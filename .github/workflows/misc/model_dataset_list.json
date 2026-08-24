@@ -113,6 +113,7 @@
       "Qwen/Qwen3-VL-8B-Instruct",
       "Qwen/Qwen3.5-4B",
       "Qwen/Qwen3.5-27B",
+      "Qwen/Qwen3.8-27B",
       "RedHatAI/Qwen3-32B-speculator.eagle3",
       "RedHatAI/Qwen3-8B-speculator.eagle3",
       "Shanghai_AI_Laboratory/internlm--chat-7b",
@@ -120,7 +121,7 @@
       "Shanghai_AI_Laboratory/internlm-7b-chat",
       "Shanghai_AI_Laboratory/internlm-7bi-chat",
       "Shanghai_AI_Laboratory/internlm-chat-7b",
-      "Tencent-Hunyuan/HunyuanOCR",
+      "vllm-ascend/HunyuanOCR",
       "Tencent-Hunyuan/Hunyuan-A13B-Instruct",
       "Tencent-Hunyuan/Hy3-preview",
       "Tengyunw/qwen3_8b_eagle3",
@@ -277,10 +278,12 @@
       "MiniMax/MiniMax-M2.5",
       "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
       "Eco-Tech/MiniMax-M3-w8a8",
+      "Eco-Tech/MiniMax-M3-w8a8-0626",
       "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot",
       "vllm-ascend/MiniMax-M2.5-eagle-model-0318",
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
       "z-lab/Qwen3-8B-DFlash-b16",
+      "z-lab/Qwen3.8-27B-DFlash2",
       "Eco-Tech/GLM-5.1-w8a8",
       "Eco-Tech/GLM-5.2-w8a8",
       "Eco-Tech/GLM-5.2-w4a8",
@@ -305,9 +308,11 @@
       "Eco-Tech/DeepSeek-R1-0528-w8a8-mtp-QuaRot",
       "Eco-Tech/Qwen3.6-27B-w8a8",
       "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot",
-      "Eco-Tech/MiniMax-M2.7-eagle-model-short"
+      "Eco-Tech/MiniMax-M2.7-eagle-model-short",
+      "Eco-Tech/Qwen3.8-27B-w8a8"
     ],
     "datasets": [
+      "vllm-ascend/mm_request",
       "vllm-ascend/GSM8K-in1024-bs210",
       "vllm-ascend/GSM8K-in3500-bs2800",
       "vllm-ascend/GSM8K-in3500-bs400",
@@ -363,7 +368,11 @@
       "vllm-ascend/GSM8K-in3500-bs4096-prefix0-kimi",
       "vllm-ascend/GSM8K-in3500-bs8000-qwen3",
       "vllm-ascend/GSM8K-in2048-bs4000-ds3.2",
+      "vllm-ascend/GSM8K-in16384-bs1024-prefix0-qwen",
       "vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51",
-      "vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51"
+      "vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51",
+      "vllm-ascend/GSM8K_prefix99_in203738_bs1_mini",
+      "vllm-ascend/GSM8K_prefix99_in203738_bs4_mini",
+      "vllm-ascend/GSM8K_in3500_bs4000_minimax"
     ]
   }

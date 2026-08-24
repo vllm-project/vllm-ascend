@@ -30,6 +30,9 @@ import torch
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn,
 )
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
+)
 from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
@@ -247,7 +250,18 @@ def _run_decode_sparse_attention(
         )
         return
 
-    pytest.skip("MiniMax M3 NPU sparse attention currently supports prefill only; decode uses Triton.")
+    minimax_m3_sparse_attn_decode_npu(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        seq_lens,
+        num_kv_heads,
+        sm_scale,
+        output,
+        decode_query_len,
+        block_size=BLOCK_SIZE,
+    )
 
 
 def _synchronize() -> None:

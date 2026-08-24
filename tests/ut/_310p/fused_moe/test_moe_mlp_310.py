@@ -20,11 +20,9 @@ import torch
 from tests.ut.base import TestBase
 from vllm_ascend._310p.fused_moe.moe_comm_method import AllGatherCommImpl310
 from vllm_ascend._310p.fused_moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEMlpComputeInput,
-    MoEQuantParams,
-    MoEWeights,
-)
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.quantization.quant_type import QuantType
 
 

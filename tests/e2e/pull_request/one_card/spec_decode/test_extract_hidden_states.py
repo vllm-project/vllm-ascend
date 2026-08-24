@@ -129,6 +129,9 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
         hidden_states = obj["hidden_states"]
         assert hidden_states.shape == expected_shape
 
+        assert not torch.isnan(hidden_states).any(), "hidden_states contains NaN"
+        assert not torch.isinf(hidden_states).any(), "hidden_states contains Inf"
+
         if verify_token_ids:
             token_ids = obj["token_ids"]
             assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
@@ -147,7 +150,7 @@ def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config):
             model=case.model_name,
             tensor_parallel_size=1,
             enforce_eager=case.enforce_eager,
-            enable_chunked_prefill=False,
+            enable_chunked_prefill=True,
             speculative_config={
                 "method": "extract_hidden_states",
                 "num_speculative_tokens": 1,

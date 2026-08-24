@@ -20,14 +20,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import regex as re
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
-MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8")
+MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8-0626")
 GSM8K_QUESTION = "Ali had $21. Leila gave him half of her $100. How much does Ali have now?"
 GSM8K_ANSWER = "71"
 MAX_TOKENS = 512
@@ -74,18 +73,12 @@ def _configure_jemalloc() -> None:
 @pytest.mark.e2e_model(str(MINIMAX_M3_MODEL_PATH))
 @pytest.mark.e2e_coverage(
     arch="multimodal",
-    feature="flashcomm1,aclgraph",
+    feature="aclgraph",
     parallel="TP,EP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W8A8",
     graph_mode="full_decode_only",
-)
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-    },
 )
 @wait_until_npu_memory_free()
 def test_minimax_m3_gsm8k_one_case() -> None:
@@ -117,7 +110,6 @@ def test_minimax_m3_gsm8k_one_case() -> None:
             },
             "multistream_overlap_shared_expert": False,
             "weight_nz_mode": 2,
-            "enable_flashcomm1": True,
             "enable_shared_expert_dp": True,
         },
     ) as vllm_model:

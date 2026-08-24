@@ -27,14 +27,12 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
+from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEQuantParams,
-    MoERoutingParams,
-    MoETokenDispatchInput,
-    build_fused_experts_input,
-    build_mlp_compute_input,
-)
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -144,7 +142,7 @@ def test_token_dispatcher_with_all_gather(
             hidden_states=a,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            routing=MoERoutingParams(
+            routing=MoeRouterInput(
                 expert_map=expert_map,
                 global_redundant_expert_num=0,
                 mc2_mask=None,
@@ -225,7 +223,7 @@ def test_token_dispatcher_with_all_gather_quant(
             hidden_states=a,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            routing=MoERoutingParams(
+            routing=MoeRouterInput(
                 expert_map=expert_map,
                 global_redundant_expert_num=0,
                 mc2_mask=None,

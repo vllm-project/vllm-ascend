@@ -225,7 +225,8 @@ class NPUWorker(WorkerBase):
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
 
@@ -248,7 +249,9 @@ class NPUWorker(WorkerBase):
         if nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
+                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config, "
+                "or enable additional_config.rl_config (enabled: true) which disables NZ "
+                "automatically."
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
@@ -264,7 +267,8 @@ class NPUWorker(WorkerBase):
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 
@@ -282,11 +286,12 @@ class NPUWorker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def _check_nz_disabled(self) -> None:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        if get_ascend_config().weight_nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter "
-                "precision issues in the RL scenarios. Please set "
-                "VLLM_ASCEND_ENABLE_NZ=0."
+                "precision issues in the RL scenarios. Please set weight_nz_mode=0 "
+                "via --additional-config, or enable additional_config.rl_config "
+                "(enabled: true) which disables NZ automatically."
             )
 
     def start_weight_update(self) -> None:
@@ -605,10 +610,23 @@ class NPUWorker(WorkerBase):
             )
         return int(available_memory)
 
+    def log_memory_stats(self) -> None:
+        """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        self.torch_reserved = torch.npu.memory_reserved()
+        self.torch_allocated = torch.npu.memory_allocated()
+        logger.debug(
+            "torch reserved memory: %.2f GiB, torch allocated memory: %.2f GiB",
+            self.torch_reserved / GiB_bytes,
+            self.torch_allocated / GiB_bytes,
+        )
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
@@ -621,8 +639,6 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
-            # it will conflict with the all-gather operation in flashcomm1.
             if enable_sp():
                 all_gather_group = None
             else:
@@ -647,8 +663,6 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
-        # it will conflict with the all-gather operation in flashcomm1.
         if enable_sp():
             all_gather_group = None
         else:
@@ -728,6 +742,10 @@ class NPUWorker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
+
+        from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
+
+        kernel_warmup(self)
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -912,13 +930,17 @@ class NPUWorker(WorkerBase):
         )
         if not reuse_layout.has_layer_reuse:
             return num_layers, num_layers, 1.0
-        num_buffer_assignments = len(reuse_layout.shared_buffer_layers)
+        num_buffer_assignments = len(reuse_layout.buffer_slots)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
-        physical_page_bytes = sum(
-            sum(entry.spec.page_size_bytes for entry in reuse_layout.layer_entries[layers_sharing_buffer[0]])
-            for layers_sharing_buffer in reuse_layout.shared_buffer_layers
-        )
+        physical_page_bytes = 0
+        for slot in reuse_layout.buffer_slots:
+            physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
+            for layer in slot:
+                indexer = reuse_layout.layer_cache_specs[layer].indexer
+                if indexer is not None:
+                    physical_page_bytes += indexer.spec.page_size_bytes
+                    break
         return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
@@ -960,25 +982,23 @@ class NPUWorker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-            # Restrict to mamba and full attn hybrid models (e.g. Qwen3.x).
-            #
-            # When eagle3 is enabled with num_speculative_tokens>1, mamba blocks may be reallocated to full blocks if
-            # the target and draft models share the same kv cache tensor (e.g. unaligned full attn layers with
-            # different num_kv_heads and head_size). In addition, for performance reasons, the current mtp/eagle path
-            # does not update seq_lens_cpu with num_rejected_tokens for step>1, since it would require d2h sync. As a
-            # result, seq_lens_cpu can become stale and some blocks will be unintentionally used.
-            #
-            # If an uncleared mamba block is later reused, the stale state combined with the incorrect seq_lens_cpu may
-            # lead to NaNs and reduced acceptance rate.
-            if (
-                kv_cache_config.needs_kv_cache_zeroing
-                and hasattr(self.model_runner, "_init_kv_zero_meta")
-                and self.vllm_config is not None
-                and self.vllm_config.speculative_config is not None
-                and self.vllm_config.speculative_config.method == "eagle3"
-                and self.vllm_config.speculative_config.num_speculative_tokens > 1
-            ):
-                self.model_runner._init_kv_zero_meta()
+        # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
+        # set, so its worker-side consumer must use the same condition. Keep the
+        # narrower Eagle3 condition for MRV1, where zeroing was introduced only
+        # for the multi-step speculative-decode reuse issue.
+        speculative_config = self.vllm_config.speculative_config
+        needs_mrv1_eagle_zeroing = (
+            speculative_config is not None
+            and speculative_config.method == "eagle3"
+            and speculative_config.num_speculative_tokens > 1
+        )
+        should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
+            self.use_v2_model_runner or needs_mrv1_eagle_zeroing
+        )
+        # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
+        # survive sleep/wake cycles.
+        if should_init_kv_zeroer and hasattr(self.model_runner, "_init_kv_zero_meta"):
+            self.model_runner._init_kv_zero_meta()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
@@ -1026,6 +1046,7 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        self.log_memory_stats()
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 

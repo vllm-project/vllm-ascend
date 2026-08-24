@@ -18,9 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# Qwen3.6-35B-A3B Deployment Tutorial"
-msgstr "# Qwen3.6-35B-A3B 部署教程"
-
 msgid "## 1 Introduction"
 msgstr "## 1 引言"
 
@@ -50,16 +47,6 @@ msgstr ""
 
 msgid "## 2 Supported Features"
 msgstr "## 2 支持特性"
-
-msgid ""
-"Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the "
-"model's supported feature matrix, including BF16, W8A8 quantization, chunked"
-" prefill, automatic prefix caching, asynchronous scheduling, tensor "
-"parallelism, expert parallelism, and ACLGraph support."
-msgstr ""
-"请参考[支持特性](../../user_guide/support_matrix/supported_models.md)获取模型的支持特性矩阵，包括"
-" BF16、W8A8 量化、分块预填充、自动前缀缓存、异步调度、张量并行、专家并行以及 ACLGraph 支持。"
 
 msgid ""
 "Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
@@ -100,9 +87,6 @@ msgid ""
 msgstr ""
 "您也可以从源码构建并安装 `vllm-ascend`。请参考[使用 Python 设置](../../installation.md#set-up-"
 "using-python)。"
-
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
 
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
@@ -498,3 +482,21 @@ msgstr ""
 "    - `--no-enable-prefix-caching`是此Atlas 300I DUO示例的默认建议，以减少内存压力。\n"
 "    - `--quantization ascend`为W8A8模型启用Ascend量化。部署BF16模型时请移除该选项。\n"
 "    - 要启用MTP推测解码，请使用--speculative_config '{\"method\": \"mtp\", \"num_speculative_tokens\": 1}'。我们建议将num_speculative_tokens设置为1。如果您的使用场景涉及少于两个并发请求，建议启用MTP。否则，建议不要启用MTP。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid "# Qwen3.6-35B-A3B"
+msgstr "# Qwen3.6-35B-A3B"
+
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_features.md) to get the "
+"model's supported feature matrix, including BF16, W8A8 quantization, chunked"
+" prefill, automatic prefix caching, asynchronous scheduling, tensor "
+"parallelism, expert parallelism, and ACLGraph support."
+msgstr ""
+"请参阅[支持的功能](../../user_guide/support_matrix/supported_features.md)获取该模型的支持功能矩阵，包括BF16、W8A8量化、分块预填充、自动前缀缓存、异步调度、张量并行、专家并行以及ACLGraph支持。"
+
+msgid "| dataset | version | metric | mode | vllm-api-general-chat |"
+msgstr "| dataset | version | metric | mode | vllm-api-general-chat |"

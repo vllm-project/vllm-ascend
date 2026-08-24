@@ -38,9 +38,6 @@ COVERAGE_DENSITY_THRESHOLD = 0.0
 MIN_AFFECTED_LINES = 1
 
 
-# ==================== Configuration ====================
-
-
 def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
     Extract new/modified test files from PR diff.
@@ -86,6 +83,33 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     return test_files_found
 
 
+def _has_csrc_changes(diff_file: str) -> bool:
+    """
+    Check if diff file contains changes to csrc directory.
+    If csrc changes detected, full test suite should be run.
+
+    Args:
+        diff_file: Path to the PR diff file
+
+    Returns:
+        True if csrc directory changes detected, False otherwise
+    """
+    try:
+        with open(diff_file, encoding="utf-8") as f:
+            diff_content = f.read()
+    except Exception as e:
+        print(f"  Warning: Failed to read diff file for csrc detection: {e}")
+        return False
+
+    # Pattern to match csrc directory in diff paths (csrc as root directory)
+    # Match lines like: +++ b/csrc/xxx.cpp or --- a/csrc/xxx.cpp
+    csrc_pattern = re.compile(r"^\+{3} [ab]/csrc/|^\-{3} a/csrc/", re.MULTILINE)
+    if csrc_pattern.search(diff_content):
+        print("  CSRC directory changes detected in PR diff")
+        return True
+    return False
+
+
 def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list[str]:
     """
     Extract deleted test files from PR diff.
@@ -107,15 +131,17 @@ def _get_deleted_test_files_from_pr(diff_file: str, test_case_map: dict) -> list
         print(f"  Warning: Failed to read diff file for deleted test detection: {e}")
         return deleted_test_files
 
-    # Pattern to match --- a/tests/... lines (deleted files start with --- a/)
-    # and verify the file is followed by +++ /dev/null (or +++ b/dev/null)
-    deleted_pattern = re.compile(r"^--- a/(tests/.+/\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null", re.MULTILINE)
+    # Pattern to match deleted test files: tests/e2e/pull_request/ or tests/ut/ directory
+    # Match --- a/tests/... followed by +++ /dev/null (deleted file marker)
+    deleted_pattern = re.compile(
+        r"^--- a/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null|"
+        r"^--- a/(tests/ut(?:/.+)?/test_\w+\.py)\s*\n\s*\+\+\+ [ab]?/dev/null",
+        re.MULTILINE,
+    )
 
     for match in deleted_pattern.finditer(diff_content):
-        test_file_path = match.group(1)
-        # Normalize: tests/ut/core/test_xxx.py -> tests/ut/core/test_xxx
-        test_case_name = test_file_path.rsplit(".py", 1)[0]
-        deleted_test_files.append(test_case_name)
+        test_file_path = match.group(1) or match.group(2)
+        deleted_test_files.append(test_file_path)
 
     if deleted_test_files:
         print(f"  Found {len(deleted_test_files)} deleted test file(s): {deleted_test_files}")
@@ -406,20 +432,60 @@ class CodeChangeDetector:
 
         return changed_files
 
-    def parse_pr_diff_file(self, diff_file_path: str) -> dict[str, set[int]]:
+    def detect_renames(self, diff_output: str) -> dict[str, str]:
         """
-        Parse changed line numbers from PR diff file
+        Detect file renames in git diff output.
+
+        Args:
+            diff_output: diff content
+
+        Returns:
+            {old_path: new_path} - mapping from old file path to new file path
+        """
+        renames = {}
+        current_old_path = None
+        current_new_path = None
+
+        for raw_line in diff_output.split("\n"):
+            line = raw_line.rstrip("\r")
+
+            # Detect rename marker
+            if line.startswith("rename from "):
+                current_old_path = line[12:].strip()
+            elif line.startswith("rename to "):
+                current_new_path = line[10:].strip()
+                # When we have both old and new path, record the rename
+                if current_old_path and current_new_path:
+                    # Remove a/ or b/ prefix if present
+                    old_path = current_old_path[2:] if current_old_path.startswith("a/") else current_old_path
+                    new_path = current_new_path[2:] if current_new_path.startswith("b/") else current_new_path
+                    renames[old_path] = new_path
+                    current_old_path = None
+                    current_new_path = None
+
+        return renames
+
+    def parse_pr_diff_file(self, diff_file_path: str) -> tuple[dict[str, set[int]], dict[str, str]]:
+        """
+        Parse changed line numbers and detect renames from PR diff file.
 
         Args:
             diff_file_path: diff file path
+
+        Returns:
+            Tuple of (changed_files_with_lines, rename_mapping)
+            - changed_files_with_lines: {filepath: {lineno, ...}}
+            - rename_mapping: {old_path: new_path}
         """
         try:
             with open(diff_file_path, encoding="utf-8") as f:
                 diff_content = f.read()
-            return self.parse_git_diff(diff_content)
+            changed_files = self.parse_git_diff(diff_content)
+            renames = self.detect_renames(diff_content)
+            return changed_files, renames
         except Exception as e:
             print(f"Warning: Failed to read diff file: {e}")
-            return {}
+            return {}, {}
 
 
 class FunctionParser:
@@ -1080,6 +1146,14 @@ def main():
 
         print(f"Fetching changes from GitHub PR: {repo}#{pr_num}")
 
+        github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+        def _github_request(url: str) -> urllib.request.Request:
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            if github_token:
+                headers["Authorization"] = f"Bearer {github_token}"
+            return urllib.request.Request(url, headers=headers)
+
         # Create context that does not verify SSL certificates
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
@@ -1093,7 +1167,7 @@ def main():
             print(f"  Attempt {attempt}/{max_retries} to get PR diff via GitHub API...")
             try:
                 pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_num}"
-                req = urllib.request.Request(pr_url, headers={"Accept": "application/vnd.github.v3+json"})
+                req = _github_request(pr_url)
                 with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
                     pr_data = json.loads(response.read().decode())
                     diff_url = pr_data.get("diff_url")
@@ -1102,7 +1176,7 @@ def main():
                     raise Exception("Cannot get diff URL")
 
                 # Download diff (use binary mode to avoid line ending conversion)
-                req = urllib.request.Request(diff_url)
+                req = _github_request(diff_url)
                 with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
                     diff_bytes = response.read()
                     with open(diff_file, "wb") as f:
@@ -1117,67 +1191,138 @@ def main():
                 time.sleep(1)
 
         print(f"  PR diff saved to: {diff_file}")
-        changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
-        print(f"Parsed {len(changed_files_with_lines)} changed files")
     else:
         # Get from file comparison (default)
         change_detector.scan_source_files()
         changed_files_with_lines = change_detector.detect_changes_by_comparison()
         print(f"Detected {len(changed_files_with_lines)} changed files")
 
-    if not changed_files_with_lines:
-        print("\n=== No product source code changes found in PR ===")
-        print("skipping test recommendation.")
-        # Write empty result file
-        with open("recommended_pytest_paths.txt", "w", encoding="utf-8") as f:
-            pass
-        print("\nResults saved to: recommended_pytest_paths.txt")
-        return
-
-    # 3. Select test cases
-    print("\n=== Selecting Affected Test Cases ===")
-    test_selector = TestSelector(selector.test_case_map)
-    selected, expand_reason = test_selector.select_tests(
-        changed_files_with_lines,
-        min_affected_lines=args.min_affected,
-        source_dir=args.source_dir,
-        enable_line_match=args.enable_line_match,
-        enable_function_match=args.enable_function_match,
-        enable_file_match=args.enable_file_match,
-        enable_skip_imports=args.skip_imports,
-        enable_dedup=args.dedup,
-    )
-    test_selector.print_selection(
-        selected, changed_files_with_lines, min_affected_lines=args.min_affected, expand_reason=expand_reason
-    )
-
-    # 4. Add new/modified test files from PR (vllm_ascend/tests/test_*.py)
-    test_file_tests = []
+    # ===== Action 1: Extract new/deleted test files =====
+    has_csrc_changes = False
+    new_test_files: list[str] = []
+    deleted_test_files: list[str] = []
     if args.github_pr and diff_file:
-        test_file_tests = _get_test_files_from_pr_diff(diff_file)
-        if test_file_tests:
-            print("\n=== New/Modified Test Files in PR ===")
-            print(f"Adding {len(test_file_tests)} test file(s): {test_file_tests}")
-            # Merge with existing selected tests (deduplicate)
-            existing_test_names = set(s[0] for s in selected)
-            for test_name in test_file_tests:
-                if test_name not in existing_test_names:
-                    # Add to selected (can be new test files not in test_case_map)
-                    selected.append((test_name, {}, 0))
+        new_test_files = _get_test_files_from_pr_diff(diff_file)
+        deleted_test_files = _get_deleted_test_files_from_pr(diff_file, selector.test_case_map)
+        # ===== Action 2: Check for csrc changes =====
+        has_csrc_changes = _has_csrc_changes(diff_file)
 
-    # 5. Remove deleted test files from PR
-    if args.github_pr and diff_file:
-        deleted_tests = _get_deleted_test_files_from_pr(diff_file, selector.test_case_map)
-        if deleted_tests:
-            print("\n=== Deleted Test Files in PR ===")
-            print(f"Removing {len(deleted_tests)} deleted test file(s): {deleted_tests}")
-            deleted_set = set(deleted_tests)
-            selected = [(name, detail, count) for name, detail, count in selected if name not in deleted_set]
+    # ===== Action 3: Detect Python product code changes -> Precision matching =====
+    selected: list[tuple[str, dict[str, set[int]], int]] = []
+    expand_reason = ""
+    changed_files_with_lines: dict[str, set[int]] = {}
 
-    # 6. Output executable pytest command
-    test_names = [s[0] for s in selected]
+    if has_csrc_changes:
+        print("\n=== CSRC Directory Changes Detected - Running Full Test Suite ===")
+    else:
+        renames: dict[str, str] = {}
+        if args.github_pr and diff_file:
+            changed_files_with_lines, renames = change_detector.parse_pr_diff_file(diff_file)
+            print(f"Parsed {len(changed_files_with_lines)} changed files:")
+            for file_path, line_set in changed_files_with_lines.items():
+                print(f"  {file_path}")
+            if renames:
+                print(f"\n=== Detected {len(renames)} Renamed File(s) - Using File-Level Matching ===")
+                for old_path, new_path in renames.items():
+                    print(f"  {old_path} -> {new_path}")
+
+        if changed_files_with_lines:
+            # Select test cases by precision matching
+            print("\n=== Selecting Affected Test Cases ===")
+            test_selector = TestSelector(selector.test_case_map)
+
+            # For renamed files, we need file-level matching to cover both old and new paths
+            # Filter out renamed new paths from changed files
+            if renames:
+                renamed_new_paths = set(renames.values())
+                normal_files = {k: v for k, v in changed_files_with_lines.items() if k not in renamed_new_paths}
+            else:
+                normal_files = changed_files_with_lines
+
+            # Process normal files with precision matching
+            selected: list[tuple[str, dict, int]] = []
+            expand_reason = ""
+            if normal_files:
+                selected, expand_reason = test_selector.select_tests(
+                    normal_files,
+                    min_affected_lines=args.min_affected,
+                    source_dir=args.source_dir,
+                    enable_line_match=args.enable_line_match,
+                    enable_function_match=args.enable_function_match,
+                    enable_file_match=args.enable_file_match,
+                    enable_skip_imports=args.skip_imports,
+                    enable_dedup=args.dedup,
+                )
+
+            # Process renamed files: use OLD path for file-level matching
+            for old_path, new_path in renames.items():
+                rename_files = {old_path: set()}
+                rename_selected, rename_expand = test_selector.select_tests(
+                    rename_files,
+                    min_affected_lines=args.min_affected,
+                    source_dir=args.source_dir,
+                    enable_line_match=False,  # Disable line match for renames
+                    enable_function_match=False,  # Disable function match for renames
+                    enable_file_match=True,  # Enable file match for renames
+                    enable_skip_imports=args.skip_imports,
+                    enable_dedup=args.dedup,
+                )
+                selected.extend(rename_selected)
+                expand_reason += rename_expand
+                # Print file-level matched test cases for this rename
+                if rename_selected:
+                    print(f"\n=== File-Level Matched Tests for Renamed File: {old_path} -> {new_path} ===")
+                    for test_name, _, _ in rename_selected:
+                        print(f"  {test_name}")
+
+            # Deduplicate
+            seen = set()
+            deduped = []
+            for item in selected:
+                if item[0] not in seen:
+                    seen.add(item[0])
+                    deduped.append(item)
+            selected = deduped
+            test_selector.print_selection(
+                selected, changed_files_with_lines, min_affected_lines=args.min_affected, expand_reason=expand_reason
+            )
+        else:
+            print("\n=== No product source code changes found ===")
+
+    # ===== Merge results =====
+    # Base set: full suite for csrc changes, otherwise use precision results
+    if has_csrc_changes:
+        base_selected = [(test_name, {}, 0) for test_name in selector.test_case_map]
+        print(f"\n=== Full Test Suite: {len(base_selected)} tests ===")
+    else:
+        base_selected = selected
+
+    # Add new test files
+    existing_test_names = {s[0] for s in base_selected}
+    for test_name in new_test_files:
+        if test_name not in existing_test_names:
+            base_selected.append((test_name, {}, 0))
+            existing_test_names.add(test_name)
+
+    if new_test_files:
+        print(f"\n=== New Test Files Added: {len(new_test_files)} ===")
+        print(f"  {new_test_files}")
+
+    # Remove deleted test files
+    if deleted_test_files:
+        print(f"\n=== Deleted Test Files Removed: {len(deleted_test_files)} ===")
+        print(f"  {deleted_test_files}")
+        deleted_set = set(deleted_test_files)
+        base_selected = [
+            (name, detail, count)
+            for name, detail, count in base_selected
+            if name not in deleted_set and not any(name.startswith(d) for d in deleted_set)
+        ]
+
+    # ===== Output results =====
+    test_names = [s[0] for s in base_selected]
     if test_names:
-        print("\n=== Recommended Test Cases ===")
+        print(f"\n=== Recommended Test Cases ({len(test_names)} tests) ===")
         print(test_names)
     else:
         print("\n=== No Test Cases Recommended ===")

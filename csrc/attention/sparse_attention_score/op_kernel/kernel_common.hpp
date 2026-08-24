@@ -15,6 +15,9 @@
 
 namespace SparseAttn {
 
+constexpr uint32_t SASA_FD_MAX_AIC = 32;
+constexpr uint32_t SASA_FD_MAX_BASE_TASK = 32;
+
 struct SparseAttentionScoreTilingData {
     uint32_t batch;
     uint32_t numHeads;
@@ -52,6 +55,19 @@ struct SparseAttentionScoreTilingData {
     uint32_t kL1BufNum;
     uint32_t vL1BufNum;
     uint32_t pL1BufNum;
+    uint32_t fdLseSubStride;
+    // FD core-range metadata.
+    uint32_t fdCorePerCoreTaskNum;
+    uint32_t fdCoreTaskStart[SASA_FD_MAX_AIC];
+    uint32_t fdCoreTaskEnd[SASA_FD_MAX_AIC];
+    // FD combine-range metadata.
+    uint32_t fdCombineTaskNum;
+    uint32_t fdCombineBaseTask[SASA_FD_MAX_BASE_TASK];
+    uint32_t fdPartialStartByBase[SASA_FD_MAX_BASE_TASK];
+    uint32_t fdPartialCountByBase[SASA_FD_MAX_BASE_TASK];
+    uint64_t fdIdentityOffset;
+    uint64_t fdPartialLseOffset;
+    uint64_t fdPartialOOffset;
 };
 
 }  // namespace SparseAttn

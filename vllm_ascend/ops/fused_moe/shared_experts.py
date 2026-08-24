@@ -15,24 +15,24 @@
 # limitations under the License.
 #
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from functools import wraps
 
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_reduce_scatter
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodBase
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
     npu_stream_switch,
-    shared_expert_dp_enabled,
     shared_experts_calculation_stream,
 )
 
@@ -44,6 +44,15 @@ class FusedMoEEvents:
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
+
+
+class SharedExpertParallelMode(Enum):
+    """Effective activation and weight layout for a shared-expert forward."""
+
+    TENSOR_PARALLEL = auto()  # Full activations, TP-sharded weights.
+    SHARED_EXPERT_DATA_PARALLEL_ONLY = auto()  # Full activations, replicated weights (DP only).
+    SEQUENCE_PARALLEL_ONLY = auto()  # Sharded activations, TP-sharded weights (SP only).
+    SEQUENCE_PARALLEL_SEDP = auto()  # Sharded activations, replicated weights (SP + DP).
 
 
 class AscendSharedExperts:
@@ -62,15 +71,18 @@ class AscendSharedExperts:
         quant_method: FusedMoEMethodBase,
     ):
         self.layer = layer
+        self.moe_config = moe_config
         self.hidden_size = moe_config.hidden_dim
         self.in_dtype = moe_config.in_dtype
         self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
         self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
         self.swiglu_beta = 0.0 if moe_config.swiglu_beta is None else moe_config.swiglu_beta
+        self.is_sequence_parallel = moe_config.is_sequence_parallel
         self.quant_type = quant_type
         self.lora_context = None
         ascend_config = get_ascend_config()
         self.multistream_overlap = ascend_config.multistream_overlap_shared_expert
+        self.weights_replicated = ascend_config.enable_shared_expert_dp
 
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -135,12 +147,104 @@ class AscendSharedExperts:
             shared_out = F.sigmoid(gate_out) * shared_out
         return shared_out
 
+    def parallel_mode(self) -> SharedExpertParallelMode:
+        """Resolve the effective activation/weight layout for this forward."""
+        # EP rewrites FusedMoEParallelConfig.tp_size to 1 because each routed
+        # expert is local. Shared-expert linears still span the physical TP
+        # group, so their layout must be derived from that group instead.
+        tp_size = self.moe_config.tp_group.world_size
+        if tp_size <= 1:
+            return SharedExpertParallelMode.TENSOR_PARALLEL
+
+        if self.moe_config.is_sequence_parallel:
+            # SP has already sharded the token dimension before entering the
+            # runner. Replicated weights (SP+DP) compute directly on the
+            # shard; TP-sharded weights (SP-only) gather the shard first and
+            # reduce-scatter the output back.
+            if self.weights_replicated:
+                return SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP
+            return SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+        if self.weights_replicated:
+            return SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY
+        return SharedExpertParallelMode.TENSOR_PARALLEL
+
+    def _prepare_local_dp_input(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[int, int]]:
+        original_num_tokens = hidden_states.shape[0]
+        # See parallel_mode(): moe_config.tp_size describes routed experts in
+        # EP, while this token split follows the shared-expert TP group.
+        tp_group = self.moe_config.tp_group
+        tp_size = tp_group.world_size
+        pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
+        if pad_size > 0:
+            hidden_states = F.pad(hidden_states, (0, 0, 0, pad_size))
+        hidden_states = torch.tensor_split(
+            hidden_states,
+            tp_size,
+            dim=0,
+        )[tp_group.rank_in_group]
+        return hidden_states, (original_num_tokens, pad_size)
+
+    def _finalize_local_dp_output(
+        self,
+        shared_out: torch.Tensor,
+        metadata: tuple[int, int],
+    ) -> torch.Tensor:
+        original_num_tokens, pad_size = metadata
+        shared_out = self.moe_config.tp_group.all_gather(shared_out, dim=0)
+        if pad_size > 0:
+            shared_out = shared_out[:original_num_tokens]
+        return shared_out
+
+    def _gather_sp_input(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Gather SP-sharded activations to the full sequence via TP all-gather + unpad.
+
+        SP shards the token dimension across the TP group as [ceil(T/TP), H]
+        per rank (``sequence_parallel_chunk`` pads T to a multiple of TP).
+        TP-sharded shared-expert weights need the full activations, so
+        all-gather the shards back to [T_padded, H] and drop the padding rows.
+        """
+        gathered = tensor_model_parallel_all_gather(hidden_states, dim=0)
+        return gathered[: _EXTRA_CTX.num_tokens]
+
+    def _pad_and_reduce_scatter(self, shared_out: torch.Tensor) -> torch.Tensor:
+        """Pad the full output to a TP multiple, then reduce-scatter to the SP shard.
+
+        Called on exit of the SP-only path (TP-sharded weights) to convert the
+        full [T, H] output back to this rank's SP shard [ceil(T/TP), H]. The
+        reduce-scatter also sums the TP-partial down-projection results
+        (down_proj is built with reduce_results=False), replacing the usual
+        TP all-reduce.
+        """
+        tp_size = self.moe_config.tp_group.world_size
+        original_num_tokens = shared_out.shape[0]
+        pad_size = (tp_size - original_num_tokens % tp_size) % tp_size
+        if pad_size > 0:
+            shared_out = F.pad(shared_out, (0, 0, 0, pad_size))
+        return tensor_model_parallel_reduce_scatter(shared_out, dim=0)
+
     def forward(self, hidden_states: torch.Tensor, fused_moe_evts: FusedMoEEvents):
+        mode = self.parallel_mode()
+        local_dp_metadata = None
+
         def maybe_wait_event(evt: torch.npu.Event | None):
             if evt is not None:
                 torch.npu.current_stream().wait_event(evt)
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+            if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
+                # Full activations + replicated weights: shard tokens locally,
+                # run the MLP, then gather its complete output.
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                hidden_states, local_dp_metadata = self._prepare_local_dp_input(hidden_states)
+            elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+                # Sharded activations + TP-sharded weights: gather the SP
+                # shard to full activations before the MLP; the output is
+                # padded and reduce-scattered back below.
+                maybe_wait_event(fused_moe_evts.before_routed_experts)
+                hidden_states = self._gather_sp_input(hidden_states)
             # Only used for int quantization
             has_quantized_shared_without_lora = (
                 not has_lora(self.lora_context)
@@ -237,12 +341,9 @@ class AscendSharedExperts:
         if self.multistream_overlap:
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
-        # NOTE: This is exactly the opposite of
-        # `maybe_all_reduce_tensor_model_parallel`
-        moe_comm_type = _EXTRA_CTX.moe_comm_type
-        if (
-            moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-            and not shared_expert_dp_enabled()
-        ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
+        if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
+            assert local_dp_metadata is not None
+            shared_out = self._finalize_local_dp_output(shared_out, local_dp_metadata)
+        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+            shared_out = self._pad_and_reduce_scatter(shared_out)
         return shared_out
