@@ -490,7 +490,7 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently:
 
-- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling FlashComm for Allreduce acceleration).
+- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling sequence parallelism for Allreduce acceleration).
 - **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling full-decode aclgraph).
 
 For `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8`, a typical **1P1D** configuration requires **2 Atlas 800 A3 (64GB × 16) nodes** (1 Prefill node + 1 Decode node), with **TP=2** and **DP=8** on each node, which fully utilizes all 16 NPUs of an Atlas A3. The example below uses `Qwen3.5-27B-w8a8`; for `Qwen3.6-27B-w8a8`, replace the model path with `Eco-Tech/Qwen3.6-27B-w8a8` and adjust `--served-model-name` to `qwen3.6` (and `--max-model-len` to 262144 if needed).
@@ -543,7 +543,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1024
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
@@ -650,7 +649,6 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 
    Key Parameter Descriptions:
 
-   - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the Allreduce communication optimization on prefill nodes, which reduces the communication overhead of long-context prefill.
    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` (on decode nodes): enables the full-decode aclgraph mode, which significantly reduces scheduling latency on the decode side.
 
@@ -694,7 +692,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
         141.xx.xx.2 \
         141.xx.xx.2 \
       --decoder-ports \
-        7100 7101 7102 7103 7104 7105 7106 7107 \
+        7100 7101 7102 7103 7104 7105 7106 7107
     ```
 
 Deployment Verification:

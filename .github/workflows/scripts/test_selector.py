@@ -38,9 +38,6 @@ COVERAGE_DENSITY_THRESHOLD = 0.0
 MIN_AFFECTED_LINES = 1
 
 
-# ==================== Configuration ====================
-
-
 def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
     Extract new/modified test files from PR diff.
@@ -1149,6 +1146,14 @@ def main():
 
         print(f"Fetching changes from GitHub PR: {repo}#{pr_num}")
 
+        github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+        def _github_request(url: str) -> urllib.request.Request:
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            if github_token:
+                headers["Authorization"] = f"Bearer {github_token}"
+            return urllib.request.Request(url, headers=headers)
+
         # Create context that does not verify SSL certificates
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
@@ -1162,7 +1167,7 @@ def main():
             print(f"  Attempt {attempt}/{max_retries} to get PR diff via GitHub API...")
             try:
                 pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_num}"
-                req = urllib.request.Request(pr_url, headers={"Accept": "application/vnd.github.v3+json"})
+                req = _github_request(pr_url)
                 with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
                     pr_data = json.loads(response.read().decode())
                     diff_url = pr_data.get("diff_url")
@@ -1171,7 +1176,7 @@ def main():
                     raise Exception("Cannot get diff URL")
 
                 # Download diff (use binary mode to avoid line ending conversion)
-                req = urllib.request.Request(diff_url)
+                req = _github_request(diff_url)
                 with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
                     diff_bytes = response.read()
                     with open(diff_file, "wb") as f:

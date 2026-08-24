@@ -257,9 +257,19 @@ class AscendSFADSACPImpl(AscendSFAImpl):
     def _prepare_native_hidden_states(
         self,
         hidden_states: torch.Tensor,
-        need_gather_q_kv: bool,
+        attn_metadata: M,
     ) -> torch.Tensor:
-        return hidden_states
+        context = getattr(attn_metadata, "dsa_cp_context", None)
+        assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
+        actual_tokens = hidden_states.shape[0]
+        if actual_tokens > context.num_tokens_pad:
+            raise RuntimeError(
+                "SFA DSA-CP input exceeds its TP-aligned metadata, "
+                f"got {actual_tokens} tokens and num_tokens_pad={context.num_tokens_pad}."
+            )
+        if actual_tokens < context.num_tokens_pad:
+            hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, context.num_tokens_pad - actual_tokens))
+        return hidden_states[context.local_start : context.local_end_with_pad]
 
     def _get_parallel_forward_context(
         self,
@@ -456,12 +466,22 @@ class AscendSFADSACPImpl(AscendSFAImpl):
                 self.o_proj_tp_weight_state,
                 use_full_weight=True,
             )
-            output[...] = self._apply_o_proj_full_weight(attn_output)
-            linear_method.switch_tp_weight(
-                self.o_proj,
-                self.o_proj_tp_weight_state,
-                use_full_weight=False,
-            )
+            try:
+                local_output = self._apply_o_proj_full_weight(attn_output)
+                full_output = get_tp_group().all_gather(local_output.contiguous(), dim=0)
+                if full_output.shape[0] < output.shape[0] or full_output.shape[1:] != output.shape[1:]:
+                    raise RuntimeError(
+                        "SFA DSA-CP gathered output does not match the replicated "
+                        f"model state, got {tuple(full_output.shape)} and expected "
+                        f"{tuple(output.shape)}."
+                    )
+                output[...] = full_output[: output.shape[0]]
+            finally:
+                linear_method.switch_tp_weight(
+                    self.o_proj,
+                    self.o_proj_tp_weight_state,
+                    use_full_weight=False,
+                )
             return output
 
         send = (
@@ -471,11 +491,15 @@ class AscendSFADSACPImpl(AscendSFAImpl):
         )
         sharded_output = torch.empty_like(send)
         torch.distributed.all_to_all_single(sharded_output, send, group=get_tp_group().device_group)
-        return super()._finalize_o_proj(
-            sharded_output,
-            output,
-            gather_full_o_proj,
-        )
+        projected_output = self.o_proj(sharded_output)[0]
+        if projected_output.shape[0] < output.shape[0] or projected_output.shape[1:] != output.shape[1:]:
+            raise RuntimeError(
+                "SFA DSA-CP projected output does not match the replicated "
+                f"model state, got {tuple(projected_output.shape)} and expected "
+                f"{tuple(output.shape)}."
+            )
+        output[...] = projected_output[: output.shape[0]]
+        return output
 
 
 # SFA DCP replicated-indexer layout:

@@ -18,7 +18,6 @@
 
 import json
 import os
-from unittest.mock import patch
 
 import requests
 from vllm.utils.network_utils import get_open_port
@@ -26,7 +25,6 @@ from vllm.utils.network_utils import get_open_port
 from tests.e2e.conftest import DisaggPDProxy, RemotePDServer, VllmRunner, wait_until_npu_memory_free
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 @wait_until_npu_memory_free()
 def test_moe_w8a8_tp_pp_ep_full_decode_only():
     """Verify W8A8 MoE generation with TP, PP, EP, and full decode only."""

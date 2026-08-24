@@ -195,7 +195,7 @@ vllm serve $MODEL_PATH \
     --gpu-memory-utilization 0.85 \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":false,"enable_fused_mc2":1}'
+    --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
 ```
 
 ::::
@@ -258,7 +258,7 @@ vllm serve $MODEL_PATH \
     --gpu-memory-utilization 0.85 \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":false,"enable_fused_mc2":1}'
+    --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
 ```
 
 ::::
@@ -292,7 +292,7 @@ Key deployment parameters:
 | `--enable-prefix-caching` | Enables automatic prefix caching. |
 | `--speculative-config` | Enables one Qwen3.5 MTP speculative token. |
 | `--compilation-config` | Uses `FULL_DECODE_ONLY` ACL Graph replay. |
-| `--additional-config` | Enables CPU binding and Fused MC2 while disabling FlashComm1. |
+| `--additional-config` | Enables CPU binding and Fused MC2. |
 
 If a worker exits immediately, confirm that Node 0 is already running,
 `--data-parallel-address` resolves to Node 0, all nodes use the same RPC port,
@@ -469,7 +469,6 @@ reasoning effort, and weight revision together with the result.
 | MTP | Uses one speculative token with the `qwen3_5_mtp` method. |
 | ACL Graph | Uses `FULL_DECODE_ONLY` replay. |
 | Fused MC2 | Enabled through the environment and additional configuration. |
-| FlashComm1 | Disabled in the validated configuration. |
 | CPU Binding | Reduces cross-core scheduling overhead. |
 
 ## 9 Performance Tuning

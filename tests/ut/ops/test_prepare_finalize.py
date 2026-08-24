@@ -148,11 +148,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
     @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp", return_value=False)
-    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp_by_pass", return_value=False)
-    def test_allgather_prepare_finalize(
-        self, mock_enable_sp_by_pass, mock_enable_sp, mock_get_forward_context, mock_get_dp_group
-    ):
+    def test_allgather_prepare_finalize(self, mock_get_forward_context, mock_get_dp_group):
         # Mock forward context
         mock_context = MagicMock()
         mock_context.max_tokens_across_dp = 6
@@ -172,6 +168,7 @@ class TestPrepareAndFinalize(unittest.TestCase):
         self.moe_config.tp_size = 1
         self.moe_config.pcp_size = 1
         self.moe_config.ep_size = 1
+        self.moe_config.is_sequence_parallel = False
         self.moe_config.dp_group = mock_dp_group
 
         layer = PrepareAndFinalizeWithAllGather(self.moe_config)
