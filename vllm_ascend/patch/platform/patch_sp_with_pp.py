@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from vllm.distributed import (
+    get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -249,6 +250,75 @@ def _gather_intermediate_tensors(tensors, full_num_tokens: int) -> IntermediateT
     return IntermediateTensors(out)
 
 
+def _qwen3next_model_forward(
+    self,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+):
+    """Copy of vllm Qwen3NextModel.forward adapted for SP-with-PP.
+
+    Differences from upstream (cdc4824a2):
+    - the entry `sequence_parallel_chunk(hidden) + assert residual is None`
+      block is dropped: it only holds on the first stage, and under PP the
+      boundary carries full-token tensors (the patched decoder layers keep
+      the residual stream full-token on every path);
+    - the non-last-rank IntermediateTensors packing gathers sequence-sharded
+      tensors back to full tokens (defensive: the patched layers emit
+      full-token outputs, so this is normally a no-op).
+    """
+    from itertools import islice
+
+    if get_pp_group().is_first_rank:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.embed_input_ids(input_ids)
+        residual = None
+    else:
+        assert intermediate_tensors is not None
+        hidden_states = intermediate_tensors["hidden_states"]
+        residual = intermediate_tensors["residual"]
+
+    full_num_tokens = positions.shape[-1]
+    aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+    for layer_idx, layer in enumerate(
+        islice(self.layers, self.start_layer, self.end_layer),
+        start=self.start_layer,
+    ):
+        hidden_states, residual = layer(
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=residual,
+        )
+        self._maybe_add_hidden_state(aux_hidden_states, layer_idx + 1, hidden_states, residual)
+
+    if not get_pp_group().is_last_rank:
+        if hidden_states.shape[0] != full_num_tokens:
+            hidden_states, residual = globals()["_all_gather_hidden_and_residual"](
+                hidden_states,
+                residual,
+                full_num_tokens,
+                self.config.hidden_size,
+            )
+        return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+    hidden_states, _ = self.norm(hidden_states, residual)
+    if hidden_states.shape[0] != full_num_tokens:
+        if aux_hidden_states:
+            hidden_size = hidden_states.shape[-1]
+            hidden_states = torch.cat([hidden_states, *aux_hidden_states], dim=-1)
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
+            hidden_states, *aux_hidden_states = hidden_states.split(hidden_size, dim=-1)
+        else:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
+    if aux_hidden_states:
+        return hidden_states, aux_hidden_states
+    return hidden_states
+
+
 def _wrap_model_forward(model_cls):
     orig_forward = model_cls.forward
     param_names = list(inspect.signature(orig_forward).parameters)
@@ -319,6 +389,8 @@ def _install_patches():
     globals()["DeepseekV2MLP"] = deepseek_v2.DeepseekV2MLP
     globals()["DeepseekV2MoE"] = deepseek_v2.DeepseekV2MoE
     globals()["DeepseekAttention"] = deepseek_v2.DeepseekAttention
+    if hasattr(qwen3_next, "_all_gather_hidden_and_residual"):
+        globals()["_all_gather_hidden_and_residual"] = qwen3_next._all_gather_hidden_and_residual
 
     # upstream-drift sentinels: fail loudly instead of patching wrong code
     q_src = inspect.getsource(qwen3_next.Qwen3NextDecoderLayer.forward)
@@ -328,6 +400,11 @@ def _install_patches():
     d_src = inspect.getsource(deepseek_v2.DeepseekV2DecoderLayer.forward)
     assert "use_sequence_parallel_moe:" in d_src, (
         "vllm DeepseekV2DecoderLayer.forward drifted; update patch_sp_with_pp.py"
+    )
+    qm_src = inspect.getsource(qwen3_next.Qwen3NextModel.forward)
+    assert "assert residual is None" in qm_src, (
+        "vllm Qwen3NextModel.forward no longer contains the SP entry block "
+        "this copy was adapted from; update patch_sp_with_pp.py"
     )
 
     _orig_qnext_forward = qwen3_next.Qwen3NextDecoderLayer.forward
@@ -353,7 +430,10 @@ def _install_patches():
     _wrap_layer_init(qwen3_next.Qwen3NextDecoderLayer)
     _wrap_layer_init(qwen3_5.Qwen3_5DecoderLayer)
     _wrap_layer_init(deepseek_v2.DeepseekV2DecoderLayer)
-    _wrap_model_forward(qwen3_next.Qwen3NextModel)
+    _qwen3next_model_forward_wrapped = functools.wraps(qwen3_next.Qwen3NextModel.forward)(
+        _qwen3next_model_forward.__get__(qwen3_next.Qwen3NextModel)
+    )
+    qwen3_next.Qwen3NextModel.forward = _qwen3next_model_forward_wrapped
     _wrap_model_forward(deepseek_v2.DeepseekV2Model)
 
 
