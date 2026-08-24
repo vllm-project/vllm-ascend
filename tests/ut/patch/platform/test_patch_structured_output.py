@@ -12,6 +12,7 @@ from vllm.v1.structured_output import StructuredOutputManager, backend_guidance,
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 from vllm_ascend.patch.platform import patch_structured_output  # noqa: F401
+from vllm_ascend.utils import vllm_version_is
 
 MODEL_CONFIG = SimpleNamespace(is_diffusion=False)
 
@@ -22,8 +23,15 @@ class FakeBackend:
         self.tokenizer = tokenizer
         self.vocab_size = vocab_size
 
-    def compile_grammar(self, request_type, grammar_spec):
-        return (type(self).__name__, request_type, grammar_spec)
+    if vllm_version_is("0.27.1"):
+
+        def compile_grammar(self, request_type, grammar_spec):
+            return (type(self).__name__, request_type, grammar_spec)
+
+    else:
+        # main (cdc4824a21): _create_grammar passes stop_token_ids kwarg
+        def compile_grammar(self, request_type, grammar_spec, stop_token_ids=None):  # type: ignore[misc]
+            return (type(self).__name__, request_type, grammar_spec)
 
 
 class FakeXgrammarBackend(FakeBackend):
@@ -44,8 +52,14 @@ def make_manager() -> StructuredOutputManager:
 
 
 def make_request(backend: str):
+    sampling_params = SimpleNamespace(
+        structured_outputs=SimpleNamespace(_backend=backend),
+    )
+    if not vllm_version_is("0.27.1"):
+        # main (cdc4824a21): _create_grammar reads sampling_params.all_stop_token_ids
+        sampling_params.all_stop_token_ids = None
     return SimpleNamespace(
-        sampling_params=SimpleNamespace(structured_outputs=SimpleNamespace(_backend=backend)),
+        sampling_params=sampling_params,
         structured_output_request=SimpleNamespace(
             structured_output_key=(StructuredOutputOptions.JSON, "{}"),
             grammar=None,
@@ -65,10 +79,12 @@ def validate_structured_outputs(params, config):
 
 
 def test_sampling_params_rejects_mixed_structured_output_backends(monkeypatch):
+    error_type = ValueError if vllm_version_is("0.27.1") else VLLMValidationError
+
     def fake_validate_xgrammar(sampling_params):
         schema = sampling_params.structured_outputs.json
         if schema.get("force_guidance"):
-            raise ValueError("xgrammar unsupported")
+            raise error_type("xgrammar unsupported")
 
     monkeypatch.setattr(
         backend_xgrammar,
@@ -120,10 +136,11 @@ def test_sampling_params_allows_consistent_guidance_backend(monkeypatch):
 
 
 def test_failed_first_validation_does_not_lock_config(monkeypatch):
+    error_type = ValueError if vllm_version_is("0.27.1") else VLLMValidationError
     monkeypatch.setattr(
         backend_xgrammar,
         "validate_xgrammar_grammar",
-        lambda sampling_params: (_ for _ in ()).throw(ValueError("xgrammar error")),
+        lambda sampling_params: (_ for _ in ()).throw(error_type("xgrammar error")),
     )
     monkeypatch.setattr(
         backend_guidance,
@@ -133,12 +150,12 @@ def test_failed_first_validation_does_not_lock_config(monkeypatch):
     monkeypatch.setattr(
         backend_guidance,
         "validate_guidance_grammar",
-        lambda sampling_params, tokenizer=None: (_ for _ in ()).throw(ValueError("guidance error")),
+        lambda sampling_params, tokenizer=None: (_ for _ in ()).throw(error_type("guidance error")),
     )
 
     config = StructuredOutputsConfig(backend="auto")
     params = SamplingParams(structured_outputs=StructuredOutputsParams(json={"force_guidance": True}))
-    with pytest.raises(ValueError, match="guidance error"):
+    with pytest.raises(error_type, match="guidance error"):
         validate_structured_outputs(params, config)
 
     assert not hasattr(config, patch_structured_output._BACKEND_ATTR)

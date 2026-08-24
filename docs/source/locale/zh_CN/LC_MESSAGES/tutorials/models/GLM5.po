@@ -18,9 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# GLM-5/GLM-5.1"
-msgstr "# GLM-5/GLM-5.1"
-
 msgid "## 1 Introduction"
 msgstr "## 1 引言"
 
@@ -741,3 +738,6 @@ msgid ""
 msgstr ""
 "有关环境变量的说明和约束，请参阅[envs.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/vllm_ascend/envs.py)。"
+
+msgid "# GLM-5 & GLM-5.1"
+msgstr "# GLM-5 与 GLM-5.1"

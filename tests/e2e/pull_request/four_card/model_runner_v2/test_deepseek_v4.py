@@ -51,11 +51,17 @@ MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 )
 @wait_until_npu_memory_free()
 def test_deepseek_v4_mtp_eager():
-    """Verify DeepSeek V4 MTP decoding with ModelRunner V2."""
+    """Verify DeepSeek V4 MTP acceptance with ModelRunner V2."""
     prompts = [
         "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
         "What is the meaning of life?",
     ]
+    max_tokens = 1024
+    num_speculative_tokens = 3
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0, seed=0)
 
     with VllmRunner(
         MODEL,
@@ -70,19 +76,26 @@ def test_deepseek_v4_mtp_eager():
         tokenizer_mode="deepseek_v4",
         block_size=128,
         enforce_eager=True,
-        speculative_config={"num_speculative_tokens": 3, "method": "mtp"},
+        disable_log_stats=False,
+        async_scheduling=True,
+        speculative_config={
+            "num_speculative_tokens": num_speculative_tokens,
+            "method": "mtp",
+        },
         additional_config={"enable_dsa_cp": False},
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts, max_tokens=5)
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
 
-    expected_token_ids = [
-        [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
-        [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
-    ]
-    assert len(outputs) == len(prompts)
-    for (output_ids, output_str), expected_ids in zip(outputs, expected_token_ids):
-        assert output_str
-        assert output_ids == expected_ids
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.85, 0.65, 0.35]
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
 
 
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)

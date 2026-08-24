@@ -1,4 +1,4 @@
-test_name: "Minimax_m2.7_in3_5_tpot50"
+test_name: "Minimax_m2.7_in3_5_tpot0"
 model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
 num_nodes: 3
 npu_per_node: 16
@@ -58,7 +58,6 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "2048"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 templates:
   - node_index: 0
@@ -80,8 +79,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "40000"
       - --max-num-batched-tokens
@@ -134,8 +131,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "40000"
       - --max-num-batched-tokens
@@ -190,8 +185,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "40000"
       - --max-num-batched-tokens
@@ -230,7 +223,7 @@ templates:
 benchmarks:
   perf_1:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    dataset_path: vllm-ascend/GSM8K_in3500_bs4000_minimax
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 800

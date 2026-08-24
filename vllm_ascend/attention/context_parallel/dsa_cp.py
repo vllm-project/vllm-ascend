@@ -1,17 +1,18 @@
 import math
 from dataclasses import dataclass
-from typing import Any, ClassVar, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_pcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
@@ -27,6 +28,8 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
+from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
@@ -38,6 +41,14 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     olora_tp_enable,
 )
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
+
+
+# =============================================================================
+# Legacy DSA-CP implementation (TP/SP group)
+# =============================================================================
 
 
 def hadamard_transform_ref(
@@ -1333,13 +1344,89 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         scale = scale.reshape(scale.shape[0], num_groups, -1, *scale.shape[2:])
         return scale.permute(1, 0, 2, *range(3, scale.ndim))
 
+    @staticmethod
+    def _split_full_hidden_states_for_cp(
+        hidden_states: torch.Tensor,
+        cp_metadata: DSACPMetadata,
+    ) -> torch.Tensor:
+        """Return this TP rank's token shard from the replicated model state.
+
+        FlashComm used to reduce-scatter every row-parallel output, so DSA-CP
+        received an already sharded tensor and gathered a second copy for KV
+        updates. Without FlashComm, normal TP keeps the model state replicated:
+        DSA-CP must slice Q locally while continuing to use the full tensor for
+        KV cache updates.
+        """
+        expected_tokens = cp_metadata.num_tokens_pad
+        actual_tokens = hidden_states.shape[0]
+        if actual_tokens > expected_tokens:
+            raise RuntimeError(
+                "DSA-CP input exceeds its TP-aligned metadata, "
+                f"got {actual_tokens} tokens and num_tokens_pad={expected_tokens}."
+            )
+        if actual_tokens < expected_tokens:
+            hidden_states = F.pad(hidden_states, (0, 0, 0, expected_tokens - actual_tokens))
+
+        local_hidden_states = hidden_states[cp_metadata.local_start : cp_metadata.local_end]
+        if local_hidden_states.shape[0] != cp_metadata.tokens_per_rank:
+            raise RuntimeError(
+                "DSA-CP local token slice does not match tokens_per_rank, "
+                f"got {local_hidden_states.shape[0]} and expected "
+                f"{cp_metadata.tokens_per_rank}."
+            )
+        return local_hidden_states
+
+    def _gather_cp_output(
+        self,
+        local_output: torch.Tensor,
+        cp_metadata: DSACPMetadata,
+        num_output_tokens: int | None = None,
+    ) -> torch.Tensor:
+        """Restore the replicated model-state layout after DSA-CP.
+
+        DSA-CP computes a contiguous token shard on every physical TP rank.
+        FlashComm used to keep that sharded layout between transformer layers;
+        normal TP does not, so the local attention output must be gathered
+        before it is returned to the residual path. Decode and speculative
+        decoding take the regular TP all-to-all path, which has already
+        restored the full token layout before the output projection.
+        """
+        if local_output.shape[0] == cp_metadata.num_tokens_pad:
+            full_output = local_output
+        elif local_output.shape[0] == cp_metadata.tokens_per_rank:
+            full_output = local_output
+            if self.tp_size > 1:
+                full_output = self.tp_group.all_gather(local_output.contiguous(), dim=0)
+        else:
+            raise RuntimeError(
+                "DSA-CP local output does not match tokens_per_rank, "
+                f"got {local_output.shape[0]} and expected "
+                f"{cp_metadata.tokens_per_rank}."
+            )
+
+        if full_output.shape[0] != cp_metadata.num_tokens_pad:
+            raise RuntimeError(
+                "DSA-CP gathered output does not match num_tokens_pad, "
+                f"got {full_output.shape[0]} and expected "
+                f"{cp_metadata.num_tokens_pad}."
+            )
+        if num_output_tokens is None:
+            num_output_tokens = cp_metadata.num_tokens_pad
+        if not 0 <= num_output_tokens <= cp_metadata.num_tokens_pad:
+            raise RuntimeError(
+                "DSA-CP output token count must fit the TP-aligned state, "
+                f"got {num_output_tokens} and num_tokens_pad={cp_metadata.num_tokens_pad}."
+            )
+        if num_output_tokens == cp_metadata.num_tokens_pad:
+            return full_output
+        return full_output[:num_output_tokens]
+
     def forward(  # type: ignore[override]
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor],
         attn_metadata: DSACPMetadataDict,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
@@ -1365,7 +1452,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             hidden_states,
             kv_cache,
             layer_metadata,
-            need_gather_q_kv,
             full_gather_wo_a_enabled,
         )
         o_proj_input = self._restore_tp_head_layout(
@@ -1401,7 +1487,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                         perm_y=(1, 0, 2),
                     )
                 o = o.reshape(num_tokens, -1)
-                output[...] = self._apply_wo_b(o, full_gather_wo_a_enabled)
+                local_output = self._apply_wo_b(o, full_gather_wo_a_enabled)
             else:
                 o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 if olora_tp_enable():
@@ -1420,7 +1506,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                         batch_split_factor=1,
                     )
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
-                output[...] = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+                local_output = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
+
+            req_metadata = common_attn_metadata.req_metadata
+            assert req_metadata is not None
+            cp_metadata = req_metadata.cp_metadata
+            output[...] = self._gather_cp_output(local_output, cp_metadata, output.shape[0])
         finally:
             if full_gather_wo_a_enabled:
                 self._switch_o_proj_to_tp_weight()
@@ -1432,10 +1523,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
     def _forward(
         self,
         layer_name,
-        hidden_states_local: torch.Tensor,
+        hidden_states: torch.Tensor,
         kv_cache: tuple,
         layer_metadata: AscendDSACPLayerMetadata,
-        need_gather_q_kv: bool = False,
         full_gather_wo_a_enabled: bool = False,
     ):
         """Run full-sequence KV cache updates and local-token attention."""
@@ -1447,12 +1537,11 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         if common_attn_metadata is None:
             common_attn_metadata = swa_metadata
 
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
+        hidden_states_local = self._split_full_hidden_states_for_cp(hidden_states, cp_metadata)
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
         local_cos = cp_metadata.local_cos[layer_name]
@@ -1830,3 +1919,381 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             return_value=False,
         )
         return topk_idxs
+
+
+# =============================================================================
+# MRV2 DSA-PCP implementation
+# =============================================================================
+
+
+@dataclass(kw_only=True)
+class AscendDSAPCPMetadata(dsa_v1.AscendDSAMetadata):
+    """Rank-local DSA metadata with its canonical cache-update view."""
+
+    local_num_tokens_after_padding: int
+    hidden_restore_idx: torch.Tensor
+    global_dsa_metadata: dsa_v1.AscendDSAMetadata
+
+    @classmethod
+    def from_local_metadata(
+        cls,
+        local_metadata: dsa_v1.AscendDSAMetadata,
+        local_num_tokens_after_padding: int,
+        hidden_restore_idx: torch.Tensor,
+        global_dsa_metadata: dsa_v1.AscendDSAMetadata,
+    ) -> "AscendDSAPCPMetadata":
+        return cls(
+            num_actual_tokens=local_metadata.num_actual_tokens,
+            num_decodes=local_metadata.num_decodes,
+            num_decode_tokens=local_metadata.num_decode_tokens,
+            num_prefills=local_metadata.num_prefills,
+            head_dim=local_metadata.head_dim,
+            attn_state=local_metadata.attn_state,
+            req_metadata=local_metadata.req_metadata,
+            reshape_cache_event=local_metadata.reshape_cache_event,
+            hadamard=local_metadata.hadamard,
+            local_num_tokens_after_padding=local_num_tokens_after_padding,
+            hidden_restore_idx=hidden_restore_idx,
+            global_dsa_metadata=global_dsa_metadata,
+        )
+
+
+class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
+    """Build rank-local attention and canonical global cache metadata."""
+
+    def __init__(
+        self,
+        kv_cache_spec: AscendMLAAttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+        )
+        # DualChunkSwap can expand each scheduler-global prefill request into
+        # two rank-local rows. Keep this in sync with PCPManager's local input
+        # buffers, which are sized to ``2 * max_num_seqs``. The canonical
+        # global builder below must retain the scheduler-global capacity.
+        max_num_local_reqs = 2 * vllm_config.scheduler_config.max_num_seqs
+        self.start_pos_prefill = self.start_pos_prefill.new_zeros(
+            max_num_local_reqs,
+        )
+        self._global_metadata_builder = dsa_v1.AscendDSAMetadataBuilder(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls=dsa_v1.AscendDSAMetadata,
+        )
+        self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self._pcp_rank = get_pcp_group().rank_in_group
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AscendDSAPCPMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        return AttentionCGSupport.NEVER
+
+    @staticmethod
+    def _build_global_common_attn_metadata(
+        pcp_context: "AscendPCPAttentionContext",
+        cache_group_idx: int,
+        local_common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendCommonAttentionMetadata:
+        global_batch = pcp_context.global_batch
+        num_reqs = global_batch.num_reqs
+        return AscendCommonAttentionMetadata(
+            query_start_loc=global_batch.query_start_loc,
+            query_start_loc_cpu=torch.from_numpy(global_batch.query_start_loc_np),
+            seq_lens=global_batch.seq_lens[:num_reqs],
+            seq_lens_cpu=torch.from_numpy(global_batch.seq_lens_np)[:num_reqs],
+            seq_lens_cpu_upper_bound=global_batch.seq_lens_cpu_upper_bound[:num_reqs],
+            num_computed_tokens_cpu=torch.from_numpy(global_batch.num_computed_tokens_np),
+            num_reqs=num_reqs,
+            num_actual_tokens=global_batch.num_tokens,
+            max_query_len=int(global_batch.num_scheduled_tokens.max()),
+            max_seq_len=local_common_attn_metadata.max_seq_len,
+            block_table_tensor=pcp_context.global_block_tables[cache_group_idx],
+            slot_mapping=pcp_context.global_slot_mappings[cache_group_idx],
+            causal=local_common_attn_metadata.causal,
+            dcp_local_seq_lens=global_batch.dcp_local_seq_lens,
+            positions=global_batch.positions,
+            attn_state=global_batch.attn_state,
+            num_input_tokens=global_batch.num_tokens,
+            is_prefilling=torch.from_numpy(global_batch.is_prefilling_np),
+        )
+
+    def _build_local_common_attn_metadata(
+        self,
+        pcp_context: "AscendPCPAttentionContext",
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendCommonAttentionMetadata:
+        num_local_padded_tokens = pcp_context.local_num_tokens_after_padding
+        gathered_slot_mapping = common_attn_metadata.slot_mapping
+        local_slot_mapping = gathered_slot_mapping.view(
+            self._pcp_world_size,
+            num_local_padded_tokens,
+        )[self._pcp_rank]
+        return common_attn_metadata.replace(
+            slot_mapping=local_slot_mapping,
+            num_input_tokens=num_local_padded_tokens,
+        )
+
+    def _build_local_dsa_metadata(
+        self,
+        common_prefix_len: int,
+        local_common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool,
+        **kwargs,
+    ) -> dsa_v1.AscendDSAMetadata:
+        if local_common_attn_metadata.num_actual_tokens > 0:
+            return super().build(
+                common_prefix_len,
+                local_common_attn_metadata,
+                fast_build,
+                **kwargs,
+            )
+
+        # Empty ranks still participate in the global cache update collectives.
+        self.common_ratio_to_sas_metadata = kwargs.get(
+            "common_ratio_to_sas_metadata",
+        )
+        return self.metadata_cls(  # type: ignore[call-arg]
+            num_actual_tokens=0,
+            head_dim=self.model_config.get_head_size(),
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_prefills=0,
+            attn_state=local_common_attn_metadata.attn_state,
+            req_metadata=None,
+            hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
+        )
+
+    def _build_global_dsa_metadata(
+        self,
+        common_prefix_len: int,
+        global_common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool,
+        **kwargs,
+    ) -> dsa_v1.AscendDSAMetadata:
+        global_build_kwargs = {
+            **kwargs,
+            "common_ratio_to_sas_metadata": {},
+            "num_reqs_actual": global_common_attn_metadata.num_reqs,
+        }
+        return self._global_metadata_builder.build(
+            common_prefix_len,
+            global_common_attn_metadata,
+            fast_build,
+            **global_build_kwargs,
+        )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        pcp_context: "AscendPCPAttentionContext | None" = None,
+        pcp_cache_group_idx: int | None = None,
+        **kwargs,
+    ) -> AscendDSAPCPMetadata:
+        assert pcp_context is not None
+        assert pcp_cache_group_idx is not None
+        global_common_attn_metadata = self._build_global_common_attn_metadata(
+            pcp_context,
+            pcp_cache_group_idx,
+            common_attn_metadata,
+        )
+        global_dsa_metadata = self._build_global_dsa_metadata(
+            common_prefix_len,
+            global_common_attn_metadata,
+            fast_build,
+            **kwargs,
+        )
+        local_common_attn_metadata = self._build_local_common_attn_metadata(
+            pcp_context,
+            common_attn_metadata,
+        )
+        local_dsa_metadata = self._build_local_dsa_metadata(
+            common_prefix_len,
+            local_common_attn_metadata,
+            fast_build,
+            **kwargs,
+        )
+        return AscendDSAPCPMetadata.from_local_metadata(
+            local_dsa_metadata,
+            pcp_context.local_num_tokens_after_padding,
+            pcp_context.hidden_restore_idx,
+            global_dsa_metadata,
+        )
+
+
+class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
+    """Run batched global DSA cache updates before rank-local PCP attention."""
+
+    supports_pcp: ClassVar[bool] = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # PCP prepares replicated caches before local attention, leaving no
+        # cache-update work for the auxiliary stream to overlap.
+        self.multistream_dsv4_dsa_overlap = False
+
+    def _gather_and_restore_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        metadata: AscendDSAPCPMetadata,
+    ) -> torch.Tensor:
+        """All-gather one padded rank slice and restore scheduler token order."""
+        gathered_hidden_states = get_pcp_group().all_gather(
+            hidden_states.contiguous(),
+            dim=0,
+        )
+        return torch.index_select(
+            gathered_hidden_states,
+            0,
+            metadata.hidden_restore_idx,
+        )
+
+    def _update_global_swa_cache(
+        self,
+        layer_name: str,
+        global_hidden_states: torch.Tensor,
+        swa_kv_cache: torch.Tensor,
+        swa_metadata: dsa_v1.AscendDSAMetadata,
+    ) -> None:
+        """Update the replicated SWA cache from the canonical global batch."""
+        req_metadata = dsa_v1._require_req_metadata(swa_metadata)
+        assert req_metadata.slot_mapping is not None
+
+        kv = self.kv_norm(self.wkv(global_hidden_states))
+        assert self.rope_head_dim is not None
+        kv = kv.view(
+            -1,
+            1,
+            self.nope_head_dim + self.rope_head_dim,
+        )
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            kv.unsqueeze(1),
+            req_metadata.cos[layer_name],
+            req_metadata.sin[layer_name],
+            rotary_mode="interleave",
+            partial_slice=[self.nope_head_dim, self.head_dim],
+        )
+        DeviceOperator.dsa_kv_compress_scatter(
+            swa_kv_cache,
+            kv,
+            req_metadata.slot_mapping,
+        )
+
+    def _update_global_compressor_cache(
+        self,
+        global_hidden_states: torch.Tensor,
+        metadata: AscendCompressorMetadata,
+        compress_kv_cache: torch.Tensor,
+        state_cache: torch.Tensor,
+    ) -> None:
+        """Update the DSA compressor cache from the canonical global batch."""
+        assert self.compressor is not None
+        compressed_kv, compress_slot_mapping = self.compressor(
+            hidden_states=global_hidden_states,
+            state_cache=state_cache,
+            metadata=metadata,
+        )
+        if compressed_kv.shape[0] > 0:
+            DeviceOperator.dsa_kv_compress_scatter(
+                compress_kv_cache,
+                compressed_kv,
+                compress_slot_mapping,
+            )
+
+    def _update_global_indexer_cache(
+        self,
+        global_hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        metadata: AscendIndexerMetadata,
+    ) -> None:
+        """Update the Indexer cache from the canonical global batch."""
+        indexer = self.indexer
+        assert indexer is not None
+        if indexer.skip_topk:
+            return
+        indexer.update_cache(
+            hidden_states=global_hidden_states,
+            kv_cache=kv_cache,
+            metadata=metadata,
+        )
+
+    def _prepare_caches_before_attention(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: dsa_v1.DSAMetadataDict,
+    ) -> bool:
+        """Restore one global batch and update each replicated cache once."""
+        pcp_metadata = next(iter(attn_metadata.values()))
+        assert isinstance(pcp_metadata, AscendDSAPCPMetadata)
+        global_hidden_states = self._gather_and_restore_hidden_states(
+            hidden_states,
+            pcp_metadata,
+        )
+
+        global_dsa_metadata_by_prefix = {}
+        for cache_prefix, metadata in attn_metadata.items():
+            assert isinstance(metadata, AscendDSAPCPMetadata)
+            global_dsa_metadata_by_prefix[cache_prefix] = metadata.global_dsa_metadata
+        global_layer_metadata = self._get_layer_metadata(
+            layer_name,
+            global_dsa_metadata_by_prefix,
+        )
+
+        cmp_kv, swa_kv, state_cache, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
+
+        self._update_global_swa_cache(
+            layer_name,
+            global_hidden_states,
+            swa_kv,
+            global_layer_metadata.swa,
+        )
+        if self.compress_ratio > 1:
+            compressor_metadata = global_layer_metadata.compressor
+            assert compressor_metadata is not None
+            assert cmp_kv is not None
+            assert state_cache is not None
+            self._update_global_compressor_cache(
+                global_hidden_states,
+                compressor_metadata,
+                cmp_kv,
+                state_cache,
+            )
+
+            if self.compress_ratio == 4:
+                indexer_metadata = global_layer_metadata.indexer
+                assert indexer_metadata is not None
+                self._update_global_indexer_cache(
+                    global_hidden_states,
+                    kv_cache,
+                    indexer_metadata,
+                )
+        return True
+
+    def _get_o_proj_input_shape(
+        self,
+        attn_metadata: dsa_v1.DSAMetadataDict | None,
+    ) -> tuple[int, int, int]:
+        if attn_metadata is None:
+            return super()._get_o_proj_input_shape(attn_metadata)
+        pcp_metadata = next(iter(attn_metadata.values()))
+        assert isinstance(pcp_metadata, AscendDSAPCPMetadata)
+        return (
+            pcp_metadata.local_num_tokens_after_padding,
+            self.n_local_heads,
+            self.head_dim,
+        )
