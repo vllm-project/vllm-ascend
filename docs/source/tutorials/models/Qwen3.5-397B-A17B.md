@@ -12,7 +12,7 @@ The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Us
 
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, speculative decoding, asynchronous scheduling, tensor parallelism, expert parallelism, data parallelism, PD disaggregation, and ACLGraph support.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
 :::{note}
 The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
@@ -785,11 +785,11 @@ Run a proxy server on the same node as the prefiller service instance. You can g
     unset https_proxy
     unset http_proxy
     python3 load_balance_proxy_server_example.py \
-      --prefiller-hosts 141.xx.xx.1 \
+      --prefiller-hosts 192.xx.xx.1 \
       --prefiller-ports 30060 \
-      --decoder-hosts 141.xx.xx.2 \
+      --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --port 8010
     ```
 
@@ -809,11 +809,11 @@ Run a proxy server on the same node as the prefiller service instance. You can g
     unset https_proxy
     unset http_proxy
     python3 load_balance_proxy_layerwise_server_example.py \
-      --prefiller-hosts 141.xx.xx.1 \
+      --prefiller-hosts 192.xx.xx.1 \
       --prefiller-ports 30060 \
-      --decoder-hosts 141.xx.xx.2 \
+      --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --port 8010
     ```
 
@@ -918,7 +918,7 @@ The following configurations are validated in specific test environments and are
 
 ### 9.2 Tuning Guidelines
 
-Refer to [public performance tuning documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
+Refer to [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
 
 Recommended tuning order:
 

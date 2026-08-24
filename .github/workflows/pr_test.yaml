@@ -658,18 +658,3 @@ jobs:
 
           echo "=== CI Gate: PASSED ==="
 
-  # this job collects failure from uploaded logs
-  # failure analyze & upload reports
-
-  analyze-failure-report:
-    name: Analyze failure report
-    needs: [run-selected-tests, recommend-tests-from-coverage]
-    if: ${{ !cancelled() }}
-    uses: ./.github/workflows/_analyze_failure.yaml
-    with:
-      log_artifact_pattern: selected-test-logs-*
-      recommendations_file: .github/workflows/scripts/recommended_pytest_paths.txt
-      recommendations_content: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths || '' }}
-    secrets:
-      OBS_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-      OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}

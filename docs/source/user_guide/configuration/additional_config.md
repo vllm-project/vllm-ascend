@@ -75,7 +75,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
 | `dynamic_spec_config`               | dict | `{}`    | Configuration options for Dynamic Speculative Decoding. See [Dynamic Speculative Decoding](../feature_guide/speculative_decoding.md#dynamic-speculative-decoding). |
 | `multistream_dsv4_dsa_overlap`      | bool | `True`  | Whether to enable dsa multi-stream overlap for DeepSeek V4.  |
-| `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See [rl_config](#rl_config) for all fields, the two deployment modes, usage examples, and the migration guide. |
+| `rl_config`                        | dict | `{}`    | One-click RL mode configuration. See <a href="#rl_config">rl_config</a> for all fields, the two deployment modes, usage examples, and the migration guide. |
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 
 The details of each configuration option are as follows:
@@ -225,7 +225,7 @@ ShortRequestFirst is a waiting-queue policy for FCFS synchronous or asynchronous
 | `low_available_tokens_threshold` | int | `4096` | Threshold for prioritising long vs short decode jobs. When available tokens > threshold, long decode jobs are prioritised; when ≤ threshold, short decode jobs are prioritised. |
 | `short_decode_token_threshold` | int | `32` | Threshold for classifying a job as "short decode". |
 
-**rl_config**
+<span id="rl_config"></span>**rl_config**
 
 `rl_config` is a one-click RL mode switch. When `enabled` is `true`, it refreshes the global Ascend configuration on every initialization, forces `AscendConfig.weight_nz_mode=0`, synchronizes `VLLM_ASCEND_ENABLE_NZ=0`, sets `VLLM_SERVER_DEV_MODE=1`, and removes the `expandable_segments` entry from `PYTORCH_NPU_ALLOC_CONF` with an informational log. These fixed RL behaviors are not configurable as `rl_config` sub-fields. When `enabled` is `false`, all other sub-fields are ignored.
 

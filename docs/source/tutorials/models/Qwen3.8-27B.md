@@ -14,7 +14,7 @@ This document is validated and written based on **vLLM-Ascend 0.23.0**. The curr
 
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
 ## 3 Prerequisites
 
@@ -161,7 +161,7 @@ You can also build and install `vllm-ascend` from source. Refer to [set up using
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -385,7 +385,7 @@ After about several minutes, you can get the performance evaluation result.
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Model-Specific Optimizations
 
@@ -408,4 +408,4 @@ The following optimizations are enabled by default and require no additional con
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

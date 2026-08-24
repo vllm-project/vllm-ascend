@@ -1112,7 +1112,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample:
+        if getattr(self, "use_dflash2_selector", False):
+            draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+            if lmhead_tp_enable():
+                draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
+                    draft_token_ids,
+                    num_indices,
+                    token_indices_to_sample,
+                    ori_token_indices_to_sample,
+                    is_logits=False,
+                )
+        elif get_ascend_config().enable_reduce_sample:
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable():
