@@ -117,6 +117,36 @@ def get_model_file(
         return None
 
 
+def model_uses_fa_quantization(
+    model: str | Path,
+    revision: str | None = None,
+) -> bool:
+    """Detect fused-attention KV quantization from ModelSlim metadata.
+
+    Hybrid-cache sizing runs before vLLM has necessarily constructed the
+    quantization config. Reading the lightweight ModelSlim description here
+    keeps cache-layout decisions independent of model architecture and avoids
+    relying on a later-initialized ``quant_config`` object.
+    """
+    from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+
+    config_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)
+    if config_path is None:
+        return False
+
+    try:
+        with open(config_path) as f:
+            quant_description = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(
+            "Could not read ModelSlim quantization metadata from %s: %s",
+            config_path,
+            exc,
+        )
+        return False
+    return isinstance(quant_description, dict) and bool(quant_description.get("fa_quant_type"))
+
+
 def detect_quantization_method(model: str, revision: str | None = None) -> str | None:
     """Auto-detect the quantization method from model files.
 

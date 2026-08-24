@@ -192,7 +192,10 @@ def _index_block_score_kernel(
     bt_row = block_table_ptr + pid_b * stride_bt_b
     hi = tl.minimum(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
 
-    middle = (q_start - BLOCK_SIZE_K) // BLOCK_SIZE_K * BLOCK_SIZE_K
+    middle = tl.maximum(
+        0,
+        (q_start - BLOCK_SIZE_K) // BLOCK_SIZE_K * BLOCK_SIZE_K,
+    )
 
     for key_start in tl.range(0, middle, BLOCK_SIZE_K):
         block_id = key_start // BLOCK_SIZE_K
@@ -1331,8 +1334,11 @@ def minimax_m3_sparse_attn_decode(
     sm_scale: float,
     output: torch.Tensor,  # [total_q, num_heads, head_dim]
     decode_query_len: int,
+    block_size: int = SPARSE_BLOCK_SIZE,
 ) -> None:
     """GQA block-sparse attention for decode (split-K over the top-k blocks)."""
+    if block_size != SPARSE_BLOCK_SIZE:
+        raise ValueError(f"A5 sparse decode requires block_size={SPARSE_BLOCK_SIZE}, got {block_size}")
     kv_cache = _as_triton_main_kv_cache(kv_cache)
     total_q, num_heads, head_dim = q.shape
     assert total_q == seq_lens.shape[0] * decode_query_len

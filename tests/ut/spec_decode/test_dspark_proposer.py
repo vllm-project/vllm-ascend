@@ -26,7 +26,10 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+from vllm.v1.worker.utils import AttentionGroup
 
+import vllm_ascend.spec_decode.dspark_proposer as dspark_proposer_module
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
@@ -723,4 +726,184 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         kv_cache_config = SimpleNamespace(kv_cache_groups=[non_overlapping_group])
         with pytest.raises(RuntimeError, match="registered draft attention groups"):
             proposer.initialize_attn_backend(kv_cache_config)
+
+    def test_initialization_tracks_logical_block_size_per_gid(self, monkeypatch):
+        manager_specs = [MagicMock(), MagicMock()]
+        for spec in manager_specs:
+            spec.block_size = 384
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.backend"
+        layers = {}
+        for gid in range(2):
+            layer = MagicMock()
+            layer.get_attn_backend.return_value = backend
+            layers[f"L{gid}"] = layer
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            lambda *a, **k: layers,
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: {"L0", "L1"}
+        )
+        assert not isinstance(
+            proposer.draft_model_config.hf_config,
+            dspark_proposer_module.K3DSparkConfig,
+        )
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[f"L{gid}"],
+                    kv_cache_spec=manager_specs[gid],
+                )
+                for gid in range(2)
+            ],
+        )
+
+        with patch.object(AttentionGroup, "create_metadata_builders") as create_builders:
+            proposer.initialize_attn_backend(
+                kv_cache_config,
+                kernel_block_sizes=[128, 64],
+            )
+
+        assert [spec.block_size for spec in manager_specs] == [384, 384]
+        assert proposer._per_group_kernel_block_sizes == {0: 128, 1: 64}
+        assert [g.kv_cache_group_id for g in proposer.draft_attn_groups] == [0, 1]
+        assert set(proposer._per_group_query_slot_mapping_buffers) == {0, 1}
+        assert set(proposer._per_group_context_slot_mapping_buffers) == {0, 1}
+        assert proposer.kernel_block_size == 128
+        assert [
+            call.kwargs["kernel_block_size"]
+            for call in create_builders.call_args_list
+        ] == [128, 64]
+
+    def test_initialization_selects_draft_from_shared_uniform_group(self, monkeypatch):
+        target_spec = MagicMock()
+        target_spec.block_size = 768
+        draft_spec = MagicMock()
+        draft_spec.block_size = 768
+        uniform_spec = UniformTypeKVCacheSpecs(
+            block_size=768,
+            kv_cache_specs={
+                "target.0": target_spec,
+                "draft.0": draft_spec,
+            },
+        )
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.mla.backend"
+        draft_layer = MagicMock()
+        draft_layer.get_attn_backend.return_value = backend
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            lambda *a, **k: {"draft.0": draft_layer},
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: {"draft.0"}
+        )
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=["target.0", "draft.0"],
+                    kv_cache_spec=uniform_spec,
+                )
+            ],
+        )
+
+        with patch.object(AttentionGroup, "create_metadata_builders") as create_builders:
+            proposer.initialize_attn_backend(
+                kv_cache_config,
+                kernel_block_sizes=[128],
+            )
+
+        assert len(proposer.draft_attn_groups) == 1
+        draft_group = proposer.draft_attn_groups[0]
+        assert draft_group.layer_names == ["draft.0"]
+        assert draft_group.kv_cache_spec is draft_spec
+        assert draft_group.kv_cache_group_id == 0
+        assert proposer._layer_group_idx == [0]
+        assert proposer.kv_cache_gid == 0
+        assert proposer.kernel_block_size == 128
+        create_builders.assert_called_once_with(
+            proposer.vllm_config,
+            proposer.device,
+            kernel_block_size=128,
+        )
+
+    def test_k3_initialization_enables_rope_on_mla_builders(self, monkeypatch):
+        class FakeK3Config:
+            pass
+
+        class FakeMLABuilder:
+            def __init__(self):
+                self.use_mla_rope = False
+
+        fake_builder = FakeMLABuilder()
+
+        def create_metadata_builders(group, *args, **kwargs):
+            del args, kwargs
+            group.metadata_builders = [fake_builder]
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.backend"
+        layer = MagicMock()
+        layer.get_attn_backend.return_value = backend
+        monkeypatch.setattr(
+            dspark_proposer_module,
+            "get_layers_from_vllm_config",
+            lambda *args, **kwargs: {"L0": layer},
+        )
+        monkeypatch.setattr(dspark_proposer_module, "K3DSparkConfig", FakeK3Config)
+        monkeypatch.setattr(
+            dspark_proposer_module,
+            "AscendMLAMetadataBuilder",
+            FakeMLABuilder,
+        )
+        monkeypatch.setattr(
+            AttentionGroup,
+            "create_metadata_builders",
+            create_metadata_builders,
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.draft_model_config = SimpleNamespace(hf_config=FakeK3Config())
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: {"L0"}
+        )
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        manager_spec = MagicMock()
+        manager_spec.block_size = 128
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=["L0"],
+                    kv_cache_spec=manager_spec,
+                )
+            ]
+        )
+
+        proposer.initialize_attn_backend(kv_cache_config)
+
+        assert fake_builder.use_mla_rope is dspark_proposer_module.K3_DSPARK_USE_MLA_ROPE
+
+    def test_kernel_block_size_falls_back_to_cache_spec(self):
+        proposer = self._make_proposer_for_init()
+
+        assert (
+            proposer._resolve_kernel_block_size(
+                0,
+                SimpleNamespace(block_size=384),
+                None,
+            )
+            == 384
+        )
 # fmt: on

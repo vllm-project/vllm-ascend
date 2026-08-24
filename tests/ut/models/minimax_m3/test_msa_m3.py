@@ -392,6 +392,7 @@ def test_a5_index_decode_uses_a5_triton_without_tp_block_sharding() -> None:
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
     assert import_branches.count("minimax_m3_index_decode") == 2
+    assert import_branches.count("minimax_m3_sparse_attn_decode") == 2
     assert "msa_m3_triton_a5" in import_branches
     with patch(
         "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
