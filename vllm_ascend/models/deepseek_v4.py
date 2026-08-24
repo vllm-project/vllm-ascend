@@ -719,6 +719,7 @@ class DeepseekV4Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        is_draft_layer: bool = False,
     ) -> None:
         super().__init__()
         layer_idx = int(prefix.split(sep=".")[-2])
@@ -744,14 +745,7 @@ class DeepseekV4Attention(nn.Module):
 
         attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
         self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
-        self.wq_a = ReplicatedLinear(
-            self.dim,
-            self.q_lora_rank,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wq_a",
-            return_bias=False,
-        )
+
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
         self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
         wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
@@ -764,14 +758,31 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
 
-        self.wkv = ReplicatedLinear(
+        # Keep a redundant KV-only projection for draft context KV
+        # precomputation; regular draft attention uses wq_a_kv below.
+        if is_draft_layer:
+            self.wkv = ReplicatedLinear(
+                self.dim,
+                self.head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.wkv",
+                return_bias=False,
+            )
+        else:
+            self.wkv = None
+
+        self.wq_a = None
+        self.wq_a_kv = MergedColumnParallelLinear(
             self.dim,
-            self.head_dim,
+            [self.q_lora_rank, self.head_dim],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.wkv",
+            disable_tp=True,
+            prefix=f"{prefix}.wq_a_kv",
             return_bias=False,
         )
+
         self.kv_norm = RMSNorm(self.head_dim, self.norm_eps)
         wo_a_linear_class = ReplicatedLinear if self.replicated_wo else ColumnParallelLinear
         self.wo_a = wo_a_linear_class(
@@ -872,6 +883,7 @@ class DeepseekV4Attention(nn.Module):
             q_norm_without_weight=self.q_norm_without_weight,
             wq_b=self.wq_b,
             wkv=self.wkv,
+            wq_a_kv=self.wq_a_kv,
             kv_norm=self.kv_norm,
             wo_a=self.wo_a,
             wo_b=self.wo_b,
@@ -949,6 +961,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            is_draft_layer=is_draft_layer,
         )
 
         self.mlp = DeepseekV4MoE(
@@ -1221,6 +1234,7 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle3):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "wq_a_kv": ["wq_a", "wkv"],
     }
     model_cls = DeepseekV4Model
 
@@ -1316,6 +1330,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("self_attn.wq_a_kv", "self_attn.wq_a", 0),
+            ("self_attn.wq_a_kv", "self_attn.wkv", 1),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales

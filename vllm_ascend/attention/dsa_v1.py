@@ -1494,14 +1494,19 @@ class AscendDSAImpl(DSAAttentionImpl):
         self.wq_a = kwargs["wq_a"]
         self.wq_b = kwargs["wq_b"]
         self.wkv = kwargs["wkv"]
+        self.wq_a_kv = kwargs["wq_a_kv"]
         self.q_norm = kwargs["q_norm"]
         self.q_norm_without_weight = kwargs["q_norm_without_weight"]
         self.kv_norm = kwargs["kv_norm"]
 
+        assert self.wq_a_kv is not None, \
+            "[PERF_DEV] wq_a and wkv must be fused into wq_a_kv"
+
         # CV wrapper: split wq_a/wkv/wq_b into quantize(Vector) + matmul(Cube)
-        self.cv_wq_a = CVLinearWrapper(self.wq_a)
-        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_a = CVLinearWrapper(self.wq_a) if self.wq_a is not None else None
+        self.cv_wkv = CVLinearWrapper(self.wkv) if self.wkv is not None else None
         self.cv_wq_b = CVLinearWrapper(self.wq_b)
+        self.cv_wq_a_kv = CVLinearWrapper(self.wq_a_kv)
 
         self.indexer = kwargs.get("indexer")
         self.compressor = kwargs.get("compressor")
@@ -1837,8 +1842,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         """3-block multi-stream: 3-stage CV parallel + serial tail
 
         Block partition (V: Vector, C: Cube, AIV: AI Vector):
-          Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
-          Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
+          Part1: q_quant[V] -> q_a_kv_down[C]
+          Part2: q_norm[V] + q_b_quant[V]
           Part3: q_b_matmul[C]             ||  kv_norm[V] + rope[V] + scatter[AIV]
           Tail:  q_rms[V] + rope[V] (wait for auxiliary stream to complete)
 
@@ -1850,25 +1855,13 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
-        # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
-        q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
+        # Part1: q_quant[V] -> q_a_down[C]
+        q_quant, q_pertoken_scale = self.cv_wq_a_kv.quantize(hidden_states)
 
-        e_q_quant_done = main_stream.record_event()
+        wq_a_kv_result = self.cv_wq_a_kv.matmul(q_quant, q_pertoken_scale)
+        wq_a_result, kv = wq_a_kv_result.split([self.q_lora_rank, self.head_dim], dim=-1)
 
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_q_quant_done)
-            kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
-
-        wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
-        main_stream.wait_stream(aux_stream)
-
-        # Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
-        e_part2_start = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_part2_start)
-            kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
-
+        # Part2: q_norm[V] + q_b_quant[V]
         if is_prefill:
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
@@ -1882,8 +1875,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = qr, None
             qr_pertoken_scale = None
-
-        main_stream.wait_stream(aux_stream)
 
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
         e_part3_start = main_stream.record_event()
@@ -1975,19 +1966,20 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
         else:
             # mlaprolog
-            share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
+            share_hs_quant = _is_w8a8_dynamic(self.wq_a_kv)
             if share_hs_quant:
                 hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-                q_a = torch_npu.npu_quant_matmul(
+                q_a_kv = torch_npu.npu_quant_matmul(
                     hs_int8,
-                    self.wq_a.weight,
-                    self.wq_a.weight_scale,
+                    self.wq_a_kv.weight,
+                    self.wq_a_kv.weight_scale,
                     pertoken_scale=hs_pertoken_scale,
-                    bias=self.wq_a.bias,
+                    bias=self.wq_a_kv.bias,
                     output_dtype=hidden_states.dtype,
                 )
             else:
-                q_a = self.wq_a(hidden_states)
+                q_a_kv = self.wq_a_kv(hidden_states)
+            q_a, kv = q_a_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
 
             # q
             if _is_w8a8_dynamic(self.wq_b):
@@ -2016,17 +2008,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
             # win kv & tok_dis
-            if share_hs_quant:
-                kv = torch_npu.npu_quant_matmul(
-                    hs_int8,
-                    self.wkv.weight,
-                    self.wkv.weight_scale,
-                    pertoken_scale=hs_pertoken_scale,
-                    bias=self.wkv.bias,
-                    output_dtype=hidden_states.dtype,
-                )
-            else:
-                kv = self.wkv(hidden_states)
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
@@ -2289,23 +2270,25 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             # Share one dynamic-quant of hidden_states between wq_a (main stream)
             # and wkv (attention stream) when both sides are W8A8 dynamic.
-            share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
+            share_hs_quant = _is_w8a8_dynamic(self.wq_a_kv)
             if share_hs_quant:
                 hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
             # q
             if _is_w8a8_dynamic(self.wq_b):
                 if share_hs_quant:
-                    q_a = torch_npu.npu_quant_matmul(
+                    q_a_kv = torch_npu.npu_quant_matmul(
                         hs_int8,
-                        self.wq_a.weight,
-                        self.wq_a.weight_scale,
+                        self.wq_a_kv.weight,
+                        self.wq_a_kv.weight_scale,
                         pertoken_scale=hs_pertoken_scale,
-                        bias=self.wq_a.bias,
+                        bias=self.wq_a_kv.bias,
                         output_dtype=hidden_states.dtype,
                     )
                 else:
-                    q_a = self.wq_a(hidden_states)
+                    q_a_kv = self.wq_a_kv(hidden_states)
+                q_a, kv = q_a_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+
                 qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                     q_a, self.q_norm.weight, epsilon=self.eps
                 )
@@ -2344,17 +2327,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             # win kv & tok_dis
-            if share_hs_quant:
-                kv = torch_npu.npu_quant_matmul(
-                    hs_int8,
-                    self.wkv.weight,
-                    self.wkv.weight_scale,
-                    pertoken_scale=hs_pertoken_scale,
-                    bias=self.wkv.bias,
-                    output_dtype=hidden_states.dtype,
-                )
-            else:
-                kv = self.wkv(hidden_states)
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)

@@ -43,14 +43,14 @@ from vllm_ascend.utils import (
 )
 
 
-_DSV4_DSA_OVERLAP_STREAM = None
+_DSV4_SWA_OVERLAP_STREAM = None
 
 
-def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
-    global _DSV4_DSA_OVERLAP_STREAM
-    if _DSV4_DSA_OVERLAP_STREAM is None:
-        _DSV4_DSA_OVERLAP_STREAM = torch_npu.npu.Stream()
-    return _DSV4_DSA_OVERLAP_STREAM
+def dsv4_swa_overlap_stream() -> torch.npu.Stream:
+    global _DSV4_SWA_OVERLAP_STREAM
+    if _DSV4_SWA_OVERLAP_STREAM is None:
+        _DSV4_SWA_OVERLAP_STREAM = torch_npu.npu.Stream()
+    return _DSV4_SWA_OVERLAP_STREAM
 
 
 def hadamard_transform_ref(
@@ -1104,6 +1104,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self.wq_a = kwargs["wq_a"]
         self.wq_b = kwargs["wq_b"]
         self.wkv = kwargs["wkv"]
+        self.wq_a_kv = kwargs["wq_a_kv"]
         self.q_norm = kwargs["q_norm"]
         self.q_norm_without_weight = kwargs.get("q_norm_without_weight")
         self.kv_norm = kwargs["kv_norm"]
@@ -1463,10 +1464,16 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         hs_local_ready_evt = torch.npu.current_stream().record_event()
 
+        if self.wq_a_kv is not None:
+            q_a_kv = self.wq_a_kv(hidden_states_local)
+            q_a, kv = torch.split(q_a_kv, [self.q_lora_rank, self.head_dim], dim=-1)
+            kv_ready_evt = torch.npu.current_stream().record_event()
+        else:
+            q_a = self.wq_a(hidden_states_local)
+
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
         ):
-            q_a = self.wq_a(hidden_states_local)
             qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
             )
@@ -1479,7 +1486,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 output_dtype=hidden_states_local.dtype,
             )
         else:
-            qr_local = self.q_norm(self.wq_a(hidden_states_local))
+            qr_local = self.q_norm(q_a)
             q = self.wq_b(qr_local)
             qr_pertoken_scale_local = None
 
@@ -1494,13 +1501,19 @@ class AscendDSACPImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        aux_stream = dsv4_dsa_overlap_stream()
-        with npu_stream_switch(aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+        swa_aux_stream = dsv4_swa_overlap_stream()
+        with npu_stream_switch(swa_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
             torch.npu.current_stream().wait_event(hs_local_ready_evt)
             if self.compress_ratio > 1:
                 hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
                 hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
-            kv = self.wkv(hidden_states_local)
+
+            if self.wq_a_kv is None:
+                kv = self.wkv(hidden_states_local)
+            else:
+                torch.npu.current_stream().wait_event(kv_ready_evt)
+                kv.record_stream(torch.npu.current_stream())
+
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
@@ -1517,10 +1530,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
             DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
 
         if self.multistream_dsv4_dsa_overlap:
-            torch.npu.current_stream().wait_stream(aux_stream)
+            torch.npu.current_stream().wait_stream(swa_aux_stream)
             if self.compress_ratio > 1:
                 hidden_states_cache.record_stream(torch.npu.current_stream())
 
+        # Launch the async all-gather after the hidden-states all-gather so the
+        # weight all-gather can overlap with subsequent computation.
         o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
         compress_topk_idxs = None
