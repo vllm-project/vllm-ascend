@@ -11,11 +11,10 @@ there is no leader. See ``docs/.../balance_schedule_refactor.md`` for the
 design.
 
 The ``schedule()`` body is a verbatim copy of the vLLM ``v0.26.0`` tag, plus
-exactly two balance deltas: (1) the disabled path delegates to the independent
-KV-delivery scheduler, and (2) the ``balance_queue`` admission gate inside the
-WAITING loop. It deliberately contains none of the Mooncake/producer lookup or
-reliable-delivery preemption changes; those live in
-``patch_kv_delivery_preemption.py`` and are selected by the disabled path.
+exactly two balance deltas: (1) the disabled path delegates to the core
+scheduler, and (2) the ``balance_queue`` admission gate inside the WAITING
+loop. It deliberately does not track internal-fork scheduler changes; balance
+scheduling is a separate, opt-in legacy path.
 
 The engine-core side is NOT copied: ``BalanceDPEngineCoreProc`` hooks
 ``_has_global_unfinished_reqs`` (called every iteration by upstream's
@@ -67,6 +66,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -75,7 +75,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.patch.platform.patch_kv_delivery_preemption import KVDeliveryScheduler
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
@@ -98,7 +97,7 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     return False
 
 
-class BalanceScheduler(KVDeliveryScheduler):
+class BalanceScheduler(Scheduler):
     def __init__(
         self,
         vllm_config,
