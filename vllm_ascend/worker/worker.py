@@ -390,6 +390,14 @@ class NPUWorker(WorkerBase):
         # that each DP group binds to a distinct set of NPUs.
         parallel_config = self.parallel_config
         if self.parallel_config.enable_fault_tolerance:
+            if self.use_v2_model_runner:
+                # Model Runner V2 + fault tolerance task queue
+                # (TASK_QUEUE_ENABLE) hangs abnormally; force it off.
+                os.environ["TASK_QUEUE_ENABLE"] = "0"
+                logger.warning(
+                    "Fault tolerance with Model Runner V2 does not support the "
+                    "task queue (TASK_QUEUE_ENABLE); forcing TASK_QUEUE_ENABLE=0."
+                )
             import torch_npu
 
             abort_timeout = get_ascend_config().ft_communication_abort_timeout

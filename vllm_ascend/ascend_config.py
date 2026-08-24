@@ -423,10 +423,9 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
-    # Fault-tolerance comm op abort timeout (seconds); 0 = disable. When fault
-    # tolerance is enabled and > 0, a hung NPU comm op is aborted after this
-    # many seconds. Drives HCCL_EVENT_TIMEOUT / HCCL_EXEC_TIMEOUT (= timeout - 1)
-    # and set_op_timeout_ms(timeout * 1000). Validated to be 0 or >= 2.
+    # ---- fault-tolerance: comm op abort timeout (s); 0 = disable ----
+    # Drives HCCL_EVENT_TIMEOUT / HCCL_EXEC_TIMEOUT (= timeout - 1) and
+    # set_op_timeout_ms(timeout * 1000). Validated to be 0 or >= 2.
     ft_communication_abort_timeout: int = 0
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
@@ -584,9 +583,6 @@ class AscendConfig:
             logger.warning_once(
                 "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
-        # ft_communication_abort_timeout is a declared AscendConfig field; it is
-        # populated from additional_config via the factory kwargs
-        # (see init_ascend_config) and validated by _validate_user_input_ranges.
 
         # mlapo_keep_prefill_weights preconditions: the prefill weights are only
         # freed by MLAPO in the MLA attention path, so the keep switch is only
@@ -690,6 +686,17 @@ class AscendConfig:
 
         # sparse KV offload vs sparse SFA C8 main cache mutex
         self._validate_sparse_c8_kv_offload_compatibility()
+
+        # ft_communication_abort_timeout only takes effect when fault tolerance
+        # is enabled, so validate it only then: a stray value in additional_config
+        # must not fail startup for non-FT runs.
+        if vc.parallel_config.enable_fault_tolerance and (
+            self.ft_communication_abort_timeout != 0 and self.ft_communication_abort_timeout < 2
+        ):
+            raise ValueError(
+                f"ft_communication_abort_timeout must be 0 (disabled) or an integer of at least "
+                f"2 seconds, got {self.ft_communication_abort_timeout}"
+            )
         return self
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
