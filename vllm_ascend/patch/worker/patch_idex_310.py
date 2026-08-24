@@ -49,6 +49,9 @@ AscendSpecDecodeBaseProposer._finish_full_decode_draft_rope = (  # type: ignore[
 AscendDflashProposer.set_inputs_first_pass = (  # type: ignore[method-assign]
     AscendDflashProposer310.set_inputs_first_pass
 )
+AscendDflashProposer.prepare_next_token_ids_padded = (  # type: ignore[method-assign]
+    AscendDflashProposer310.prepare_next_token_ids_padded
+)
 AscendDflashProposer.build_model_inputs_first_pass = (  # type: ignore[method-assign]
     AscendDflashProposer310.build_model_inputs_first_pass
 )

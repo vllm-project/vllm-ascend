@@ -22,6 +22,7 @@ import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 from vllm.config import CUDAGraphMode
 
+import vllm_ascend._310p.spec_decode.dflash_proposer_310 as dflash_proposer_310
 from tests.ut.base import TestBase
 from vllm_ascend._310p.spec_decode.dflash_proposer_310 import (
     AscendDflashProposer310,
@@ -42,6 +43,65 @@ class _RejectInt64Add(TorchDispatchMode):
         ):
             raise AssertionError("310P slot mapping must not launch int64 Add")
         return func(*args, **kwargs)
+
+
+def test_dflash_private_index_fill_avoids_dynamic_int64_add():
+    tensor = torch.arange(6).reshape(2, 3)
+    indices = torch.tensor([0, -1], dtype=torch.int64)
+
+    with _RejectInt64Add():
+        output = dflash_proposer_310._index_fill_without_add_310p_dflash(
+            tensor,
+            1,
+            indices,
+            99,
+        )
+
+    torch.testing.assert_close(
+        output,
+        torch.tensor([[99, 1, 99], [99, 4, 99]]),
+    )
+
+
+def test_dflash_prepare_next_tokens_does_not_use_shared_index_fill():
+    class BackupTokens:
+        def __init__(self):
+            self.np = np.zeros(4, dtype=np.int64)
+            self.gpu = torch.zeros(4, dtype=torch.int64)
+
+        def copy_to_gpu(self, num_reqs):
+            self.gpu[:num_reqs].copy_(torch.from_numpy(self.np[:num_reqs]))
+
+    fake_self = SimpleNamespace(backup_next_token_ids=BackupTokens())
+    requests = {
+        "request-0": SimpleNamespace(get_token_id=MagicMock(return_value=31)),
+        "request-1": SimpleNamespace(get_token_id=MagicMock(return_value=42)),
+    }
+    gpu_input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens_no_spec=torch.tensor([3, 3]),
+        req_ids=["request-0", "request-1"],
+        vocab_size=100,
+    )
+
+    with patch(
+        "vllm_ascend.spec_decode.llm_base_proposer.DeviceOperator.index_fill",
+        side_effect=AssertionError("shared index_fill must stay out of 310P DFlash"),
+    ):
+        next_token_ids, valid_counts = AscendDflashProposer310.prepare_next_token_ids_padded(
+            fake_self,
+            sampled_token_ids=torch.tensor(
+                [[11, 12, -1], [21, 22, -1]],
+                dtype=torch.int64,
+            ),
+            requests=requests,
+            gpu_input_batch=gpu_input_batch,
+            discard_request_indices=torch.tensor([-1], dtype=torch.int64),
+            num_discarded_requests=1,
+        )
+
+    assert next_token_ids.tolist() == [12, 42]
+    assert valid_counts.tolist() == [2, 0]
 
 
 def test_dummy_capture_prepares_dual_rope_before_graph_capture():
