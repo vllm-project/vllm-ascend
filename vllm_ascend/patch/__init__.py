@@ -1049,6 +1049,22 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
+# ** 27a. File: worker/patch_v2/patch_spec_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. PPHandler sampled-token broadcast methods
+#    Why:
+#       Target-driven speculative decoding generates next-step draft tokens
+#       after target sampling. Non-last PP ranks need both results for the same
+#       delayed request-state update.
+#    How:
+#       Defer the target-token broadcast until drafting finishes, then carry
+#       accepted target tokens and next-step draft tokens in the same V2 PP
+#       queue slot.
+#    Related PR (if no, explain why):
+#       No, this enables the Ascend MRV2 implementation.
+#    Future Plan:
+#       Remove when vLLM natively transports draft tokens through PP.
+#
 # ** 28. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,

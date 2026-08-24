@@ -88,6 +88,9 @@ class NPUModelRunner(GPUModelRunner):
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        self.use_spec_pp = (
+            self.use_pp and self.speculative_config is not None and self.speculative_config.method == "mtp"
+        )
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -115,7 +118,7 @@ class NPUModelRunner(GPUModelRunner):
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
-        if self.speculative_config is not None:
+        if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
@@ -131,6 +134,13 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
+        if self.use_spec_pp:
+            from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
+                install_spec_pp_token_broadcast,
+            )
+
+            assert self.pp_handler is not None
+            install_spec_pp_token_broadcast(self.pp_handler, self.req_states)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -161,6 +171,15 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
+
+    def sample_tokens(self, grammar_output):
+        output = super().sample_tokens(grammar_output)
+
+        if self.use_spec_pp and self.is_last_pp_rank:
+            assert self.pp_handler is not None
+            # Wait until propose() has populated this step's draft tokens.
+            self.pp_handler.broadcast_draft_tokens()
+        return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
