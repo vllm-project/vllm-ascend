@@ -38,12 +38,18 @@ class Ascend310PStagedWriteTensor:
     def stage_write(self, index: int, start: int, values: Iterable[int] | Iterable[float]) -> None:
         values = list(values)
         if values:
-            self.np[index, start : start + len(values)] = values
-            self._dirty_indices.add(index)
-
-    def stage_write_elem(self, index: int, value: int | float) -> None:
-        self.np[index] = value
-        self._dirty_indices.add(index)
+            if self.np.ndim == 1:
+                # 1D tensors are written as contiguous slices starting at
+                # (index + start). In this 310P codebase we only use the scalar
+                # path with start=0 and len(values)=1.
+                start_pos = index + start
+                end_pos = start_pos + len(values)
+                self.np[start_pos:end_pos] = values
+                self._dirty_indices.update(range(start_pos, end_pos))
+            else:
+                self.np[index, start : start + len(values)] = values
+                # Copy granularity is per-"row" for 2D tensors.
+                self._dirty_indices.add(index)
 
     def apply_write(self) -> None:
         if not self._dirty_indices:
@@ -110,13 +116,33 @@ class Ascend310PRequestState(AscendRequestState):
         num_computed_tokens: int,
         max_tokens: int | None = None,
     ) -> None:
-        super().add_request(
-            req_id,
-            prompt_len,
-            all_token_ids,
-            num_computed_tokens,
-            max_tokens=max_tokens,
-        )
+        # Inline vLLM v1 RequestState.add_request so we can avoid using
+        # stage_write_elem (which our 310P staged-write tensor no longer
+        # provides).
+        assert len(self.free_indices) > 0, "No free indices"
+        req_idx = self.free_indices.pop()
+        self.req_id_to_index[req_id] = req_idx
+        self.index_to_req_id[req_idx] = req_id
+
+        if max_tokens is None:
+            max_tokens = self.max_model_len
+
+        self.max_seq_len[req_idx] = prompt_len + max_tokens
+        self.prompt_len.np[req_idx] = prompt_len
+
+        prefill_len = len(all_token_ids)
+        assert prefill_len >= prompt_len, f"prefill_len {prefill_len} < prompt_len {prompt_len}"
+        self.prefill_len.np[req_idx] = prefill_len
+
+        self.total_len.stage_write(req_idx, 0, [prefill_len])
+        self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
+
+        self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
+        self.num_computed_tokens_np[req_idx] = num_computed_tokens
+        self.num_computed_tokens.stage_write(req_idx, 0, [num_computed_tokens])
+        self.num_computed_tokens_cpu[req_idx] = num_computed_tokens
+
+        self.draft_tokens[req_idx].zero_()
+
         if num_computed_tokens > 0:
-            req_idx = self.req_id_to_index[req_id]
             self.last_sampled_tokens[req_idx : req_idx + 1] = all_token_ids[num_computed_tokens - 1]

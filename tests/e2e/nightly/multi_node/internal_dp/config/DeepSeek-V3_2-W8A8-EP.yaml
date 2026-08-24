@@ -30,7 +30,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -75,7 +74,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0

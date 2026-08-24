@@ -31,12 +31,12 @@ from vllm.v1.worker.utils import bind_kv_cache
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
+from vllm_ascend._310p.worker.v2.attn_utils import get_310p_non_mla_kv_cache_shapes
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.feature_support import (
     FIRST_RELEASE_FEATURE_SUPPORT,
     MRv2FeatureSupport,
 )
-from vllm_ascend._310p.worker.v2.kernel_registry import register_310p_kernels
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PGreedySampler
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
@@ -57,10 +57,19 @@ class NPUModelRunner310V2(NPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self._validate_first_release_config(vllm_config)
         super().__init__(vllm_config, device)
-        # Register optional pluggable kernels only when the 310P V2 runner is
-        # actually used. This keeps the codebase compatible with vLLM
-        # deployments where vLLM PR #43048 is not merged yet.
-        register_310p_kernels()
+        # Some vLLM versions do not expose `uniform_decode_query_len` on the V2
+        # runner. Keep the attribute available for cudagraph sizing.
+        self.uniform_decode_query_len = getattr(self, "uniform_decode_query_len", self.decode_query_len)
+        # Parent reconstructs AscendRequestState (Triton staged writes). 310P
+        # cannot use those kernels; replace with the CPU staged-write state.
+        self.req_states = Ascend310PRequestState(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            num_speculative_steps=self.num_speculative_steps,
+            vocab_size=self.vocab_size,
+            device=self.device,
+        )
         self.sampler = Ascend310PGreedySampler()
         self.input_ids_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int32, device="cpu")
         self.positions_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int64, device="cpu")
@@ -127,10 +136,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("KV transfer is outside the 310P Model Runner V2 first-release scope.")
         if getattr(vllm_config.model_config, "enable_sleep_mode", False):
             raise NotImplementedError("Sleep mode is outside the 310P Model Runner V2 first-release scope.")
-
-    def _get_uniform_decode_query_len(self) -> int:
-        """Bridge vLLM versions that do not expose this V2 attribute."""
-        return getattr(self, "uniform_decode_query_len", self.decode_query_len)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Restore linear-attention specs omitted by some upstream V2 versions."""
@@ -203,7 +208,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
-            self._get_uniform_decode_query_len(),
+            self.uniform_decode_query_len,
             use_v2_model_runner=True,
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
@@ -333,7 +338,8 @@ class NPUModelRunner310V2(NPUModelRunner):
                     head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
                     if head_size_v != kv_cache_spec.head_size:
                         raise NotImplementedError("310P V2 does not support asymmetric K/V head sizes.")
-                    k_shape = v_shape = kv_cache_shape[1:]
+                    # NZ 4D views; see get_310p_non_mla_kv_cache_shapes.
+                    k_shape, v_shape = get_310p_non_mla_kv_cache_shapes(kv_cache_shape, kv_cache_spec)
                     k_cache = torch_npu.empty_with_format(
                         size=k_shape,
                         dtype=kv_cache_spec.dtype,

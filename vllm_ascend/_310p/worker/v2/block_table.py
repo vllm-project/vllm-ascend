@@ -114,7 +114,7 @@ class Ascend310PBlockTables(BlockTables):
         )
 
     def init_block_table_layout_tensors(self) -> None:
-        """310P does not use raw device pointers consumed by Triton kernels."""
+        """No-op: 310P does not cache Triton pointer tensors for block tables."""
 
     def append_block_ids(
         self,

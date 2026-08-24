@@ -348,7 +348,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
         seq_lens_list = seq_lens.tolist()
-        # flashcomm1/SP (or cudagraph) padding makes the model runner insert a
+        # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
         # constraint (sum of q lengths == hidden_states.shape[0]), bumping the
         # q-derived batchSize by one. The query_start_loc buffer is sized
@@ -871,7 +871,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         # Keep the captured block_tables tensor on this affected path.
                         # Non-SWA models preserve the original behavior and continue to refresh
                         # block_tables from attn_metadata.
-                        if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
+                        if not getattr(vllm_config.model_config.hf_text_config, "sliding_window", None):
                             block_tables = attn_metadata[metadata_key].block_tables
                     layer_count += 1
 

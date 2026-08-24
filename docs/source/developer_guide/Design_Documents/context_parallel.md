@@ -75,10 +75,11 @@ This mode is selected automatically for SFA sparse models when
 `prefill_context_parallel_size=1` and `decode_context_parallel_size>1`. It
 requires `decode_context_parallel_size == tensor_parallel_size`.
 
-For a GLM-5.2 DSA-CP deployment, enable FlashComm1 and DSA-CP and keep the CP
+For a GLM-5.2 DSA-CP deployment, enable sequence parallelism and DSA-CP and keep the CP
 interleave size equal to the KV-cache block size:
 
 ```bash
+
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \
   --prefill-context-parallel-size 1 \

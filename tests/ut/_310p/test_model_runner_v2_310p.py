@@ -17,10 +17,6 @@ from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2 import block_table as block_table_module
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.feature_support import MRv2FeatureSupport
-from vllm_ascend._310p.worker.v2.kernel_registry import (
-    KERNEL_IMPLS,
-    register_310p_kernels,
-)
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
 from vllm_ascend._310p.worker.v2.model_state import (
     Ascend310PMambaHybridModelState,
@@ -33,11 +29,6 @@ from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
-
-
-def test_310p_v2_has_no_required_kernel_dispatcher_registration() -> None:
-    assert KERNEL_IMPLS == {}
-    assert register_310p_kernels() == ()
 
 
 def test_310p_block_tables_do_not_import_triton_or_shared_v2_kernel() -> None:
@@ -271,16 +262,6 @@ def test_first_release_config_rejects_expert_parallelism() -> None:
 
     with pytest.raises(NotImplementedError, match="Expert parallelism"):
         NPUModelRunner310V2._validate_first_release_config(config)
-
-
-def test_uniform_decode_query_len_falls_back_to_decode_query_len() -> None:
-    runner = object.__new__(NPUModelRunner310V2)
-    runner.decode_query_len = 1
-
-    assert runner._get_uniform_decode_query_len() == 1
-
-    runner.uniform_decode_query_len = 2
-    assert runner._get_uniform_decode_query_len() == 2
 
 
 def test_310p_v2_restores_missing_linear_attention_kv_cache_specs() -> None:
@@ -543,7 +524,6 @@ def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
     )
     block_tables.append_block_ids(0, ([10, 11],), overwrite=True)
     block_tables.append_block_ids(1, ([20],), overwrite=True)
-    block_tables.apply_staged_writes()
 
     gathered = block_tables.gather_block_tables(np.array([1, 0], dtype=np.int32), num_reqs_padded=3)
     torch.testing.assert_close(gathered[0][0, :2], torch.tensor([20, 0], dtype=torch.int32))

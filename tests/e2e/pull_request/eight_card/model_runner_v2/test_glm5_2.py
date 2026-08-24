@@ -34,7 +34,7 @@ MODEL = "Eco-Tech/GLM-5.2-w4a8"
     deploy="pd_mix",
     hardware="A3",
     quantization="W4A8",
-    graph_mode="eager",
+    graph_mode="full_decode_only",
 )
 @patch.dict(
     os.environ,
@@ -45,7 +45,7 @@ MODEL = "Eco-Tech/GLM-5.2-w4a8"
     },
 )
 @wait_until_npu_memory_free()
-def test_glm5_2_mtp_eager() -> None:
+def test_glm5_2_mtp_full_decode_only() -> None:
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -63,7 +63,7 @@ def test_glm5_2_mtp_eager() -> None:
         max_num_seqs=16,
         enable_expert_parallel=True,
         disable_log_stats=False,
-        enforce_eager=True,
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         speculative_config={
             "method": "mtp",
             "num_speculative_tokens": num_speculative_tokens,
