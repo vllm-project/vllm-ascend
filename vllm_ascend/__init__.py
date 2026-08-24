@@ -19,7 +19,7 @@ import importlib.util
 import sys
 from types import ModuleType
 
-from vllm.logger import logger as vllm_logger
+# from vllm.logger import logger as vllm_logger
 
 _triton_available = importlib.util.find_spec("triton") is not None
 
@@ -69,12 +69,14 @@ def register():
     # Upstream auto-enables breakable CUDAGraph for selected architectures
     # only when the environment variable is absent. Keep it opt-in on Ascend
     # while preserving any value explicitly set by users.
-    value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
-    vllm_logger.info_once(
-        "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
-        value,
-        scope="process",
-    )
+    # from vllm.logger import logger as vllm_logger
+
+    # value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    # vllm_logger.info_once(
+    #     "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
+    #     value,
+    #     scope="process",
+    # )
     return "vllm_ascend.platform.NPUPlatform"
 
 
@@ -107,10 +109,6 @@ def register_service_profiling():
 
 
 def register_model():
-    from vllm_ascend.patch.hunyuan_vl_processor_compat import (
-        install_hunyuan_vl_processor_compat,
-    )
-
     from .models import register_model
 
     register_model()

@@ -114,6 +114,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 lora_capture_cases=lora_capture_cases,
                 varlen_decode=varlen_decode,
             )
+            self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
             self.model_runner = model_runner
             self.update_stream = self.model_runner.update_stream
             self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
