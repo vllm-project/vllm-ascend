@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -12,8 +14,10 @@ from vllm_ascend.spec_decode.dynamic.cost_model import (
     HardwareProfileCollector,
 )
 from vllm_ascend.spec_decode.dynamic.draft_k_controller import AdaptiveDraftKController
+from vllm_ascend.spec_decode.dynamic.device_allocator import assign_prefix_budget
 from vllm_ascend.spec_decode.dynamic.policy import HardwareAwarePrefixPolicy
 from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
+from vllm_ascend.worker.v2.spec_decode.physical_k import physical_k_scope
 
 
 class _FakeDSparkModel:
@@ -63,6 +67,93 @@ def test_hardware_policy_can_choose_zero_tokens() -> None:
     lengths = policy.allocate(survival)
 
     assert lengths.tolist() == [0, 0]
+
+
+def test_device_allocator_assigns_prefixes_without_host_row_mapping() -> None:
+    ranked = torch.tensor([[0.9, 0.2, 0.1], [0.8, 0.7, 0.1]])
+    lengths = torch.empty(2, dtype=torch.int32)
+
+    assign_prefix_budget(
+        ranked,
+        mandatory=1,
+        extra=2,
+        lengths=lengths,
+        use_compiled=False,
+    )
+
+    # The two globally best remaining positions belong to request 1 and
+    # request 0 respectively; the output is still a valid prefix length.
+    assert lengths.tolist() == [2, 2]
+
+
+def test_device_allocator_handles_zero_extra_budget() -> None:
+    ranked = torch.tensor([[0.9, 0.2], [0.8, 0.7]])
+    lengths = torch.empty(2, dtype=torch.int32)
+
+    assign_prefix_budget(
+        ranked,
+        mandatory=2,
+        extra=0,
+        lengths=lengths,
+        use_compiled=False,
+    )
+
+    assert lengths.tolist() == [2, 2]
+
+
+def test_v2_physical_k_scope_updates_query_layout_atomically() -> None:
+    speculator = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config={
+                "dynamic_spec_config": {
+                    "method_params": {"v2_varlen_physical_k": True}
+                }
+            }
+        ),
+        num_speculative_steps=5,
+        num_query_per_req=5,
+        max_num_reqs=2,
+        sample_from_anchor=True,
+        sample_col=torch.arange(5).repeat(2),
+        _anchor_idx=torch.arange(2) * 5,
+    )
+    batch = SimpleNamespace(num_draft_tokens_per_req=torch.tensor([2, 2]))
+
+    with physical_k_scope(speculator, batch) as active_k:
+        assert active_k == 2
+        assert speculator.num_speculative_steps == 2
+        assert speculator.num_query_per_req == 2
+        assert speculator.sample_col.tolist() == [0, 1, 0, 1]
+        assert speculator._anchor_idx.tolist() == [0, 2]
+
+    assert speculator.num_speculative_steps == 5
+    assert speculator.num_query_per_req == 5
+    assert speculator.sample_col.tolist() == [0, 1, 2, 3, 4] * 2
+    assert speculator._anchor_idx.tolist() == [0, 5]
+
+
+def test_v2_physical_k_scope_keeps_mixed_batch_on_safe_width() -> None:
+    speculator = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config={
+                "dynamic_spec_config": {
+                    "method_params": {"v2_varlen_physical_k": True}
+                }
+            }
+        ),
+        num_speculative_steps=5,
+        num_query_per_req=5,
+        max_num_reqs=2,
+        sample_from_anchor=True,
+        sample_col=torch.arange(5).repeat(2),
+        _anchor_idx=torch.arange(2) * 5,
+    )
+    batch = SimpleNamespace(num_draft_tokens_per_req=torch.tensor([2, 3]))
+
+    with physical_k_scope(speculator, batch) as active_k:
+        assert active_k == 5
+        assert speculator.num_speculative_steps == 5
+        assert speculator.num_query_per_req == 5
 
 
 def test_hardware_policy_allocates_prefixes_globally() -> None:

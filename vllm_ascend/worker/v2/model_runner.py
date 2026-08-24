@@ -891,13 +891,25 @@ class NPUModelRunner(GPUModelRunner):
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
 
-        if num_tokens_padded == num_reqs_padded * self.decode_query_len:
+        # A hardware-aware V2 draft can select a smaller uniform physical K
+        # and therefore a smaller query width than the maximum configured
+        # decode width.  Infer that width from the selected FULL graph bucket;
+        # mixed batches keep the existing dummy-row path.
+        runtime_query_len = self.decode_query_len
+        if (
+            num_reqs_padded > 0
+            and num_tokens_padded % num_reqs_padded == 0
+        ):
+            runtime_query_len = num_tokens_padded // num_reqs_padded
+
+        if num_tokens_padded == num_reqs_padded * runtime_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * runtime_query_len
+                + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded

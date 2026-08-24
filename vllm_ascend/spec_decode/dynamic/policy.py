@@ -8,6 +8,7 @@ from __future__ import annotations
 import torch
 
 from vllm_ascend.spec_decode.dynamic.cost_model import HardwareCostModel
+from vllm_ascend.spec_decode.dynamic.device_allocator import assign_prefix_budget
 
 
 class HardwareAwarePrefixPolicy:
@@ -30,6 +31,7 @@ class HardwareAwarePrefixPolicy:
         device: torch.device,
         decision_interval: int = 16,
         allocation_interval: int = 1,
+        device_allocation_enabled: bool = True,
     ) -> None:
         if min_k < 0 or min_k > max_draft_tokens:
             raise ValueError("min_k must be in [0, max_draft_tokens]")
@@ -44,6 +46,7 @@ class HardwareAwarePrefixPolicy:
         self.device = device
         self.decision_interval = decision_interval
         self.allocation_interval = allocation_interval
+        self.device_allocation_enabled = bool(device_allocation_enabled)
         self._steps = 0
         self._best_total_tokens: int | None = None
         self._last_num_reqs: int | None = None
@@ -253,22 +256,13 @@ class HardwareAwarePrefixPolicy:
                     dtype=survival.dtype,
                 ).repeat(num_reqs, 1)
                 tie_break = (num_draft_tokens - cols) * torch.finfo(survival.dtype).eps
-                ranked = (candidates + tie_break).reshape(-1)
-                _, selected = torch.topk(
+                ranked = candidates + tie_break
+                assign_prefix_budget(
                     ranked,
-                    k=min(extra, ranked.numel()),
-                    largest=True,
-                    sorted=False,
-                )
-                request_indices = torch.div(
-                    selected,
-                    num_draft_tokens - mandatory,
-                    rounding_mode="floor",
-                )
-                lengths.scatter_add_(
-                    0,
-                    request_indices,
-                    torch.ones_like(request_indices, dtype=torch.int32),
+                    mandatory=mandatory,
+                    extra=min(extra, ranked.numel()),
+                    lengths=lengths,
+                    use_compiled=self.device_allocation_enabled,
                 )
             lengths.clamp_(min=mandatory, max=num_draft_tokens)
 

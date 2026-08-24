@@ -421,6 +421,16 @@ class DynamicSpecScheduler:
         if self.hybrid_full_width_goodput_margin < 0.0:
             raise ValueError("hybrid_full_width_goodput_margin must be >= 0")
 
+        # Request-to-prefix mapping is lowered to device operators on NPU.
+        # Keep an explicit escape hatch for bring-up and A/B comparisons; the
+        # default is enabled only for the hardware-aware policy.
+        self.device_allocation_enabled = bool(
+            method_params.get(
+                "device_allocation_enabled",
+                self.policy_name == "hardware_aware",
+            )
+        )
+
         self._steps_since_budget_update = 0
 
         self._hybrid_last_acceptance: float | None = None
@@ -499,6 +509,7 @@ class DynamicSpecScheduler:
             device=self.device,
             decision_interval=self._hardware_decision_interval(self._method_params),
             allocation_interval=self._hardware_allocation_interval(self._method_params),
+            device_allocation_enabled=self.device_allocation_enabled,
         )
         if hasattr(self, "_cached_num_verify_tokens"):
             self._cached_num_verify_tokens = None

@@ -65,16 +65,18 @@ def _use_pp_ipc_runtime_patch(vllm_config, use_pp: bool) -> bool:
 def _supports_adaptive_physical_k(vllm_config) -> bool:
     """Return whether the active worker can consume a variable draft width.
 
-    The V2 DSpark worker currently captures a FULL decode graph with a fixed
-    ``num_query_per_req``.  Changing only the scheduler's logical width leaves
-    the TND attention metadata at the old padded shape and can make ACL reject
-    the graph (``queryT != actualSequenceLengthQ[-1]``).  Keep the adaptive
-    controller available for V1/piecewise paths, but fail closed for V2 until
-    the worker-side metadata is updated atomically with the scheduler output.
+    V2 is enabled only with the explicit varlen graph switch.  The worker then
+    captures width-specific descriptors and updates the draft metadata in the
+    same runtime scope as the scheduler-selected physical K.  Without that
+    switch, retain the historical fixed-width safety behavior.
     """
 
     if bool(getattr(vllm_config, "use_v2_model_runner", False)):
-        return False
+        from vllm_ascend.worker.v2.spec_decode.physical_k import (
+            v2_varlen_physical_k_enabled,
+        )
+
+        return v2_varlen_physical_k_enabled(vllm_config)
     # Some older vLLM configs do not expose the field yet; the launch
     # environment is still authoritative for the Ascend V2 worker.
     return os.environ.get("VLLM_USE_V2_MODEL_RUNNER", "0") != "1"

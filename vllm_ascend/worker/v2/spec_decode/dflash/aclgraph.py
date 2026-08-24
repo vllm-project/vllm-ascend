@@ -21,6 +21,12 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
 from vllm_ascend.worker.v2.utils import communicator_switch
+from vllm_ascend.worker.v2.spec_decode.physical_k import (
+    configured_capture_k,
+    physical_k_scope,
+    query_width,
+    v2_varlen_physical_k_enabled,
+)
 
 
 class DFlashAclGraphManager(DFlashCudaGraphManager):
@@ -42,6 +48,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # It is set by AscendDFlashSpeculator.init_cudagraph_manager after creation,
         # because upstream's init_cudagraph_manager creates the manager without it.
         self.speculator = speculator
+        self._v2_varlen_physical_k = v2_varlen_physical_k_enabled(vllm_config)
+        if self._v2_varlen_physical_k:
+            self._extend_varlen_capture_descriptors()
         # The attention backend keys its per-size graph params by the actual
         # captured token counts (rounded up to decode_query_len when using
         # speculative decoding), so derive them from the capture descriptors
@@ -53,6 +62,76 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # both capture and replay to keep them consistent).
         if super().needs_capture():
             set_draft_graph_params(self.capture_sizes)
+
+    def _sample_from_anchor(self) -> bool:
+        speculative_config = self.vllm_config.speculative_config
+        draft_model_config = getattr(speculative_config, "draft_model_config", None)
+        hf_config = getattr(draft_model_config, "hf_config", None)
+        if getattr(speculative_config, "use_dspark", lambda: False)():
+            return bool(getattr(hf_config, "sample_from_anchor", True))
+        return False
+
+    def _extend_varlen_capture_descriptors(self) -> None:
+        """Capture one FULL descriptor for each configured physical K.
+
+        The upstream manager only expands capture widths for its native
+        dynamic-spec configuration.  Ascend's hardware-aware policy is an
+        independent scheduler path, so add the same descriptor matrix here.
+        If a width is not captured, normal dispatch falls back to eager mode;
+        it never reuses a graph with a different query width.
+        """
+
+        decode_mode = self.cudagraph_mode.decode_mode()
+        if decode_mode == CUDAGraphMode.NONE:
+            return
+        capture_sizes = sorted(self.compilation_config.cudagraph_capture_sizes or [])
+        if not capture_sizes:
+            return
+
+        speculative_config = self.vllm_config.speculative_config
+        max_k = int(getattr(speculative_config, "num_speculative_tokens", 0))
+        if max_k <= 0:
+            return
+        sample_from_anchor = self._sample_from_anchor()
+        max_capture_size = (
+            self.compilation_config.max_cudagraph_capture_size or (1 << 60)
+        )
+        max_decode_tokens = self.max_num_reqs * self.decode_query_len
+
+        capture_descs = self._capture_descs.setdefault(decode_mode, [])
+        for raw_tokens in capture_sizes:
+            for draft_k in configured_capture_k(self.vllm_config, max_k):
+                width = query_width(sample_from_anchor, draft_k)
+                rounded_tokens = ((raw_tokens + width - 1) // width) * width
+                num_reqs = rounded_tokens // width
+                if (
+                    rounded_tokens > max_decode_tokens
+                    or rounded_tokens > max_capture_size
+                    or num_reqs > self.max_num_reqs
+                ):
+                    continue
+                for num_active_loras in self.lora_capture_cases:
+                    desc = BatchExecutionDescriptor(
+                        cg_mode=decode_mode,
+                        num_tokens=rounded_tokens,
+                        num_reqs=num_reqs,
+                        uniform_token_count=width,
+                        num_active_loras=num_active_loras,
+                    )
+                    if desc not in capture_descs:
+                        capture_descs.append(desc)
+                    self._candidates.setdefault(
+                        (rounded_tokens, num_active_loras), []
+                    ).append(desc)
+                    for token_count in range(0, rounded_tokens + 1):
+                        self._candidates.setdefault(
+                            (token_count, num_active_loras), []
+                        ).append(desc)
+
+        capture_descs.sort(key=lambda item: item.num_tokens, reverse=True)
+        for key, candidates in self._candidates.items():
+            unique = list(dict.fromkeys(candidates))
+            candidates[:] = unique
 
     def capture(
         self,
@@ -66,9 +145,38 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
+        def forward_with_runtime_width(
+            num_reqs: int,
+            num_tokens: int,
+            attn_metadata: Any,
+            slot_mappings: Any,
+            num_tokens_across_dp: Any,
+            cg_mode: CUDAGraphMode,
+        ):
+            if not self._v2_varlen_physical_k or num_reqs <= 0:
+                return forward_fn(
+                    num_reqs,
+                    num_tokens,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cg_mode,
+                )
+            width = num_tokens // num_reqs
+            draft_k = width if self._sample_from_anchor() else width - 1
+            with physical_k_scope(self.speculator, draft_k=draft_k):
+                return forward_fn(
+                    num_reqs,
+                    num_tokens,
+                    attn_metadata,
+                    slot_mappings,
+                    num_tokens_across_dp,
+                    cg_mode,
+                )
+
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
-                forward_fn,
+                forward_with_runtime_width,
                 input_buffers,
                 block_tables,
                 attn_groups,
@@ -85,6 +193,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
+            num_tokens_padded=num_tokens,
         )
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
