@@ -7,7 +7,11 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 
-from vllm_ascend.models.llama_eagle3 import get_rotation_matrix, get_rotation_path
+from vllm_ascend.models.llama_eagle3 import (
+    get_rotation_matrix,
+    get_rotation_path,
+    prepare_quarot_shared_layer,
+)
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -67,6 +71,27 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 prefix=maybe_prefix(model_prefix, "confidence_head"),
             )
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
+        self._shared_layer_rotation: torch.Tensor | None = None
+
+    def prepare_shared_layer(
+        self,
+        draft_layer: nn.Module | None,
+        target_layer: nn.Module,
+        label: str,
+    ) -> nn.Module | None:
+        rotation = self._shared_layer_rotation
+        if rotation is None:
+            return None
+        draft_layer, self._shared_layer_rotation = prepare_quarot_shared_layer(
+            draft_layer,
+            target_layer,
+            rotation,
+            label,
+        )
+        return draft_layer
+
+    def finish_shared_layer_preparation(self) -> None:
+        self._shared_layer_rotation = None
 
     @staticmethod
     def _get_confidence_relative_name(
@@ -89,9 +114,11 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         all_weights = list(weights)
+        self._shared_layer_rotation = None
         if self.rotation_path is not None:
             processed_weights: list[tuple[str, torch.Tensor]] = []
             rotation_weight = get_rotation_matrix(self.rotation_path)
+            self._shared_layer_rotation = rotation_weight
             for name, loaded_weight in all_weights:
                 if "fc." in name:
                     loaded_weight = process_weight(loaded_weight, rotation_weight)
