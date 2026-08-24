@@ -23,7 +23,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_TOKENS_PER_RANK_LIMIT, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
@@ -290,10 +290,7 @@ class FusedMC2CommImpl(MoECommMethod):
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
         group = get_mc2_group().device_group
-        # The symmetric CCL buffer must be large enough for every MegaMoe call.
-        # Use the same rank-invariant capacity that bounds the chunks below so
-        # prefill does not reuse a buffer sized only for the decode capacity.
-        num_max_tokens_per_rank = _MEGA_MOE_TOKENS_PER_RANK_LIMIT
+        num_max_tokens_per_rank = self.token_dispatcher.mega_moe_max_num_tokens_per_rank
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
         expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
@@ -388,11 +385,12 @@ class FusedMC2CommImpl(MoECommMethod):
         topk_ids = fused_experts_input.topk_ids.to(torch.int32)
         topk_weights = fused_experts_input.topk_weights.to(torch.float32)
         num_tokens = hidden_states.shape[0]
+        max_tokens_per_call = int(self.mega_moe_symm_buffer.num_max_tokens_per_rank)
 
-        out = torch.empty_like(hidden_states) if num_tokens > _MEGA_MOE_TOKENS_PER_RANK_LIMIT else None
+        out = torch.empty_like(hidden_states) if num_tokens > max_tokens_per_call else None
         expert_tokens = None
-        for start in range(0, num_tokens, _MEGA_MOE_TOKENS_PER_RANK_LIMIT):
-            end = min(start + _MEGA_MOE_TOKENS_PER_RANK_LIMIT, num_tokens)
+        for start in range(0, num_tokens, max_tokens_per_call):
+            end = min(start + max_tokens_per_call, num_tokens)
             chunk_mask = None if x_active_mask is None else x_active_mask[start:end]
             chunk_out, chunk_expert_tokens = self.mega_moe(
                 hidden_states[start:end],

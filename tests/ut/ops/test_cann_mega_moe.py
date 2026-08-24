@@ -1,12 +1,16 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.ascend_config import AscendConfig
 from vllm_ascend.ascend_forward_context import _MEGA_MOE_TOKENS_PER_RANK_LIMIT
 from vllm_ascend.ops.fused_moe.moe_comm_method import FusedMC2CommImpl
-from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithMC2
+from vllm_ascend.ops.fused_moe.token_dispatcher import (
+    TokenDispatcherWithMC2,
+    _get_mega_moe_max_num_tokens_per_rank,
+)
 from vllm_ascend.quantization.methods.base import QuantType
 
 
@@ -17,6 +21,7 @@ def _make_comm_impl():
     comm_impl.mega_moe_symm_buffer = SimpleNamespace(
         dispatch_quant_mode=None,
         dispatch_quant_out_dtype=None,
+        num_max_tokens_per_rank=_MEGA_MOE_TOKENS_PER_RANK_LIMIT,
     )
     comm_impl.mega_moe = MagicMock()
     comm_impl.swiglu_limit = 7.0
@@ -44,6 +49,23 @@ def _make_fused_experts_input(num_tokens, mc2_mask=None):
     )
 
 
+@pytest.mark.parametrize(
+    ("kv_transfer_config", "expected_capacity"),
+    [
+        (None, _MEGA_MOE_TOKENS_PER_RANK_LIMIT),
+        (SimpleNamespace(is_kv_consumer=True, is_kv_producer=False), 40),
+        (
+            SimpleNamespace(is_kv_consumer=True, is_kv_producer=True),
+            _MEGA_MOE_TOKENS_PER_RANK_LIMIT,
+        ),
+    ],
+)
+def test_mega_moe_capacity_accounts_for_pd_role(kv_transfer_config, expected_capacity):
+    vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+
+    assert _get_mega_moe_max_num_tokens_per_rank(vllm_config, 40) == expected_capacity
+
+
 def test_cann_mega_moe_receives_swigluoai_parameters():
     comm_impl = _make_comm_impl()
     comm_impl.mega_moe.return_value = (torch.empty(1, 4), torch.empty(2, dtype=torch.int32))
@@ -56,11 +78,18 @@ def test_cann_mega_moe_receives_swigluoai_parameters():
     assert call_kwargs["activation_params"] == {"alpha": 1.5, "beta": 0.25}
 
 
-def test_cann_mega_moe_symm_buffer_uses_chunk_capacity():
+@pytest.mark.parametrize(
+    ("is_pd_decode_consumer", "expected_capacity"),
+    [(False, _MEGA_MOE_TOKENS_PER_RANK_LIMIT), (True, 40)],
+)
+def test_cann_mega_moe_symm_buffer_uses_instance_capacity(is_pd_decode_consumer, expected_capacity):
     comm_impl = _make_comm_impl()
     comm_impl.token_dispatcher.ep_world_size = 2
     comm_impl.token_dispatcher.ep_rank_id = 0
     comm_impl.token_dispatcher.max_num_tokens_per_rank = 40
+    comm_impl.token_dispatcher.mega_moe_max_num_tokens_per_rank = (
+        40 if is_pd_decode_consumer else _MEGA_MOE_TOKENS_PER_RANK_LIMIT
+    )
     comm_impl.moe_config = SimpleNamespace(
         experts_per_token=2,
         num_experts=8,
@@ -74,7 +103,8 @@ def test_cann_mega_moe_symm_buffer_uses_chunk_capacity():
         comm_impl._init_mega_moe_symm_buffer()
 
     call = comm_impl.get_symm_buffer_for_mega_moe.call_args
-    assert call.args[2] == _MEGA_MOE_TOKENS_PER_RANK_LIMIT
+    assert call.args[2] == expected_capacity
+    assert call.kwargs["max_recv_token_num"] == expected_capacity * 4
 
 
 def test_cann_mega_moe_splits_batches_above_operator_limit():
@@ -102,6 +132,26 @@ def test_cann_mega_moe_splits_batches_above_operator_limit():
         _MEGA_MOE_TOKENS_PER_RANK_LIMIT,
         1,
     ]
+    torch.testing.assert_close(out, torch.cat([first_out, second_out], dim=0))
+    torch.testing.assert_close(expert_tokens, torch.tensor([4, 6], dtype=torch.int32))
+
+
+def test_cann_mega_moe_chunks_at_symm_buffer_capacity():
+    comm_impl = _make_comm_impl()
+    comm_impl.token_dispatcher.global_bs = 0
+    comm_impl.mega_moe_symm_buffer.num_max_tokens_per_rank = 40
+    first_out = torch.ones(40, 4)
+    second_out = torch.full((1, 4), 2.0)
+    comm_impl.mega_moe.side_effect = [
+        (first_out, torch.tensor([1, 2], dtype=torch.int32)),
+        (second_out, torch.tensor([3, 4], dtype=torch.int32)),
+    ]
+
+    out, expert_tokens = comm_impl._apply_cann_mega_moe(
+        _make_fused_experts_input(41, mc2_mask=torch.ones(41, dtype=torch.bool))
+    )
+
+    assert [call.args[0].shape[0] for call in comm_impl.mega_moe.call_args_list] == [40, 1]
     torch.testing.assert_close(out, torch.cat([first_out, second_out], dim=0))
     torch.testing.assert_close(expert_tokens, torch.tensor([4, 6], dtype=torch.int32))
 
