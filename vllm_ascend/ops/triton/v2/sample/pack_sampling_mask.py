@@ -78,9 +78,7 @@ def sampling_mask_from_logits(cls, logits, num_sampled_tokens):
     num_reqs, vocab_size = logits.shape
     packed_width = (vocab_size + 7) // 8
 
-    packed_mask = torch.empty(
-        (num_reqs, packed_width), dtype=torch.uint8, device=logits.device
-    )
+    packed_mask = torch.empty((num_reqs, packed_width), dtype=torch.uint8, device=logits.device)
     counts = torch.empty(num_reqs, dtype=torch.int32, device=logits.device)
     _pack_sampling_mask_kernel[(num_reqs,)](
         logits,

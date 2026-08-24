@@ -1407,7 +1407,7 @@
 #       Remove once triton-ascend upcasts int1 reductions and supports the
 #       upstream BLOCK_SIZE, or vLLM adds a backend-dispatch mechanism for
 #       this kernel.
-# 
+#
 #   4. `vllm.v1.worker.gpu.sample.thinking_budget._load_effective_token`,
 #      `vllm.v1.worker.gpu.sample.thinking_budget._update_committed_marker_cache_kernel`
 #    Why:

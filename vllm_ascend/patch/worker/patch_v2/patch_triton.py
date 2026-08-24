@@ -2,7 +2,17 @@ import vllm.v1.worker.gpu.spec_decode.speculator as base_speculator
 from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu import structured_outputs
-from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, output, penalties, prompt_logprob, sampler, states, thinking_budget
+from vllm.v1.worker.gpu.sample import (
+    bad_words,
+    gumbel,
+    logprob,
+    output,
+    penalties,
+    prompt_logprob,
+    sampler,
+    states,
+    thinking_budget,
+)
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
