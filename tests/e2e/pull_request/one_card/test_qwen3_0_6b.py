@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-
+import os
 import pytest
 
 from tests.e2e.conftest import wait_until_npu_memory_free
