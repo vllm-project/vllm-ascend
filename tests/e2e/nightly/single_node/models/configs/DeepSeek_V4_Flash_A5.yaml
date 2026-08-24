@@ -66,7 +66,7 @@ _benchmarks_per2: &benchmarks_per
 # ACTUAL TEST CASES
 # ==========================================
 test_cases:
-  - name: "DeepSeekV4_Flash_A5_Signle_GPQA_Accurancy_Test_01"
+  - name: "DeepSeekV4_Flash_A5_Signal_GPQA_Accuracy_Test_01"
     model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
     envs:
       <<: *envs
