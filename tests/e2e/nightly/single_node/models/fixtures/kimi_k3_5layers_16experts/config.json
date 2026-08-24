@@ -1,0 +1,63 @@
+{
+  "activation_situ_beta": 4,
+  "activation_situ_linear_beta": 25,
+  "architectures": [
+    "KimiLinearForCausalLM"
+  ],
+  "attn_res_block_size": 12,
+  "bos_token_id": 163584,
+  "dtype": "bfloat16",
+  "eos_token_id": 163586,
+  "first_k_dense_replace": 1,
+  "hidden_act": "situ",
+  "hidden_size": 7168,
+  "intermediate_size": 33792,
+  "kv_lora_rank": 512,
+  "latent_moe_use_norm": true,
+  "linear_attn_config": {
+    "full_attn_layers": [
+      4
+    ],
+    "gate_lower_bound": -5,
+    "head_dim": 128,
+    "kda_layers": [
+      1,
+      2,
+      3,
+      5
+    ],
+    "num_heads": 96,
+    "short_conv_kernel_size": 4,
+    "use_full_rank_gate": true
+  },
+  "max_position_embeddings": 1048576,
+  "mla_use_nope": true,
+  "mla_use_output_gate": true,
+  "model_type": "kimi_linear",
+  "moe_intermediate_size": 3072,
+  "moe_layer_freq": 1,
+  "moe_renormalize": true,
+  "moe_router_activation_func": "sigmoid",
+  "num_attention_heads": 96,
+  "num_expert_group": 1,
+  "num_experts": 16,
+  "num_experts_per_token": 16,
+  "num_hidden_layers": 5,
+  "num_key_value_heads": 96,
+  "num_nextn_predict_layers": 0,
+  "num_shared_experts": 2,
+  "pad_token_id": 163839,
+  "q_lora_rank": 1536,
+  "qk_nope_head_dim": 128,
+  "qk_rope_head_dim": 64,
+  "rms_norm_eps": 1e-05,
+  "routed_expert_hidden_size": 3584,
+  "routed_scaling_factor": 1,
+  "tie_word_embeddings": false,
+  "topk_group": 1,
+  "topk_method": "noaux_tc",
+  "use_cache": true,
+  "use_grouped_topk": true,
+  "v_head_dim": 128,
+  "vocab_size": 163840
+}
