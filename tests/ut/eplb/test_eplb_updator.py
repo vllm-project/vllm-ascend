@@ -46,13 +46,16 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         # ====================== 3. Mock EplbUpdator ======================
         self.eplb_config = MagicMock()
         self.loader = MagicMock()
-        self.eplb_process = MagicMock()
-        self.process = MagicMock()
-        self.eplb_process.shared_dict = {}
+        self.eplb_planner = MagicMock()
+        self.eplb_planner.shared_dict = {}
+        self.eplb_planner.thread_name = "EplbPlanner"
 
         self.updator = EplbUpdator(
-            eplb_config=self.eplb_config, loader=self.loader, eplb_process=self.eplb_process, process=self.process
+            eplb_config=self.eplb_config,
+            loader=self.loader,
+            eplb_planner=self.eplb_planner,
         )
+        self.eplb_planner.start.assert_not_called()
 
         # ====================== 4. Mock adaptor ======================
         self.adaptor = MagicMock()
@@ -62,6 +65,15 @@ class TestEplbUpdatorComputeAndSetMoeLoad(unittest.TestCase):
         self.adaptor.get_rank_expert_workload.return_value = self.mock_local_load
 
         self.updator.set_adaptor(self.adaptor)
+
+    def test_planner_lifecycle_delegation(self):
+        self.eplb_planner.start.assert_called_once_with()
+
+        self.updator.wakeup_eplb_worker()
+        self.eplb_planner.submit.assert_called_once_with()
+
+        self.updator.shutdown()
+        self.eplb_planner.shutdown.assert_called_once_with()
 
     def test_compute_and_set_moe_load_normal(self):
         self.updator.multi_stage = False

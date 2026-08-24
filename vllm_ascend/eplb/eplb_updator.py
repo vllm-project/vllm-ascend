@@ -14,7 +14,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
+# TODO: Remove the MRv1 updater after the upstream EPLB Platform Backend can
+# host Ascend's policy and weight-transfer lifecycle (vLLM PR #49700).
 import numpy
 import torch
 import torch.distributed as dist
@@ -26,17 +27,22 @@ from vllm.v1.utils import record_function_or_nullcontext
 from vllm_ascend.distributed.parallel_state import get_dynamic_eplb_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
-from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.core.eplb_worker import EplbPlannerThread
 
 
 class EplbUpdator:
-    def __init__(self, eplb_config, loader: D2DExpertWeightLoader, eplb_process: EplbProcess, process):
+    def __init__(
+        self,
+        eplb_config,
+        loader: D2DExpertWeightLoader,
+        eplb_planner: EplbPlannerThread,
+    ):
         self.eplb_config = eplb_config
         self.multi_stage = eplb_config.eplb_policy_type == 3
-        self.init_eplb(self.eplb_config.expert_map_path, process)
+        self.init_eplb(self.eplb_config.expert_map_path)
         self.eplb_loader = loader
-        self.eplb_process = eplb_process
-        self.shared_dict = self.eplb_process.shared_dict
+        self.eplb_planner = eplb_planner
+        self.shared_dict = self.eplb_planner.shared_dict
         self.comm_group = get_dynamic_eplb_group()
 
     def set_adaptor(self, adaptor: VllmEplbAdaptor):
@@ -47,8 +53,13 @@ class EplbUpdator:
         self.world_size = dist.get_world_size()
         self.device = local_load.device
         self.eplb_loader.num_layers = self.adaptor.num_dense_layers + self.adaptor.num_moe_layers
+        self.eplb_planner.start()
+        logger.info(
+            "[eplb/updator] Launched EPLB planner thread, name=%s",
+            self.eplb_planner.thread_name,
+        )
 
-    def init_eplb(self, expert_map_path, process):
+    def init_eplb(self, expert_map_path):
         self.rank_id = dist.get_rank()
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
@@ -71,10 +82,6 @@ class EplbUpdator:
         self.cur_iterations: torch.int64 = 0
 
         self.algorithm_execution_interval: torch.int64 = self.eplb_config.algorithm_execution_interval
-
-        self.process = process
-
-        logger.info("[eplb/updator] Launched EPLB subprocess, pid=%s", self.process.pid)
 
     def update_iteration(self):
         self.cur_iterations += 1
@@ -101,12 +108,12 @@ class EplbUpdator:
         return weight_update_counter >= 0 and weight_update_counter < self.num_moe_layers
 
     def wakeup_eplb_worker(self):
-        self.eplb_process.planner_q.put(1)
+        self.eplb_planner.submit()
 
     def forward_before(self):
-        # Batch after eplb process being triggered, get update info provided by eplb process
+        # Consume the placement prepared by the background planner.
         if self.get_update_info_flag():
-            self.update_info_all = self.eplb_process.block_update_q.get()
+            self.update_info_all = self.eplb_planner.get_result()
         if self.update_expert_weight_flag():
             with record_function_or_nullcontext("EPLB generate p2p task"):
                 (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = (
@@ -183,10 +190,6 @@ class EplbUpdator:
         logger.info("[eplb/updator] EPLB warm-up completed")
 
     def shutdown(self):
-        """
-        Clean up the EPLB process.
-        """
-        if self.process.is_alive():
-            self.process.terminate()
-            self.process.join()
-            logger.info("[eplb/updator] EPLB subprocess terminated")
+        """Stop the worker-owned EPLB planner thread."""
+        self.eplb_planner.shutdown()
+        logger.info("[eplb/updator] EPLB planner thread stopped")
