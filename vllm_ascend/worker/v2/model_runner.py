@@ -66,6 +66,11 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.pp_utils import (
+    bypass_upstream_spec_pp_guard,
+    resolve_spec_pp_support,
+    restore_pp_after_upstream_init,
+)
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -111,11 +116,18 @@ class NPUModelRunner(GPUModelRunner):
         if parallel_config.decode_context_parallel_size > 1:
             raise NotImplementedError("Decode context parallelism is not supported by Ascend NPU model runner v2.")
 
+        spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
-            super().__init__(vllm_config, device)
-        self.use_spec_pp = (
-            self.use_pp and self.speculative_config is not None and self.speculative_config.method == "mtp"
-        )
+            with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support) as pp_disabled:
+                super().__init__(vllm_config, device)
+            if pp_disabled:
+                restore_pp_after_upstream_init(self, vllm_config)
+        self.use_spec_pp = spec_pp_support is not None
+        if (
+            spec_pp_support is not None
+            and spec_pp_support.needs_aux_hidden_states
+        ):
+            self.use_aux_hidden_state_outputs = True
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE

@@ -107,6 +107,12 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _use_fused_qkv_indexer,
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.worker.v2.pp_utils import (
+    PPTransportDataType,
+    add_pp_transport_tensors,
+    get_pp_transport_tensors,
+    make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
+)
 
 
 def _scatter_index_cache(
@@ -948,8 +954,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+        self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(
+            self,
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size
+            ),
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -962,24 +971,40 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if get_pp_group().is_first_rank:
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
+            aux_hidden_states: list[torch.Tensor] = []
+            self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+            aux_hidden_states = get_pp_transport_tensors(
+                intermediate_tensors,
+                PPTransportDataType.AUX_HIDDEN_STATES,
+            )
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(aux_hidden_states, idx + 1, hidden_states, residual)
 
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+        if not pp_group.is_last_rank:
+            intermediate_tensors = IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+            return add_pp_transport_tensors(
+                intermediate_tensors,
+                PPTransportDataType.AUX_HIDDEN_STATES,
+                aux_hidden_states,
+            )
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
