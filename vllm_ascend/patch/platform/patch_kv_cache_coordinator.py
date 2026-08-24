@@ -399,15 +399,23 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             if is_simple_hybrid:
                 break
 
-        # Truncate full attention blocks to final hit_length (if present)
-        # NOTE(zxr): for deepseek-v4, there is two fullattn groups, but
-        # in this function, only the first fullattn group is truncate by
-        # the belowing codes(c4), c128 layer does not truncate, which may
-        # have prefix cache block hit.
-        # Due to slidingwindow attn, deepseek-v4 decode node can't have
-        # any prefix cache hit, because `hit_length` of SWA is 0.
-        spec, group_ids, _ = self.attention_groups[0]
-        if isinstance(spec, FullAttentionSpec):
+        # Truncate full attention blocks to final hit_length (if present).
+        #
+        # NOTE: previously only the first full-attn attention_group (c4) was
+        # truncated here, while c128 (and any other full-attn group beyond
+        # attention_groups[0]) kept its already-found hit blocks even when
+        # hit_length shrank to 0 (e.g. when SWA forced the global min to 0 on
+        # the decode node). That left c128 carrying N hit blocks while
+        # num_local_computed_tokens = hit_length = 0, so
+        # allocate_external_computed_blocks computed
+        #   get_new_blocks(cdiv((0 + ext//cr), bs) - N) < 0
+        # -> popleft_n(negative) -> num_free_blocks inflated by |n| with the
+        # list intact, surfacing later as `assert curr_block is not None`
+        # (vllm-ascend #14283). Truncate EVERY full-attn group to hit_length
+        # so no group's hit_blocks outlive the agreed-upon hit_length.
+        for spec, group_ids, _ in self.attention_groups:
+            if not isinstance(spec, FullAttentionSpec):
+                continue
             num_blocks = cdiv(hit_length, self._get_effective_block_size(spec))
             for group_id in group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
