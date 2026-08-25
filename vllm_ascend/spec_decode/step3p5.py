@@ -8,7 +8,6 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, replace
 from vllm.forward_context import BatchDescriptor, get_forward_context
-from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -26,35 +25,6 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
-
-
-def _log_drafter_tensor(name: str, step: int, tensor: torch.Tensor | None) -> None:
-    if tensor is None:
-        return
-    value = tensor.detach()
-    flat = value.reshape(-1)
-    numeric = flat.float()
-    stats = torch.stack(
-        (
-            numeric.min(),
-            numeric.max(),
-            numeric.mean(),
-            torch.linalg.vector_norm(numeric),
-        )
-    ).cpu().tolist()
-    sample = flat[:16].float().cpu().tolist()
-    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
-    logger.info(
-        "[drafter-forward][rank=%d][step=%d] %s shape=%s dtype=%s "
-        "min=%.8e max=%.8e mean=%.8e norm=%.8e sample=%s",
-        rank,
-        step,
-        name,
-        tuple(value.shape),
-        value.dtype,
-        *stats,
-        sample,
-    )
 
 
 class AscendStep3p5MTPProposer(AscendEagleProposer):
@@ -571,9 +541,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             model_kwargs["hidden_states"] = model_hidden_states
             model_kwargs["positions"] = model_positions
 
-        _log_drafter_tensor("input_ids", 0, model_input_ids)
-        _log_drafter_tensor("positions", 0, model_positions)
-        _log_drafter_tensor("hidden_states.input", 0, model_kwargs.get("hidden_states"))
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
@@ -601,8 +568,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             spec_step_idx=0,
             num_indices=num_indices,
         )
-        _log_drafter_tensor("hidden_states.output", 0, last_hidden_states)
-        _log_drafter_tensor("draft_token_ids", 0, draft_token_ids)
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             if draft_probs is not None:
                 self._last_draft_probs = draft_probs.view(
@@ -719,9 +684,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = model_hidden_states
 
-            _log_drafter_tensor("input_ids", spec_step_idx, model_input_ids)
-            _log_drafter_tensor("positions", spec_step_idx, model_positions)
-            _log_drafter_tensor("hidden_states.input", spec_step_idx, model_kwargs.get("hidden_states"))
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
@@ -743,8 +705,6 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 spec_step_idx=spec_step_idx,
                 num_indices=num_indices,
             )
-            _log_drafter_tensor("hidden_states.output", spec_step_idx, last_hidden_states)
-            _log_drafter_tensor("draft_token_ids", spec_step_idx, draft_token_ids)
             if draft_probs is not None:
                 assert draft_probs_list is not None
                 draft_probs_list.append(draft_probs)
