@@ -252,12 +252,15 @@ def test_aclgraph_query_lens_ignore_padded_request_entries() -> None:
 def test_worker_selects_v2_runner_on_310p() -> None:
     atb_ops = MagicMock()
     atb_ops._register_atb_extensions = MagicMock()
+    profiler = MagicMock()
+    profiler.dynamic_profile = MagicMock()
     with patch.dict(
         sys.modules,
         {
             "torch_npu.op_plugin": MagicMock(),
             "torch_npu.op_plugin.atb": MagicMock(),
             "torch_npu.op_plugin.atb._atb_ops": atb_ops,
+            "torch_npu.profiler": profiler,
         },
     ):
         from vllm_ascend._310p.worker_310p import NPUWorker310
