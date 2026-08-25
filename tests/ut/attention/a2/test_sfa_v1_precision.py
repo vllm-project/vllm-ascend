@@ -306,6 +306,7 @@ def _run_sfa_kernel(
     """Call kernel via MagicMock self (only ``scale`` needed)."""
     fake_self = MagicMock()
     fake_self.scale = scale
+    fake_self.enable_sparse_sfa_turboquant = False
 
     fake_attn_metadata = MagicMock()
     fake_attn_metadata.block_table = block_table

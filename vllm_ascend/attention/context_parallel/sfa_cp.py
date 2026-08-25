@@ -27,6 +27,7 @@ from vllm_ascend.attention.sfa_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
+from vllm_ascend.ops import tq_latent_store
 from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin
 from vllm_ascend.utils import (
     _round_up,
@@ -365,7 +366,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
         slots: torch.Tensor,
         attn_metadata: M,
     ):
-        if self.enable_sparse_sfa_c8:
+        if self.uses_packed_sfa_main_cache:
             return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
         kv_a_layernorm = self.kv_a_layernorm
         assert kv_a_layernorm is not None, "kv_a_layernorm must be initialized for DSA-CP KV preprocessing"
@@ -397,7 +398,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
         assert k_pe is not None and k_nope is not None
         async_op = full_gather_o_proj_enabled
         handles: list[torch.distributed.Work] = []
-        if self.enable_sparse_sfa_c8:
+        if self.uses_packed_sfa_main_cache:
             assert knope_scale is not None
             parts = [
                 k_nope.view(-1, k_nope.shape[-1]),
@@ -412,7 +413,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
         fused_kv, handle = all_gather_async(torch.cat(parts, dim=1), get_tp_group(), async_op=async_op)
         if handle is not None:
             handles.append(handle)
-        if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
+        if self.has_indexer and (self.uses_packed_sfa_main_cache or self.enable_sparse_li_c8):
             assert k_li is not None
             k_li, handle = all_gather_async(k_li, get_tp_group(), async_op=async_op)
             if handle is not None:
@@ -451,7 +452,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
 
         if kv_cache is not None:
             assert fused_kv_no_split is not None
-            if self.enable_sparse_sfa_c8:
+            if self.uses_packed_sfa_main_cache:
                 torch_npu.npu_scatter_nd_update_(
                     kv_cache[0].view(-1, fused_kv_no_split.shape[-1]),
                     slot_mapping_sfa[: attn_metadata.num_actual_tokens].view(-1, 1),
@@ -466,7 +467,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
                 )
             else:
                 k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
-            if not self.enable_sparse_sfa_c8:
+            if not self.uses_packed_sfa_main_cache:
                 assert k_pe is not None and k_nope is not None
                 k_nope = k_nope.view(k_nope.shape[0], 1, -1)
                 k_pe = k_pe.view(k_pe.shape[0], 1, -1)
@@ -929,8 +930,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert valid_block_ids is not None and block_table is not None
         kv = torch.index_select(kv_cache[0], 0, valid_block_ids)
         split_sizes: tuple[int, ...]
-        if self.enable_sparse_sfa_c8:
-            # Sparse C8 stores nope, rope, and quantization data in one packed
+        if self.uses_packed_sfa_main_cache:
+            # Packed SFA formats store nope, rope, and quantization data in one
             # SFA KV cache. The remaining cache entries belong to the indexer
             # and must not participate in the DCP SFA KV all-gather.
             gather_input = kv.contiguous()
@@ -1165,6 +1166,73 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
         return result
 
+    def _execute_tq_dcp_sfa(
+        self,
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        attn_metadata,
+        actual_seq_lengths_query,
+        actual_seq_lengths_key,
+    ):
+        # Mirrors AscendSFAImpl for the non-DCP case, and additionally asks for
+        # softmax LSE so decode can merge partial results across CP ranks.
+        dcp_context = attn_metadata.dcp_context
+
+        if self._has_prefill(attn_metadata):
+            # Prefill keeps Q local and attends over the gathered KV, so no LSE.
+            gather_context = dcp_context.gather_context
+            dcp_context.gather_context = None
+            if gather_context is None:
+                self._record_dcp_kv_gather_context(kv_cache, attn_metadata)
+                gather_context = dcp_context.gather_context
+                dcp_context.gather_context = None
+            assert gather_context is not None
+            gathered_kv_cache = self._finish_dcp_gather(gather_context)
+            block_table = dcp_context.kv_gather_block_table
+            assert block_table is not None
+            attn_out, _, _ = self._turboquant_sfa(
+                self._tq_rotate_query(ql_nope, q_pe),
+                gathered_kv_cache[0],
+                topk_indices,
+                block_table,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                sparse_mode=3,
+            )
+            return tq_latent_store.had_inv(attn_out, head_dim=self.kv_lora_rank)
+
+        # Decode attends over this rank's KV shard only, so the partial results
+        # are recombined by _merge_dcp_outputs using the LSE.
+        gather_context = dcp_context.gather_context
+        dcp_context.gather_context = None
+        if gather_context is None:
+            gather_context = self._start_dcp_query_gather(ql_nope, q_pe)
+        dsa_cp_context = getattr(attn_metadata, "dsa_cp_context", None)
+        if dsa_cp_context is not None:
+            actual_seq_lengths_query = attn_metadata.cum_query_lens
+            topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
+        topk_indices = self._remap_sparse_indices(topk_indices)
+        ql_nope, q_pe = self._finish_dcp_gather(gather_context)
+        attn_out, softmax_max, softmax_sum = self._turboquant_sfa(
+            self._tq_rotate_query(ql_nope, q_pe),
+            kv_cache[0],
+            topk_indices,
+            dcp_context.block_table,
+            actual_seq_lengths_query,
+            dcp_context.seq_lens,
+            sparse_mode=0,
+            return_softmax_lse=True,
+        )
+        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
+        output_dtype = attn_out.dtype
+        output = self._merge_dcp_outputs(attn_out, softmax_lse, dsa_cp_context)
+        # The merge runs in Hadamard space, so rotate back once at the end.
+        output = tq_latent_store.had_inv(output, head_dim=self.kv_lora_rank)
+        return output.to(output_dtype)
+
     def _execute_sparse_flash_attention_process(
         self,
         ql_nope,
@@ -1179,6 +1247,16 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         assert attn_metadata.dcp_context is not None, "DCP SFA requires attn_metadata.dcp_context."
         assert self.dcp_group is not None, "DCP SFA requires dcp_group when dcp_size > 1."
         dcp_context = attn_metadata.dcp_context
+        if self.enable_sparse_sfa_turboquant:
+            return self._execute_tq_dcp_sfa(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
         if self._has_prefill(attn_metadata):
             gather_context = dcp_context.gather_context
             dcp_context.gather_context = None

@@ -165,11 +165,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         )
         if enable_dsa_cp():
             raise NotImplementedError("Sparse KV offload currently requires TP without context parallelism")
-        if self.enable_sparse_sfa_c8:
+        if self.uses_packed_sfa_main_cache:
             raise NotImplementedError(
-                "Sparse KV offload does not support the sparse SFA C8 main "
-                "cache; sparse LI C8 is supported for the device-resident "
-                "indexer cache."
+                "Sparse KV offload does not support packed SFA main caches "
+                "(C8 or TQ4); sparse LI C8 is supported for the "
+                "device-resident indexer cache."
             )
         self._current_layer_name: str | None = None
 

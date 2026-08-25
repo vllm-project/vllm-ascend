@@ -320,7 +320,7 @@ class BaseDeviceAdaptor:
         indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
 
         if enable_sparse_li_c8:
-            assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
+            assert len(kv_cache) == (3 if sfa_impl.uses_packed_sfa_main_cache else 4)
             assert q_li_scale is not None
             assert q_li_shape_ori is not None
             weights = weights.to(torch.float16)
@@ -1377,7 +1377,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
 
         if enable_sparse_li_c8:
-            assert len(kv_cache) == (3 if sfa_impl.enable_sparse_sfa_c8 else 4)
+            assert len(kv_cache) == (3 if sfa_impl.uses_packed_sfa_main_cache else 4)
             assert q_li_shape_ori is not None
 
             if q_li_scale is not None:

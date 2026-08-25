@@ -1485,9 +1485,13 @@ def get_compressed_pos_and_indices(
 def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(
-        getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
-    )
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(kv_cache_spec.cache_sparse_sfa_c8)
+
+
+def kv_cache_spec_uses_packed_sfa_main_cache(kv_cache_spec) -> bool:
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(kv_cache_spec.uses_packed_sfa_main_cache)
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

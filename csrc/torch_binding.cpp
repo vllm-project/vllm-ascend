@@ -41,6 +41,8 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
+#include "attention/turbo_quant_sparse_flash_attention/turbo_quant_sparse_flash_attention_torch_adpt.h"
+#include "attention/turbo_quant_compress_latent/turbo_quant_compress_latent_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
@@ -2210,6 +2212,20 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                           bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
     );
     ops.impl("npu_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_attention);
+    ops.def(
+        "turboquant_sparse_flash_attention(Tensor query, Tensor key, Tensor value, Tensor sparse_indices, "
+        "                                 Tensor? key_dequant_scale=None, Tensor? value_dequant_scale=None, *, "
+        "                                 Tensor block_table, Tensor actual_seq_lengths_query, "
+        "                                 Tensor actual_seq_lengths_kv, float scale_value, "
+        "                                 int key_quant_mode, int value_quant_mode, int sparse_block_size, "
+        "                                 str layout_query, str layout_kv, int sparse_mode, "
+        "                                 int attention_mode, int quant_scale_repo_mode, "
+        "                                 int tile_size, int rope_head_dim, "
+        "                                 bool return_softmax_lse=False) -> (Tensor attention_out, Tensor softmax_max, Tensor softmax_sum)"
+    );
+    ops.impl("turboquant_sparse_flash_attention", torch::kPrivateUse1, &vllm_ascend::turboquant_sparse_flash_attention);
+    ops.def("turbo_quant_compress_latent(Tensor latent, Tensor centroids) -> Tensor");
+    ops.impl("turbo_quant_compress_latent", torch::kPrivateUse1, &vllm_ascend::turbo_quant_compress_latent);
 
     ops.def(
         "npu_kv_quant_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"

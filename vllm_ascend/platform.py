@@ -31,8 +31,11 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import (
+    get_ascend_config,
+    init_ascend_config,
+    validate_additional_config_bool,
+)
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
     HardwareCapability,
@@ -440,6 +443,7 @@ class NPUPlatform(Platform):
 
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
+        _validate_turboquant_cache(vllm_config)
 
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)
@@ -589,6 +593,63 @@ class NPUPlatform(Platform):
             "sinks": sinks,
             "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
         }
+
+
+def _validate_turboquant_cache(vllm_config: VllmConfig) -> None:
+    additional_config = vllm_config.additional_config or {}
+    internal_tq_options = {
+        "enable_sparse_sfa_turboquant",
+        "tq_key_quant_mode",
+        "tq_value_quant_mode",
+        "tq_tile_size",
+    }
+    configured_internal_options = sorted(internal_tq_options.intersection(additional_config))
+    if configured_internal_options:
+        raise ValueError(
+            "TurboQuant internal options cannot be set through additional_config: "
+            f"{', '.join(configured_internal_options)}. Use --kv-cache-dtype turboquant_4bit_nc."
+        )
+
+    cache_config = vllm_config.cache_config
+    if cache_config is None or cache_config.cache_dtype != "turboquant_4bit_nc":
+        return
+
+    enable_sparse_sfa_c8 = validate_additional_config_bool(
+        additional_config.get("enable_sparse_sfa_c8", False),
+        "additional_config.enable_sparse_sfa_c8",
+    )
+    if enable_sparse_sfa_c8:
+        raise ValueError("turboquant_4bit_nc and enable_sparse_sfa_c8 cannot be enabled together")
+
+    xlite_graph_config = additional_config.get("xlite_graph_config", {})
+    enable_xlite = validate_additional_config_bool(
+        xlite_graph_config.get("enabled", False),
+        "additional_config.xlite_graph_config.enabled",
+    )
+    if enable_xlite:
+        raise ValueError("turboquant_4bit_nc does not support xLite graph mode")
+
+    if bool(getattr(vllm_config, "use_v2_model_runner", False)):
+        raise ValueError("turboquant_4bit_nc only supports Model Runner V1")
+
+    model_config = vllm_config.model_config
+    if not model_uses_sfa_sparse(model_config):
+        raise ValueError("turboquant_4bit_nc is only supported by SFA sparse models")
+
+    if not get_current_hardware_profile().supports(HardwareCapability.TURBOQUANT_4BIT_NC_CACHE):
+        raise ValueError("turboquant_4bit_nc is only supported on Ascend A2 and A3")
+
+    if model_config.dtype != torch.bfloat16:
+        raise ValueError(f"turboquant_4bit_nc requires bfloat16 model dtype, but got {model_config.dtype}")
+
+    hf_text_config = model_config.hf_text_config
+    kv_lora_rank = getattr(hf_text_config, "kv_lora_rank", None)
+    if kv_lora_rank != 512:
+        raise ValueError(f"turboquant_4bit_nc requires kv_lora_rank=512, but got {kv_lora_rank}")
+
+    rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", None)
+    if rope_head_dim != 64:
+        raise ValueError(f"turboquant_4bit_nc requires qk_rope_head_dim=64, but got {rope_head_dim}")
 
 
 def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
@@ -1030,7 +1091,11 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             else ascend_compilation_config
         )
 
-    if model_config and hasattr(model_config.hf_text_config, "index_topk"):
+    if (
+        model_config
+        and hasattr(model_config.hf_text_config, "index_topk")
+        and vllm_config.cache_config.cache_dtype != "turboquant_4bit_nc"
+    ):
         from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
 
         vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(

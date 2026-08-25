@@ -45,6 +45,7 @@ for k in list(sys.modules):
 for _m in _to_remove:
     _saved_modules[_m] = sys.modules.pop(_m)
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
@@ -1438,24 +1439,43 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.layer_metadata["encoder.layer.0"].block_len), 2)
 
-    def test_register_kv_caches_rejects_sparse_sfa_c8_main_cache(self):
+    def test_register_kv_caches_rejects_packed_sfa_main_cache(self):
         layer_name = "model.layers.0.self_attn.attn"
-        group = MagicMock()
-        group.kv_cache_spec = UniformTypeKVCacheSpecs(
-            block_size=16,
-            kv_cache_specs={layer_name: SimpleNamespace(block_size=16, cache_sparse_sfa_c8=True)},
-        )
-        group.layer_names = [layer_name]
-        kv_cache_config = MagicMock()
-        kv_cache_config.kv_cache_groups = [group]
-        kv_cache_config.kv_cache_tensors = []
-        kv_cache_config.num_blocks = 10
-        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, kv_cache_config, self.engine_id)
+        packed_specs = {
+            "C8": AscendMLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=656,
+                dtype=torch.int8,
+                cache_sparse_sfa_c8=True,
+            ),
+            "TQ4": AscendMLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=386,
+                dtype=torch.int8,
+                cache_dtype_str="turboquant_4bit_nc",
+            ),
+        }
 
-        with self.assertRaisesRegex(NotImplementedError, "does not support sparse SFA C8 packed main KV cache"):
-            worker.register_kv_caches({layer_name: (MagicMock(),)})
+        for kv_format, spec in packed_specs.items():
+            with self.subTest(kv_format=kv_format):
+                group = MagicMock()
+                group.kv_cache_spec = UniformTypeKVCacheSpecs(
+                    block_size=16,
+                    kv_cache_specs={layer_name: spec},
+                )
+                group.layer_names = [layer_name]
+                kv_cache_config = MagicMock()
+                kv_cache_config.kv_cache_groups = [group]
+                kv_cache_config.kv_cache_tensors = []
+                kv_cache_config.num_blocks = 10
+                worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, kv_cache_config, self.engine_id)
 
-        self.assertEqual(worker.layer_metadata, {})
+                with self.assertRaisesRegex(NotImplementedError, "does not support packed SFA main KV caches"):
+                    worker.register_kv_caches({layer_name: (MagicMock(),)})
+
+                self.assertEqual(worker.layer_metadata, {})
 
     def test_register_kv_caches_groups_optional_indexer_by_physical_layer(self):
         main_0 = "model.layers.0.self_attn.attn"
