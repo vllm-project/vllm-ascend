@@ -99,7 +99,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel
+from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel, fault_barrier_wrapper
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -789,6 +789,7 @@ class NPUWorker(WorkerBase):
             self.torch_allocated / GiB_bytes,
         )
 
+    @fault_barrier_wrapper
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -858,6 +859,7 @@ class NPUWorker(WorkerBase):
         return output
 
     @torch.inference_mode()
+    @fault_barrier_wrapper
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
         _attach_profiling_chunk_execution_time(

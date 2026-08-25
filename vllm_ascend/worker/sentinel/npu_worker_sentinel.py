@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import torch
 import torch_npu
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
     WorkerSentinel as GPUWorkerSentinel,
 )
@@ -30,6 +31,31 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 
+def fault_barrier_wrapper(func: Callable):
+    """Quarantine and reset the worker when a wrapped method faults."""
+
+    def wrapped(self, *args, **kwargs):
+        sentinel = getattr(self, "worker_sentinel", None)
+        if sentinel is not None and sentinel.worker_faulted:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+        try:
+            return func(self, *args, **kwargs)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            if sentinel is not None:
+                sentinel.worker_faulted = True
+                logger.warning("[FT] Quarantining worker %d after fault: %s", self.rank, exc)
+                try:
+                    sentinel.reset_device()
+                except Exception:
+                    logger.exception("[FT] self device reset failed on worker %d.", self.rank)
+                return EMPTY_MODEL_RUNNER_OUTPUT
+            raise
+
+    return wrapped
+
+
 class WorkerSentinel(GPUWorkerSentinel):
     """Per-worker sentinel for fault tolerance on Ascend NPU.
 
@@ -44,6 +70,9 @@ class WorkerSentinel(GPUWorkerSentinel):
         self.dp_rank = worker.parallel_config.data_parallel_rank
         self.dp_size = worker.parallel_config.data_parallel_size
         self.data_parallel_master_ip = worker.parallel_config.data_parallel_master_ip
+        # Set once a device-touching method faults, to keep this worker off the
+        # device until FT recovery rebuilds the groups.
+        self.worker_faulted = False
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
         """Report the dead-rank mask (upstream convention: 0=live, 1=dead).
@@ -65,9 +94,11 @@ class WorkerSentinel(GPUWorkerSentinel):
     def retry(self, ft_request: FaultToleranceRequest):
         # reset the device first so any hung device-side collectives are
         # aborted, then run the base class flow (synchronize, clean worker
-        # state, re-initialize the DP group).
+        # state, re-initialize the DP group). The quarantine is lifted only
+        # after the groups are rebuilt below.
         self.reset_device()
         super().retry(ft_request)
+        self.worker_faulted = False
 
     def scale_down(self, ft_request: FaultToleranceRequest):
         """Scale down over the surviving DP ranks, mirroring the upstream
@@ -133,25 +164,11 @@ class WorkerSentinel(GPUWorkerSentinel):
             )
 
     def _redistribute_experts(self, dead_ep_ranks: set[int]) -> None:
-        """One-shot expert redistribution after scale-down.
+        """Redistribute experts onto the surviving slots after scale-down.
 
-        Cannot be inherited from the upstream sentinel: the upstream version
-        applies the new placement via `rebuild_model_expert_maps` (GPU expert
-        maps), reloads weights in the GPU runtime layout, and calls
-        `sync_num_dispatchers_for_nixl_ep`. On Ascend the placement must
-        instead be propagated into the Ascend routing tables
-        (`refresh_model_routing_tables`), reassigned weights must be rewritten
-        in the NPU runtime layout (transpose / NZ cast / per-slot lists — the
-        `reload_experts_from_disk` in eplb_redistribute.py), and the MC2
-        expert width must be shrunk via `set_num_physical_experts`. Only the
-        pure placement math is shared (imported from upstream); the apply
-        steps are platform-specific.
-
-        Deterministic, no cross-rank communication: every surviving rank
-        computes bit-identical placements from the shared EPLB model state.
-        The EPLB maps keep the upstream slot model (full width, original
-        physical ids); the densified rank numbering lives only in the
-        elastic_info tensor maintained by the all2all manager.
+        Deterministic and local: every survivor runs the same placement math
+        (imported from upstream), then applies it to the Ascend routing tables,
+        reloads reassigned weights from disk, and shrinks the MC2 expert width.
         """
         eplb_model_state = self._eplb_model_state()
         p2l = eplb_model_state.physical_to_logical_map
@@ -167,18 +184,12 @@ class WorkerSentinel(GPUWorkerSentinel):
         mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
         redistribute_expert_placement(p2l, num_logical, num_local_experts)
         rebuild_logical_expert_maps(p2l, l2p, lrc)
-        # Propagate the new placement into the Ascend routing tables; the
-        # table shape is unchanged so this copy_'s into the storage captured
-        # by graphs.
+        # Propagate the new placement into the Ascend routing tables (in-place,
+        # so captured graphs keep pointing at valid storage).
         refresh_model_routing_tables(eplb_model_state)
 
-        # The MC2 kernels require the densified physical-id space while scaled
-        # down (dispatch routes via table2[expert_id // num_local]; combine
-        # silently drops ids >= the shrunk physical expert count). The refresh
-        # above rebuilds the tables with original full-width ids, so renumber
-        # the kernel-facing values in place. Original ids only route correctly
-        # when the dead ranks are a suffix; a dead rank in the middle would
-        # misroute tokens or crash the kernel on a -1 rank lookup.
+        # The MC2 kernels consume the routing tables in the densified id space;
+        # renumber the kernel-facing values in place after the refresh.
         orig_to_dense_rank = get_ep_all2all_manager().to_densified_rank_table()
         for layer in eplb_model_state.model.moe_layers:
             routing_table = getattr(getattr(layer, "eplb_state", None), "expert_replica_routing_table", None)
@@ -193,10 +204,8 @@ class WorkerSentinel(GPUWorkerSentinel):
                 reload_plan,
             )
 
-        # Shrink the physical-expert width the MC2 kernels see so it matches
-        # the surviving slots; this also flips elastic_info into scaling-down
-        # mode (the mask replayed during retry kept the flag at 0 until the
-        # new width was known).
+        # Shrink the physical-expert width to the surviving slots; this also
+        # flips elastic_info into scaling-down mode.
         get_ep_all2all_manager().set_num_physical_experts((ep_world_size - len(dead_ep_ranks)) * num_local_experts)
 
         logger.info(
