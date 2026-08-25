@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
@@ -23,6 +24,19 @@ from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+
+def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0) -> KVCacheTensor:
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.27.1"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=page_size,
+        block_stride=page_size,
+        offset=0,
+    )
 
 
 def _mamba_spec() -> MambaSpec:
@@ -41,10 +55,11 @@ def _kv_cache_config(
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
-            KVCacheTensor(
-                size=num_blocks * spec.page_size_bytes,
-                shared_by=["linear_attn"],
-            )
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                ["linear_attn"],
+                spec.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -162,13 +177,10 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
-            KVCacheTensor(
-                size=40,
-                shared_by=["full_attn", "linear_attn"],
-            ),
+            _make_kv_cache_tensor(40, ["full_attn", "linear_attn"], 20),
             # Hybrid models can have an attention-only slot (for example an
             # MTP layer). It must still use the common single-tensor layout.
-            KVCacheTensor(size=40, shared_by=["mtp_attn"]),
+            _make_kv_cache_tensor(40, ["mtp_attn"], 20),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -279,10 +291,11 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
         kv_cache_config=KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=[
-                KVCacheTensor(
-                    size=raw_cache.numel(),
-                    shared_by=["mla_attn"],
-                )
+                _make_kv_cache_tensor(
+                    raw_cache.numel(),
+                    ["mla_attn"],
+                    spec.page_size_bytes,
+                ),
             ],
             kv_cache_groups=[
                 KVCacheGroupSpec(
@@ -348,7 +361,12 @@ def test_mamba_spec_follows_aligned_attention_spec(
 
     assert list(specs) == ["full_attn", "linear_attn"]
     assert specs["full_attn"].page_size_bytes == 20
-    assert specs["full_attn"].indexes_kv_by_block_stride is True
+    # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main;
+    # page_size_padded carries the padded/block-stride-indexed page there.
+    if vllm_version_is("0.27.1"):
+        assert specs["full_attn"].indexes_kv_by_block_stride is True
+    else:
+        assert specs["full_attn"].page_size_padded == 20
 
 
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
@@ -398,8 +416,16 @@ def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
     specs = get_kv_cache_spec(MagicMock())
 
     assert {spec.page_size_bytes for spec in specs.values()} == {80}
-    assert specs["small_attn"].indexes_kv_by_block_stride is True
-    assert specs["large_attn"].indexes_kv_by_block_stride is True
+    # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main.
+    # The marker is gone, so the main-lane assertions verify the observable
+    # alignment effect instead: the under-sized spec is padded to the common
+    # page, and the already-aligned spec reports the common page size.
+    if vllm_version_is("0.27.1"):
+        assert specs["small_attn"].indexes_kv_by_block_stride is True
+        assert specs["large_attn"].indexes_kv_by_block_stride is True
+    else:
+        assert specs["small_attn"].page_size_padded == 80
+        assert specs["large_attn"].page_size_bytes == 80
     assert specs["linear_attn"].page_size_padded == 80
 
 
