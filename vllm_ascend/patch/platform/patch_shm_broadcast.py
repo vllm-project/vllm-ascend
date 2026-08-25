@@ -8,14 +8,19 @@ from vllm.distributed.device_communicators import shm_broadcast
 
 MessageQueue = shm_broadcast.MessageQueue
 
-# Cap how long an idle reader parks before re-reading the authoritative SHM
-# written flag. This bounds lost-notify recovery latency while keeping the
-# periodic wakeup negligible (one flag check per reader every five seconds).
+# Cap on how long an idle reader parks before re-reading the authoritative SHM
+# written-flag. Bounds lost-notify recovery latency to ~5s while the periodic
+# wakeup stays negligible (one flag check per reader every 5s).
 SHM_READER_RECHECK_INTERVAL_MS = 5000
 
 
 def timeout_ms(self) -> int:
-    """Return a timeout capped at the SHM recheck interval."""
+    """Returns a timeout, capped at the recheck interval, that is:
+    - min(time to deadline, time to next warning) if we're logging warnings
+    - time to deadline, if we're not logging warnings
+    - recheck interval if the timeout is None and we're not logging warnings
+    - raise TimeoutError if we are past the deadline
+    """
     wait_ms = SHM_READER_RECHECK_INTERVAL_MS
     if self.warning_wait_time_ms is not None:
         wait_ms = min(wait_ms, self.warning_wait_time_ms)
@@ -52,26 +57,38 @@ def acquire_read(
                 )
 
             if not check():
-                # This block is either not written or already read by this reader.
+                # this block is either
+                # (1) not written
+                # (2) already read by this reader
+
+                # for readers, `self.current_idx` is the next block to read
+                # if this block is not ready,
+                # we need to wait until it is written
                 self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
 
                 if self.shutting_down:
                     raise RuntimeError("cancelled")
 
+                # if we wait for a long time, log a message
                 if read_timeout.should_warn():
                     shm_broadcast.logger.info(
                         shm_broadcast.LONG_WAIT_TIME_LOG_MSG,
                         shm_broadcast.VLLM_RINGBUFFER_WARNING_INTERVAL,
                     )
+
                 continue
 
+            # found a block that is not read by this reader
+            # let caller read from the buffer
             with self.buffer.get_data(self.current_idx) as buf:
                 try:
                     yield buf
                 finally:
+                    # caller has read from the buffer; set the read flag.
                     metadata_buffer[self.local_reader_rank + 1] = 1
-                    # Ensure the writer sees read completion before the reader
-                    # advances to the next ring-buffer slot.
+                    # Memory fence ensures the read flag is visible to the writer.
+                    # Without this, writer may not see our read completion and
+                    # could wait indefinitely for all readers to finish.
                     shm_broadcast.memory_fence()
                     next_idx = self.current_idx + 1
                     self.current_idx = next_idx % self.buffer.max_chunks
