@@ -80,7 +80,8 @@ def apply_temperature(
     do_not_specialize=[
         "local_argmax_stride",
         "local_max_stride",
-        "processed_logits_stride",
+        "logits_cache_stride_0",
+        "logits_cache_stride_1",
         "logits_stride",
         "vocab_size",
         "num_blocks",
@@ -91,9 +92,11 @@ def _gumbel_sample_kernel(
     local_argmax_stride,
     local_max_ptr,
     local_max_stride,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
+    # [max_num_reqs, num_cols, vocab_size]
+    logits_cache_ptr,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
+    logits_cache_col_ptr,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -121,24 +124,28 @@ def _gumbel_sample_kernel(
         )
         logits = logits.to(tl.float32)
 
-        block_temp = temp
-        if block_temp != 0.0 and APPLY_TEMPERATURE:
-            logits = logits / block_temp
-
-        if processed_logits_ptr is not None:
-            # Store the temperature-applied logits.
-            if processed_logits_col_ptr is not None:
+        if logits_cache_ptr is not None:
+            # Store the logits *before* temperature. Dividing first would
+            # produce a value that is generally not representable in the
+            # cache's dtype, forcing it to be fp32. Consumers (the rejection
+            # sampler) divide by the same temperature on load, which
+            # reproduces the value used below bitwise.
+            if logits_cache_col_ptr is not None:
                 if PER_TOKEN_COL:
-                    col = tl.load(processed_logits_col_ptr + token_idx)
+                    col = tl.load(logits_cache_col_ptr + token_idx)
                 else:
-                    col = tl.load(processed_logits_col_ptr)
+                    col = tl.load(logits_cache_col_ptr)
             else:
                 col = 0
             tl.store(
-                processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
+                logits_cache_ptr + req_state_idx * logits_cache_stride_0 + col * logits_cache_stride_1 + block,
                 logits,
                 mask=mask,
             )
+
+        block_temp = temp
+        if block_temp != 0.0 and APPLY_TEMPERATURE:
+            logits = logits / block_temp
 
         if block_temp != 0.0:
             # Calculate the seed for gumbel noise.
@@ -171,13 +178,21 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
-    output_processed_logits: torch.Tensor | None = None,
-    output_processed_logits_col: torch.Tensor | None = None,
+    logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
+    logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
+    if logits_cache_col is not None:
+        logits_cache_col = logits_cache_col.contiguous()
     num_tokens, vocab_size = logits.shape
+    if logits_cache is not None:
+        assert logits_cache.size(-1) >= vocab_size, (
+            f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
+            f"than the sampled logits ({vocab_size}). Cached logits would be "
+            "truncated."
+        )
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = torch.empty(
@@ -192,15 +207,16 @@ def gumbel_sample(
         dtype=torch.float32,
         device=logits.device,
     )
-    per_token_col = output_processed_logits_col is not None and output_processed_logits_col.dim() > 0
+    per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
     _gumbel_sample_kernel[(num_tokens,)](
         local_argmax,
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        output_processed_logits,
-        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-        output_processed_logits_col,
+        logits_cache,
+        logits_cache.stride(0) if logits_cache is not None else 0,
+        logits_cache.stride(1) if logits_cache is not None else 0,
+        logits_cache_col,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
