@@ -174,7 +174,7 @@ private:
     void FillRequiredParamShapeWithDims();
     void FillOptionalOutputParamShapeWithDims();
     void FillOptionalOutputParamShapeWithDimsV2();
- 	void FillOptionalOutputParamShapeWithDimsV3();
+    void FillOptionalOutputParamShapeWithDimsV3();
     void FillScenarioParamInfo();
     void FillQueryNormScaleShape();
     void FillQueryNormDtypes();
