@@ -668,11 +668,12 @@ class NPUModelRunner310(NPUModelRunner):
         self,
         attention_backends,
         kv_cache_groups,
+        is_profiling=False,
     ) -> None:
         # 910B does not need this branch because runner/dispatcher query_len are
         # naturally consistent there. 310P ngram needs temporary alignment.
         with self.temporary_modify_uniform_decode_query_len():
-            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
+            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups, is_profiling)
 
     def _init_kv_zero_meta(self) -> None:
         """310P uses torch zeroing because Triton is not available."""
