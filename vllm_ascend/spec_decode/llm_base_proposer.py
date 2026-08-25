@@ -1507,8 +1507,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if use_probabilistic and dspark_probs_list:
                         # Stack [K x [num_blk, V]] -> [num_blk, K, V] ->
                         # [num_blk * K, V] to match early_exit view logic.
-                        draft_probs_step0 = torch.stack(dspark_probs_list, dim=1).view(-1,
-                                                                                       logits.shape[-1]).contiguous()
+                        draft_probs_step0 = (
+                            torch.stack(dspark_probs_list, dim=1).view(-1, logits.shape[-1]).contiguous()
+                        )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
