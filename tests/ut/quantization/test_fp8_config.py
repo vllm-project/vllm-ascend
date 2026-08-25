@@ -4,10 +4,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -125,18 +122,6 @@ class TestAscendFp8Config(TestBase):
         config.ignored_layers = ignored_layers or []
         return config
 
-    def test_from_config_merges_both_exclusion_keys(self):
-        config = AscendFp8Config.from_config(
-            {
-                "quant_method": "fp8",
-                "activation_scheme": "dynamic",
-                "weight_block_size": [128, 128],
-                "ignored_layers": ["lm_head"],
-                "modules_to_not_convert": ["visual.merger.linear_fc1", "lm_head"],
-            }
-        )
-        self.assertEqual(config.ignored_layers, ["lm_head", "visual.merger.linear_fc1"])
-
     def test_ignored_linear_falls_back_to_unquantized(self):
         # visual.merger.linear_fc1 is the layer that used to crash: the
         # checkpoint keeps it in bfloat16 and lists it as not converted.
@@ -226,10 +211,12 @@ class TestAscendFp8Config(TestBase):
         mock_scheme_class.assert_called_once_with((128, 128), moe_config)
         self.assertIs(method, mock_moe_method)
 
-    def test_embedding_stays_unquantized(self):
+    def test_embedding_is_left_to_the_default_method(self):
+        # Returning None makes VocabParallelEmbedding fall back to
+        # UnquantizedEmbeddingMethod on its own.
         config = self.build_config()
         method = config.get_quant_method(MagicMock(spec=VocabParallelEmbedding), "model.embed_tokens")
-        self.assertIsInstance(method, UnquantizedEmbeddingMethod)
+        self.assertIsNone(method)
 
     def test_per_tensor_checkpoint_reports_an_actionable_error(self):
         config = self.build_config(weight_block_size=None)

@@ -1,5 +1,5 @@
 import inspect
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs
@@ -10,10 +10,6 @@ from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
-    VocabParallelEmbedding,
-)
 from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
 from vllm_ascend.utils import FP8_METHOD
@@ -50,21 +46,6 @@ class AscendFp8Config(Fp8Config):
     def get_min_capability(cls) -> int:
         raise NotImplementedError('Ascend hardware dose not support "get_min_capability" feature.')
 
-    @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "AscendFp8Config":
-        quant_config = super().from_config(config)
-        # Checkpoints spell the exclusion list either way, and upstream Fp8Config
-        # only reads `ignored_layers`. Qwen3.8-27B-FP8 lists exact names such as
-        # `visual.blocks.0.mlp.linear_fc1` in `modules_to_not_convert`, so both
-        # keys have to be honoured. Matching is exact, not glob.
-        ignored_layers = list(quant_config.ignored_layers or [])
-        for key in ("ignored_layers", "modules_to_not_convert"):
-            for layer_name in config.get(key) or []:
-                if layer_name not in ignored_layers:
-                    ignored_layers.append(layer_name)
-        quant_config.ignored_layers = ignored_layers
-        return quant_config
-
     def _verify_block_quantization(self) -> None:
         if self.weight_block_size is None:
             raise NotImplementedError(
@@ -99,10 +80,6 @@ class AscendFp8Config(Fp8Config):
         is_linear = isinstance(layer, LinearBase)
         is_moe = _is_fused_moe_layer(layer)
         if not is_linear and not is_moe:
-            # Embeddings and the lm_head stay in the model dtype in every native
-            # FP8 release published so far.
-            if isinstance(layer, VocabParallelEmbedding):
-                return UnquantizedEmbeddingMethod()
             return None
 
         skip_kwargs = {}
@@ -126,13 +103,16 @@ class AscendFp8Config(Fp8Config):
             assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/linear"
             return AscendLinearMethod(scheme_class(self.weight_block_size))
 
-        scheme_class = get_scheme_class(FP8_METHOD, "moe")
-        assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/moe"
-        return AscendFusedMoEMethod(
-            scheme_class(self.weight_block_size, layer.moe_config),
-            layer.moe_config,
-            tid2eid=tid2eid,
-        )
+        if is_moe:
+            scheme_class = get_scheme_class(FP8_METHOD, "moe")
+            assert scheme_class is not None, f"No scheme registered for {FP8_METHOD}/moe"
+            return AscendFusedMoEMethod(
+                scheme_class(self.weight_block_size, layer.moe_config),
+                layer.moe_config,
+                tid2eid=tid2eid,
+            )
+
+        return None
 
 
 @register_quantization_config("deepseek_v4_fp8")
