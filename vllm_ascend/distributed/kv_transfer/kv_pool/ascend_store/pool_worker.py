@@ -1023,15 +1023,14 @@ class KVPoolWorker:
             for task in layer_tasks:
                 for block_range in task.block_ranges:
                     req_id = block_range.request.req_id
+                    num_blocks = (block_range.end_block - block_range.start_block) + (
+                        1 if block_range.partial_block_index is not None else 0
+                    )
                     if req_id in self._load_start_times:
-                        self._layerwise_load_keys[req_id] += (
-                            block_range.end_block - block_range.start_block
-                        )
+                        self._layerwise_load_keys[req_id] += num_blocks
                     else:
                         self._load_start_times[req_id] = start_time
-                        self._layerwise_load_keys[req_id] = (
-                            block_range.end_block - block_range.start_block
-                        )
+                        self._layerwise_load_keys[req_id] = num_blocks
 
     def _record_layerwise_load_finished(self) -> None:
         # Called after the last layer's load has been waited for: all
@@ -1041,7 +1040,7 @@ class KVPoolWorker:
         end_time = time.perf_counter()
         for req_id, num_keys in self._layerwise_load_keys.items():
             start_time = self._load_start_times.pop(req_id, None)
-            if start_time is None:
+            if start_time is None or num_keys <= 0:
                 continue
             with self._kv_stats_lock:
                 self._kv_stats.record_load(
