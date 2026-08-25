@@ -44,7 +44,7 @@ enables the development endpoints, and removes `expandable_segments` from
 | `enable_batch_invariant` | Enable batch-invariant kernels and deterministic communication settings |
 
 All optional fields default to `false` and are ignored unless `enabled` is
-`true`. See [Additional Configuration](../configuration/additional_config.md#rl_config)
+`true`. See [Additional Configuration](../configuration/additional_config.md)
 for field definitions, prerequisites, and migration from legacy settings.
 
 ## Choose a deployment mode
