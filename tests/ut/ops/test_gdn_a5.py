@@ -4,12 +4,14 @@ import pytest
 import torch
 
 from vllm_ascend.ops.gdn_a5 import (
+    A5GDNAdapter,
     A5GDNOperatorDispatcher,
     GDNBackendMode,
     GDNOperator,
     GDNPrefillMetadata,
     GDNRuntimeSignature,
     parse_gdn_backend_config,
+    run_gdn_decode_pipeline,
     run_gdn_prefill_pipeline,
 )
 
@@ -317,3 +319,115 @@ def test_prefill_pipeline_rejects_non_integral_grouped_heads():
             metadata=GDNPrefillMetadata(None, None, None, None),
             operators={},
         )
+
+
+def test_causal_conv_adapter_maps_stateful_arguments(monkeypatch):
+    calls = []
+
+    def causal_conv(x, weight, bias, conv_states, **kwargs):
+        calls.append((x, weight, bias, conv_states, kwargs))
+        conv_states.add_(1)
+        return x + 2
+
+    monkeypatch.setattr(
+        "vllm_ascend.ops.gdn_a5.resolve_fla_operator",
+        lambda operator: (causal_conv, "fla_npu.ops.ascendc.causal_conv1d"),
+    )
+    adapter = A5GDNAdapter(
+        parse_gdn_backend_config("fla_npu", ""),
+        SIGNATURE,
+        layer_name="model.layers.0.linear_attn",
+        is_a5=True,
+    )
+    x = torch.zeros((2, 8))
+    weight = torch.zeros((4, 8))
+    bias = torch.zeros((8,))
+    state = torch.zeros((2, 8, 4))
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+    cache_indices = torch.tensor([3, 7], dtype=torch.int32)
+    initial_state_mode = torch.tensor([0, 1], dtype=torch.int32)
+
+    output = adapter.causal_conv1d(
+        x=x,
+        weight=weight,
+        bias=bias,
+        conv_state=state,
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        initial_state_mode=initial_state_mode,
+        activation_mode=1,
+        pad_slot_id=-1,
+        run_mode=0,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][4] == {
+        "query_start_loc": query_start_loc,
+        "cache_indices": cache_indices,
+        "initial_state_mode": initial_state_mode,
+        "num_accepted_tokens": None,
+        "activation_mode": 1,
+        "pad_slot_id": -1,
+        "run_mode": 0,
+        "head_num": 0,
+    }
+    torch.testing.assert_close(output, x + 2)
+    torch.testing.assert_close(state, torch.ones_like(state))
+
+
+def test_decode_pipeline_normalizes_once_and_preserves_native_state_mutation():
+    calls = []
+    state = torch.zeros((4, 2, 4, 4))
+
+    def l2norm(x):
+        calls.append("l2norm_fwd")
+        return x + 1
+
+    def recurrent(**kwargs):
+        calls.append("recurrent_gated_delta_rule")
+        assert kwargs["query"].shape == (2, 1, 4)
+        assert kwargs["key"].shape == (2, 1, 4)
+        kwargs["state"].add_(3)
+        return kwargs["value"] + 4
+
+    output = run_gdn_decode_pipeline(
+        q=torch.zeros((1, 2, 1, 4)),
+        k=torch.zeros((1, 2, 1, 4)),
+        v=torch.zeros((1, 2, 2, 4)),
+        g=torch.zeros((1, 2, 2)),
+        beta=torch.zeros((1, 2, 2)),
+        state=state,
+        scale=0.5,
+        actual_seq_lengths=torch.tensor([0, 1, 1], dtype=torch.int32),
+        ssm_state_indices=torch.tensor([1, 3], dtype=torch.int32),
+        l2norm=l2norm,
+        recurrent=recurrent,
+    )
+
+    assert calls == ["l2norm_fwd", "l2norm_fwd", "recurrent_gated_delta_rule"]
+    assert output.shape == (1, 2, 2, 4)
+    torch.testing.assert_close(output, torch.full_like(output, 4))
+    torch.testing.assert_close(state, torch.full_like(state, 3))
+
+
+def test_decode_pipeline_copies_functional_state_once():
+    state = torch.zeros((2, 1, 2, 2))
+
+    def recurrent(**kwargs):
+        return kwargs["value"], torch.full_like(kwargs["state"], 5)
+
+    run_gdn_decode_pipeline(
+        q=torch.zeros((1, 1, 1, 2)),
+        k=torch.zeros((1, 1, 1, 2)),
+        v=torch.zeros((1, 1, 1, 2)),
+        g=torch.zeros((1, 1, 1)),
+        beta=torch.zeros((1, 1, 1)),
+        state=state,
+        scale=2**-0.5,
+        actual_seq_lengths=torch.tensor([0, 1], dtype=torch.int32),
+        ssm_state_indices=torch.tensor([0], dtype=torch.int32),
+        l2norm=lambda value: value,
+        recurrent=recurrent,
+    )
+
+    torch.testing.assert_close(state, torch.full_like(state, 5))

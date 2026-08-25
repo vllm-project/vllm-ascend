@@ -197,6 +197,44 @@ def run_gdn_prefill_pipeline(
     return output.transpose(1, 2).contiguous(), final_state.transpose(-1, -2).contiguous()
 
 
+def run_gdn_decode_pipeline(
+    *,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    state: torch.Tensor,
+    scale: float,
+    actual_seq_lengths: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    l2norm: Callable[[torch.Tensor], torch.Tensor],
+    recurrent: Callable[..., Any],
+) -> torch.Tensor:
+    """Run ordinary (non-MTP) recurrent decode with native cache semantics."""
+
+    q = l2norm(q)
+    k = l2norm(k)
+    result = recurrent(
+        query=q.squeeze(0),
+        key=k.squeeze(0),
+        value=v.squeeze(0),
+        g=g.squeeze(0),
+        beta=beta.squeeze(0),
+        state=state,
+        scale=scale,
+        actual_seq_lengths=actual_seq_lengths,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=None,
+    )
+    if isinstance(result, (tuple, list)):
+        output, final_state = result
+        state.copy_(final_state)
+    else:
+        output = result
+    return output.unsqueeze(0)
+
+
 _FLA_OPERATOR_PATHS: dict[GDNOperator, tuple[str, str]] = {
     GDNOperator.CAUSAL_CONV1D: ("fla_npu.ops.ascendc", "causal_conv1d"),
     GDNOperator.L2NORM_FWD: ("fla_npu.ops.triton", "l2norm_fwd"),
@@ -321,6 +359,34 @@ class A5GDNOperatorDispatcher:
             )
             raise
 
+    def select_native_only(
+        self,
+        operator: GDNOperator,
+        signature: GDNRuntimeSignature,
+        *,
+        native: Callable[..., Any],
+        native_symbol: str,
+    ) -> GDNOperatorSelection:
+        """Select an intentionally retained native implementation and log it."""
+
+        cache_key = (operator, signature)
+        if cache_key in self._selections:
+            return self._selections[cache_key]
+        requested_override = self.config.overrides.get(operator)
+        if requested_override is GDNBackendMode.FLA_NPU:
+            raise RuntimeError(
+                f"GDN operator {operator.value} has no Stage 1 fla_npu replacement; "
+                "remove its per-operator override"
+            )
+        selection = GDNOperatorSelection(
+            GDNBackendMode.NATIVE,
+            native,
+            native_symbol,
+            "retained native implementation",
+        )
+        self._remember(operator, signature, selection)
+        return selection
+
     def _fallback_or_raise(
         self,
         operator: GDNOperator,
@@ -417,6 +483,122 @@ class A5GDNAdapter:
             metadata=metadata,
             operators=operators,
             chunk_size=self.signature.chunk_size,
+        )
+
+    def causal_conv1d(
+        self,
+        *,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        conv_state: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        cache_indices: torch.Tensor,
+        initial_state_mode: torch.Tensor | None,
+        activation_mode: int,
+        pad_slot_id: int,
+        run_mode: int,
+    ) -> torch.Tensor:
+        def native(
+            input_tensor,
+            conv_weight,
+            conv_bias,
+            conv_states,
+            **kwargs,
+        ):
+            output = torch.empty_like(input_tensor)
+            torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output,
+                input_tensor,
+                conv_weight,
+                conv_state=conv_states,
+                bias_opt=conv_bias,
+                query_start_loc_opt=kwargs["query_start_loc"],
+                cache_indices_opt=kwargs["cache_indices"],
+                initial_state_mode_opt=kwargs["initial_state_mode"],
+                num_accepted_tokens_opt=kwargs["num_accepted_tokens"],
+                activation_mode=kwargs["activation_mode"],
+                pad_slot_id=kwargs["pad_slot_id"],
+                run_mode=kwargs["run_mode"],
+            )
+            return output
+
+        selection = self.dispatcher.select(
+            GDNOperator.CAUSAL_CONV1D,
+            self.signature,
+            native=native,
+            native_symbol="torch.ops._C_ascend.npu_causal_conv1d_custom",
+        )
+        operator = self._logged_operator(
+            GDNOperator.CAUSAL_CONV1D,
+            selection,
+            phase="prefill" if run_mode == 0 else "decode",
+            stateful=True,
+        )
+        return operator(
+            x,
+            weight,
+            bias,
+            conv_state,
+            query_start_loc=query_start_loc,
+            cache_indices=cache_indices,
+            initial_state_mode=initial_state_mode,
+            num_accepted_tokens=None,
+            activation_mode=activation_mode,
+            pad_slot_id=pad_slot_id,
+            run_mode=run_mode,
+            head_num=0,
+        )
+
+    def decode(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        state: torch.Tensor,
+        scale: float,
+        actual_seq_lengths: torch.Tensor,
+        ssm_state_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+
+        l2_selection = self.dispatcher.select_native_only(
+            GDNOperator.L2NORM_FWD,
+            self.signature,
+            native=l2norm_fwd,
+            native_symbol="vllm.third_party.fla.l2norm_fwd",
+        )
+        recurrent_selection = self.dispatcher.select_native_only(
+            GDNOperator.RECURRENT_GATED_DELTA_RULE,
+            self.signature,
+            native=torch.ops._C_ascend.npu_recurrent_gated_delta_rule,
+            native_symbol="torch.ops._C_ascend.npu_recurrent_gated_delta_rule",
+        )
+        return run_gdn_decode_pipeline(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            state=state,
+            scale=scale,
+            actual_seq_lengths=actual_seq_lengths,
+            ssm_state_indices=ssm_state_indices,
+            l2norm=self._logged_operator(
+                GDNOperator.L2NORM_FWD,
+                l2_selection,
+                phase="decode",
+                stateful=False,
+            ),
+            recurrent=self._logged_operator(
+                GDNOperator.RECURRENT_GATED_DELTA_RULE,
+                recurrent_selection,
+                phase="decode",
+                stateful=True,
+            ),
         )
 
     def _prefill_operators(self, metadata: GDNPrefillMetadata) -> dict[GDNOperator, Callable[..., Any]]:
@@ -638,7 +820,7 @@ class A5GDNAdapter:
             return call
 
         specs = {
-            GDNOperator.L2NORM_FWD: (native_l2norm, "vllm.third_party.fla.l2norm_fwd", lambda raw: raw),
+            GDNOperator.L2NORM_FWD: (native_l2norm, "vllm.third_party.fla.l2norm_fwd", None),
             GDNOperator.CHUNK_LOCAL_CUMSUM: (
                 native_cumsum_normalized,
                 "vllm_ascend.triton.chunk_local_cumsum",
@@ -672,13 +854,21 @@ class A5GDNAdapter:
         }
         selected: dict[GDNOperator, Callable[..., Any]] = {}
         for operator, (native, native_symbol, normalize_fla) in specs.items():
-            selection = self.dispatcher.select(
-                operator,
-                self.signature,
-                native=native,
-                native_symbol=native_symbol,
-                fla_resolver=self._normalized_fla_resolver(operator, normalize_fla),
-            )
+            if normalize_fla is None:
+                selection = self.dispatcher.select_native_only(
+                    operator,
+                    self.signature,
+                    native=native,
+                    native_symbol=native_symbol,
+                )
+            else:
+                selection = self.dispatcher.select(
+                    operator,
+                    self.signature,
+                    native=native,
+                    native_symbol=native_symbol,
+                    fla_resolver=self._normalized_fla_resolver(operator, normalize_fla),
+                )
             selected[operator] = self._logged_operator(operator, selection, phase="prefill", stateful=False)
         return selected
 
