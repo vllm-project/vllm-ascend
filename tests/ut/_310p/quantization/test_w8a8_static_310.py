@@ -41,7 +41,7 @@ class TestAscendW8A8LinearMethod310(TestBase):
         params = self.method.get_perchannel_param(10, torch.float16)
 
         self.assertEqual(params["quant_bias"].dtype, torch.int32)
-        self.assertEqual(params["deq_scale"].dtype, torch.int64)
+        self.assertEqual(params["deq_scale"].dtype, torch.float32)
         self.assertEqual(params["weight_scale"].dtype, torch.float16)
         self.assertEqual(params["weight_offset"].dtype, torch.float16)
 
@@ -82,7 +82,8 @@ class TestAscendW8A8LinearMethod310(TestBase):
 
         # positional args
         self.assertTrue(torch.equal(args[0], expect_x_output))
-        self.assertTrue(torch.equal(args[1], layer.weight.data))
+        # 310P passes a transpose view so QuantBatchMatmulV3 sees transpose_x2=True.
+        self.assertTrue(torch.equal(args[1], layer.weight.data.transpose(0, 1)))
         self.assertTrue(torch.equal(args[2], layer.deq_scale))
 
         # kwargs
@@ -114,7 +115,7 @@ class TestAscendW8A8LinearMethod310(TestBase):
         (args, kwargs) = mock_npu_quant_matmul.call_args
 
         self.assertTrue(torch.equal(args[0], x))
-        self.assertTrue(torch.equal(args[1], layer.weight.data))
+        self.assertTrue(torch.equal(args[1], layer.weight.data.transpose(0, 1)))
         self.assertTrue(torch.equal(args[2], layer.deq_scale))
 
         self.assertTrue(torch.equal(kwargs["bias"], layer.quant_bias))

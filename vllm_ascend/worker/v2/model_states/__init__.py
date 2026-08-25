@@ -36,9 +36,7 @@ def init_asecnd_model_state(
         cls = model.get_model_state_cls()
         return cls(vllm_config, model, encoder_cache, device)
 
-    # Minimal mainline hook: 310P needs Triton-free model states under
-    # ``vllm_ascend._310p.worker.v2.model_state``. Other platforms keep the
-    # shared Ascend defaults below.
+    # 310P uses Triton-free states under ``vllm_ascend._310p.worker.v2.model_state``.
     if vllm_config.model_config.is_hybrid:
         if is_310p():
             from vllm_ascend._310p.worker.v2.model_state import Ascend310PMambaHybridModelState

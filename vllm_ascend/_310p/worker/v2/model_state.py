@@ -11,7 +11,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
@@ -24,40 +23,6 @@ from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridMod
 
 class _Ascend310PModelStateMixin:
     """310P RoPE and full-graph state shared by default and hybrid models."""
-
-    def _init_310p_state(
-        self,
-        vllm_config: VllmConfig,
-        model: nn.Module,
-        encoder_cache: EncoderCache | None,
-        device: torch.device,
-    ) -> None:
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.model = model
-        self.device = device
-        self.supports_mm_inputs = encoder_cache is not None
-        self.max_model_len = self.model_config.max_model_len
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
-        self.dtype = self.model_config.dtype
-        self._capture_seq_lens_by_ptr: dict[int, torch.Tensor] = {}
-
-        if self.supports_mm_inputs:
-            assert encoder_cache is not None
-            self.encoder_cache = encoder_cache
-            self.encoder_runner = EncoderRunner(
-                model=self.model,
-                max_num_tokens=self.max_num_tokens,
-                hidden_size=self.inputs_embeds_size,
-                encoder_cache=encoder_cache,
-                dtype=self.dtype,
-                device=self.device,
-            )
-
-        self._replace_310p_rope_state(encoder_cache)
 
     def _replace_310p_rope_state(self, encoder_cache: EncoderCache | None) -> None:
         self.rope_state = get_310p_rope_state(
@@ -152,9 +117,12 @@ class Ascend310PModelState(_Ascend310PModelStateMixin, AscendModelState):
         encoder_cache: EncoderCache | None,
         device: torch.device,
     ) -> None:
-        # Standard attention only needs the 310P RoPE/graph subset. Hybrid
-        # models must call the full parent constructor first (see below).
-        self._init_310p_state(vllm_config, model, encoder_cache, device)
+        # Initialize the full Ascend/DefaultModelState contract first so
+        # attributes such as ``prompt_embeds_state`` exist, then swap RoPE to
+        # the Triton-free 310P implementation.
+        AscendModelState.__init__(self, vllm_config, model, encoder_cache, device)
+        self._capture_seq_lens_by_ptr = {}
+        self._replace_310p_rope_state(encoder_cache)
 
 
 class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHybridModelState):

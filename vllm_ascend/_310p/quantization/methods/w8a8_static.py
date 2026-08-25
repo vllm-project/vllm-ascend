@@ -37,7 +37,11 @@ class AscendW8A8LinearMethod310(AscendW8A8Linear310pScheme):
     def get_perchannel_param(self, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params: dict[str, Any] = {}
         params["quant_bias"] = torch.empty(output_size, dtype=torch.int32)
-        params["deq_scale"] = torch.empty(output_size, dtype=torch.int64)
+        # ModelSlim W8A8 stores float32 ``deq_scale``. On 310P, ACL accepts float32
+        # scales for ``npu_quant_matmul``. Allocating int64 (mainline fp16 path)
+        # causes float32→int64 load casts that zero tiny scales and garbles output
+        # (seen on Qwen3-8B-W8A8 with ``--dtype float16``).
+        params["deq_scale"] = torch.empty(output_size, dtype=torch.float32)
         params["weight_scale"] = torch.empty(output_size, 1, dtype=params_dtype)
         params["weight_offset"] = torch.empty(output_size, 1, dtype=params_dtype)
         return params
@@ -59,15 +63,11 @@ class AscendW8A8LinearMethod310(AscendW8A8Linear310pScheme):
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
 
-        # NOTE(310P):
-        # - Current torch_npu.npu_quant_matmul on Ascend 310P expects the weight layout in a transposed form
-        #   for correct/efficient execution, so we pass `layer.weight.T` here.
-        # - This is a temporary workaround. The planned replacement quant-matmul op will accept the
-        #   canonical (non-transposed) weight layout directly, so this explicit transpose will be removed
-        #   once that op is enabled on 310P.
+        # 310P QuantBatchMatmulV3 requires transpose_x2=True: keep FRACTAL_NZ
+        # weight as [N, K] and pass a transpose view (same as W8A8S).
         return torch_npu.npu_quant_matmul(
             x,
-            layer.weight.data,
+            layer.weight.data.transpose(0, 1),
             layer.deq_scale,
             bias=quant_bias,
             output_dtype=layer.params_dtype,
@@ -91,8 +91,13 @@ class AscendW8A8LinearMethod310(AscendW8A8Linear310pScheme):
         ).to(layer.aclnn_input_scale.dtype)
 
         # ---- matmul stage tensor ----
-        layer.weight.data = maybe_trans_nz(layer.weight.data).transpose(0, 1)
+        layer.weight.data = maybe_trans_nz(layer.weight.data)
 
         # ---- dequant stage tensors ----
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
+        if layer.deq_scale.dtype != torch.float32:
+            layer.deq_scale = torch.nn.Parameter(
+                layer.deq_scale.data.to(torch.float32),
+                requires_grad=False,
+            )

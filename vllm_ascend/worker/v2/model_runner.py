@@ -236,6 +236,18 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
+    # Hooks so 310P can override Triton helpers without changing the call sites.
+    # Default path forwards positional args only; extra kwargs are ignored so
+    # mainline Triton helpers stay unchanged for non-310P platforms.
+    def _prepare_prefill_inputs(self, *args, **kwargs) -> None:
+        prepare_prefill_inputs(*args)
+
+    def _prepare_pos_seq_lens(self, *args, **kwargs) -> None:
+        prepare_pos_seq_lens(*args)
+
+    def _combine_sampled_and_draft_tokens(self, *args, **kwargs):
+        return combine_sampled_and_draft_tokens(*args)
+
     if vllm_version_is("0.27.1"):
 
         def prepare_inputs(
@@ -345,7 +357,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Get prefill tokens if any.
             if batch_has_prefill:
-                prepare_prefill_inputs(
+                self._prepare_prefill_inputs(
                     self.input_buffers.input_ids,
                     self.req_states.next_prefill_tokens,
                     idx_mapping,
@@ -356,7 +368,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
             # Prepare positions and seq_lens.
-            prepare_pos_seq_lens(
+            self._prepare_pos_seq_lens(
                 idx_mapping,
                 query_start_loc,
                 self.req_states.num_computed_tokens.gpu,
@@ -370,7 +382,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
-            logits_indices = combine_sampled_and_draft_tokens(
+            logits_indices = self._combine_sampled_and_draft_tokens(
                 self.input_buffers.input_ids,
                 idx_mapping,
                 self.req_states.last_sampled_tokens,
@@ -562,7 +574,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Get prefill tokens if any.
             if batch_has_prefill:
-                prepare_prefill_inputs(
+                self._prepare_prefill_inputs(
                     self.input_buffers.input_ids,
                     self.req_states.next_prefill_tokens,
                     idx_mapping,
@@ -573,7 +585,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
 
             # Prepare positions and seq_lens.
-            prepare_pos_seq_lens(
+            self._prepare_pos_seq_lens(
                 idx_mapping,
                 query_start_loc,
                 self.req_states.num_computed_tokens.gpu,
@@ -587,7 +599,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
-            logits_indices = combine_sampled_and_draft_tokens(
+            logits_indices = self._combine_sampled_and_draft_tokens(
                 self.input_buffers.input_ids,
                 idx_mapping,
                 self.req_states.last_sampled_tokens,
