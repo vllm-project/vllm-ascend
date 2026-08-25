@@ -486,6 +486,15 @@ class TestApplyVllmMapper(TestBase):
 
 
 class TestQuantPrefixMapper(TestBase):
+    def test_qwen3_5_text_backbones_use_packed_module_mappings(self):
+        dense_mapping = get_packed_modules_mapping("qwen3_5_text")
+        moe_mapping = get_packed_modules_mapping("qwen3_5_moe_text")
+        self.assertEqual(dense_mapping["qkv_proj"], ["q_proj", "k_proj", "v_proj"])
+        self.assertEqual(
+            moe_mapping["experts"],
+            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        )
+
     def test_lm_head_maps_to_language_model_lm_head_when_quant_key_exists(self):
         config = AscendModelSlimConfig({"language_model.lm_head.weight": "FLOAT"})
 

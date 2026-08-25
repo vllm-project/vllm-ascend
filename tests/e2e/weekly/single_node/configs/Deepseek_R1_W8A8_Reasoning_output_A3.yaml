@@ -41,8 +41,6 @@ _server_cmd: &server_cmd
   - "--no-enable-prefix-caching"
   - "--reasoning-parser"
   - "deepseek_r1"
-  - "--additional-config"
-  - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false}}'
 
 _benchmarks: &benchmarks
   acc:

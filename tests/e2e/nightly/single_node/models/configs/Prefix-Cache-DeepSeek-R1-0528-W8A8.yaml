@@ -34,7 +34,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.9"
       - "--additional-config"
-      - '{"enable_weight_nz_layout": true}'
+      - '{"weight_nz_mode": 1}'
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method": "mtp"}'
     test_content:
