@@ -23,9 +23,9 @@ MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
 DP_SIZE = 4
 
 # Fault-detection timeout budget:
-# - CPU: Gloo DP allreduce timeout (30s) detects the dead peer.
+# - CPU: Gloo DP allreduce timeout  detects the dead peer.
 # - NPU: HCSP operator timeout detects the dead peer.
-# - Deadline (45s): slowest fallback (30s) + margin.
+# - Deadline : slowest fallback + margin.
 CPU_DISTRIBUTED_TIMEOUT_S = 15
 FT_COMMUNICATION_ABORT_TIMEOUT_S = 10
 FAULT_DETECTION_DEADLINE_S = 45
