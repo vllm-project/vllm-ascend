@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
 )
+
 from vllm_ascend.utils import vllm_version_is
 
 
