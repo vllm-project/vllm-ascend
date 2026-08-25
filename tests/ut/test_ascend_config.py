@@ -511,11 +511,10 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_transpose_kv_cache_by_block_ignores_removed_env(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"enable_transpose_kv_cache_by_block": False}
-        with patch.dict(os.environ, {"VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "1"}):
+        with patch.dict(os.environ, {"VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0"}):
             ascend_config = init_ascend_config(test_vllm_config)
 
-        self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
+        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.warning")
