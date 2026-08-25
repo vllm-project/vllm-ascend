@@ -80,6 +80,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -133,6 +134,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
+    is_compatible_mixed_li_c8_indexer_specs,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_cache_tensors_for_sparse_kv_offload,
@@ -3747,7 +3749,10 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
-        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
+        self.layerwise_kv_cache_reuse_applied = apply_layerwise_kv_cache_plan(
+            kv_cache_config,
+            self.vllm_config,
+        )
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
@@ -3992,6 +3997,69 @@ class NPUModelRunner(GPUModelRunner):
 
         return dsa_k_tensor, dsa_k_scale_tensor
 
+    def _allocate_mixed_li_c8_indexer_tensors(
+        self,
+        kv_cache_tensor: KVCacheTensor,
+        specs: list[KVCacheSpec],
+        num_blocks: int,
+        alignment: int,
+        share_raw_buffer: bool,
+    ) -> dict[str, tuple[torch.Tensor, ...]]:
+        """Allocate compatible mixed indexers with optional layerwise sharing."""
+        raw_buffer = None
+        if share_raw_buffer:
+            expected_size = max(spec.page_size_bytes for spec in specs) * num_blocks
+            if kv_cache_tensor.size != expected_size:
+                raise ValueError(
+                    "Mixed layerwise indexer buffer has an unexpected size: "
+                    f"expected {expected_size}, got {kv_cache_tensor.size}."
+                )
+            raw_buffer = self._allocate_int8_cache_tensor(kv_cache_tensor.size, alignment)
+
+        raw_caches: dict[str, tuple[torch.Tensor, ...]] = {}
+        for layer_name, spec in zip(kv_cache_tensor.shared_by, specs, strict=True):
+            assert isinstance(spec, AscendSFAIndexerCacheSpec)
+            k_tensor_size = (
+                num_blocks
+                * spec.sfa_dcp_replicated_indexer_size
+                * spec.block_size
+                * spec.num_kv_heads
+                * spec.head_size
+                * get_dtype_size(spec.dtype)
+            )
+            scale_offset = None
+            required_size = k_tensor_size
+            if spec.scale_dim:
+                scale_tensor_size = (
+                    num_blocks
+                    * spec.sfa_dcp_replicated_indexer_size
+                    * spec.block_size
+                    * spec.num_kv_heads
+                    * spec.scale_dim
+                    * get_dtype_size(spec.scale_dtype)
+                )
+                scale_offset = self._align_up(k_tensor_size, get_dtype_size(spec.scale_dtype))
+                required_size = scale_offset + scale_tensor_size
+
+            layer_raw_buffer = (
+                raw_buffer
+                if raw_buffer is not None
+                else self._allocate_int8_cache_tensor(required_size, alignment)
+            )
+            if required_size > layer_raw_buffer.numel():
+                raise ValueError(
+                    f"Mixed layerwise indexer views for {layer_name} need "
+                    f"{required_size} bytes, but the shared buffer has {layer_raw_buffer.numel()} bytes."
+                )
+            if scale_offset is None:
+                raw_caches[layer_name] = (layer_raw_buffer[:k_tensor_size],)
+                continue
+            raw_caches[layer_name] = (
+                layer_raw_buffer[:k_tensor_size],
+                layer_raw_buffer[scale_offset:required_size],
+            )
+        return raw_caches
+
     def _allocate_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
@@ -4025,6 +4093,18 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
+            shared_specs = [layer_kv_cache_spec[layer_name] for layer_name in kv_cache_tensor.shared_by]
+            if is_compatible_mixed_li_c8_indexer_specs(shared_specs):
+                kv_cache_raw_tensors.update(
+                    self._allocate_mixed_li_c8_indexer_tensors(
+                        kv_cache_tensor,
+                        shared_specs,
+                        kv_cache_config.num_blocks,
+                        alignment,
+                        share_raw_buffer=getattr(self, "layerwise_kv_cache_reuse_applied", False),
+                    )
+                )
+                continue
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers

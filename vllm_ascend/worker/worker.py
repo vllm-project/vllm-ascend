@@ -66,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_reuse_layout,
     get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
+    is_layerwise_reuse_requested,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_host_device_memory_usage_ratio,
@@ -949,6 +950,8 @@ class NPUWorker(WorkerBase):
         num_layers = len(physical_layers)
         if num_layers < base_layers:
             return num_layers, num_layers, 1.0
+        if not is_layerwise_reuse_requested(kv_cache_spec, base_layers, extra_config):
+            return num_layers, num_layers, 1.0
         reuse_layout = build_layerwise_reuse_layout(
             kv_cache_spec,
             base_layers,
@@ -962,11 +965,13 @@ class NPUWorker(WorkerBase):
         physical_page_bytes = 0
         for slot in reuse_layout.buffer_slots:
             physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
-            for layer in slot:
-                indexer = reuse_layout.layer_cache_specs[layer].indexer
-                if indexer is not None:
-                    physical_page_bytes += indexer.spec.page_size_bytes
-                    break
+            indexer_page_sizes = [
+                indexer.spec.page_size_bytes
+                for layer in slot
+                if (indexer := reuse_layout.layer_cache_specs[layer].indexer) is not None
+            ]
+            if indexer_page_sizes:
+                physical_page_bytes += max(indexer_page_sizes)
         return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:

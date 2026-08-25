@@ -76,8 +76,40 @@ def test_no_reuse_skips_topology_validation():
         ],
     )
 
-    apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(2, 2))
+    assert apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(2, 2)) is False
 
+    assert kv_cache_config.kv_cache_tensors == original_tensors
+
+
+def test_no_reuse_skips_multi_component_layer_validation():
+    spec = MambaSpec(
+        block_size=2,
+        shapes=((1,),),
+        dtypes=(torch.int8,),
+    )
+    suffixes = (
+        "compressor.state_cache",
+        "indexer.k_cache",
+        "indexer.compressor.state_cache",
+        "swa_cache",
+        "attn",
+    )
+    layer_names = [f"model.layers.{layer}.self_attn.{suffix}" for layer in range(2) for suffix in suffixes]
+    original_tensors = [KVCacheTensor(size=16, shared_by=[layer_name]) for layer_name in layer_names]
+    kv_cache_config = SimpleNamespace(
+        kv_cache_tensors=original_tensors.copy(),
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=layer_names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=dict.fromkeys(layer_names, spec),
+                ),
+            )
+        ],
+    )
+
+    assert apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(2, 2)) is False
     assert kv_cache_config.kv_cache_tensors == original_tensors
 
 
@@ -461,6 +493,76 @@ def _make_sfa_indexer_spec() -> AscendSFAIndexerCacheSpec:
         scale_dtype=torch.float16,
         cache_sparse_li_c8=True,
     )
+
+
+def _make_unquantized_sfa_indexer_spec() -> AscendSFAIndexerCacheSpec:
+    return AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.bfloat16,
+        cache_sparse_li_c8=False,
+    )
+
+
+def test_mixed_li_c8_indexers_share_one_buffer_per_main_slot():
+    main_spec = _make_sfa_main_spec()
+    c8_spec = _make_sfa_indexer_spec()
+    bf16_spec = _make_unquantized_sfa_indexer_spec()
+    main_by_layer = {layer: f"model.layers.{layer}.self_attn.attn" for layer in range(6)}
+    indexer_by_layer = {layer: f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in range(6)}
+    indexer_specs = {indexer_by_layer[layer]: c8_spec if layer % 2 == 0 else bf16_spec for layer in range(6)}
+    num_blocks = 2
+    kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            *(
+                KVCacheTensor(size=main_spec.page_size_bytes * num_blocks, shared_by=[name])
+                for name in main_by_layer.values()
+            ),
+            *(
+                KVCacheTensor(size=spec.page_size_bytes * num_blocks, shared_by=[name])
+                for name, spec in indexer_specs.items()
+            ),
+        ],
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=list(main_by_layer.values()),
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=dict.fromkeys(main_by_layer.values(), main_spec),
+                ),
+            ),
+            SimpleNamespace(
+                layer_names=list(indexer_by_layer.values()),
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=indexer_specs,
+                ),
+            ),
+        ],
+    )
+    vllm_config = _make_vllm_config(6, 3)
+    vllm_config.kv_transfer_config.kv_connector_extra_config["layerwise_independent_layers"] = []
+
+    apply_layerwise_kv_cache_plan(kv_cache_config, vllm_config)
+
+    main_tensors = [
+        tensor
+        for tensor in kv_cache_config.kv_cache_tensors
+        if not any(".indexer." in name for name in tensor.shared_by)
+    ]
+    indexer_tensors = [
+        tensor for tensor in kv_cache_config.kv_cache_tensors if any(".indexer." in name for name in tensor.shared_by)
+    ]
+    assert len(main_tensors) == 3
+    assert len(indexer_tensors) == 3
+    assert [tensor.shared_by for tensor in indexer_tensors] == [
+        [indexer_by_layer[0], indexer_by_layer[3]],
+        [indexer_by_layer[1], indexer_by_layer[4]],
+        [indexer_by_layer[2], indexer_by_layer[5]],
+    ]
+    assert all(tensor.size == bf16_spec.page_size_bytes * num_blocks for tensor in indexer_tensors)
 
 
 def test_component_sharing_merges_main_across_a_and_b_layers():

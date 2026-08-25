@@ -222,6 +222,45 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(len(worker.layer_load_tasks), 5)
         self.assertEqual(len(worker.layer_save_tasks), 5)
 
+    def test_concrete_no_reuse_layout_is_not_reenabled_from_model_layer_count(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 4
+        worker.num_kv_cache_groups = 1
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        worker.use_gva_layerwise = True
+        worker._extra_config = {
+            "layerwise_num_shared_buffers": 2,
+            "layerwise_independent_layers": [],
+        }
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        )
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[
+                        "model.layers.0.self_attn.attn",
+                        "model.layers.1.self_attn.attn",
+                    ],
+                    kv_cache_spec=spec,
+                )
+            ]
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertIsNone(worker._layerwise_reuse_layout)
+        self.assertFalse(worker.layerwise_offload)
+        self.assertEqual(worker.prefetch_layer_map, {})
+        self.assertEqual(worker.independent_layers, [])
+
 
 class TestKVPoolWorkerInit(unittest.TestCase):
     """Test KVPoolWorker initialization with mocked dependencies."""

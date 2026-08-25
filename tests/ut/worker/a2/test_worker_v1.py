@@ -148,6 +148,61 @@ class TestNPUWorker(TestBase):
         self.assertEqual((num_layers, num_slots), (7, 3))
         self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
 
+    def test_layer_reuse_memory_factor_uses_largest_mixed_indexer(self):
+        from vllm_ascend.core.kv_cache_interface import (
+            AscendMLAAttentionSpec,
+            AscendSFAIndexerCacheSpec,
+        )
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 2
+        main_spec = AscendMLAAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.bfloat16,
+        )
+        bf16_indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            cache_sparse_li_c8=False,
+        )
+        c8_indexer_spec = AscendSFAIndexerCacheSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_li_c8=True,
+        )
+        specs = {
+            "model.layers.0.self_attn.attn": main_spec,
+            "model.layers.1.self_attn.attn": main_spec,
+            "model.layers.0.self_attn.indexer.k_cache": bf16_indexer_spec,
+            "model.layers.1.self_attn.indexer.k_cache": c8_indexer_spec,
+        }
+
+        num_layers, num_slots, factor = worker._get_layerwise_kv_cache_memory_info(
+            specs,
+            {
+                "layerwise_num_shared_buffers": 1,
+                "layerwise_independent_layers": [],
+            },
+        )
+
+        expected_logical_bytes = (
+            2 * main_spec.page_size_bytes + bf16_indexer_spec.page_size_bytes + c8_indexer_spec.page_size_bytes
+        )
+        expected_physical_bytes = main_spec.page_size_bytes + bf16_indexer_spec.page_size_bytes
+        self.assertEqual((num_layers, num_slots), (2, 1))
+        self.assertEqual(factor, expected_logical_bytes / expected_physical_bytes)
+
     def test_incomplete_layer_layout_does_not_scale_memory_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -196,6 +251,29 @@ class TestNPUWorker(TestBase):
         )
 
         self.assertEqual(memory_info, (3, 3, 1.0))
+
+    def test_no_reuse_does_not_validate_multi_component_layers(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_config = MagicMock()
+        worker.parallel_config = MagicMock()
+        worker.model_config.get_num_layers.return_value = 2
+        suffixes = (
+            "compressor.state_cache",
+            "indexer.k_cache",
+            "indexer.compressor.state_cache",
+            "swa_cache",
+            "attn",
+        )
+        specs = {f"model.layers.{layer}.self_attn.{suffix}": MagicMock() for layer in range(2) for suffix in suffixes}
+
+        memory_info = worker._get_layerwise_kv_cache_memory_info(
+            specs,
+            {"layerwise_num_shared_buffers": 2},
+        )
+
+        self.assertEqual(memory_info, (2, 2, 1.0))
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")

@@ -415,6 +415,108 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_spec.page_size_bytes, 2 * 16 * (128 + 2))
         self.assertFalse(hasattr(main_spec, "sfa_dcp_replicated_indexer_size"))
 
+    def test_mixed_li_c8_indexers_share_raw_buffer_only_with_layer_reuse(self):
+        runner = self._build_runner()
+        runner.vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_connector="AscendStoreConnector",
+            kv_connector_extra_config={
+                "backend": "memcache",
+                "use_layerwise": True,
+            },
+        )
+        bf16_name = "model.layers.1.self_attn.indexer.k_cache"
+        c8_name = "model.layers.4.self_attn.indexer.k_cache"
+        bf16_spec = AscendSFAIndexerCacheSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_sparse_li_c8=False,
+        )
+        c8_spec = AscendSFAIndexerCacheSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.int8,
+            scale_dim=1,
+            scale_dtype=torch.float16,
+            cache_sparse_li_c8=True,
+        )
+        num_blocks = 2
+        group_spec = UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={bf16_name: bf16_spec, c8_name: c8_spec},
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=bf16_spec.page_size_bytes * num_blocks,
+                    shared_by=[c8_name, bf16_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[c8_name, bf16_name],
+                    kv_cache_spec=group_spec,
+                )
+            ],
+        )
+        backend = MagicMock()
+        backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = MagicMock(
+            return_value=[
+                SimpleNamespace(
+                    kv_cache_spec=bf16_spec,
+                    backend=backend,
+                    layer_names=[bf16_name],
+                ),
+                SimpleNamespace(
+                    kv_cache_spec=c8_spec,
+                    backend=backend,
+                    layer_names=[c8_name],
+                ),
+            ]
+        )
+
+        raw_caches_without_reuse = runner._allocate_kv_cache_tensors(kv_cache_config)
+        self.assertNotEqual(
+            raw_caches_without_reuse[bf16_name][0].untyped_storage().data_ptr(),
+            raw_caches_without_reuse[c8_name][0].untyped_storage().data_ptr(),
+        )
+        caches_without_reuse = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches_without_reuse,
+        )
+        self.assertEqual(len(caches_without_reuse[bf16_name]), 1)
+        self.assertEqual(caches_without_reuse[bf16_name][0].dtype, torch.bfloat16)
+        self.assertEqual(len(caches_without_reuse[c8_name]), 2)
+        self.assertEqual(caches_without_reuse[c8_name][0].dtype, torch.int8)
+        self.assertEqual(caches_without_reuse[c8_name][1].dtype, torch.float16)
+
+        runner.layerwise_kv_cache_reuse_applied = True
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        bf16_raw = raw_caches[bf16_name]
+        c8_raw = raw_caches[c8_name]
+        storage_ptr = bf16_raw[0].untyped_storage().data_ptr()
+        self.assertEqual(storage_ptr, c8_raw[0].untyped_storage().data_ptr())
+        self.assertEqual(storage_ptr, c8_raw[1].untyped_storage().data_ptr())
+
+        caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)
+        self.assertEqual(len(caches[bf16_name]), 1)
+        self.assertEqual(caches[bf16_name][0].dtype, torch.bfloat16)
+        self.assertEqual(caches[bf16_name][0].shape, (2, 16, 1, 128))
+        self.assertEqual(len(caches[c8_name]), 2)
+        self.assertEqual(caches[c8_name][0].dtype, torch.int8)
+        self.assertEqual(caches[c8_name][0].shape, (2, 16, 1, 128))
+        self.assertEqual(caches[c8_name][1].dtype, torch.float16)
+        self.assertEqual(caches[c8_name][1].shape, (2, 16, 1, 1))
+
     def test_sparse_sfa_and_li_c8_allocate_and_reshape_independently(self):
         runner = self._build_runner()
         runner.use_sparse = True
