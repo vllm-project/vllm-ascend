@@ -136,7 +136,6 @@ from typing import Any, cast
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from proxy_utils import append_generated_text
 
 logger = logging.getLogger(__name__)
 
@@ -1089,7 +1088,12 @@ async def handle_completions_impl(api: str, request: Request):
                             retry = True
                             retry_count += 1
                             if chat_flag:
-                                messages[0]["content"] = append_generated_text(origin_prompt, generated_token)
+                                messages[0]["content"] = (
+                                    origin_prompt
+                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
+                                    if isinstance(origin_prompt, list)
+                                    else (origin_prompt or "") + generated_token
+                                )
                             else:
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
