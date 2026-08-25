@@ -114,6 +114,8 @@ class TestPrefillMLAPreprocessResult(TestBase):
         self.assertIsNone(result.k_nope)
         self.assertIsNone(result.k_pe)
         self.assertIsNone(result.value)
+        self.assertIsNone(result.kv_lora)
+        self.assertIsNone(result.k_pe_cache)
 
     def test_prefill_mla_preprocess_result_with_values(self):
         q_nope = torch.randn(2, 4, 8)
@@ -981,7 +983,7 @@ class TestAscendMLAImpl(TestBase):
             "rotary_emb": MagicMock(),
         }
 
-        self.impl = AscendMLAImpl(
+        self.impl_init_kwargs = dict(
             num_heads=num_heads,
             head_size=head_size,
             scale=scale,
@@ -995,6 +997,7 @@ class TestAscendMLAImpl(TestBase):
             kv_sharing_target_layer_name=None,
             **kwargs,
         )
+        self.impl = AscendMLAImpl(**self.impl_init_kwargs)
         self.impl.fa_quant_layer = False
 
     def test_init(self):
@@ -1017,6 +1020,23 @@ class TestAscendMLAImpl(TestBase):
         # 256 is power of 2, so padding should be 0
         self.assertEqual(self.impl.num_heads_padded, 256)
         self.assertEqual(self.impl.head_padding, 0)
+
+    def test_mla_extras_use_layer_rotary_emb(self):
+        global_layer_kwargs = dict(self.impl_init_kwargs)
+        global_layer_kwargs["k_rope_only_layernorm"] = MagicMock()
+        global_layer_kwargs["sliding_window"] = None
+        with patch(
+            "vllm_ascend.attention.mla_v1.get_current_vllm_config",
+            return_value=self.impl.vllm_config,
+        ):
+            global_layer = AscendMLAImpl(**global_layer_kwargs)
+
+            sliding_layer_kwargs = dict(global_layer_kwargs)
+            sliding_layer_kwargs["sliding_window"] = 511
+            sliding_layer = AscendMLAImpl(**sliding_layer_kwargs)
+
+        self.assertTrue(global_layer.use_layer_rotary_emb)
+        self.assertTrue(sliding_layer.use_layer_rotary_emb)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
