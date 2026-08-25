@@ -169,6 +169,8 @@ class SparseKVOffloadMemoryBudget:
 def _split_host_device_kv_specs(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> tuple[list[KVCacheSpec], list[KVCacheSpec]]:
+    if not kv_cache_spec:
+        raise ValueError("Sparse KV offload requires a non-empty kv_cache_spec")
     host_specs: list[KVCacheSpec] = []
     device_specs: list[KVCacheSpec] = []
     for spec in kv_cache_spec.values():
