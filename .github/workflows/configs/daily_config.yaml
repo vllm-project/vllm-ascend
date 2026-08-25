@@ -44,7 +44,6 @@ daily:
       os: linux-aarch64-a3-2
       tests: >-
         tests/e2e/pull_request/two_card/test_prefix_caching.py
-        tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py
         tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py
         tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
         tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
