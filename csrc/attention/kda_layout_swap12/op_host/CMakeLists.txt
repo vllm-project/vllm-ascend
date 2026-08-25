@@ -12,6 +12,8 @@ if (BUILD_OPEN_PROJECT)
 endif()
 
 add_modules_sources(OPTYPE kda_layout_swap12 ACLNNTYPE aclnn_exclude)
+# The kernel explicitly orders MTE2/MTE3 with SetFlag/WaitFlag. Disable
+# compiler-inserted synchronization so it does not duplicate those barriers.
 add_ops_compile_options(
     OP_NAME KdaLayoutSwap12
     OPTIONS --cce-auto-sync=off
