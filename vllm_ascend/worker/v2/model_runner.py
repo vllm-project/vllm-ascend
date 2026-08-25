@@ -953,13 +953,20 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
+        descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
+        is_uniform_decode_graph = num_tokens_padded == descriptor_num_reqs * self.decode_query_len
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
             and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            and not is_uniform_decode_graph
         ):
             num_reqs_padded = num_reqs
         else:
-            num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
+            # Preserve the captured request shape for uniform decode graphs.
+            # GDN full graphs capture metadata at request granularity, so
+            # collapsing all padded tokens into one request changes the graph
+            # topology between capture and replay.
+            num_reqs_padded = descriptor_num_reqs
 
         if num_tokens_padded == num_reqs_padded * self.decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
