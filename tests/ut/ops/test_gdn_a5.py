@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+import torch
 
 from vllm_ascend.ops.gdn_a5 import (
     A5GDNOperatorDispatcher,
     GDNBackendMode,
     GDNOperator,
+    GDNPrefillMetadata,
     GDNRuntimeSignature,
     parse_gdn_backend_config,
+    run_gdn_prefill_pipeline,
 )
 
 
@@ -205,4 +208,112 @@ def test_runtime_error_is_propagated_without_fallback():
             phase="decode",
             layer_name="model.layers.0.linear_attn",
             state_may_be_mutated=True,
+        )
+
+
+def test_prefill_pipeline_matches_reference_order_and_layouts():
+    calls = []
+    batch, tokens, key_heads, value_heads, dim = 1, 3, 1, 2, 4
+    q = torch.arange(batch * tokens * key_heads * dim, dtype=torch.float32).view(
+        batch, tokens, key_heads, dim
+    )
+    k = q + 1
+    v = torch.arange(batch * tokens * value_heads * dim, dtype=torch.float32).view(
+        batch, tokens, value_heads, dim
+    )
+    g = torch.full((batch, tokens, value_heads), -0.25)
+    beta = torch.full((batch, tokens, value_heads), 0.5)
+    state = torch.arange(value_heads * dim * dim, dtype=torch.float32).view(1, value_heads, dim, dim)
+
+    def l2norm(x):
+        calls.append("l2norm_fwd")
+        return x
+
+    def cumsum(gate, **kwargs):
+        calls.append("chunk_local_cumsum")
+        return gate
+
+    def kkt(key, gate, beta_value, **kwargs):
+        calls.append("chunk_scaled_dot_kkt")
+        assert key.shape == (batch, value_heads, tokens, dim)
+        return torch.zeros((batch, tokens, value_heads, 64), dtype=key.dtype)
+
+    def solve(a, **kwargs):
+        calls.append("solve_tri")
+        return a
+
+    def recompute(key, value, beta_value, a, gate, **kwargs):
+        calls.append("recompute_w_u_fwd")
+        assert key.shape == value.shape == (batch, value_heads, tokens, dim)
+        return key, value
+
+    def fwd_h(key, w, u, gate, initial_state, **kwargs):
+        calls.append("chunk_gated_delta_rule_fwd_h")
+        assert initial_state.shape == (1, value_heads, dim, dim)
+        h = torch.zeros((batch, value_heads, 1, dim, dim), dtype=key.dtype)
+        return h, u, initial_state + 1
+
+    def fwd_o(query, key, new_value, h, gate, **kwargs):
+        calls.append("chunk_fwd_o")
+        assert query.shape == key.shape == new_value.shape
+        return new_value
+
+    output, final_state = run_gdn_prefill_pipeline(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=state,
+        has_initial_state=torch.tensor([True]),
+        scale=0.5,
+        metadata=GDNPrefillMetadata(
+            cu_seqlens=torch.tensor([0, tokens], dtype=torch.int64),
+            cu_seqlens_host=(0, tokens),
+            chunk_indices=torch.tensor([[0, 0]], dtype=torch.int64),
+            chunk_indices_host=(0, 0),
+        ),
+        operators={
+            GDNOperator.L2NORM_FWD: l2norm,
+            GDNOperator.CHUNK_LOCAL_CUMSUM: cumsum,
+            GDNOperator.CHUNK_SCALED_DOT_KKT: kkt,
+            GDNOperator.SOLVE_TRI: solve,
+            GDNOperator.RECOMPUTE_W_U_FWD: recompute,
+            GDNOperator.CHUNK_GATED_DELTA_RULE_FWD_H: fwd_h,
+            GDNOperator.CHUNK_FWD_O: fwd_o,
+        },
+        chunk_size=64,
+    )
+
+    assert calls == [
+        "l2norm_fwd",
+        "l2norm_fwd",
+        "chunk_local_cumsum",
+        "chunk_scaled_dot_kkt",
+        "solve_tri",
+        "recompute_w_u_fwd",
+        "chunk_gated_delta_rule_fwd_h",
+        "chunk_fwd_o",
+    ]
+    assert output.shape == (batch, tokens, value_heads, dim)
+    torch.testing.assert_close(output, v)
+    torch.testing.assert_close(final_state, (state.transpose(-1, -2) + 1).transpose(-1, -2))
+
+
+def test_prefill_pipeline_rejects_non_integral_grouped_heads():
+    q = torch.zeros((1, 2, 2, 4))
+    v = torch.zeros((1, 2, 3, 4))
+
+    with pytest.raises(ValueError, match="value heads.*multiple of key heads"):
+        run_gdn_prefill_pipeline(
+            q=q,
+            k=q,
+            v=v,
+            g=torch.zeros((1, 2, 3)),
+            beta=torch.zeros((1, 2, 3)),
+            initial_state=torch.zeros((1, 3, 4, 4)),
+            has_initial_state=torch.tensor([True]),
+            scale=0.5,
+            metadata=GDNPrefillMetadata(None, None, None, None),
+            operators={},
         )

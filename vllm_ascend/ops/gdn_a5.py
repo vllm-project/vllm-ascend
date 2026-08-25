@@ -6,8 +6,9 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
+import torch
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -62,6 +63,140 @@ class GDNOperatorSelection:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class GDNPrefillMetadata:
+    cu_seqlens: torch.Tensor | None
+    cu_seqlens_host: tuple[int, ...] | None
+    chunk_indices: torch.Tensor | None
+    chunk_indices_host: tuple[int, ...] | None
+    cu_seqlens_kern: tuple[int, ...] | None = None
+    keep_meta: torch.Tensor | None = None
+    block_indices_cumsum: torch.Tensor | None = None
+    chunk_indices_large_block: torch.Tensor | None = None
+
+
+def run_gdn_prefill_pipeline(
+    *,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    has_initial_state: torch.Tensor,
+    scale: float,
+    metadata: GDNPrefillMetadata,
+    operators: Mapping[GDNOperator, Callable[..., Any]],
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the inference-only forward ordering from flash_gated_delta_rule.py."""
+
+    if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
+        raise ValueError("GDN prefill expects q/k/v with shape [B, T, H, D].")
+    if q.shape != k.shape:
+        raise ValueError(f"GDN prefill q/k shapes must match, got q={tuple(q.shape)} k={tuple(k.shape)}.")
+    if q.shape[:2] != v.shape[:2]:
+        raise ValueError(f"GDN prefill token layouts must match, got q={tuple(q.shape)} v={tuple(v.shape)}.")
+
+    num_key_heads = q.shape[2]
+    num_value_heads = v.shape[2]
+    if num_value_heads % num_key_heads != 0:
+        raise ValueError(
+            "GDN prefill value heads must be an integer multiple of key heads, "
+            f"got key_heads={num_key_heads} value_heads={num_value_heads}."
+        )
+    if g.shape != beta.shape or g.shape != (q.shape[0], q.shape[1], num_value_heads):
+        raise ValueError(
+            "GDN prefill g/beta must both have shape [B, T, Nv], "
+            f"got g={tuple(g.shape)} beta={tuple(beta.shape)}."
+        )
+
+    l2norm = operators[GDNOperator.L2NORM_FWD]
+    q = l2norm(q)
+    k = l2norm(k)
+    repeat = num_value_heads // num_key_heads
+    if repeat > 1:
+        q = q.repeat_interleave(repeat, dim=2)
+        k = k.repeat_interleave(repeat, dim=2)
+
+    # fla_npu chunk forward operators use [B, H, T, D].
+    q = q.transpose(1, 2).contiguous()
+    k = k.transpose(1, 2).contiguous()
+    v = v.transpose(1, 2).contiguous()
+
+    initial_state = initial_state.clone()
+    initial_state[~has_initial_state, ...] = 0
+    initial_state = initial_state.transpose(-1, -2).contiguous()
+
+    g = operators[GDNOperator.CHUNK_LOCAL_CUMSUM](
+        g,
+        chunk_size=chunk_size,
+        cu_seqlens=metadata.cu_seqlens,
+        chunk_indices=metadata.chunk_indices,
+    )
+    a = operators[GDNOperator.CHUNK_SCALED_DOT_KKT](
+        k,
+        g,
+        beta,
+        chunk_size=chunk_size,
+        cu_seqlens=metadata.cu_seqlens,
+        chunk_indices=metadata.chunk_indices,
+    )
+    a = operators[GDNOperator.SOLVE_TRI](
+        a,
+        cu_seqlens=metadata.cu_seqlens,
+        cu_seqlens_host=metadata.cu_seqlens_host,
+        chunk_indices=metadata.chunk_indices,
+        chunk_indices_host=metadata.chunk_indices_host,
+        output_dtype=k.dtype,
+    )
+
+    g_head = g.transpose(1, 2).contiguous()
+    beta_head = beta.transpose(1, 2).contiguous().float()
+    a_head = a.transpose(1, 2).contiguous()
+    w, u = operators[GDNOperator.RECOMPUTE_W_U_FWD](
+        k,
+        v,
+        beta_head,
+        a_head,
+        g_head,
+        chunk_size=chunk_size,
+        cu_seqlens=metadata.cu_seqlens_host,
+        chunk_indices=metadata.chunk_indices_host,
+    )
+
+    initial_state_kern = initial_state
+    if metadata.keep_meta is not None:
+        initial_state_kern = initial_state[metadata.keep_meta]
+    h, v_new, final_state = operators[GDNOperator.CHUNK_GATED_DELTA_RULE_FWD_H](
+        k,
+        w,
+        u,
+        g_head,
+        initial_state_kern,
+        chunk_size=chunk_size,
+        cu_seqlens=metadata.cu_seqlens_kern or metadata.cu_seqlens_host,
+        chunk_indices=metadata.chunk_indices_host,
+    )
+    if metadata.keep_meta is not None:
+        full_state = initial_state.clone()
+        full_state[metadata.keep_meta] = final_state
+        final_state = full_state
+
+    output = operators[GDNOperator.CHUNK_FWD_O](
+        q,
+        k,
+        v_new,
+        h,
+        g_head,
+        scale=scale,
+        chunk_size=chunk_size,
+        cu_seqlens=metadata.cu_seqlens_host,
+        chunk_indices=metadata.chunk_indices_host,
+    )
+    return output.transpose(1, 2).contiguous(), final_state.transpose(-1, -2).contiguous()
+
+
 _FLA_OPERATOR_PATHS: dict[GDNOperator, tuple[str, str]] = {
     GDNOperator.CAUSAL_CONV1D: ("fla_npu.ops.ascendc", "causal_conv1d"),
     GDNOperator.L2NORM_FWD: ("fla_npu.ops.triton", "l2norm_fwd"),
@@ -93,34 +228,10 @@ def resolve_fla_operator(operator: GDNOperator) -> tuple[Callable[..., Any], str
 
 
 def _resolve_fla_recurrent_operator() -> tuple[Callable[..., Any], str]:
-    candidates = (
-        ("fla_npu.ops.ascendc", "recurrent_gated_delta_rule"),
-        ("torch_npu", "npu_recurrent_gated_delta_rule"),
+    raise AttributeError(
+        "flash-linear-attention-npu does not expose recurrent_gated_delta_rule; "
+        "use the vllm-ascend native operator"
     )
-    errors: list[str] = []
-    for module_name, attribute in candidates:
-        try:
-            module = importlib.import_module(module_name)
-            return getattr(module, attribute), f"{module_name}.{attribute}"
-        except (ImportError, AttributeError) as exc:
-            errors.append(f"{module_name}.{attribute}: {_first_line(exc)}")
-
-    try:
-        import torch
-
-        for namespace_name in ("ascend_ops", "_C_ascend"):
-            namespace = getattr(torch.ops, namespace_name)
-            attribute = (
-                "recurrent_gated_delta_rule"
-                if namespace_name == "ascend_ops"
-                else "npu_recurrent_gated_delta_rule"
-            )
-            if hasattr(namespace, attribute):
-                return getattr(namespace, attribute), f"torch.ops.{namespace_name}.{attribute}"
-            errors.append(f"torch.ops.{namespace_name}.{attribute}: missing")
-    except (ImportError, AttributeError) as exc:
-        errors.append(f"torch.ops: {_first_line(exc)}")
-    raise AttributeError("; ".join(errors))
 
 
 class A5GDNOperatorDispatcher:
@@ -263,6 +374,345 @@ class A5GDNOperatorDispatcher:
             signature.mtp,
             signature.acl_graph,
         )
+
+
+class A5GDNAdapter:
+    """Normalize fla_npu/native operator contracts for one Qwen GDN layer."""
+
+    def __init__(
+        self,
+        config: GDNBackendConfig,
+        signature: GDNRuntimeSignature,
+        *,
+        layer_name: str,
+        is_a5: bool,
+    ) -> None:
+        self.signature = signature
+        self.layer_name = layer_name
+        self.dispatcher = A5GDNOperatorDispatcher(config, is_a5=is_a5)
+
+    def prefill(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        scale: float,
+        metadata: GDNPrefillMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        operators = self._prefill_operators(metadata)
+        return run_gdn_prefill_pipeline(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            has_initial_state=has_initial_state,
+            scale=scale,
+            metadata=metadata,
+            operators=operators,
+            chunk_size=self.signature.chunk_size,
+        )
+
+    def _prefill_operators(self, metadata: GDNPrefillMetadata) -> dict[GDNOperator, Callable[..., Any]]:
+        from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd as native_l2norm
+
+        from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import (
+            chunk_scaled_dot_kkt_fwd as native_kkt,
+        )
+        from vllm_ascend.ops.triton.fla.cumsum import chunk_local_cumsum as native_cumsum
+        from vllm_ascend.ops.triton.fla.solve_tril import solve_tril as native_solve
+        from vllm_ascend.ops.triton.fla.wy_fast import recompute_w_u_fwd as native_recompute
+
+        def native_cumsum_normalized(gate, *, chunk_size, cu_seqlens, chunk_indices):
+            del chunk_indices
+            return native_cumsum(
+                gate,
+                chunk_size=chunk_size,
+                cu_seqlens=cu_seqlens,
+                block_indices=metadata.block_indices_cumsum,
+                head_first=False,
+            )
+
+        def fla_cumsum(raw):
+            def call(gate, *, chunk_size, cu_seqlens, chunk_indices):
+                indices = None if chunk_indices is None else {str(chunk_size): chunk_indices}
+                return raw(
+                    gate,
+                    chunk_size=chunk_size,
+                    cu_seqlens=cu_seqlens,
+                    chunk_indices_out=indices,
+                    head_first=False,
+                )
+
+            return call
+
+        def native_kkt_normalized(key, gate, beta_value, *, chunk_size, cu_seqlens, chunk_indices):
+            return native_kkt(
+                k=key.transpose(1, 2).contiguous(),
+                beta=beta_value,
+                g_cumsum=gate,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                chunk_size=chunk_size,
+                output_dtype=torch.float32,
+            )
+
+        def fla_kkt(raw):
+            def call(key, gate, beta_value, *, chunk_size, cu_seqlens, chunk_indices):
+                return raw(
+                    k=key,
+                    g=gate,
+                    beta=beta_value,
+                    cu_seqlens=cu_seqlens,
+                    chunk_indices=chunk_indices,
+                    chunk_size=chunk_size,
+                    output_dtype=torch.float32,
+                )
+
+            return call
+
+        def native_solve_normalized(
+            a,
+            *,
+            cu_seqlens,
+            cu_seqlens_host,
+            chunk_indices,
+            chunk_indices_host,
+            output_dtype,
+        ):
+            del cu_seqlens_host, chunk_indices_host
+            return native_solve(
+                A=a,
+                cu_seqlens=cu_seqlens,
+                chunk_indices_large_block=metadata.chunk_indices_large_block,
+                chunk_indices_bt=chunk_indices,
+                output_dtype=output_dtype,
+            )
+
+        def fla_solve(raw):
+            def call(
+                a,
+                *,
+                cu_seqlens,
+                cu_seqlens_host,
+                chunk_indices,
+                chunk_indices_host,
+                output_dtype,
+            ):
+                del cu_seqlens, chunk_indices
+                a = a.to(output_dtype).contiguous()
+                if cu_seqlens_host is None:
+                    return raw(a, layout="bsnd")
+                return raw(
+                    a.squeeze(0),
+                    cu_seqlens=cu_seqlens_host,
+                    chunk_indices=chunk_indices_host,
+                    layout="tnd",
+                ).unsqueeze(0)
+
+            return call
+
+        def native_recompute_normalized(
+            key,
+            value,
+            beta_value,
+            a,
+            gate,
+            *,
+            chunk_size,
+            cu_seqlens,
+            chunk_indices,
+        ):
+            del chunk_size, cu_seqlens, chunk_indices
+            w, u = native_recompute(
+                k=key.transpose(1, 2).contiguous(),
+                v=value.transpose(1, 2).contiguous(),
+                beta=beta_value.transpose(1, 2).contiguous(),
+                g_cumsum=gate.transpose(1, 2).contiguous(),
+                A=a.transpose(1, 2).contiguous(),
+                cu_seqlens=metadata.cu_seqlens,
+                chunk_indices=metadata.chunk_indices,
+            )
+            return w.transpose(1, 2).contiguous(), u.transpose(1, 2).contiguous()
+
+        def fla_recompute(raw):
+            def call(
+                key,
+                value,
+                beta_value,
+                a,
+                gate,
+                *,
+                chunk_size,
+                cu_seqlens,
+                chunk_indices,
+            ):
+                return raw(
+                    key,
+                    value,
+                    beta_value,
+                    a,
+                    chunk_size,
+                    g=gate,
+                    gk=None,
+                    cu_seqlens=cu_seqlens,
+                    chunk_indices=chunk_indices,
+                )
+
+            return call
+
+        def native_fwd_h(key, w, u, gate, initial_state, *, chunk_size, cu_seqlens, chunk_indices):
+            return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
+                key,
+                w,
+                u,
+                g=gate,
+                gk=None,
+                initial_state=initial_state,
+                output_final_state=True,
+                chunk_size=chunk_size,
+                save_new_value=True,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                use_exp2=False,
+                transpose_state_layout=False,
+            )
+
+        def fla_fwd_h(raw):
+            def call(key, w, u, gate, initial_state, *, chunk_size, cu_seqlens, chunk_indices):
+                return raw(
+                    key,
+                    w,
+                    u,
+                    g=gate,
+                    gk=None,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    chunk_size=chunk_size,
+                    save_new_value=True,
+                    cu_seqlens=cu_seqlens,
+                    chunk_indices=chunk_indices,
+                    use_exp2=False,
+                    transpose_state_layout=False,
+                )
+
+            return call
+
+        def native_fwd_o(query, key, value, h, gate, *, scale, chunk_size, cu_seqlens, chunk_indices):
+            return torch.ops._C_ascend.chunk_fwd_o(
+                query,
+                key,
+                value,
+                h,
+                scale,
+                g=gate,
+                g_gamma=None,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                chunk_size=chunk_size,
+                transpose_state_layout=False,
+            )
+
+        def fla_fwd_o(raw):
+            def call(query, key, value, h, gate, *, scale, chunk_size, cu_seqlens, chunk_indices):
+                return raw(
+                    query,
+                    key,
+                    value,
+                    h,
+                    scale,
+                    g=gate,
+                    g_gamma=None,
+                    cu_seqlens=cu_seqlens,
+                    chunk_indices=chunk_indices,
+                    chunk_size=chunk_size,
+                    transpose_state_layout=False,
+                )
+
+            return call
+
+        specs = {
+            GDNOperator.L2NORM_FWD: (native_l2norm, "vllm.third_party.fla.l2norm_fwd", lambda raw: raw),
+            GDNOperator.CHUNK_LOCAL_CUMSUM: (
+                native_cumsum_normalized,
+                "vllm_ascend.triton.chunk_local_cumsum",
+                fla_cumsum,
+            ),
+            GDNOperator.CHUNK_SCALED_DOT_KKT: (
+                native_kkt_normalized,
+                "vllm_ascend.triton.chunk_scaled_dot_kkt_fwd",
+                fla_kkt,
+            ),
+            GDNOperator.SOLVE_TRI: (
+                native_solve_normalized,
+                "vllm_ascend.triton.solve_tril",
+                fla_solve,
+            ),
+            GDNOperator.RECOMPUTE_W_U_FWD: (
+                native_recompute_normalized,
+                "vllm_ascend.triton.recompute_w_u_fwd",
+                fla_recompute,
+            ),
+            GDNOperator.CHUNK_GATED_DELTA_RULE_FWD_H: (
+                native_fwd_h,
+                "torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h",
+                fla_fwd_h,
+            ),
+            GDNOperator.CHUNK_FWD_O: (
+                native_fwd_o,
+                "torch.ops._C_ascend.chunk_fwd_o",
+                fla_fwd_o,
+            ),
+        }
+        selected: dict[GDNOperator, Callable[..., Any]] = {}
+        for operator, (native, native_symbol, normalize_fla) in specs.items():
+            selection = self.dispatcher.select(
+                operator,
+                self.signature,
+                native=native,
+                native_symbol=native_symbol,
+                fla_resolver=self._normalized_fla_resolver(operator, normalize_fla),
+            )
+            selected[operator] = self._logged_operator(operator, selection, phase="prefill", stateful=False)
+        return selected
+
+    @staticmethod
+    def _normalized_fla_resolver(
+        operator: GDNOperator,
+        normalizer: Callable[[Callable[..., Any]], Callable[..., Any]],
+    ) -> Callable[[], tuple[Callable[..., Any], str]]:
+        def resolve() -> tuple[Callable[..., Any], str]:
+            raw, symbol = resolve_fla_operator(operator)
+            return normalizer(raw), symbol
+
+        return resolve
+
+    def _logged_operator(
+        self,
+        operator: GDNOperator,
+        selection: GDNOperatorSelection,
+        *,
+        phase: str,
+        stateful: bool,
+    ) -> Callable[..., Any]:
+        def call(*args: Any, **kwargs: Any) -> Any:
+            return self.dispatcher.execute(
+                operator,
+                selection,
+                *args,
+                phase=phase,
+                layer_name=self.layer_name,
+                state_may_be_mutated=stateful,
+                **kwargs,
+            )
+
+        return call
 
 
 def _parse_mode(value: str) -> GDNBackendMode:
