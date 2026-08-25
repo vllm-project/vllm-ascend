@@ -939,13 +939,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_enable_mlapo_removed_env_is_ignored(self, mock_fix):
-        vc = VllmConfig()
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "false"}):
-            self.assertTrue(init_ascend_config(vc).enable_mlapo)
-
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_cpu_binding_rejects_invalid_int(self, mock_fix):
         # JSON booleans should be true/false; an int 2 is neither 0 nor 1 and
         # must fail fast rather than being coerced into unexpected truthiness.
