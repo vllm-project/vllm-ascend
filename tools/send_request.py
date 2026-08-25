@@ -160,7 +160,8 @@ def send_v1_chat_completions(
     print(f"Status Code: {response.status_code}")
     response_json = response.json()
     print(f"Response json: {response_json}")
-    response_text = response_json["choices"][0]["message"]["content"]
+    message = response_json["choices"][0]["message"]
+    response_text = message.get("content") or message.get("reasoning", "")
     print(f"Response: {response_text}")
     assert response_text, "empty response"
     validate_response(response_json, expected, max_model_len)
