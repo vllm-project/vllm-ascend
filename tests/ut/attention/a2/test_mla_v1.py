@@ -1267,6 +1267,44 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.num_heads_padded, 256)
         self.assertEqual(self.impl.head_padding, 0)
 
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_draft_model_disables_mlapo_at_init(self, mock_get_current_vllm_config, mock_enabling_mlapo):
+        mock_get_current_vllm_config.return_value = self.impl.vllm_config
+        impl = AscendMLAImpl(
+            num_heads=self.impl.num_heads,
+            head_size=self.impl.head_size,
+            scale=self.impl.scale,
+            num_kv_heads=self.impl.num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=self.impl.kv_cache_dtype,
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            kv_lora_rank=self.impl.kv_lora_rank,
+            qk_nope_head_dim=self.impl.qk_nope_head_dim,
+            qk_rope_head_dim=self.impl.qk_rope_head_dim,
+            qk_head_dim=self.impl.qk_head_dim,
+            v_head_dim=self.impl.v_head_dim,
+            q_lora_rank=self.impl.q_lora_rank,
+            q_proj=self.impl.q_proj,
+            q_b_proj=self.impl.q_proj,
+            kv_b_proj=self.impl.kv_b_proj,
+            o_proj=self.impl.o_proj,
+            kv_a_proj_with_mqa=self.impl.kv_a_proj_with_mqa,
+            fused_qkv_a_proj=self.impl.fused_qkv_a_proj,
+            kv_a_layernorm=self.impl.kv_a_layernorm,
+            rotary_emb=self.impl.rotary_emb,
+            g_proj=None,
+            use_mla_rope=True,
+            is_draft_model=True,
+        )
+
+        self.assertTrue(impl.is_draft_model)
+        self.assertFalse(impl.enable_mlapo)
+        mock_enabling_mlapo.assert_not_called()
+
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
         """Test head padding computation for num_heads that are not power of 2 (e.g. GLM-4.7-Flash with 20 heads)."""

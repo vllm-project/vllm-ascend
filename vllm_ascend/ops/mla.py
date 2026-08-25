@@ -118,6 +118,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
             # extra args
+            is_draft_model=non_causal_multi_token_decode,
             rotary_emb=mla_modules.rotary_emb,
             fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
             q_b_proj=mla_modules.q_b_proj,

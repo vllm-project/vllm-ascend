@@ -82,7 +82,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_cls:
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
@@ -106,6 +106,24 @@ class TestAscendMultiHeadLatentAttention(TestBase):
 
             self.assertEqual(attn.tp_size, 2)
             self.assertIsNotNone(attn.mla_attn)
+            self.assertFalse(mock_mla_cls.call_args.kwargs["is_draft_model"])
+
+            AscendMultiHeadLatentAttention(
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                mla_modules=self.mock_mla_modules,
+                cache_config=self.mock_cache_config,
+                quant_config=self.mock_quant_config,
+                prefix=f"{self.prefix}.draft",
+                non_causal_multi_token_decode=True,
+            )
+            self.assertTrue(mock_mla_cls.call_args.kwargs["is_draft_model"])
 
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
