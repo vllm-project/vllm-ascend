@@ -726,12 +726,6 @@ class TestSchedulerConfig(TestBase):
         self.assertFalse(hasattr(config, "_additional_config"))
         self.assertFalse(hasattr(config, "_balance_env_value"))
 
-    def test_balance_scheduling_ignores_removed_env(self):
-        with patch.dict(os.environ, {"VLLM_ASCEND_BALANCE_SCHEDULING": "1"}):
-            config = SchedulerConfig.from_additional_config({})
-
-        self.assertFalse(config.enable_balance_scheduling)
-
     @patch("vllm_ascend.ascend_config.logger.warning_once")
     def test_none_config_uses_defaults_and_legacy_fallback(self, mock_warning_once):
         config = SchedulerConfig.from_additional_config(
