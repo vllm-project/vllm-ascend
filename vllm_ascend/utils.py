@@ -612,8 +612,11 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
 
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
     required `layer_stride` on vLLM main. This helper keeps both lanes readable.
+    The v0.27.1 lane is a source build whose version string can be
+    ``0.27.1.dev*``, so an exact `vllm_version_is` comparison is not a
+    reliable discriminator; the mutually-exclusive fields identify the lane.
     """
-    if vllm_version_is("0.27.1"):
+    if hasattr(kv_cache_tensor, "shared_by"):
         return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
