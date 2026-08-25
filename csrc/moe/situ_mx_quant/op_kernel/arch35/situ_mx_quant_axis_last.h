@@ -29,7 +29,8 @@ public:
     __aicore__ inline SituMxQuantAxisLast(){};
 
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR y, GM_ADDR mxscale, GM_ADDR workspace,
-                                const SituMxQuantTilingData* __restrict tilingData, AscendC::TPipe* pipe);
+                                GM_ADDR groupList, const SituMxQuantTilingData* __restrict tilingData,
+                                AscendC::TPipe* pipe);
     __aicore__ inline void Process();
 
 private:
@@ -42,6 +43,7 @@ private:
     GlobalTensor<T> xGm_;
     GlobalTensor<uint8_t> yGm_;
     GlobalTensor<uint8_t> scaleGm_;
+    GlobalTensor<int64_t> groupListGm_;
     const SituMxQuantTilingData* tiling_;
     AscendC::TPipe* pipe_;
     int32_t blockIdx_ = 0;
@@ -80,7 +82,7 @@ private:
 template <typename T, typename U, bool hasLinearBeta>
 __aicore__ inline void SituMxQuantAxisLast<T, U, hasLinearBeta>::Init(
     GM_ADDR x, GM_ADDR y, GM_ADDR mxscale, GM_ADDR workspace,
-    const SituMxQuantTilingData* __restrict tilingData, AscendC::TPipe* pipe)
+    GM_ADDR groupList, const SituMxQuantTilingData* __restrict tilingData, AscendC::TPipe* pipe)
 {
 #if (__NPU_ARCH__ == 3510)
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
@@ -93,6 +95,18 @@ __aicore__ inline void SituMxQuantAxisLast<T, U, hasLinearBeta>::Init(
     scaleGm_.SetGlobalBuffer((__gm__ uint8_t*)mxscale);
 
     dimM_ = tiling_->inputDim1;
+    if (tiling_->hasGroupList != 0) {
+        groupListGm_.SetGlobalBuffer((__gm__ int64_t*)groupList, tiling_->groupListSize);
+        int64_t activeRows = 0;
+        for (int64_t expertIdx = 0; expertIdx < tiling_->groupListSize && activeRows < dimM_; ++expertIdx) {
+            const int64_t requestedRows = groupListGm_.GetValue(expertIdx);
+            const int64_t remainingRows = dimM_ - activeRows;
+            if (requestedRows > 0) {
+                activeRows += requestedRows > remainingRows ? remainingRows : requestedRows;
+            }
+        }
+        dimM_ = activeRows;
+    }
     dimN_ = tiling_->inputDim2;
     dim2N_ = dimN_ * CONST_2;
 

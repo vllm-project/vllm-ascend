@@ -226,8 +226,10 @@ def _w4a8_situ_apply_mlp(
         dispose_tensor(externally_quantized_hidden_states)
 
     if use_mxfp_quant:
+        situ_group_list = cumsum_group_list(group_list, group_list_type, 1).to(torch.int64)
         hidden_states, situ_out_scale = torch.ops._C_ascend.situ_mx_quant(
             x=gate_up_out,
+            group_list=situ_group_list,
             beta=activation.beta,
             linear_beta=activation.linear_beta or 0.0,
             activate_left=True,
