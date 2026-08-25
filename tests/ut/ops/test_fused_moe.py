@@ -7,7 +7,6 @@ import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
-
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
