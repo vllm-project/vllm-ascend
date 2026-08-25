@@ -428,6 +428,12 @@ def _is_missing_v_shard(shard_key: str, quant_description: Mapping[str, Any]) ->
     return f"{shard_prefix}q_proj.weight" in quant_description and f"{shard_prefix}k_proj.weight" in quant_description
 
 
+# Module-level cache for scheme instances.
+# Schemes are stateless config wrappers — a single instance per (quant_type, layer_type)
+# is safe to share across all layers and avoids ~300 redundant instantiations.
+_scheme_instance_cache: dict[tuple[str, str], Any] = {}
+
+
 def get_linear_quant_type(
     quant_description: dict[str, Any], prefix: str, packed_modules_mapping: dict[str, Any]
 ) -> str | None:
@@ -466,7 +472,7 @@ def get_linear_quant_type(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
-        quant_type = quant_description[prefix + ".weight"]
+        quant_type = quant_description.get(prefix + ".weight")
     return quant_type
 
 
@@ -527,10 +533,19 @@ def create_scheme_for_layer(
         logger.error(err_msg)
         raise ValueError(err_msg)
 
-    # Use registry to get scheme class
+    # Use registry to get scheme class with instance caching.
+    # Schemes are stateless (config-only), so a single instance per
+    # (quant_type, layer_type) pair is safe and avoids ~300 redundant
+    # instantiations during model construction.
+    cache_key = (quant_type, layer_type)
+    cached = _scheme_instance_cache.get(cache_key)
+    if cached is not None:
+        return cached
     scheme_cls = get_scheme_class(quant_type, layer_type)
     if scheme_cls is not None:
-        return scheme_cls()
+        instance = scheme_cls()
+        _scheme_instance_cache[cache_key] = instance
+        return instance
 
     err_msg = (
         "Currently, vLLM Ascend doesn't support quant_type=%s for layer_type=%s. "
@@ -558,6 +573,38 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.hf_to_vllm_mapper: WeightsMapper | None = None
         self._mapper_applied = False
         self._add_kvcache_quant_metadata()
+        # Lazily-built caches for fast per-layer lookups
+        self._float_prefixes: set[str] | None = None
+        self._all_weight_prefixes: set[str] | None = None
+        self._prefix_quant_type: dict[str, str] | None = None
+        self._has_norm_bias: bool | None = None
+
+    def _build_quant_caches(self):
+        """Pre-build lookup caches to avoid O(n) scans per linear layer."""
+        if self._float_prefixes is not None:
+            return
+        float_prefixes: set[str] = set()
+        all_prefixes: set[str] = set()
+        prefix_quant_type: dict[str, str] = {}
+        has_norm_bias = False
+        for key, value in self.quant_description.items():
+            if key.endswith(".weight"):
+                prefix = key[:-7]
+                all_prefixes.add(prefix)
+                prefix_quant_type[prefix] = value
+                if value == "FLOAT":
+                    float_prefixes.add(prefix)
+            if not has_norm_bias and "norm.bias" in key:
+                has_norm_bias = True
+        self._float_prefixes = float_prefixes
+        self._all_weight_prefixes = all_prefixes
+        self._prefix_quant_type = prefix_quant_type
+        self._has_norm_bias = has_norm_bias
+
+    @property
+    def has_norm_bias(self) -> bool:
+        self._build_quant_caches()
+        return self._has_norm_bias
 
     def __repr__(self) -> str:
         return "AscendModelSlimConfig:\n" + super().__repr__()
@@ -616,6 +663,12 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         if self.quant_description:
             self.quant_description = hf_to_vllm_mapper.apply_dict(self.quant_description)
+            # Invalidate caches since quant_description keys changed
+            self._float_prefixes = None
+            self._all_weight_prefixes = None
+            self._prefix_quant_type = None
+            self._has_norm_bias = None
+            _scheme_instance_cache.clear()
             self._add_kvcache_quant_metadata()
             logger.info("Applied hf_to_vllm_mapper to quant_description keys")
 
@@ -802,10 +855,11 @@ class AscendModelSlimConfig(QuantizationConfig):
                         "to have the same precision."
                     )
         else:
-            is_skipped = any(
-                key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
-                for key, value in self.quant_description.items()
-            )
+            self._build_quant_caches()
+            if prefix in self._all_weight_prefixes:
+                is_skipped = prefix in self._float_prefixes
+            else:
+                is_skipped = True
 
         assert is_skipped is not None
         return is_skipped
