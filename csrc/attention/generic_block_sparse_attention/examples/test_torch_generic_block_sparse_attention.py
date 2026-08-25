@@ -24,7 +24,7 @@ import os
 import sys
 
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
 # Allow running from repo root without installing the torch_extension package.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -129,8 +129,10 @@ def run_metadata(inputs: dict) -> torch.Tensor:
     assert metadata.dtype == torch.int32
     sa_total_task_num = int(metadata[SA_TOTAL_TASK_NUM_INDEX].item())
     expected_task_num = inputs["total_q_tokens"] * inputs["kv_heads"]
-    print(f"[metadata] shape={tuple(metadata.shape)}, saTotalTaskNum={sa_total_task_num}, "
-          f"expected(no-pad)={expected_task_num}")
+    print(
+        f"[metadata] shape={tuple(metadata.shape)}, saTotalTaskNum={sa_total_task_num}, "
+        f"expected(no-pad)={expected_task_num}"
+    )
     assert sa_total_task_num > 0
     return metadata
 
@@ -167,8 +169,10 @@ def run_attention(inputs: dict, metadata: torch.Tensor):
     assert torch.isfinite(attention_out.float()).all()
     assert softmax_lse.shape == (inputs["query"].shape[0], inputs["query"].shape[1], 1)
     assert softmax_lse.dtype == torch.float32
-    print(f"[attention] out={tuple(attention_out.shape)}, lse={tuple(softmax_lse.shape)}, "
-          f"out_mean={attention_out.float().mean().item():.6f}")
+    print(
+        f"[attention] out={tuple(attention_out.shape)}, lse={tuple(softmax_lse.shape)}, "
+        f"out_mean={attention_out.float().mean().item():.6f}"
+    )
     return attention_out, softmax_lse
 
 
@@ -177,9 +181,11 @@ def main():
     torch.manual_seed(0)
 
     inputs = build_tnd_paged_inputs()
-    print("[case] TND + PAGED_BBND, "
-          f"T={inputs['total_q_tokens']}, Nq={inputs['num_heads']}, Nkv={inputs['kv_heads']}, "
-          f"q_seqlen={inputs['q_seqlen']}, kv_seqlen={inputs['kv_seqlen']}")
+    print(
+        "[case] TND + PAGED_BBND, "
+        f"T={inputs['total_q_tokens']}, Nq={inputs['num_heads']}, Nkv={inputs['kv_heads']}, "
+        f"q_seqlen={inputs['q_seqlen']}, kv_seqlen={inputs['kv_seqlen']}"
+    )
 
     # 1) metadata
     metadata = run_metadata(inputs)

@@ -61,14 +61,14 @@
 - `layoutQ="TND"`，`layoutKv="PAGED_BBND"`，`maskType=1`，`blockShape=[1, 128]`，`headDim=128`，`isPackedGQA=1`。
 - Query shape：`[T, Nq, D]`；Key/Value shape：`[numBlocks, blockSize, Nkv, D]`（`blockSize` 由 KV shape 解析）。
 - TND + packed GQA：
-  - `sparseBlockIdx`：`[Nkv, totalQBlocks, topK]`
-  - `sparseBlockCount`：`[Nkv, totalQBlocks]`
-  - `totalQBlocks` 按各 batch 的 **存储** Q 长度（`cuSeqLengthsQ`）分块累加。
+    - `sparseBlockIdx`：`[Nkv, totalQBlocks, topK]`
+    - `sparseBlockCount`：`[Nkv, totalQBlocks]`
+    - `totalQBlocks` 按各 batch 的 **存储** Q 长度（`cuSeqLengthsQ`）分块累加。
 - 必须传入 `metadata`（由 `GenericBlockSparseAttentionMetadata` 生成，INT32 `[1024]`）以及 `blockTable`、`cuSeqLengthsQ`、`cuSeqLengthsKv`。
 - `Nq` 必须能被 `Nkv` 整除（GQA）。
 - Softmax 精度：
-  - Ascend 950：仅支持 `softmaxPrecision=1`
-  - Atlas A2/A3：`fp16` 支持 `0/1`；`bf16` 仅支持 `0`
+    - Ascend 950：仅支持 `softmaxPrecision=1`
+    - Atlas A2/A3：`fp16` 支持 `0/1`；`bf16` 仅支持 `0`
 - FP8 全量化：`quantType=5` 且 Q/K/V 为 `FLOAT8_E4M3FN`；此时不支持 `returnSoftmaxlse=1`。
 - `sequsedQ` / `sequsedKv` 可选：任务空间按 actual 长度打包，GM/稀疏索引仍按 cu 存储偏移（段末 pad）。
 

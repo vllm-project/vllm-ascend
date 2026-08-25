@@ -109,15 +109,15 @@ aclnnStatus aclnnGenericBlockSparseAttentionMetadata(
 - `blockShape`长度固定为2；当前`blockShape[0]`仅支持1，`blockShape[1]`必须为16的倍数。
 - 当前仅支持`isPackedGQA=1`，此时同一KV head group内的Q head共享稀疏块索引。
 - Query为TND时：
-  - 必须传入`cuSeqLengthsOptional`，Batch为其元素个数减1；
-  - `sparseBlockIdx` shape为`[numKvHeads, totalQBlocks, maxSparseBlockCount]`；
-  - `sparseBlockCount` shape为`[numKvHeads, totalQBlocks]`；
-  - `totalQBlocks`为各Batch的Q块数量之和；
-  - `seqUsedQOptional[i]`不能超过对应Batch的Query存储长度。
+    - 必须传入`cuSeqLengthsOptional`，Batch为其元素个数减1；
+    - `sparseBlockIdx` shape为`[numKvHeads, totalQBlocks, maxSparseBlockCount]`；
+    - `sparseBlockCount` shape为`[numKvHeads, totalQBlocks]`；
+    - `totalQBlocks`为各Batch的Q块数量之和；
+    - `seqUsedQOptional[i]`不能超过对应Batch的Query存储长度。
 - Query为BSND/BNSD时：
-  - `sparseBlockIdx` shape为`[batch, numKvHeads, maxQBlocks, maxSparseBlockCount]`；
-  - `sparseBlockCount` shape为`[batch, numKvHeads, maxQBlocks]`；
-  - `maxQBlocks=CeilDiv(maxQSeqLen, blockShape[0])`。
+    - `sparseBlockIdx` shape为`[batch, numKvHeads, maxQBlocks, maxSparseBlockCount]`；
+    - `sparseBlockCount` shape为`[batch, numKvHeads, maxQBlocks]`；
+    - `maxQBlocks=CeilDiv(maxQSeqLen, blockShape[0])`。
 - `sparseBlockCount`中的每个元素必须位于`[0, maxSparseBlockCount]`，`maxSparseBlockCount`为`sparseBlockIdx`的最后一维大小。
 - `seqUsedQOptional`、`seqUsedKvOptional`、`cuSeqLengthsOptional`和`cuSeqLengthsKvOptional`的Batch信息需要保持一致；实际序列长度不能超过对应的存储长度和最大序列长度。
 - 输出`metadata`固定为长度1024的INT32 Tensor，只能与生成它时使用的输入和属性配套传给`aclnnSparseAttentionScore`，不能跨不同shape或属性复用。

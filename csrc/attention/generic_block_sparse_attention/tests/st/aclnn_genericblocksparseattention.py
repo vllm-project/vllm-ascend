@@ -5,12 +5,12 @@ Default plugin for:
 
 Torch bm/gt fallback is aclnn_genericblocksparseattention.py.torch_bak.
 """
+
 import ctypes
 import random
 
 import numpy as np
 import torch
-
 from atk.configs.dataset_config import InputDataset
 from atk.configs.results_config import TaskResult
 from atk.tasks.api_execute import register
@@ -62,9 +62,7 @@ def simulate_aicpu_metadata(
     """Host stand-in for AICPU EncodeMetadata: INT32[1024] header."""
     if aic_core_num <= 0:
         raise ValueError(f"aic_core_num must be > 0, got {aic_core_num}")
-    sa_total_task_num = calc_sa_total_task_num(
-        q_seqlens, num_q_heads, num_kv_heads, is_packed_gqa=is_packed_gqa
-    )
+    sa_total_task_num = calc_sa_total_task_num(q_seqlens, num_q_heads, num_kv_heads, is_packed_gqa=is_packed_gqa)
     metadata = torch.zeros(METADATA_TOTAL_SIZE, dtype=torch.int32, device=device)
     metadata[0] = METADATA_MAGIC
     metadata[1] = METADATA_VERSION
@@ -130,9 +128,7 @@ def decode_cu_and_seqused(cu_q, cu_kv, seqused_q=None, seqused_kv=None, total_q=
 
 def seqlens_from_cu_seq(cu_q, cu_kv, total_q=None, seqused_q=None, seqused_kv=None):
     """Actual seqlens (seqused if present, else cu). None if invalid."""
-    decoded = decode_cu_and_seqused(
-        cu_q, cu_kv, seqused_q=seqused_q, seqused_kv=seqused_kv, total_q=total_q
-    )
+    decoded = decode_cu_and_seqused(cu_q, cu_kv, seqused_q=seqused_q, seqused_kv=seqused_kv, total_q=total_q)
     if decoded is None:
         return None
     return decoded[0], decoded[1]
@@ -145,9 +141,7 @@ def recover_batch_seqlens(query, sparse_block_idx, block_table, metadata=None):
     total_q = int(query.shape[0])
     max_blocks = int(block_table.shape[1])
     if batch <= 0 or total_q % batch != 0:
-        raise ValueError(
-            f"Cannot recover equal-batch q seqlens: T={total_q}, B={batch}"
-        )
+        raise ValueError(f"Cannot recover equal-batch q seqlens: T={total_q}, B={batch}")
     q_seqlen = total_q // batch
     kv_seqlen = max(max_blocks * 128, q_seqlen)
     return [q_seqlen] * batch, [kv_seqlen] * batch
@@ -195,9 +189,7 @@ def build_sparse_and_block_table(
 
     sparse_idx = torch.full((kv_heads, total_q_blocks, top_k), -1, dtype=torch.int32)
     sparse_count = torch.zeros((kv_heads, total_q_blocks), dtype=torch.int32)
-    block_table = generate_block_table(
-        batch, max_blocks, num_physical, seed=seed, identity=smoke
-    )
+    block_table = generate_block_table(batch, max_blocks, num_physical, seed=seed, identity=smoke)
 
     q_storage = 0
     for b in range(batch):
@@ -253,9 +245,7 @@ def apply_init_tensors(input_data, device="cpu"):
     )
     # Sparse seqused pad: only ~1/10 cases (need all batch q_seqlen>=2).
     use_seqused = all(int(s) >= 2 for s in storage_q) and (seed % 10 == 0)
-    actual_q = (
-        [int(s) - 1 for s in storage_q] if use_seqused else [int(s) for s in storage_q]
-    )
+    actual_q = [int(s) - 1 for s in storage_q] if use_seqused else [int(s) for s in storage_q]
     actual_kv = [int(s) for s in storage_kv]
 
     sparse_idx, sparse_count, block_table_new = build_sparse_and_block_table(
@@ -431,6 +421,7 @@ class TestGenericBlockSparseAttentionNumpy:
         if dtype == torch.bfloat16:
             try:
                 from ml_dtypes import bfloat16 as np_bf16
+
                 return np_bf16
             except ImportError:
                 return np.float32
@@ -459,12 +450,8 @@ class TestGenericBlockSparseAttentionNumpy:
         mm_k_loop = (k_dim + mm_k_tile - 1) // mm_k_tile
         for idx in range(mm_k_loop):
             sub_k = min(mm_k_tile, k_dim - idx * mm_k_tile)
-            left_slice = np.asarray(
-                left[:, idx * mm_k_tile: idx * mm_k_tile + sub_k], dtype=np.float32
-            )
-            right_slice = np.asarray(
-                right[idx * mm_k_tile: idx * mm_k_tile + sub_k, :], dtype=np.float32
-            )
+            left_slice = np.asarray(left[:, idx * mm_k_tile : idx * mm_k_tile + sub_k], dtype=np.float32)
+            right_slice = np.asarray(right[idx * mm_k_tile : idx * mm_k_tile + sub_k, :], dtype=np.float32)
             res_slice = np.matmul(left_slice, right_slice)
             res = res_slice if res is None else (res + res_slice)
         return res
@@ -508,8 +495,8 @@ class TestGenericBlockSparseAttentionNumpy:
         gm = gl = go = None
         for kv_s_start in range(0, cur_kv_s, kv_s_base_tile):
             cur_kv_s_tile = min(kv_s_base_tile, cur_kv_s - kv_s_start)
-            key_tile = key[:, kv_s_start: kv_s_start + cur_kv_s_tile]
-            value_tile = value[kv_s_start: kv_s_start + cur_kv_s_tile, :]
+            key_tile = key[:, kv_s_start : kv_s_start + cur_kv_s_tile]
+            value_tile = value[kv_s_start : kv_s_start + cur_kv_s_tile, :]
             qk = cls.base_tile_mm(query, key_tile, 128)
             if use_low_sm:
                 qk = qk.astype(interm_dtype_sm)
@@ -589,9 +576,7 @@ class TestGenericBlockSparseAttentionNumpy:
         block_shape_x = int(block_shape[0])
         block_shape_y = int(block_shape[1])
         if block_shape_x != 1:
-            raise ValueError(
-                f"calc_data currently requires blockShapeX=1, got {block_shape_x}"
-            )
+            raise ValueError(f"calc_data currently requires blockShapeX=1, got {block_shape_x}")
         if q_storage_seqlens is None:
             q_storage_seqlens = q_seqlens
         batch = len(q_seqlens)
@@ -648,17 +633,15 @@ class TestGenericBlockSparseAttentionNumpy:
                     key_g = np.concatenate(k_parts, axis=1)
                     val_g = np.concatenate(v_parts, axis=0)
                     q_start = kv_h * group_size
-                    q_group = query_np[global_q, q_start: q_start + group_size, :]
+                    q_group = query_np[global_q, q_start : q_start + group_size, :]
                     if compute_bm:
-                        go, lse = self.ref_flash(
-                            q_group, key_g, val_g, scale, np_dtype, use_low_sm
-                        )
-                        out_bm[global_q, q_start: q_start + group_size, :] = go
-                        lse_bm[global_q, q_start: q_start + group_size, 0] = lse
+                        go, lse = self.ref_flash(q_group, key_g, val_g, scale, np_dtype, use_low_sm)
+                        out_bm[global_q, q_start : q_start + group_size, :] = go
+                        lse_bm[global_q, q_start : q_start + group_size, 0] = lse
                     if compute_gt:
                         go, lse = self.ref_attention(q_group, key_g, val_g, scale)
-                        out_gt[global_q, q_start: q_start + group_size, :] = go
-                        lse_gt[global_q, q_start: q_start + group_size, 0] = lse
+                        out_gt[global_q, q_start : q_start + group_size, :] = go
+                        lse_gt[global_q, q_start : q_start + group_size, 0] = lse
             q_offset += int(q_storage_seqlens[b])
 
         return (

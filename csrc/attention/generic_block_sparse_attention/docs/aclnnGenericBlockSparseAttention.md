@@ -24,10 +24,10 @@
 - **调用前置**：必须先调用 [aclnnGenericBlockSparseAttentionMetadata](../../sparse_attention_score_metadata/docs/aclnnGenericBlockSparseAttentionMetadata.md) 生成 `metadata`（INT32，shape `[1024]`），再传入本接口。`metadata` 为不透明调度表，调用者不应解析或修改。
 
 - **布局符号**：
-  - `T`：各 batch Query token 累加长度
-  - `N` / `Nq`：Query head 数；`Nkv`：KV head 数
-  - `D`：head dim（当前仅支持 128）
-  - `PAGED_BBND`：`[numBlocks, blockSize, Nkv, D]`
+    - `T`：各 batch Query token 累加长度
+    - `N` / `Nq`：Query head 数；`Nkv`：KV head 数
+    - `D`：head dim（当前仅支持 128）
+    - `PAGED_BBND`：`[numBlocks, blockSize, Nkv, D]`
 
 ## 函数原型
 

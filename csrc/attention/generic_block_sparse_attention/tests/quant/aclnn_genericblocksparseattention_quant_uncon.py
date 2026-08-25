@@ -1,18 +1,18 @@
 """Quant ATK plugin: PAGED_BBND dim0 non-contiguous KV (FIA fused cache).
 
-  atk ... -p aclnn_genericblocksparseattention_quant_uncon.py
+atk ... -p aclnn_genericblocksparseattention_quant_uncon.py
 """
 
 import math
 
 import torch
-
-from atk.tasks.api_execute import register
-
 from aclnn_genericblocksparseattention_quant import (  # noqa: F401
     GenericBlockSparseAttentionQuantApi,
+)
+from aclnn_genericblocksparseattention_quant import (
     GenericBlockSparseAttentionQuantInputProcess as _ContigInputProcess,
 )
+from atk.tasks.api_execute import register
 
 
 def make_fused_noncontig_kv(key: torch.Tensor, value: torch.Tensor):

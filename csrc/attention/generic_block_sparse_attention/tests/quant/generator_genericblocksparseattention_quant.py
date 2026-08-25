@@ -1,10 +1,9 @@
 import random
-from typing import Union, List
 
 import numpy as np
-from atk.case_generator.generator.generate_types import GENERATOR_REGISTRY
 from atk.case_generator.generator.base_generator import CaseGenerator
-from atk.configs.case_config import InputCaseConfig, CaseConfig
+from atk.case_generator.generator.generate_types import GENERATOR_REGISTRY
+from atk.configs.case_config import CaseConfig, InputCaseConfig
 
 HEAD_DIM = 128
 BLOCK_SHAPE_X = 1
@@ -37,8 +36,8 @@ class GenericBlockSparseAttentionQuantGenerator(CaseGenerator):
     def after_input_config(
         self,
         index: int,
-        input_case: Union[InputCaseConfig, List[InputCaseConfig]],
-    ) -> Union[InputCaseConfig, List[InputCaseConfig]]:
+        input_case: InputCaseConfig | list[InputCaseConfig],
+    ) -> InputCaseConfig | list[InputCaseConfig]:
         if index == 0 and input_case.name == "query":
             self.query_range = input_case.range_values
         if index in (1, 2) and input_case.name in ("key", "value"):
@@ -97,7 +96,6 @@ class GenericBlockSparseAttentionQuantGenerator(CaseGenerator):
         p = self._sample_shape()
         batch = p["batch"]
         q_seqlen = p["q_seqlen"]
-        kv_seqlen = p["kv_seqlen"]
         num_heads = p["num_heads"]
         kv_heads = p["kv_heads"]
         top_k = p["top_k"]

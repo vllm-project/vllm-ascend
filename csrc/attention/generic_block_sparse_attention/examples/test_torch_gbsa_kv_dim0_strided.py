@@ -8,7 +8,7 @@ import os
 import sys
 
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 _TORCH_EXT = os.path.join(_REPO_ROOT, "torch_extension")

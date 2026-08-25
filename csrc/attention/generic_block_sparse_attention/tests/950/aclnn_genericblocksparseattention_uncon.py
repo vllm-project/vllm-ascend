@@ -9,13 +9,13 @@ delegates to parent init.
 import math
 
 import torch
-
-from atk.tasks.api_execute import register
-
 from aclnn_genericblocksparseattention import (  # noqa: F401
     GenericBlockSparseAttentionApi,
+)
+from aclnn_genericblocksparseattention import (
     GenericBlockSparseAttentionInputProcess as _ContigInputProcess,
 )
+from atk.tasks.api_execute import register
 
 
 def make_fused_noncontig_kv(key: torch.Tensor, value: torch.Tensor):

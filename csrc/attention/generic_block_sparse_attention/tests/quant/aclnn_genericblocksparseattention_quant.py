@@ -9,14 +9,13 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from ml_dtypes import bfloat16
-
 from atk.configs.dataset_config import InputDataset
 from atk.configs.results_config import TaskResult
 from atk.tasks.api_execute import register
-from atk.tasks.api_execute.base_api import BaseApi
 from atk.tasks.api_execute.aclnn_base_api import AclnnBaseApi
-from atk.tasks.backends.lib_interface.acl_wrapper import AclTensor, TORCH_TO_ACLTYPE
+from atk.tasks.api_execute.base_api import BaseApi
+from atk.tasks.backends.lib_interface.acl_wrapper import TORCH_TO_ACLTYPE, AclTensor
+from ml_dtypes import bfloat16
 
 # ATK acl_wrapper lacks fp8 mapping; CANN DT_FLOAT8_E4M3FN = 36
 TORCH_TO_ACLTYPE.setdefault("torch.float8_e4m3fn", 36)
@@ -100,9 +99,7 @@ def recover_batch_seqlens(query, sparse_block_idx, block_table, metadata=None):
     total_q = int(query.shape[0])
     max_blocks = int(block_table.shape[1])
     if batch <= 0 or total_q % batch != 0:
-        raise ValueError(
-            f"Cannot recover equal-batch q seqlens: T={total_q}, B={batch}"
-        )
+        raise ValueError(f"Cannot recover equal-batch q seqlens: T={total_q}, B={batch}")
     q_seqlen = total_q // batch
     kv_seqlen = max(max_blocks * 128, q_seqlen)
     return [q_seqlen] * batch, [kv_seqlen] * batch
@@ -150,9 +147,7 @@ def build_sparse_and_block_table(
 
     sparse_idx = torch.full((kv_heads, total_q_blocks, top_k), -1, dtype=torch.int32)
     sparse_count = torch.zeros((kv_heads, total_q_blocks), dtype=torch.int32)
-    block_table = generate_block_table(
-        batch, max_blocks, num_physical, seed=seed, identity=smoke
-    )
+    block_table = generate_block_table(batch, max_blocks, num_physical, seed=seed, identity=smoke)
 
     q_storage = 0
     for b in range(batch):
@@ -208,9 +203,7 @@ def simulate_aicpu_metadata(
     """Host stand-in for AICPU EncodeMetadata: INT32[1024] header."""
     if aic_core_num <= 0:
         raise ValueError(f"aic_core_num must be > 0, got {aic_core_num}")
-    sa_total_task_num = calc_sa_total_task_num(
-        q_seqlens, num_q_heads, num_kv_heads, is_packed_gqa=is_packed_gqa
-    )
+    sa_total_task_num = calc_sa_total_task_num(q_seqlens, num_q_heads, num_kv_heads, is_packed_gqa=is_packed_gqa)
     metadata = torch.zeros(METADATA_TOTAL_SIZE, dtype=torch.int32, device=device)
     metadata[0] = METADATA_MAGIC
     metadata[1] = METADATA_VERSION
@@ -242,9 +235,7 @@ def apply_init_tensors(input_data, device="cpu"):
     )
     # Sparse seqused pad: only ~1/10 cases (need all batch q_seqlen>=2).
     use_seqused = all(int(s) >= 2 for s in storage_q) and (seed % 10 == 0)
-    actual_q = (
-        [int(s) - 1 for s in storage_q] if use_seqused else [int(s) for s in storage_q]
-    )
+    actual_q = [int(s) - 1 for s in storage_q] if use_seqused else [int(s) for s in storage_q]
     actual_kv = [int(s) for s in storage_kv]
 
     sparse_idx, sparse_count, block_table_new = build_sparse_and_block_table(
@@ -297,6 +288,7 @@ def apply_init_tensors(input_data, device="cpu"):
     input_data.kwargs["dstTypeMax"] = 0.0
 
     return actual_q, actual_kv
+
 
 # Kernel (arch35 full-quant bf16): FusedExpSub is fp32; ll = sum(fp32 exp).
 SIMULATE_SM_EXP = False
@@ -365,7 +357,6 @@ class TestGenericBlockSparseAttentionGenBmGt:
             result_bits[overflow_mask] = np.where(sign[overflow_mask] == 0, 0x7E, 0xFE)
         zero_mask = arr == 0.0
         result_bits[zero_mask] = 0x00
-        flat = arr.flatten()
         flat_abs = abs_val.flatten()
         flat_sign = sign.flatten()
         flat_bits = result_bits.flatten()
@@ -443,8 +434,8 @@ class TestGenericBlockSparseAttentionGenBmGt:
         k_dim = left.shape[1]
         for idx in range((k_dim + mm_k_tile - 1) // mm_k_tile):
             sub_k = min(mm_k_tile, k_dim - idx * mm_k_tile)
-            a = left[:, idx * mm_k_tile: idx * mm_k_tile + sub_k].astype(np.float32)
-            b = right[idx * mm_k_tile: idx * mm_k_tile + sub_k, :].astype(np.float32)
+            a = left[:, idx * mm_k_tile : idx * mm_k_tile + sub_k].astype(np.float32)
+            b = right[idx * mm_k_tile : idx * mm_k_tile + sub_k, :].astype(np.float32)
             s = np.matmul(a, b)
             res = s if res is None else res + s
         return res
@@ -478,8 +469,9 @@ class TestGenericBlockSparseAttentionGenBmGt:
         return go, gl.astype(interm_dtype_re)
 
     @classmethod
-    def ref_flash_block_sparse_attention(cls, query, key, value, softmax_scale, block_lens,
-                                         block_size=128, sm_dtype=bfloat16):
+    def ref_flash_block_sparse_attention(
+        cls, query, key, value, softmax_scale, block_lens, block_size=128, sm_dtype=bfloat16
+    ):
         # Align arch35 full-quant: SM QK in attentionOut dtype, ToBfloat16/half(scale),
         # fp32 exp+ll, P=CAST_RINT(fp8, exp*448) kept as fp32 for PV, final O CAST_RINT.
         cur_kv_len = key.shape[1]
@@ -492,8 +484,8 @@ class TestGenericBlockSparseAttentionGenBmGt:
             cur_tile = min(block_len, cur_kv_len - kv_start)
             if cur_tile <= 0:
                 continue
-            key_tile = key[:, kv_start: kv_start + cur_tile]
-            value_tile = value[kv_start: kv_start + cur_tile, :]
+            key_tile = key[:, kv_start : kv_start + cur_tile]
+            value_tile = value[kv_start : kv_start + cur_tile, :]
             qk = cls.base_tile_mm(query, key_tile, 128)
             qk = cls._fp32_to_sm(qk, interm_dtype_sm)
             qk = cls._fp32_to_sm(qk * scale_sm, interm_dtype_sm)
@@ -519,8 +511,7 @@ class TestGenericBlockSparseAttentionGenBmGt:
         return o
 
     @staticmethod
-    def gather_kv_blocks(key, value, batch_idx, kv_h, sparse_idx, block_table,
-                         kv_seqlen, causal_bound, block_shape_y):
+    def gather_kv_blocks(key, value, batch_idx, kv_h, sparse_idx, block_table, kv_seqlen, causal_bound, block_shape_y):
         key_parts, value_parts, block_lens = [], [], []
         for i in range(len(sparse_idx)):
             logical_id = int(sparse_idx[i])
@@ -595,22 +586,34 @@ class TestGenericBlockSparseAttentionGenBmGt:
                     valid_topk = min(valid_topk, top_k)
                     idx_row = sparse_block_idx[kv_h, global_q_block, :valid_topk]
                     key_g, val_g, block_lens = self.gather_kv_blocks(
-                        key, value, batch_idx, kv_h, idx_row, block_table,
-                        kv_seqlen, causal_bound, block_shape_y,
+                        key,
+                        value,
+                        batch_idx,
+                        kv_h,
+                        idx_row,
+                        block_table,
+                        kv_seqlen,
+                        causal_bound,
+                        block_shape_y,
                     )
                     if key_g is None:
                         continue
                     q_start = kv_h * group_size
-                    q_group = query[global_q, q_start: q_start + group_size, :]
+                    q_group = query[global_q, q_start : q_start + group_size, :]
                     if not is_benchmark:
                         out_group = self.ref_flash_block_sparse_attention(
-                            q_group, key_g, val_g, scale, block_lens, block_shape_y,
+                            q_group,
+                            key_g,
+                            val_g,
+                            scale,
+                            block_lens,
+                            block_shape_y,
                             sm_dtype=sm_dtype,
                         )
-                        attn_out_bm[global_q, q_start: q_start + group_size, :] = out_group
+                        attn_out_bm[global_q, q_start : q_start + group_size, :] = out_group
                     else:
                         out_group = self.ref_attention(q_group, key_g, val_g, scale)
-                        attn_out_gt[global_q, q_start: q_start + group_size, :] = out_group
+                        attn_out_gt[global_q, q_start : q_start + group_size, :] = out_group
             q_offset += int(q_storage_seqlens[batch_idx])
 
         if not is_benchmark:
@@ -733,7 +736,7 @@ class GenericBlockSparseAttentionQuantInputProcess(AclnnBaseApi):
 @register("aclnn_genericblocksparseattention")
 class GenericBlockSparseAttentionQuantApi(BaseApi):
     def __init__(self, task_result: TaskResult):
-        super(GenericBlockSparseAttentionQuantApi, self).__init__(task_result)
+        super().__init__(task_result)
 
     def init_by_input_data(self, input_data: InputDataset):
         np.random.seed(10)
@@ -781,9 +784,7 @@ class GenericBlockSparseAttentionQuantApi(BaseApi):
             scale=float(scale_value),
             block_shape_y=int(block_shape[1]),
             top_k=top_k,
-            sm_dtype=test_obj._sm_dtype_from_attention_out(
-                input_data.kwargs.get("attentionOut")
-            ),
+            sm_dtype=test_obj._sm_dtype_from_attention_out(input_data.kwargs.get("attentionOut")),
         )
         inputs = test_obj.AttentionInputs(
             query=query,
@@ -797,9 +798,7 @@ class GenericBlockSparseAttentionQuantApi(BaseApi):
             aux_attrs=aux,
             q_storage_seqlens=q_storage_seqlens,
         )
-        attn_out_bm, attn_out_gt = test_obj.compute_output(
-            inputs, self.task_result.is_benchmark_task
-        )
+        attn_out_bm, attn_out_gt = test_obj.compute_output(inputs, self.task_result.is_benchmark_task)
 
         if not self.task_result.is_benchmark_task:
             atten_out = _numpy_to_torch(attn_out_bm)
