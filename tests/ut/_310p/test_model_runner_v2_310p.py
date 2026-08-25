@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import sys
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -178,7 +179,7 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     with (
         patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
         patch.object(model_runner_module, "AscendAttentionBackend310", FakeBackend),
-        patch.object(model_runner_module.torch_npu, "empty_with_format", empty_with_format),
+        patch.object(model_runner_module.torch_npu, "empty_with_format", empty_with_format, create=True),
     ):
         caches = runner._allocate_kv_cache_tensors(kv_cache_config, {})
 
@@ -249,7 +250,17 @@ def test_aclgraph_query_lens_ignore_padded_request_entries() -> None:
 
 
 def test_worker_selects_v2_runner_on_310p() -> None:
-    from vllm_ascend._310p.worker_310p import NPUWorker310
+    atb_ops = MagicMock()
+    atb_ops._register_atb_extensions = MagicMock()
+    with patch.dict(
+        sys.modules,
+        {
+            "torch_npu.op_plugin": MagicMock(),
+            "torch_npu.op_plugin.atb": MagicMock(),
+            "torch_npu.op_plugin.atb._atb_ops": atb_ops,
+        },
+    ):
+        from vllm_ascend._310p.worker_310p import NPUWorker310
 
     worker = object.__new__(NPUWorker310)
     worker.vllm_config = SimpleNamespace()
