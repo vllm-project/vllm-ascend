@@ -10,6 +10,7 @@ import numpy as np
 import torch
 import torch_npu
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -24,16 +25,23 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.kv_connector import get_kv_connector
+from vllm.v1.worker.gpu.model_runner import sort_batch_req_ids
 from vllm.v1.worker.utils import bind_kv_cache
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.ops.rotary_embedding import update_cos_sin
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
+if not vllm_version_is("0.27.1"):
+    from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
@@ -43,11 +51,17 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     # TODO: Refactor Triton-dependent overrides to register 310P
     # implementations through Triton Dispatcher after vLLM RFC #45133 lands.
-    request_state_cls = Ascend310PRequestState
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self._validate_config(vllm_config)
         super().__init__(vllm_config, device)
+        self.req_states = Ascend310PRequestState(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            num_speculative_steps=self.num_speculative_steps,
+            vocab_size=self.vocab_size,
+            device=self.device,
+        )
         self.input_ids_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int32, device="cpu")
         self.positions_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int64, device="cpu")
         self.next_prefill_tokens_cpu = torch.zeros(self.max_num_reqs, dtype=torch.int32, device="cpu")
@@ -93,6 +107,181 @@ class NPUModelRunner310V2(NPUModelRunner):
         # TODO: Support LoRA in the next 310P MRV2 iteration.
         if vllm_config.lora_config is not None:
             raise NotImplementedError("LoRA is not supported by model runner v2 on 310P.")
+
+    def _prepare_inputs_310p(
+        self,
+        scheduler_output: SchedulerOutput,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> AscendInputBatch:
+        # TODO: Refactor this Triton-free input preparation through Triton
+        # Dispatcher after vLLM RFC #45133 lands.
+        num_tokens = scheduler_output.total_num_scheduled_tokens
+        num_tokens_after_padding = batch_desc.num_tokens
+        assert num_tokens > 0
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
+
+        if vllm_version_is("0.27.1"):
+            req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
+        else:
+            req_ids = sort_batch_req_ids(
+                num_tokens_per_req,
+                scheduler_output.scheduled_spec_decode_tokens,
+                self.decode_query_len,
+            )
+        self._update_seq_lens_cpu(scheduler_output, req_ids)
+
+        num_scheduled_tokens = np.fromiter(
+            map(num_tokens_per_req.get, req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        attn_state = build_attn_state(
+            self.vllm_config,
+            self.input_buffers.seq_lens_np,
+            num_reqs,
+            num_scheduled_tokens,
+            num_scheduled_tokens,
+        )
+        idx_mapping_np = np.fromiter(
+            map(self.req_states.req_id_to_index.get, req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+        query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
+        query_start_loc_np[num_reqs + 1 :] = num_tokens
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
+                num_tokens_after_padding,
+                num_reqs_padded,
+                num_reqs,
+                query_start_loc_np,
+                batch_desc.cg_mode,
+                batch_desc.num_reqs,
+            )
+        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
+        query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
+
+        prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
+        num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
+        is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
+        batch_has_prefill = bool(np.any(is_prefilling_np))
+        self.eplb.set_batch_phase(batch_has_prefill)
+        if batch_has_prefill:
+            self._prepare_prefill_inputs(
+                self.input_buffers.input_ids,
+                self.req_states.next_prefill_tokens,
+                idx_mapping,
+                query_start_loc,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prefill_len.gpu,
+                self.req_states.num_computed_tokens.gpu,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+            )
+
+        self._prepare_pos_seq_lens(
+            idx_mapping,
+            query_start_loc,
+            self.req_states.num_computed_tokens.gpu,
+            self.input_buffers.positions,
+            self.input_buffers.seq_lens,
+            idx_mapping_np=idx_mapping_np,
+            query_start_loc_np=query_start_loc_np,
+            num_scheduled_tokens=num_scheduled_tokens,
+        )
+        seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
+        self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
+        cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        cu_num_logits = torch.arange(num_reqs + 1, device=self.device, dtype=torch.int32)
+        logits_indices = self._combine_sampled_and_draft_tokens(
+            self.input_buffers.input_ids,
+            idx_mapping,
+            self.req_states.last_sampled_tokens,
+            query_start_loc,
+            seq_lens,
+            self.req_states.prefill_len.gpu,
+            self.req_states.draft_tokens,
+            cu_num_logits,
+            num_reqs,
+            self.model_state.num_new_sampled_tokens_per_step,
+            idx_mapping_np=idx_mapping_np,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens_np=self.input_buffers.seq_lens_np[:num_reqs],
+            prefill_len_np=prefill_len_np,
+        )
+
+        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
+        np.add(
+            self.req_states.num_computed_tokens_np[idx_mapping_np],
+            num_scheduled_tokens,
+            out=seq_lens_cpu_upper_bound_np[:num_reqs],
+        )
+        input_batch_kwargs: dict[str, Any] = dict(
+            req_ids=req_ids,
+            num_reqs=num_reqs,
+            num_reqs_after_padding=num_reqs_padded,
+            idx_mapping=idx_mapping,
+            idx_mapping_np=idx_mapping_np,
+            expanded_idx_mapping=idx_mapping,
+            expanded_local_pos=torch.zeros(num_reqs, dtype=torch.int32, device=self.device),
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_tokens=num_tokens,
+            num_tokens_after_padding=num_tokens_after_padding,
+            num_draft_tokens=0,
+            num_draft_tokens_per_req=None,
+            query_start_loc=query_start_loc,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
+            dcp_local_seq_lens=None,
+            is_prefilling_np=is_prefilling_np,
+            num_computed_tokens_np=self.req_states.num_computed_tokens_np[idx_mapping_np],
+            prefill_len_np=prefill_len_np,
+            num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
+            max_seq_len_np=None,
+            input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
+            positions=self.input_buffers.positions[:num_tokens_after_padding],
+            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
+            logits_indices=logits_indices,
+            cu_num_logits=cu_num_logits,
+            cu_num_logits_np=cu_num_logits_np,
+            has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+            prompt_lens=None,
+            seq_lens_np=self.input_buffers.seq_lens_np,
+            attn_state=attn_state,
+        )
+        if not vllm_version_is("0.27.1"):
+            input_batch_kwargs["has_prefill"] = batch_has_prefill
+        input_batch = AscendInputBatch(**input_batch_kwargs)
+        update_cos_sin(input_batch.positions)
+        return input_batch
+
+    if vllm_version_is("0.27.1"):
+
+        def prepare_inputs(
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            return self._prepare_inputs_310p(scheduler_output, batch_desc)
+
+    else:
+
+        def prepare_inputs(  # type: ignore[misc]
+            self,
+            scheduler_output: SchedulerOutput,
+            batch_req_state: BatchReqState,
+            batch_desc: BatchExecutionDescriptor,
+        ) -> AscendInputBatch:
+            del batch_req_state
+            return self._prepare_inputs_310p(scheduler_output, batch_desc)
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         super().finish_requests(scheduler_output)
