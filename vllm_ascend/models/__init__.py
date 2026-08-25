@@ -22,12 +22,12 @@ def register_model():
         "LlamaForCausalLMVwnEagle3", "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM"
     )
     ModelRegistry.register_model("Qwen3DSparkModel", "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM")
-    ModelRegistry.register_model(
-        "DFlash2DraftModel",
-        "vllm_ascend.models.qwen3_dflash2:DFlash2Qwen3ForCausalLM",
-    )
     ModelRegistry.register_model("DeepSeekMTPModel", "vllm_ascend.models.deepseek_mtp:AscendDeepSeekMTP")
     ModelRegistry.register_model("GlmMoeDsaForCausalLM", "vllm_ascend.models.deepseek_mtp:AscendGlmMoeDsaForCausalLM")
     ModelRegistry.register_model(
         "Eagle3LlamaForCausalLM", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
+    )
+    ModelRegistry.register_model(
+        "Qwen3MoePlusPlusForCausalLM",
+        "vllm_ascend.models.qwen3_moe_plus_plus:Qwen3MoePlusPlusForCausalLM",
     )
