@@ -25,7 +25,7 @@ from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import maybe_trans_nz, vllm_version_is
+from vllm_ascend.utils import maybe_trans_nz
 
 from .moe_comm_method import AllGatherCommImpl310
 
@@ -116,10 +116,6 @@ class AscendMoERunner310(AscendMoERunner):
         tid2eid=None,
         n_shared_experts: int = 0,
     ):
-        if not vllm_version_is("0.27.1") and gate is not None:
-            # Pre-cast the internal router weight during model loading. A
-            # forward-time Cast cannot be captured by ACLGraph on 310P.
-            gate.precast_fp32_weight = True
         super().__init__(
             layer_name=layer_name,
             moe_config=moe_config,
@@ -133,6 +129,10 @@ class AscendMoERunner310(AscendMoERunner):
             routed_output_transform=routed_output_transform,
             routed_scaling_factor=routed_scaling_factor,
         )
+        if self.is_internal_router and self.gate is not None and not hasattr(self.gate, "weight_fp32"):
+            # Pre-cast the internal router weight during model loading. A
+            # forward-time Cast cannot be captured by ACLGraph on 310P.
+            self.gate.precast_fp32_weight = True
 
         ascend_shared_experts = getattr(self, "ascend_shared_experts", None)
         if ascend_shared_experts is not None:
