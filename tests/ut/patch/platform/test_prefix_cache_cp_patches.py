@@ -48,6 +48,11 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)
 
 
+def _ratio_kwargs(ratio: int) -> dict[str, int]:
+    """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
+    return {"compress_ratio": ratio} if vllm_version_is("0.27.1") else {"tokens_per_state": ratio}
+
+
 def _make_hybrid_kv_cache_config(
     full_block_size: int = 16,
     mamba_block_size: int = 16,
@@ -142,7 +147,7 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=4,
+        **_ratio_kwargs(4),
         model_version="deepseek_v4",
     )
     c128_spec = MLAAttentionSpec(
@@ -150,7 +155,7 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=128,
+        **_ratio_kwargs(128),
         model_version="deepseek_v4",
     )
     c4_group_spec = UniformTypeKVCacheSpecs.from_specs({"c4_attn": c4_spec})
@@ -277,7 +282,7 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=128,
+        **_ratio_kwargs(128),
         model_version="deepseek_v4",
     )
     c4_spec = MLAAttentionSpec(
@@ -285,7 +290,7 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=4,
+        **_ratio_kwargs(4),
         model_version="deepseek_v4",
     )
     swa_spec = SlidingWindowMLASpec(
@@ -717,7 +722,7 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         head_size=512,
         dtype=torch.float32,
         sliding_window=128,  # DeepSeek V4 window
-        compress_ratio=1,
+        **_ratio_kwargs(1),
     )
     alignment_tokens = 4096  # lcm_block_size
 
