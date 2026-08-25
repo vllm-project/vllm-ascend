@@ -1,0 +1,56 @@
+name: Test AIframe/Mind Runner
+
+on:
+  workflow_dispatch:  # 手动触发
+  pull_request:
+    paths:
+      - '.github/workflows/test-aiframe-mind-runner.yml'
+
+jobs:
+  test-aiframe-2card:
+    runs-on: linux-aarch64-a3-800i-2-aiframe
+    steps:
+      - name: Check runner info
+        run: |
+          echo "=== Runner Information ==="
+          echo "Hostname: $(hostname)"
+          echo "Kernel: $(uname -a)"
+          echo "Date: $(date)"
+
+      - name: Check NPU
+        run: |
+          echo "=== NPU Information ==="
+          npu-smi info || echo "NPU info not available"
+
+      - name: Check resources
+        run: |
+          echo "=== System Resources ==="
+          echo "CPU cores: $(nproc)"
+          echo "Memory:"
+          free -h
+          echo "Disk:"
+          df -h | head -10
+
+  test-mind-4card:
+    runs-on: linux-aarch64-a3-800i-4-mind
+    steps:
+      - name: Check runner info
+        run: |
+          echo "=== Runner Information ==="
+          echo "Hostname: $(hostname)"
+          echo "Kernel: $(uname -a)"
+          echo "Date: $(date)"
+
+      - name: Check NPU
+        run: |
+          echo "=== NPU Information ==="
+          npu-smi info || echo "NPU info not available"
+
+      - name: Check resources
+        run: |
+          echo "=== System Resources ==="
+          echo "CPU cores: $(nproc)"
+          echo "Memory:"
+          free -h
+          echo "Disk:"
+          df -h | head -10
