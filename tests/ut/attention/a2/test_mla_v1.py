@@ -1196,6 +1196,7 @@ class TestAscendMLAImpl(TestBase):
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         model_config.dtype = torch.float16
+        model_config.runner_type = "generate"
         vllm_config.model_config = model_config
         get_current_vllm_config.return_value = vllm_config
         vllm_config.additional_config = {"refresh": True}
@@ -1263,6 +1264,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(self.impl.kv_a_proj_with_mqa)
         self.assertIsNotNone(self.impl.kv_a_layernorm)
         self.assertEqual(self.impl.num_queries_per_kv, 32)
+        self.assertFalse(self.impl.is_draft_model)
         # 256 is power of 2, so padding should be 0
         self.assertEqual(self.impl.num_heads_padded, 256)
         self.assertEqual(self.impl.head_padding, 0)
@@ -1270,6 +1272,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_draft_model_disables_mlapo_at_init(self, mock_get_current_vllm_config, mock_enabling_mlapo):
+        self.impl.vllm_config.model_config.runner_type = "draft"
         mock_get_current_vllm_config.return_value = self.impl.vllm_config
         impl = AscendMLAImpl(
             num_heads=self.impl.num_heads,
@@ -1298,7 +1301,6 @@ class TestAscendMLAImpl(TestBase):
             rotary_emb=self.impl.rotary_emb,
             g_proj=None,
             use_mla_rope=True,
-            is_draft_model=True,
         )
 
         self.assertTrue(impl.is_draft_model)
