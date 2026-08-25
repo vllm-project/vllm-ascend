@@ -100,7 +100,6 @@ class DSACPMetadata:
 @dataclass
 class CompressorSPMetadata:
     enabled: bool
-    reason: str
     num_input_tokens: int = 0
     token_indices: torch.Tensor | None = None
     token_slice: tuple[int, int] | None = None
@@ -129,12 +128,6 @@ class CompressorSPMetadata:
     state_sync_gather_compact_indices: torch.Tensor | None = None
     state_sync_gather_compact_slice: tuple[int, int] | None = None
     state_sync_row_counts_per_rank: tuple[int, ...] = ()
-    rotate_chunk_owners: bool = False
-    request_ids: tuple[str, ...] = ()
-    request_continues: tuple[bool, ...] = ()
-    rank_offsets: tuple[int, ...] = ()
-    tp_rank: int = 0
-    tp_size: int = 1
 
 
 @dataclass
@@ -884,34 +877,20 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens_cpu = self.seq_lens_cpu
         if query_start_loc_cpu is None or seq_lens_cpu is None:
-            return CompressorSPMetadata(False, "missing_cpu_metadata")
+            return CompressorSPMetadata(False)
 
         num_reqs = common_attn_metadata.num_reqs
         tp_group = get_tp_group()
         query_start_loc = tuple(query_start_loc_cpu[: num_reqs + 1].tolist())
         seq_lens = tuple(seq_lens_cpu[:num_reqs].tolist())
-        positions = self.common_ratio_to_sas_metadata.get("_compressor_sp_positions")
-        if positions is None:
-            positions_source = common_attn_metadata.positions_cpu
-            if positions_source is None:
-                positions_source = input_positions
-            positions = tuple(positions_source[: common_attn_metadata.num_actual_tokens].tolist())
-            self.common_ratio_to_sas_metadata["_compressor_sp_positions"] = positions
-        cache_key = (
-            "compressor_sp",
-            self.compressor_ratio,
-            tp_group.world_size,
-            tp_group.rank_in_group,
-            local_start,
-            local_end,
-            query_start_loc,
-            seq_lens,
-            positions,
-            common_attn_metadata.req_ids,
-            common_attn_metadata.prefill_continues,
-            common_attn_metadata.compressor_sp_rank_offsets,
-            common_attn_metadata.compressor_sp_rotate_owners,
-        )
+        positions_source = common_attn_metadata.positions_cpu
+        if positions_source is None:
+            return CompressorSPMetadata(False)
+        positions = positions_source[: common_attn_metadata.num_actual_tokens]
+        # This cache is created afresh for each model step and shared only by
+        # metadata builders for that step. The ratio therefore identifies the
+        # plan without hashing every position and request field again.
+        cache_key = ("compressor_sp", self.compressor_ratio)
         cached = self.common_ratio_to_sas_metadata.get(cache_key)
         if cached is not None:
             return cached
@@ -947,14 +926,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
     def _to_compressor_sp_metadata(self, plan: CompressorSPPlan) -> CompressorSPMetadata:
         if not plan.enabled:
-            return CompressorSPMetadata(
-                enabled=False,
-                reason=plan.reason,
-                num_input_tokens=plan.num_input_tokens,
-                sp_row_counts_per_rank=plan.sp_row_counts_per_rank,
-                tp_rank=plan.tp_rank,
-                tp_size=plan.tp_size,
-            )
+            return CompressorSPMetadata(enabled=False)
 
         def indices(values: tuple[int, ...], index_slice: tuple[int, int] | None) -> torch.Tensor | None:
             if index_slice is not None:
@@ -963,7 +935,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         return CompressorSPMetadata(
             enabled=True,
-            reason=plan.reason,
             num_input_tokens=plan.num_input_tokens,
             token_indices=indices(plan.token_indices, plan.token_slice),
             token_slice=plan.token_slice,
@@ -1021,12 +992,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ),
             state_sync_gather_compact_slice=plan.state_sync_gather_compact_slice,
             state_sync_row_counts_per_rank=plan.state_sync_row_counts_per_rank,
-            rotate_chunk_owners=plan.rotate_chunk_owners,
-            request_ids=plan.request_ids,
-            request_continues=plan.request_continues,
-            rank_offsets=plan.rank_offsets,
-            tp_rank=plan.tp_rank,
-            tp_size=plan.tp_size,
         )
 
     def _build_local_token_metadata(
@@ -1840,7 +1805,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             return False
         row_counts = plan.sp_row_counts_per_rank
         expected_global = sum(row_counts)
-        expected_local = row_counts[plan.tp_rank]
+        expected_local = row_counts[self.tp_rank]
         if full_slot_mapping.shape[0] < expected_global:
             return False
 

@@ -24,6 +24,14 @@ def _plan(**overrides):
     return build_compressor_sp_plan(**params)
 
 
+def _selector_values(plan, name):
+    selector_slice = getattr(plan, f"{name}_slice")
+    if selector_slice is not None:
+        start, length = selector_slice
+        return tuple(range(start, start + length))
+    return getattr(plan, f"{name}_indices")
+
+
 def test_c4_aligned_8192_plan_uses_contiguous_gather():
     plan = _plan(
         input_positions=list(range(8192)),
@@ -38,7 +46,8 @@ def test_c4_aligned_8192_plan_uses_contiguous_gather():
     assert plan.num_input_tokens == 8192
     assert plan.sp_row_counts_per_rank == (512, 512, 512, 512)
     assert plan.gather_compact_slice == (0, 2048)
-    assert len(plan.output_keep_indices) == 512
+    assert plan.output_keep_indices == ()
+    assert plan.output_keep_slice == (2, 512)
     assert plan.token_slice is not None
     assert plan.token_slice[1] >= 2048
     assert plan.req_indices == (0,)
@@ -46,7 +55,7 @@ def test_c4_aligned_8192_plan_uses_contiguous_gather():
     assert plan.state_replay_req_slice == (0, 1)
     assert plan.state_replay_cu_seqlens == (0, 8)
     assert plan.state_replay_start_pos == (8184,)
-    assert plan.state_replay_rope_row_indices == (2046, 2047, 2048)
+    assert plan.state_replay_rope_row_indices == ()
     assert plan.state_replay_rope_row_slice == (2046, 3)
 
 
@@ -69,7 +78,8 @@ def test_c128_aligned_rank_mapping(rank, local_start, local_end, expected_start)
     assert plan.enabled
     assert plan.sp_row_counts_per_rank == (1, 1)
     assert plan.token_slice == (expected_start, 128)
-    assert plan.output_keep_indices == (0,)
+    assert plan.output_keep_indices == ()
+    assert plan.output_keep_slice == (0, 1)
     assert plan.gather_compact_slice == (0, 2)
     assert not plan.requires_state_sync
     assert plan.state_sync_row_counts_per_rank == (0, 0)
@@ -90,8 +100,7 @@ def test_multi_request_overlap_does_not_cross_request_boundary():
 
     assert plan.enabled
     assert plan.req_indices == (0,)
-    assert plan.token_indices
-    assert max(plan.token_indices) < 8
+    assert max(_selector_values(plan, "token")) < 8
     assert plan.sp_row_counts_per_rank == (2, 2)
 
 
@@ -196,7 +205,7 @@ def test_ragged_trailing_padding_keeps_physical_indices():
 
     assert plan.enabled
     assert plan.sp_row_counts_per_rank == (2, 2, 2, 2, 2, 2, 2, 1)
-    assert plan.gather_compact_indices == tuple(range(15))
+    assert plan.gather_compact_indices == ()
     assert plan.gather_compact_slice == (0, 15)
 
 
@@ -214,14 +223,15 @@ def test_c4_chunked_prefill_uses_absolute_start_position():
     assert plan.enabled
     assert plan.start_pos == (128,)
     assert plan.sp_row_counts_per_rank == (2, 2)
-    assert plan.output_keep_indices == (2, 3)
+    assert plan.output_keep_indices == ()
+    assert plan.output_keep_slice == (2, 2)
     assert not plan.requires_state_sync
     assert plan.state_sync_row_counts_per_rank == (0, 0)
     assert plan.state_sync_global_token_indices == ()
     assert plan.state_replay_token_slice == (0, 16)
     assert plan.state_replay_cu_seqlens == (0, 16)
     assert plan.state_replay_start_pos == (128,)
-    assert plan.state_replay_rope_row_indices == (0, 1, 2, 3, 4)
+    assert plan.state_replay_rope_row_indices == ()
     assert plan.state_replay_rope_row_slice == (0, 5)
 
 
@@ -240,8 +250,6 @@ def test_c4_continuing_chunk_rotates_head_owner_without_replay():
     )
 
     assert plan.enabled
-    assert plan.rotate_chunk_owners
-    assert plan.rank_offsets == (3,)
     assert plan.token_slice == (0, 2048)
     assert plan.output_keep_slice == (0, 512)
     assert plan.state_replay_token_indices == ()
@@ -324,7 +332,7 @@ def test_rope_padding_falls_back_when_no_contiguous_source_row_exists():
     )
 
     assert plan.enabled
-    assert plan.rope_row_indices == (0,)
+    assert plan.rope_row_indices == ()
     assert plan.rope_row_slice == (0, 1)
 
 
@@ -386,7 +394,7 @@ def test_chunked_multi_request_positions_are_validated_per_request():
     assert plan.req_indices == (0,)
     assert plan.start_pos == (124,)
     assert plan.sp_row_counts_per_rank == (2, 2)
-    assert max(plan.token_indices) < 8
+    assert max(_selector_values(plan, "token")) < 8
 
 
 def _ref_sp_row_counts(num_tokens, ratio, tp_size):
@@ -424,22 +432,17 @@ def test_closed_form_owned_counts_match_per_token_reference(num_tokens, ratio, t
         assert plan.sp_row_counts_per_rank == reference
         # gather_compact must reindex the padded rank-major buffer back to the
         # dense global row order (0..sum(counts)-1) exactly once.
-        assert sorted(plan.gather_compact_indices) == sorted(set(plan.gather_compact_indices))
-        assert len(plan.gather_compact_indices) == sum(reference)
+        gather_compact = _selector_values(plan, "gather_compact")
+        assert sorted(gather_compact) == sorted(set(gather_compact))
+        assert len(gather_compact) == sum(reference)
 
 
-def test_endpoint_position_check_admits_middle_discontinuity_by_default():
-    """Fast path validates request endpoints only (positions contiguous by
-    vLLM invariant); the full O(N) scan is available behind validate_positions."""
+def test_endpoint_position_check_relies_on_vllm_contiguity_invariant():
     positions = list(range(16))
     positions[7] = 99  # interior corruption, endpoints still consistent
 
-    fast_plan = _plan(input_positions=positions)
-    assert fast_plan.enabled  # endpoints (0 and 15) still line up
-
-    checked_plan = _plan(input_positions=positions, validate_positions=True)
-    assert not checked_plan.enabled
-    assert checked_plan.reason == "noncontiguous_positions"
+    plan = _plan(input_positions=positions)
+    assert plan.enabled  # endpoints (0 and 15) still line up
 
 
 def _reference_plan_selectors(*, num_tokens, ratio, tp_size, tp_rank, query_start_loc, seq_lens, positions):
@@ -520,8 +523,8 @@ def test_arithmetic_output_rows_match_per_token_reference(ratio, tp_size, num_to
         )
         assert plan.enabled, plan.reason
         assert plan.sp_row_counts_per_rank == reference["sp_row_counts_per_rank"]
-        assert plan.gather_compact_indices == reference["gather_compact_indices"]
-        assert len(plan.output_keep_indices) == reference["num_keep_rows"]
+        assert _selector_values(plan, "gather_compact") == reference["gather_compact_indices"]
+        assert len(_selector_values(plan, "output_keep")) == reference["num_keep_rows"]
 
 
 @pytest.mark.parametrize("ratio", [4, 128])
@@ -558,7 +561,7 @@ def test_packed_requests_keep_per_request_output_phase(ratio, lens):
         )
         assert plan.enabled, plan.reason
         assert plan.sp_row_counts_per_rank == reference["sp_row_counts_per_rank"]
-        assert plan.gather_compact_indices == reference["gather_compact_indices"]
+        assert _selector_values(plan, "gather_compact") == reference["gather_compact_indices"]
 
 
 @pytest.mark.parametrize("tp_size", [2, 4])
@@ -585,7 +588,6 @@ def test_rotated_owner_runs_match_per_token_reference(tp_size, offset):
             rotate_chunk_owners=True,
         )
         assert plan.enabled, plan.reason
-        assert plan.rotate_chunk_owners
 
         # Per-token reference for the rotated owner assignment.
         owned_rows = [[] for _ in range(tp_size)]
@@ -602,7 +604,7 @@ def test_rotated_owner_runs_match_per_token_reference(tp_size, offset):
                 gather[global_row] = rank * max_rows + local_row
 
         assert plan.sp_row_counts_per_rank == tuple(len(rows) for rows in owned_rows)
-        assert plan.gather_compact_indices == tuple(gather)
+        assert _selector_values(plan, "gather_compact") == tuple(gather)
 
 
 def test_contiguous_slice_rejects_permuted_selectors():

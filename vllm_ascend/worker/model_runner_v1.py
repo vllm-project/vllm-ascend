@@ -2988,7 +2988,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         if not compressor_sp_active:
             req_ids = None
-            active_req_ids: tuple[str, ...] = ()
             prefill_continues = None
             rank_offsets: list[int] = []
             rotate_compressor_owners = False
@@ -3123,7 +3122,6 @@ class NPUModelRunner(GPUModelRunner):
                 else None
             ),
             req_ids=req_ids,
-            active_req_ids=active_req_ids,
             prefill_continues=prefill_continues,
             compressor_sp_rank_offsets=tuple(rank_offsets),
             compressor_sp_rotate_owners=rotate_compressor_owners,

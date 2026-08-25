@@ -38,23 +38,17 @@ class CompressorSPPlan:
     state_sync_gather_compact_indices: tuple[int, ...] = ()
     state_sync_gather_compact_slice: tuple[int, int] | None = None
     state_sync_row_counts_per_rank: tuple[int, ...] = ()
-    rotate_chunk_owners: bool = False
-    request_ids: tuple[str, ...] = ()
-    request_continues: tuple[bool, ...] = ()
-    rank_offsets: tuple[int, ...] = ()
-    tp_rank: int = 0
-    tp_size: int = 1
 
 
 def _selector_from_runs(runs: Sequence[tuple[int, int]]) -> tuple[tuple[int, ...], tuple[int, int] | None]:
-    """Materialize a selector from ``(start, length)`` runs and derive its slice.
+    """Build an index selector only when ``narrow()`` cannot represent it.
 
     Every large selector in a plan is a concatenation of contiguous index runs,
     so whether ``narrow()`` can replace ``index_select()`` is decided by checking
     that consecutive runs join with unit stride. That is O(number of runs)
     instead of the O(number of indices) re-scan that inspecting the materialized
-    selector requires, and the materialization itself becomes a single ``range``
-    expansion in the common single-run case.
+    selector requires. Contiguous selectors keep only ``(start, length)`` so the
+    metadata path does not allocate a Python tuple or a device index tensor.
 
     Runs must be non-empty and given in selector order.
     """
@@ -66,7 +60,7 @@ def _selector_from_runs(runs: Sequence[tuple[int, int]]) -> tuple[tuple[int, ...
         contiguous = contiguous and run_start == start + total
         total += run_length
     if contiguous:
-        return (tuple(range(start, start + total)), (start, total))
+        return ((), (start, total))
     return (
         tuple(chain.from_iterable(range(run_start, run_start + run_length) for run_start, run_length in runs)),
         None,
@@ -121,14 +115,7 @@ def _rope_row_runs(
     return [*compressed_row_runs, *([(0, 1)] * padding_rows)]
 
 
-
-def _gather_compact_indices(row_counts: Sequence[int]) -> tuple[int, ...]:
-    max_rows = max(row_counts, default=0)
-    return tuple(rank * max_rows + row for rank, count in enumerate(row_counts) for row in range(count))
-
-
 def _build_c4_state_replay(
-    input_positions: Sequence[int],
     query_start_loc: Sequence[int],
     request_start_positions: Sequence[int],
     rope_source_rows: int,
@@ -151,15 +138,15 @@ def _build_c4_state_replay(
         req_end = query_start_loc[req_index + 1]
         replay_tokens = 8 + (4 if request_start > 0 else 0)
         replay_start = max(req_start, req_end - replay_tokens)
-        while replay_start > req_start and input_positions[replay_start] % 8 != 0:
-            replay_start -= 1
+        replay_start_position = request_start + replay_start - req_start
+        replay_start -= min(replay_start - req_start, replay_start_position % 8)
 
         run_length = req_end - replay_start
         token_runs.append((replay_start, run_length))
         num_replay_tokens += run_length
         req_indices.append(req_index)
         cu_seqlens.append(cu_seqlens[-1] + run_length)
-        start_pos.append(input_positions[replay_start])
+        start_pos.append(request_start + replay_start - req_start)
 
         # Output tokens inside the replay window are consecutive outputs of the
         # request, so they own one contiguous global row run.
@@ -205,7 +192,6 @@ def build_compressor_sp_plan(
     request_continues: Sequence[bool] | None = None,
     rank_offsets: Sequence[int] | None = None,
     rotate_chunk_owners: bool = False,
-    validate_positions: bool = False,
 ) -> CompressorSPPlan:
     """Plan Compressor sequence-parallel execution for prefill batches.
 
@@ -219,8 +205,6 @@ def build_compressor_sp_plan(
             enabled=False,
             reason=reason,
             num_input_tokens=len(input_positions),
-            tp_rank=tp_rank,
-            tp_size=tp_size,
         )
 
     if not enabled:
@@ -253,27 +237,18 @@ def build_compressor_sp_plan(
     request_start_positions = [seq_lens[i] - query_lens[i] for i in range(num_reqs)]
     if any(start < 0 for start in request_start_positions):
         return disabled("negative_start_pos")
+
     # Positions within a single request are contiguous by vLLM invariant, so a
     # per-request endpoint check is sufficient and avoids an O(num_tokens) scan
-    # on the metadata-build hot path. The full scan remains available behind
-    # ``validate_positions`` for debugging.
+    # on the metadata-build hot path.
     for req_index, request_start_pos in enumerate(request_start_positions):
         req_start = query_start_loc[req_index]
         req_end = query_start_loc[req_index + 1]
         if (
-            input_positions[req_start] != request_start_pos
-            or input_positions[req_end - 1] != request_start_pos + (req_end - req_start) - 1
+            int(input_positions[req_start]) != request_start_pos
+            or int(input_positions[req_end - 1]) != request_start_pos + (req_end - req_start) - 1
         ):
             return disabled("noncontiguous_positions")
-    if validate_positions:
-        for req_index, request_start_pos in enumerate(request_start_positions):
-            req_start = query_start_loc[req_index]
-            req_end = query_start_loc[req_index + 1]
-            if any(
-                input_positions[flat_index] != request_start_pos + flat_index - req_start
-                for flat_index in range(req_start, req_end)
-            ):
-                return disabled("noncontiguous_positions")
 
     normalized_request_ids = tuple(request_ids[:num_reqs]) if request_ids is not None else ()
     normalized_request_continues = (
@@ -340,15 +315,6 @@ def build_compressor_sp_plan(
             row_base + (aligned_low - first_output) // compress_ratio,
             row_base + (high - 1 - first_output) // compress_ratio + 1,
         )
-
-    def compressed_row_of(req_index: int, flat_index: int) -> int | None:
-        offset = flat_index - req_output_first[req_index]
-        if offset < 0 or offset % compress_ratio != 0:
-            return None
-        row = offset // compress_ratio
-        if row >= req_output_count[req_index]:
-            return None
-        return req_output_row_base[req_index] + row
 
     # Rank ownership: token counts are a closed form over the shard bounds, and
     # each (request, shard) pair contributes exactly one contiguous row run.
@@ -435,19 +401,19 @@ def build_compressor_sp_plan(
         expanded_end = true_end
         if first_true_output is not None:
             expanded_start = max(req_start, first_true_output - dependency_tokens + 1)
-            expected_position = max(
-                request_start_positions[req_index],
-                input_positions[first_true_output] - dependency_tokens + 1,
-            )
-            while expanded_start < first_true_output and input_positions[expanded_start] < expected_position:
-                expanded_start += 1
             if compress_ratio == 4:
-                while expanded_start > req_start and input_positions[expanded_start] % dependency_tokens != 0:
-                    expanded_start -= 1
+                expanded_start_position = request_start_positions[req_index] + expanded_start - req_start
+                expanded_start -= min(
+                    expanded_start - req_start,
+                    expanded_start_position % dependency_tokens,
+                )
 
             if expanded_end < req_end:
-                while expanded_end < req_end and (input_positions[expanded_end - 1] + 1) % dependency_tokens != 0:
-                    expanded_end += 1
+                expanded_end_position = request_start_positions[req_index] + expanded_end - req_start
+                expanded_end = min(
+                    req_end,
+                    expanded_end + (-expanded_end_position) % dependency_tokens,
+                )
         req_indices.append(req_index)
         token_runs.append((expanded_start, expanded_end - expanded_start))
         num_local_tokens += expanded_end - expanded_start
@@ -500,12 +466,11 @@ def build_compressor_sp_plan(
     )
     state_replay = (
         _build_c4_state_replay(
-            input_positions,
             query_start_loc,
             request_start_positions,
             rope_source_rows,
             replay_req_indices,
-            compressed_row_of,
+            output_rows_in_range,
         )
         if compress_ratio == 4
         else {}
@@ -539,38 +504,39 @@ def build_compressor_sp_plan(
     state_sync_global_token_indices = tuple(
         flat_index for rank_indices in state_sync_indices_per_rank for flat_index in rank_indices
     )
-    state_sync_gather_compact_indices = _gather_compact_indices(state_sync_row_counts)
+    state_sync_max_rows = max(state_sync_row_counts, default=0)
+    state_sync_gather_compact_indices, state_sync_gather_compact_slice = _selector_from_runs(
+        [
+            (rank * state_sync_max_rows, count)
+            for rank, count in enumerate(state_sync_row_counts)
+            if count
+        ]
+    )
 
     return CompressorSPPlan(
         enabled=True,
         reason="enabled",
         num_input_tokens=num_input_tokens,
-        token_indices=tuple(token_indices),
-        token_slice=_contiguous_slice(token_indices),
+        token_indices=token_indices,
+        token_slice=token_slice,
         req_indices=tuple(req_indices),
         req_slice=_contiguous_slice(req_indices),
         cu_seqlens=tuple(cu_seqlens),
         start_pos=tuple(local_start_positions),
         rope_row_indices=rope_row_indices,
-        rope_row_slice=_contiguous_slice(rope_row_indices),
-        output_keep_indices=tuple(output_keep_indices),
-        output_keep_slice=_contiguous_slice(output_keep_indices),
+        rope_row_slice=rope_row_slice,
+        output_keep_indices=output_keep_indices,
+        output_keep_slice=output_keep_slice,
         gather_compact_indices=gather_compact_indices,
-        gather_compact_slice=_contiguous_slice(gather_compact_indices),
+        gather_compact_slice=gather_compact_slice,
         sp_row_counts_per_rank=tuple(sp_row_counts),
         **state_replay,
         requires_state_sync=requires_state_sync,
         state_sync_token_indices=state_sync_indices_per_rank[tp_rank],
         state_sync_global_token_indices=state_sync_global_token_indices,
         state_sync_gather_compact_indices=state_sync_gather_compact_indices,
-        state_sync_gather_compact_slice=_contiguous_slice(state_sync_gather_compact_indices),
+        state_sync_gather_compact_slice=state_sync_gather_compact_slice,
         state_sync_row_counts_per_rank=tuple(state_sync_row_counts),
-        rotate_chunk_owners=rotate_chunk_owners,
-        request_ids=normalized_request_ids if rotate_chunk_owners else (),
-        request_continues=(normalized_request_continues if rotate_chunk_owners else ()),
-        rank_offsets=normalized_rank_offsets if rotate_chunk_owners else (),
-        tp_rank=tp_rank,
-        tp_size=tp_size,
     )
 
 
