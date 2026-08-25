@@ -33,10 +33,6 @@ daily:
       tests: >-
         tests/e2e/pull_request/one_card/test_attention_fa3.py
         tests/e2e/pull_request/one_card/test_sampler.py
-        tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
-        tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py
-        tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
-        tests/e2e/pull_request/one_card/test_multi_instance.py
         tests/e2e/pull_request/one_card/test_guided_decoding.py
 
   # --- A3: PR E2E two-card smoke (pytest-driven, runs on a3-2) ---
@@ -47,7 +43,6 @@ daily:
     - name: a3-two-card-smoke
       os: linux-aarch64-a3-2
       tests: >-
-        tests/e2e/pull_request/two_card/test_flashcomm_distributed.py
         tests/e2e/pull_request/two_card/test_prefix_caching.py
         tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py
         tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py
@@ -66,7 +61,6 @@ daily:
         tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
         tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
         tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py
-        tests/e2e/pull_request/four_card/test_graph_mode.py
 
   # --- A2: nightly high-freq subset (pytest-driven, runs on a2b3-1) ---
   # Curated from nightly high-frequency failure cases.
@@ -84,6 +78,5 @@ daily:
     - name: a3-nightly-hf
       os: linux-aarch64-a3-2
       tests: >-
-        tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine.py
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
