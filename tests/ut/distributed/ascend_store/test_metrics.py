@@ -322,6 +322,7 @@ class TestKVPoolWorkerLoadTiming(unittest.TestCase):
         block_range.request.req_id = "req-lw"
         block_range.start_block = 0
         block_range.end_block = 3
+        block_range.partial_block_index = None
         task = MagicMock()
         task.block_ranges = [block_range]
         worker.layer_load_tasks = [[task]]
@@ -340,6 +341,30 @@ class TestKVPoolWorkerLoadTiming(unittest.TestCase):
         # Both bookkeeping dicts are drained.
         self.assertEqual(worker._load_start_times, {})
         self.assertEqual(worker._layerwise_load_keys, {})
+
+    def test_layerwise_partial_block_counted(self):
+        """Verify partial_block_index adds 1 to the key count."""
+        worker = self._make_worker()
+
+        block_range = MagicMock()
+        block_range.request.req_id = "req-pw"
+        block_range.start_block = 0
+        block_range.end_block = 2
+        block_range.partial_block_index = 5  # extra partial block
+        task = MagicMock()
+        task.block_ranges = [block_range]
+        worker.layer_load_tasks = [[task]]
+
+        worker._record_layerwise_load_started()
+        time.sleep(0.01)
+        worker._record_layerwise_load_finished()
+
+        stats = worker.get_stats()
+        self.assertIsNotNone(stats)
+        records = stats.data["load"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["num_keys"], 3)  # 2 full + 1 partial
+        self.assertEqual(records[0]["path"], "layerwise")
 
 
 class TestKVPoolSchedulerDelayedRelease(unittest.TestCase):
