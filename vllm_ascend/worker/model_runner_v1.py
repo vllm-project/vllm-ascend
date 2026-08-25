@@ -3666,6 +3666,8 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
+        # K3's packed layout keeps Mamba specs inside UniformType groups, so the
+        # old first-spec scan over attn_groups cannot recognize them.
         self.need_accepted_tokens = kv_cache_config.has_mamba_layers
 
         self.may_reinitialize_input_batch(kv_cache_config)
@@ -3689,25 +3691,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.drafter,
                 AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
             )
+            kernel_block_sizes = self.kernel_block_sizes
             if isinstance(self.drafter, AscendDSparkProposer):
-                if isinstance(self.kernel_block_sizes, list):
-                    draft_kernel_block_sizes = [
-                        int(sizes[0] if isinstance(sizes, (list, tuple)) else sizes)
-                        for sizes in self.kernel_block_sizes
-                    ]
-                else:
-                    draft_kernel_block_sizes = [int(self.kernel_block_sizes)]
-                self.drafter.initialize_attn_backend(
-                    kv_cache_config,
-                    draft_kernel_block_sizes,
-                )
+                sizes = kernel_block_sizes if isinstance(kernel_block_sizes, list) else [kernel_block_sizes]
+                draft_kernel_block_sizes = [
+                    int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
+                ]
             else:
-                block_size = (
-                    self.kernel_block_sizes[0]
-                    if isinstance(self.kernel_block_sizes, list)
-                    else self.kernel_block_sizes
+                draft_kernel_block_sizes = (
+                    kernel_block_sizes[0] if isinstance(kernel_block_sizes, list) else kernel_block_sizes
                 )
-                self.drafter.initialize_attn_backend(kv_cache_config, block_size)
+            self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
         if (
             self.speculative_config

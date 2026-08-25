@@ -104,7 +104,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
         self.assertEqual(block_table.slot_mapping.cpu.numel(), 128)
         self.assertEqual(block_table.slot_mapping.cpu[: req_indices.size].numel(), 110)
 
-    def test_uniform_mamba_group_disables_slot_mapping(self):
+    def test_uniform_mamba_group_is_recognized_as_mamba(self):
         mamba_spec = MambaSpec(
             block_size=self.block_size,
             shapes=((4, 8),),

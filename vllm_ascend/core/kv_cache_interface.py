@@ -93,14 +93,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             store_on_host=first_spec.store_on_host,
         )
 
-    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
-        if any(
-            getattr(spec, "non_causal_multi_token_decode", False) != self.non_causal_multi_token_decode
-            for spec in kv_cache_specs.values()
-        ):
-            return False
-        return super().is_uniform_with_collection(kv_cache_specs)
-
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
