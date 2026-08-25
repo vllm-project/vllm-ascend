@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import TypeGuard
 
 ROOT = Path(__file__).resolve().parents[4]
 KERNEL = ROOT / "vllm_ascend" / "ops" / "triton" / "reject_sample.py"
@@ -23,7 +24,7 @@ def _function(name: str) -> ast.FunctionDef:
     raise AssertionError(f"function {name} not found in {KERNEL}")
 
 
-def _is_tl_call(node: ast.AST, name: str) -> bool:
+def _is_tl_call(node: ast.AST, name: str) -> TypeGuard[ast.Call]:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -134,7 +135,9 @@ def test_expand_kernel_masks_padded_lane_reads_and_writes() -> None:
         if _is_tl_call(node, "load") and node.args and "input_ptr" in _names(node.args[0])
     ]
     assert len(input_loads) == 1
-    assert ast.unparse(_keyword(input_loads[0], "mask")) == "len_mask"
+    input_mask = _keyword(input_loads[0], "mask")
+    assert input_mask is not None
+    assert ast.unparse(input_mask) == "len_mask"
     input_other = _keyword(input_loads[0], "other")
     assert isinstance(input_other, ast.Constant) and input_other.value == 0
 
