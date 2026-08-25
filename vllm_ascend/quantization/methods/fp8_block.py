@@ -97,36 +97,13 @@ def resolve_block_scales(
     return resolved
 
 
-def _as_linear_mx_scale(mx_scale: torch.Tensor, out_features: int, in_features: int, group_size: int) -> torch.Tensor:
-    mx_scale = mx_scale.view(torch.uint8)
-    expected = (out_features, in_features // group_size)
-    if tuple(mx_scale.shape) == expected:
-        return mx_scale
-    packed = (out_features, expected[1] // 2, 2) if expected[1] % 2 == 0 else None
-    if packed is not None and tuple(mx_scale.shape) == packed:
-        return mx_scale.reshape(*expected)
-    squeezed = mx_scale.squeeze()
-    if tuple(squeezed.shape) == expected:
-        return squeezed
-    if mx_scale.numel() == expected[0] * expected[1]:
-        return mx_scale.reshape(*expected)
-    raise ValueError(
-        f"npu_dynamic_mx_quant returned MX scale of shape {tuple(mx_scale.shape)} "
-        f"(numel={mx_scale.numel()}), expected {expected}"
-        + (f" or packed {packed}" if packed is not None else "")
-        + "."
-    )
-
-
-def _mx_quantize(resolved: torch.Tensor, scale_alg: int, group_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+def _mx_quantize(resolved: torch.Tensor, scale_alg: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Re-quantize a dense matrix to MXFP8, returning the weight and uint8 scale."""
-    quantized, mx_scale = torch_npu.npu_dynamic_mx_quant(
+    return torch_npu.npu_dynamic_mx_quant(
         resolved,
         dst_type=BLOCK_FP8_WEIGHT_DTYPE,
         scale_alg=scale_alg,
     )
-    out_features, in_features = resolved.shape
-    return quantized, _as_linear_mx_scale(mx_scale, out_features, in_features, group_size)
 
 
 def _supports_mx_regroup(in_features: int, group_size: int) -> bool:
@@ -191,9 +168,7 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
             return
 
-        quantized, mx_scale = _mx_quantize(
-            resolved, self.mxfp8_method.dynamic_mx_quant_scale_alg, self.mxfp8_method.group_size
-        )
+        quantized, mx_scale = _mx_quantize(resolved, self.mxfp8_method.dynamic_mx_quant_scale_alg)
         layer.weight = torch.nn.Parameter(quantized, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(mx_scale, requires_grad=False)
         self.mxfp8_method.process_weights_after_loading(layer)
@@ -338,7 +313,7 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             resolved = resolve_block_scales(
                 weight[expert], scale_inv[expert], self.block_n, self.block_k, self.model_dtype
             )
-            quantized, expert_scale = _mx_quantize(resolved, scale_alg, mxfp8_method.group_size)
+            quantized, expert_scale = _mx_quantize(resolved, scale_alg)
             weight[expert].copy_(quantized)
             mx_scale[expert].copy_(expert_scale)
         return mx_scale
