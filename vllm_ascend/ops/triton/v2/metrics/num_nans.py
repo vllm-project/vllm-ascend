@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-import triton.language.extra.cann.libdevice as libdevice
 from vllm.triton_utils import tl, triton
 
 
@@ -20,7 +19,7 @@ def _num_nans_kernel(
         mask = block < vocab_size
         logits = tl.load(logits_ptr + req_idx * logits_stride + block, mask=mask, other=0)
         logits = logits.to(tl.float32)
-        is_nan = libdevice.isnan(logits).to(tl.int32)
+        is_nan = tl.extra.cann.libdevice.isnan(logits).to(tl.int32)
         num_nans += tl.sum(is_nan).to(tl.int32)
     tl.store(num_nans_ptr + req_idx, num_nans)
 
