@@ -222,7 +222,7 @@ def plan_sparse_kv_offload_memory(
         "dram": dram_limit_blocks,
         "workload": workload_limit_blocks,
     }
-    limiting_factor = min(limits, key=limits.get)
+    limiting_factor = min(limits, key=lambda name: limits[name])
     final_num_blocks = limits[limiting_factor]
     final_planner_bytes = final_num_blocks * total_page_size_bytes
     planned_host_bytes = final_num_blocks * host_page_size_bytes
