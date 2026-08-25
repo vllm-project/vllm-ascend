@@ -8,7 +8,7 @@
 | aclnn | `aclnnMlaPrologV3WeightNzGetWorkspaceSize` / `aclnnMlaPrologV3WeightNz` | 支持 |
 | Ascend C `<<<>>>` | `mla_prolog_v3<<<blockDim, nullptr, stream>>>` | 支持（诊断/直调；需自备 tiling） |
 
-各入口表达同一套 MLA 前处理融合语义：下采样 → RMSNorm → 上采样 / RoPE → 写入 KV/KR Cache（及可选量化）。  
+各入口表达同一套 MLA 前处理融合语义：下采样 → RMSNorm → 上采样 / RoPE → 写入 KV/KR Cache（及可选量化）。
 底层算子名为 **MlaPrologV3**，权重 `weight_dq` / `weight_uq_qr` / `weight_dkv_kr` 需以 **FRACTAL_NZ** 格式传入。
 
 ## 2. 公共参数与约束
@@ -138,8 +138,8 @@ aclnnStatus aclnnMlaPrologV3WeightNz(
     void *workspace, uint64_t workspaceSize, aclOpExecutor *executor, aclrtStream stream);
 ```
 
-`GetWorkspaceSize` 完成参数校验与 executor 创建；第二段在传入 stream 上异步执行。  
-`ropeSin` / `ropeCos` 同时非空时启用 RoPE，同时为空时禁用；一个空一个非空时返回参数错误。  
+`GetWorkspaceSize` 完成参数校验与 executor 创建；第二段在传入 stream 上异步执行。
+`ropeSin` / `ropeCos` 同时非空时启用 RoPE，同时为空时禁用；一个空一个非空时返回参数错误。
 `kvCacheRef` / `krCacheRef` 同时是输入和输出。输入、输出、workspace 和 executor 必须保持有效直到 stream 完成。
 
 ### 3.2 调用示例
@@ -189,9 +189,9 @@ query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm = (
 )
 ```
 
-仅在 Ascend950 构建且加载 `vllm_ascend_C` + 自定义 opp 后可用。  
-`rope_sin` / `rope_cos` 为必传位置参数：同时非空启用 RoPE，同时为空（`numel()==0`）禁用；不允许一空一非空。  
-`token_x` rank=2 为合轴 `(T,He)`，rank=3 为 `(B,S,He)`。  
+仅在 Ascend950 构建且加载 `vllm_ascend_C` + 自定义 opp 后可用。
+`rope_sin` / `rope_cos` 为必传位置参数：同时非空启用 RoPE，同时为空（`numel()==0`）禁用；不允许一空一非空。
+`token_x` rank=2 为合轴 `(T,He)`，rank=3 为 `(B,S,He)`。
 `kv_cache` / `kr_cache` 原地更新；不需要的 optional 输出以空 Tensor 返回。
 
 NZ 权重可用 `torch_npu.npu_format_cast(w.contiguous(), 29)` 转换。
