@@ -30,7 +30,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -75,7 +74,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -242,7 +240,7 @@ benchmarks:
     max_out_len: 1500
     batch_size: 32
     request_rate: 0
-    baseline: 1
+    baseline: 983.2904
     threshold: 0.97
 
   perf_long:
@@ -254,7 +252,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 4
     request_rate: 1
-    baseline: 1
+    baseline: 53.0416
     threshold: 0.97
 
   acc:

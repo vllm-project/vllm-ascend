@@ -1,3 +1,4 @@
+import importlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,6 +10,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from tests.ut.base import TestBase
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
+kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
 
 
 class TestNPUWorker(TestBase):
@@ -353,12 +355,32 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.cache_config.num_gpu_blocks, 100)
             self.assertEqual(worker.cache_config.num_cpu_blocks, 50)
 
+    @patch("torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_sleep_uses_rl_extra_cleanup(self, mock_get_config, mock_allocator_class, mock_mem_get_info):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_get_config.return_value = SimpleNamespace(
+            rl_config=SimpleNamespace(enabled=True, sleep_mode_extra_cleanup=True)
+        )
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.sleep_wakeup_manager = MagicMock()
+
+        worker.sleep()
+
+        worker.sleep_wakeup_manager.sleep.assert_called_once_with()
+        mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(offload_tags=("weights",))
+        self.assertEqual(mock_mem_get_info.call_count, 2)
+
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
-        mock_config.enable_sleep_mode_extra_cleanup = True
+        mock_config.rl_config.enabled = True
+        mock_config.rl_config.sleep_mode_extra_cleanup = True
         mock_get_config.return_value = mock_config
         """Test wake_up method when sleep mode is enabled"""
         from vllm_ascend.worker.worker import NPUWorker
@@ -423,7 +445,10 @@ class TestNPUWorker(TestBase):
             )
             for model in (target_model, draft_model)
         ]
-        mock_get_config.return_value = SimpleNamespace(weight_nz_mode=0, enable_sleep_mode_extra_cleanup=False)
+        mock_get_config.return_value = SimpleNamespace(
+            weight_nz_mode=0,
+            rl_config=SimpleNamespace(enabled=False, sleep_mode_extra_cleanup=True),
+        )
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
@@ -1270,7 +1295,10 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
@@ -1305,6 +1333,7 @@ class TestNPUWorker(TestBase):
 
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
+            mock_kernel_warmup.assert_called_once_with(worker)
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
     @patch("vllm_ascend.worker.worker.get_ascend_device_type")
@@ -1334,7 +1363,10 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
@@ -1363,6 +1395,7 @@ class TestNPUWorker(TestBase):
 
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
+            mock_kernel_warmup.assert_called_once_with(worker)
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
@@ -1630,18 +1663,23 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine.parse_init_info.assert_called_once_with(init_info)
         engine.init_transfer_engine.assert_called_once_with("typed_init")
 
-    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_start_weight_update_dispatches_to_engine(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_start_weight_update_dispatches_to_engine(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        worker.start_weight_update()
+        # The runtime AscendConfig is authoritative even when the deprecated
+        # environment variable still carries a stale import-time value.
+        with patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "1"}):
+            worker.start_weight_update()
 
         engine.start_weight_update.assert_called_once_with()
         self.assertTrue(worker._weight_update_active)
 
-    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
-    def test_start_weight_update_rejects_reentry(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_start_weight_update_rejects_reentry(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 0
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
         worker._weight_update_active = True
@@ -1649,12 +1687,16 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.start_weight_update()
 
-    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "1"})
-    def test_start_weight_update_rejects_nz(self):
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_start_weight_update_rejects_nz(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.weight_nz_mode = 1
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        with self.assertRaises(ValueError):
+        with (
+            patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"}),
+            self.assertRaises(ValueError),
+        ):
             worker.start_weight_update()
 
     def test_update_weights_requires_start(self):

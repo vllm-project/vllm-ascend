@@ -19,13 +19,11 @@
 import logging
 from contextlib import contextmanager
 from copy import copy
-from typing import Any, cast
+from typing import Any
 
 import torch
-import vllm.v1.worker.gpu.spec_decode.speculator as vllm_speculator
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -37,45 +35,30 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata_wrapper,
+    build_draft_attn_metadata_factory,
+)
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 
 logger = logging.getLogger(__name__)
 
 
-@contextmanager
-def build_draft_attn_metadata_factory(positions, pad):
-    """Wrap build_attn_metadata to forward MLA rotary positions for the block.
-
-    MLA reads positions inside build_decode_metadata for cos/sin; the flat
-    super() path doesn't forward them. Must run inside build_attn_metadata_wrapper().
-    TODO:This field is removed when the external cos/sin solution is removed from the MLA.
-    """
-    raw = vllm_speculator.build_attn_metadata  # cache
-
-    def build_attn_metadata(*args, **kwargs):
-        kwargs["positions"] = positions[:pad]
-        return raw(*args, **kwargs)
-
-    try:
-        vllm_speculator.build_attn_metadata = build_attn_metadata
-        yield
-    finally:
-        vllm_speculator.build_attn_metadata = raw  # restore
-
-
 class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
-    GQA, MLA, and DSA draft decode state share one path. The current MTP path
+    GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
     uses the draft attention backend recorded by ``set_attn``.
 
     MLA's per-step state lives in ``.decode`` (cloned per step, written via an
     alias), GQA's is top-level. MLA also rebuilds the base (live ``.decode`` is
     None/wrong-batch) and forwards rotary ``positions`` into
-    build_attn_metadata. DSA manages its draft state in its metadata builder
-    and skips the generic MLA/GQA init and update logic.
+    build_attn_metadata. DSA and SFA manage their draft state in their metadata
+    builders and skip the generic MLA/GQA init and update logic.
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -88,6 +71,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         super().__init__(vllm_config, device)
 
         self.attn_architecture: str | None = None
+        self.attn_backend: type[AttentionBackend] | None = None
+        self.draft_vllm_config = self._create_draft_vllm_config()
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -109,6 +94,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Build the runtime config used while executing the draft model."""
+        return replace(
+            self.vllm_config,
+            model_config=self.draft_model_config,
+        )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
@@ -191,32 +183,19 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             target_attn_groups,
         )
 
-        # npu needs attn_backends to update graph params
-        attn_backends: dict[str, type[AttentionBackend]] = {}
-
-        active_layer_names = self.draft_attn_layer_names
-        for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
-            layer_names = kv_cache_group_spec.layer_names
-            if active_layer_names is not None:
-                layer_names = list(active_layer_names.intersection(layer_names))
-
-            layer_type = cast(type[Any], AttentionLayerBase)
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
-
-            for layer_name in layer_names:
-                attn_backend = attn_layers[layer_name].get_attn_backend()
-                attn_backends[layer_name] = attn_backend
-
-        self.attn_backends = attn_backends
-        first_attn_backend = list(self.attn_backends.values())[0]
-        if issubclass(first_attn_backend, AscendDSABackend):
+        # Use the first executable draft attention layer as the architecture
+        # discriminator and cache it for ACL graph parameter updates.
+        self.attn_backend = _get_graph_update_backend(self.attn_groups)
+        if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
-        elif issubclass(first_attn_backend, AscendMLABackend):
+        elif issubclass(self.attn_backend, AscendMLABackend):
             self.attn_architecture = "MLA"
-        elif issubclass(first_attn_backend, AscendAttentionBackend):
+        elif issubclass(self.attn_backend, (AscendSFABackend, AscendSFAIndexerBackend)):
+            self.attn_architecture = "SFA"
+        elif issubclass(self.attn_backend, AscendAttentionBackend):
             self.attn_architecture = "GQA"
         else:
-            raise ValueError(f"Unsupported attention backend: {first_attn_backend}")
+            raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
     def capture(self) -> None:
         logger.info("Capturing model for speculator...")
@@ -335,7 +314,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_query_per_req: int = 1,
         causal: bool = True,
     ) -> dict[str, Any] | None:
-        with build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens_padded):
+        assert self.input_batch is not None
+        with build_draft_attn_metadata_factory(
+            self.input_buffers.positions,
+            num_tokens_padded,
+            torch.from_numpy(self.input_batch.is_prefilling_np),
+        ):
             attn_metadata = super()._build_draft_attn_metadata(
                 num_reqs,
                 num_reqs_padded,
@@ -348,6 +332,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if attn_metadata is not None:
             # Ascend-specific: force DecodeOnly attention state for the draft model.
             for metadata in attn_metadata.values():
+                if metadata is None:
+                    continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
         return attn_metadata
 
@@ -371,6 +357,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         return draft_attn_metadatas
 
     def _ascend_update_seq_lens(self, attn_metadata: dict[str, Any] | None) -> None:
+        if self.attn_architecture in ("DSA", "SFA"):
+            return
         if attn_metadata is not None:
             for attn_meta in attn_metadata.values():
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
@@ -381,9 +369,9 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if attn_metadata is None:
             return
 
-        # DSA owns its per-step slot mapping, SAS, and QLI state in the DSA
-        # metadata builder and does not use draft graph metadata updates.
-        if self.attn_architecture == "DSA":
+        # DSA and SFA own their per-step sparse-attention state in their
+        # metadata builders and do not use draft graph metadata updates.
+        if self.attn_architecture in ("DSA", "SFA"):
             return []
 
         # TODO: _build_draft_attn_metadata pulls data (seq_lens, block_table,
@@ -427,7 +415,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if attn_metadata is None:
             return
 
-        if self.attn_architecture == "DSA":
+        if self.attn_architecture in ("DSA", "SFA"):
             return
 
         attn_meta = next(iter(attn_metadata.values()))

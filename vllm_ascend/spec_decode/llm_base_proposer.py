@@ -45,46 +45,26 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_co
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
+from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     prepare_sparse_kv_offload_mtp_dummy_metadata,
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
-from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
-    _disable_flash_comm_v1_context,
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
-
-
-# split hidden states along dimension of sequence
-def split_inputs_tp_to_sp(hidden_states, out):
-    # tp and sp share the same group
-    group = get_tp_group()
-
-    world_size = group.world_size
-    rank = group.rank
-
-    num_tokens = hidden_states.shape[0]
-    # the size per rank after padded
-    padded_num_tokens_per_rank = (num_tokens + world_size - 1) // world_size
-    # compute the start and end of slice
-    start = padded_num_tokens_per_rank * rank
-    end = padded_num_tokens_per_rank * (rank + 1)
-
-    # copy only hidden_states in current rank
-    hidden_states_curr_rank = hidden_states[start:end]
-    out[: hidden_states_curr_rank.shape[0]] = hidden_states_curr_rank
-    return out[:padded_num_tokens_per_rank]
 
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
@@ -163,8 +143,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
-
-        self.enable_shared_expert_dp = shared_expert_dp_enabled()
+        self.use_sequence_parallel_moe = enable_sp(vllm_config)
 
         self.dcp_size = self.runner.dcp_size
 
@@ -332,9 +311,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
 
         # Sliding-window draft attention adapter.
-        self.draft_window_size = (
-            self.vllm_config.additional_config.get("draft_window_size") if self.vllm_config.additional_config else None
-        )
+        # Read from the validated AscendConfig singleton instead of bypassing it
+        # via additional_config["draft_window_size"] (architecture debt #7).
+        from vllm_ascend.ascend_config import get_ascend_config
+
+        self.draft_window_size = get_ascend_config().draft_window_size
         if self.draft_window_size is not None:
             # EAGLE3: seq_lens is context-only, K draft positions lie beyond it
             #   -> future_offset = K.
@@ -634,7 +615,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 assert len(self.draft_attn_groups) > 0
                 builder = self.draft_attn_groups[0].get_metadata_builder()
-                kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
@@ -642,7 +622,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if self.use_compress:
                         extra_attn_metadata_args.update(
                             common_ratio_to_sas_metadata=dict(),
-                            block_size=kv_cache_spec.block_size,
                         )
                     # Set the real slot_mapping.
                     slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
@@ -790,8 +769,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method in ("eagle3", "dflash", "dspark"):
+            model = self.model
+            if isinstance(model, BreakableACLGraphWrapper):
+                model = model.unwrap()
             assert isinstance(
-                self.get_model(),
+                model,
                 (
                     Eagle3LlamaForCausalLM,
                     DFlashQwen3ForCausalLM,
@@ -1134,7 +1116,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample:
+        if getattr(self, "use_dflash2_selector", False):
+            draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
+            if lmhead_tp_enable():
+                draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
+                    draft_token_ids,
+                    num_indices,
+                    token_indices_to_sample,
+                    ori_token_indices_to_sample,
+                    is_logits=False,
+                )
+        elif get_ascend_config().enable_reduce_sample:
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1148,7 +1140,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
-                    logits = get_lmhead_tp_group().all_to_all(logits)
+                    # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
+                    logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                 else:
                     logits = self.model.model.logits_processor._gather_logits(logits)
                 if lmhead_tp_enable():
@@ -1168,29 +1161,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
                 # `sample_hidden_states` has been all-gathered to full.
                 # `markov_emb` should also be full to match it.
-                # We changed `flash_comm_v1_enabled` to avoid `markov_emb` from being split.
-                with _disable_flash_comm_v1_context():
-                    raw_logits = self.model.compute_logits(sample_hidden_states)
-                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
-                    num_blk = logits.shape[0]
-                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
-                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                    for idx in range(self.num_speculative_tokens):
-                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
-                        logits_bias = self.model.markov_bias(markov_emb)
-                        logits[:, idx].add_(logits_bias)
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                raw_logits = self.model.compute_logits(sample_hidden_states)
+                logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+                num_blk = logits.shape[0]
+                draft_token_ids = self._dspark_draft_buffer[:num_blk]
+                draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+                for idx in range(self.num_speculative_tokens):
+                    markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                    logits_bias = self.model.markov_bias(markov_emb)
+                    logits[:, idx].add_(logits_bias)
+                    draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
 
-                    # Dynamic verify-length path, implemented in DynamicSpecScheduler
-                    # Only the dspark method is handled here since it relies on
-                    # the DSpark confidence head.
-                    if self.dynamic_spec is not None:
-                        self.dynamic_spec.update(
-                            model=self.model,
-                            last_hidden_states=last_hidden_states,
-                            draft_token_ids=draft_token_ids,
-                            num_reqs=num_blk,
-                        )
+                # Dynamic verify-length path, implemented in DynamicSpecScheduler
+                # Only the dspark method is handled here since it relies on
+                # the DSpark confidence head.
+                if self.dynamic_spec is not None:
+                    self.dynamic_spec.update(
+                        model=self.model,
+                        last_hidden_states=last_hidden_states,
+                        draft_token_ids=draft_token_ids,
+                        num_reqs=num_blk,
+                    )
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1339,7 +1330,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
-                        logits = get_lmhead_tp_group().all_to_all(logits)
+                        # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
+                        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
                     else:
                         logits = self.model.model.logits_processor._gather_logits(logits)
                     if lmhead_tp_enable() and num_indices < logits.shape[0]:
@@ -1536,7 +1528,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model_config = getattr(self, "draft_model_config", None)
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
-            return "DeepSeekMTPModel" in architectures
+            if vllm_version_is("0.27.1"):
+                return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
+            else:
+                return bool(
+                    {
+                        "DeepSeekMTPModel",
+                        "DeepseekV32MTPModel",
+                        "KimiK3MTPModel",
+                    }.intersection(architectures)
+                )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(
@@ -1723,11 +1724,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         attn_metadata_builder = attn_group.get_metadata_builder()
 
-        extra_attn_metadata_args = {}
+        extra_attn_metadata_args: dict[str, Any] = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
                 common_ratio_to_sas_metadata=dict(),
-                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
         if dcp_manager is not None:
             dcp_manager.prepare_spec_decode_drafting_cp_metadata(
@@ -2076,15 +2076,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.method == "mtp":
-            if _EXTRA_CTX.flash_comm_v1_enabled and not self.is_multimodal_model:
-                hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
-                positions = positions.unsqueeze(-1)
-                positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
-                positions = positions.squeeze(-1)
-        else:
-            if _EXTRA_CTX.flash_comm_v1_enabled:
-                hidden_states = split_inputs_tp_to_sp(hidden_states, hidden_states)
         return hidden_states, positions
 
     def maybe_all_gather_and_unpad(
@@ -2094,22 +2085,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         hidden_states: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if self.method == "mtp":
-            if self.enable_shared_expert_dp:
-                last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    last_hidden_states.contiguous(), True
+            if self.use_sequence_parallel_moe:
+                tp_group = get_tp_group()
+                last_hidden_states = torch.ops.vllm.all_gather(
+                    last_hidden_states.contiguous(), 0, tp_group.world_size, tp_group.unique_name
                 )
                 # in mm model, positions not need allgather, because it not reduced before(see maybe_pad_and_reduce())
                 if not self.is_multimodal_model:
-                    positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
+                    positions = torch.ops.vllm.all_gather(
+                        positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name
+                    )
                 if hidden_states is not None:
                     hidden_states = last_hidden_states
-        else:
-            if _EXTRA_CTX.flash_comm_v1_enabled:
-                last_hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                    last_hidden_states.contiguous(), True
-                )
-                if hidden_states is not None:
-                    hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), True)
         return last_hidden_states, positions, hidden_states
 
     # In the context of the dummy‑run accompaniment of p‑eagle, when num_indices becomes large,
@@ -2173,7 +2160,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.use_compress:
                 extra_attn_metadata_args = dict(
                     common_ratio_to_sas_metadata=dict(),
-                    block_size=attn_group.kv_cache_spec.block_size,
                 )
             if self.method == "dspark":
                 gid = attn_group.kv_cache_group_id

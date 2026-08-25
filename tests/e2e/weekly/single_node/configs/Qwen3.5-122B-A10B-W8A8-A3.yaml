@@ -161,7 +161,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-expert-parallel"
@@ -179,7 +178,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-expert-parallel"
@@ -213,7 +211,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-expert-parallel"
@@ -247,7 +244,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--enable-expert-parallel"
@@ -266,7 +262,6 @@ test_cases:
     model: "Eco-Tech/Qwen3.5-122B-A10B-w8a8-mtp"
     envs:
       <<: *envs
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--max-model-len"

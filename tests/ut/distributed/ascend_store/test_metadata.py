@@ -16,7 +16,7 @@
 #
 
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -30,7 +30,52 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     RequestTracker,
     get_block_hashes,
+    get_group_block_size,
+    get_group_cache_family,
+    infer_cache_transfer_granularity,
+    infer_group_block_sizes,
+    uses_hybrid_kv_cache,
 )
+
+
+class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_uses_hybrid_kv_cache(self):
+        groups = [
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+        ]
+        scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
+        self.assertTrue(uses_hybrid_kv_cache(scheduler_config, groups))
+        self.assertFalse(uses_hybrid_kv_cache(scheduler_config, None))
+
+    def test_uses_hybrid_kv_cache_disabled(self):
+        groups = [
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+        ]
+        scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=True)
+        self.assertFalse(uses_hybrid_kv_cache(scheduler_config, groups))
+
+    def test_infer_group_block_sizes(self):
+        groups = [
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=32)),
+        ]
+        self.assertEqual(infer_group_block_sizes(8, groups), [16, 32])
+        self.assertEqual(infer_group_block_sizes(8, None), [8])
+
+    def test_get_group_cache_family(self):
+        self.assertEqual(get_group_cache_family(["c1", "c2"], 1), "c2")
+        self.assertEqual(get_group_cache_family(["c1"], 3), "default")
+
+    def test_get_group_block_size(self):
+        self.assertEqual(get_group_block_size([16, 32], 1), 32)
+
+    def test_get_group_block_size_out_of_range(self):
+        self.assertEqual(get_group_block_size([16, 32], 5), 16)
+
+    def test_infer_cache_transfer_granularity(self):
+        self.assertEqual(infer_cache_transfer_granularity([16, 32], 32, [0, 1]), 32)
 
 
 class TestKeyMetadata(unittest.TestCase):
@@ -202,7 +247,7 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             KeyMetadata("llama", 0, 0, 0, 0),
             KeyMetadata("llama", 1, 0, 0, 0),
         ]
-        db = ChunkedTokenDatabase(group_metadata, block_size=[16, 32], partitions=None, hash_block_size=16)
+        db = ChunkedTokenDatabase(group_metadata, block_size=[16, 64], partitions=None, hash_block_size=16)
         db.set_group_buffers(
             {0: [1000], 1: [2000]},
             {0: [160], 1: [320]},
@@ -236,6 +281,53 @@ class TestChunkedTokenDatabase(unittest.TestCase):
             )
         )
         self.assertEqual([(start, end, block_id) for start, end, _, _, block_id in result], [(32, 48, 12)])
+
+    def test_compressed_keys_use_logical_spans_and_values_use_physical_rows(self):
+        db = ChunkedTokenDatabase(
+            [self.meta],
+            block_size=[512],
+            partitions=None,
+            hash_block_size=128,
+        )
+        db.set_group_buffers(
+            {0: [1000]},
+            {0: [1024]},
+            group_cache_families={0: "c4"},
+            group_num_layers={0: 1},
+        )
+        hashes = [bytes([idx]) * 32 for idx in range(8)]
+
+        chunks = list(
+            db.process_tokens(
+                1024,
+                hashes,
+                kv_cache_group_id=0,
+                cache_family="c4",
+            )
+        )
+        self.assertEqual(
+            [(start, end) for start, end, _ in chunks],
+            [(0, 512), (512, 1024)],
+        )
+
+        first_addr, first_size, first_block = db.prepare_value(
+            0,
+            512,
+            [5, 6],
+            kv_cache_group_id=0,
+        )
+        second_addr, second_size, second_block = db.prepare_value(
+            512,
+            1024,
+            [5, 6],
+            kv_cache_group_id=0,
+        )
+        self.assertEqual((first_block, second_block), (5, 6))
+        self.assertEqual(
+            (first_addr, second_addr),
+            ([1000 + 5 * 1024], [1000 + 6 * 1024]),
+        )
+        self.assertEqual((first_size, second_size), ([1024], [1024]))
 
     def test_get_block_hashes_selects_terminal_str_hashes(self):
         result = get_block_hashes(["a", "b", "c", "d"], group_block_size=32, hash_block_size=16)
@@ -310,28 +402,6 @@ class TestLoadSpec(unittest.TestCase):
 
 
 class TestRequestTracker(unittest.TestCase):
-    def test_from_new_request(self):
-        new_req = MagicMock()
-        new_req.req_id = "req-1"
-        new_req.block_ids = [10, 20, 30]
-        new_req.prompt_token_ids = list(range(100))
-
-        tracker = RequestTracker.from_new_request(new_req, num_tokens_to_compute=48)
-        self.assertEqual(tracker.req_id, "req-1")
-        self.assertEqual(tracker.token_len, 48)
-        self.assertEqual(tracker.allocated_block_ids, [10, 20, 30])
-        self.assertEqual(len(tracker.token_ids), 48)
-        self.assertEqual(tracker.num_saved_tokens, 0)
-
-    def test_from_new_request_nested_block_ids(self):
-        new_req = MagicMock()
-        new_req.req_id = "req-2"
-        new_req.block_ids = [[10, 20], [30, 40]]
-        new_req.prompt_token_ids = list(range(32))
-
-        tracker = RequestTracker.from_new_request(new_req, num_tokens_to_compute=32)
-        self.assertEqual(tracker.allocated_block_ids, [10, 20])
-
     def test_update_with_list(self):
         tracker = RequestTracker(req_id="r1", token_len=16, allocated_block_ids=[1, 2])
         tracker.update([3, 4])
@@ -606,7 +676,7 @@ class TestReqMeta(unittest.TestCase):
 
 class TestAscendConnectorMetadata(unittest.TestCase):
     def test_add_request(self):
-        meta = AscendConnectorMetadata(unfinished_request_ids=set(), preempted_req_ids=set())
+        meta = AscendConnectorMetadata(preempted_req_ids=set())
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,

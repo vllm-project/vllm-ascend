@@ -47,7 +47,6 @@ env_common: &env_common
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "512"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
@@ -146,5 +145,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 15
     request_rate: 0.4
-    baseline: 347.4475
+    baseline: 242.7762
     threshold: 0.97

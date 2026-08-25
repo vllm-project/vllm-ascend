@@ -1,4 +1,4 @@
-test_name: "Minimax_m2.7_in3_5_tpot50"
+test_name: "Minimax_m2.7_in64k_tpot50"
 model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
 num_nodes: 2
 npu_per_node: 16
@@ -51,7 +51,6 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "2048"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 templates:
   - node_index: 0
@@ -73,8 +72,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "70000"
       - --max-num-batched-tokens
@@ -126,8 +123,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "70000"
       - --max-num-batched-tokens

@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import inspect
 import logging
 from types import NoneType
 from typing import Any
@@ -58,6 +59,9 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.profiling_chunk_predictor import (
+    _attach_profiling_chunk_execution_time,
+)
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
@@ -225,7 +229,8 @@ class NPUWorker(WorkerBase):
             model = self.model_runner.model
             self._sleep_saved_buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.sleep()
 
@@ -248,7 +253,9 @@ class NPUWorker(WorkerBase):
         if nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
+                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config, "
+                "or enable additional_config.rl_config (enabled: true) which disables NZ "
+                "automatically."
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
@@ -264,7 +271,8 @@ class NPUWorker(WorkerBase):
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
 
-        cleanup_enabled = getattr(get_ascend_config(), "enable_sleep_mode_extra_cleanup", False)
+        rl_config = get_ascend_config().rl_config
+        cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 
@@ -282,11 +290,12 @@ class NPUWorker(WorkerBase):
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def _check_nz_disabled(self) -> None:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        if get_ascend_config().weight_nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter "
-                "precision issues in the RL scenarios. Please set "
-                "VLLM_ASCEND_ENABLE_NZ=0."
+                "precision issues in the RL scenarios. Please set weight_nz_mode=0 "
+                "via --additional-config, or enable additional_config.rl_config "
+                "(enabled: true) which disables NZ automatically."
             )
 
     def start_weight_update(self) -> None:
@@ -634,8 +643,6 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
-            # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
-            # it will conflict with the all-gather operation in flashcomm1.
             if enable_sp():
                 all_gather_group = None
             else:
@@ -660,8 +667,6 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
-        # it will conflict with the all-gather operation in flashcomm1.
         if enable_sp():
             all_gather_group = None
         else:
@@ -691,7 +696,16 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        if not self.use_v2_model_runner:
+            return self.model_runner.sample_tokens(grammar_output)
+
+        output = self.model_runner.sample_tokens(grammar_output)
+        _attach_profiling_chunk_execution_time(
+            self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
+            self.model_runner,
+            output,
+        )
+        return output
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -741,6 +755,10 @@ class NPUWorker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
+
+        from vllm_ascend.model_executor.warmup.kernel_warmup import kernel_warmup
+
+        kernel_warmup(self)
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -857,16 +875,25 @@ class NPUWorker(WorkerBase):
 
         start = time.perf_counter()
 
-        # Run real model forward with force_attention=True
-        # This ensures attention is actually executed, not skipped.
-        # Without force_attention, attn_metadata may be None and attention
-        # won't run, making profiling results inaccurate.
-        # _dummy_run handles PP internally (intermediate tensors, etc.)
-        self.model_runner._dummy_run(
-            num_tokens=num_tokens,
-            force_attention=True,  # Critical: ensure attention is executed
-            profile_cpp=True,
-        )
+        # Run a real model forward with attention enabled in eager mode.
+        # _dummy_run handles PP internally (intermediate tensors, etc.).
+        old_max_num_reqs = self.model_runner.max_num_reqs
+        try:
+            self.model_runner.max_num_reqs = 1
+
+            dummy_run_kwargs = {
+                "num_tokens": num_tokens,
+                "force_attention": True,
+                "is_profile": False,
+                "cudagraph_runtime_mode": CUDAGraphMode.NONE,
+            }
+
+            if "profile_cpp" in inspect.signature(self.model_runner._dummy_run).parameters:
+                dummy_run_kwargs["profile_cpp"] = True
+
+            self.model_runner._dummy_run(**dummy_run_kwargs)
+        finally:
+            self.model_runner.max_num_reqs = old_max_num_reqs
 
         # Synchronize after forward to ensure NPU operations complete
         torch.npu.synchronize()

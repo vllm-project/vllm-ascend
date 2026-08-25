@@ -31,9 +31,7 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 
 # isort: off
 from vllm_ascend.utils import (
@@ -54,14 +52,6 @@ from vllm_ascend.utils import (
     enable_sp,
 )
 
-# Since vllm-project/vllm#43746, DeepSeek V4 model classes no longer
-# carry @support_torch_compile. This makes vLLM auto-enable the breakable
-# cudagraph PIECEWISE path, which is not supported on Ascend yet.
-envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH = False
-logger.info(
-    "Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet."
-)
-
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
@@ -69,6 +59,15 @@ else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
+
+# Keep Breakable CUDAGraph opt-in on Ascend. Upstream may auto-enable it
+# for selected architectures when the environment variable is absent.
+value = os.environ.setdefault("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+logger.info_once(
+    "Breakable CUDAGraph on Ascend is opt-in; using VLLM_USE_BREAKABLE_CUDAGRAPH=%s.",
+    value,
+    scope="process",
+)
 
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
@@ -92,6 +91,8 @@ class NPUPlatform(Platform):
         COMPRESSED_TENSORS_METHOD,
         FP8_METHOD,
         "deepseek_v4_fp8",
+        "modelopt_mxfp8",
+        "mxfp8",
     ]
 
     @property
@@ -217,7 +218,7 @@ class NPUPlatform(Platform):
         use_compress = getattr(attn_selector_config, "use_compress", False)
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
-        if selected_backend == AttentionBackendEnum.FLASH_ATTN and _validate_fa3_backend(key, attn_selector_config):
+        if _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
@@ -276,21 +277,18 @@ class NPUPlatform(Platform):
         if is_310p():
             from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
         else:
-            from vllm_ascend.quantization import AscendCompressedTensorsConfig, AscendFp8Config, AscendModelSlimConfig  # noqa: F401
+            from vllm_ascend.quantization import (  # noqa: F401
+                AscendCompressedTensorsConfig,
+                AscendFp8Config,
+                AscendModelOptMxFp8Config,
+                AscendModelSlimConfig,
+            )
 
         _config_deprecated_logging()
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: VllmConfig) -> None:
         """Apply Ascend-specific defaults."""
-
-        # Set sp_min_token_num=1 when enable_sp and not set.
-        pass_config = vllm_config.compilation_config.pass_config
-        if pass_config.enable_sp and pass_config.sp_min_token_num is None:
-            from vllm_ascend.compilation.passes.sequence_parallelism import get_sp_min_token_num
-
-            pass_config.sp_min_token_num = get_sp_min_token_num(vllm_config)
-            logger.info("Set sp_min_token_num. sp_min_token_num=%s", pass_config.sp_min_token_num)
 
         default_max_cg_capture_size = _get_default_max_cudagraph_capture_size(vllm_config)
         if default_max_cg_capture_size is not None:
@@ -381,7 +379,12 @@ class NPUPlatform(Platform):
         _update_compilation_modes(vllm_config, ascend_config)
 
         # 7.Recompute cudagraph sizes and setup compile backend (vllm_config).
-        _setup_compile_backend(vllm_config, compile_backend=cls.get_compile_backend())
+        _setup_compile_backend(
+            vllm_config,
+            compile_backend=cls.get_compile_backend(),
+            enable_shared_expert_dp=ascend_config.enable_shared_expert_dp,
+            enable_dsa_cp=ascend_config.enable_dsa_cp,
+        )
 
         # 8.Setup worker class, custom ops and scheduler (ascend_config -> vllm_config).
         _setup_worker_and_scheduler(vllm_config, ascend_config)
@@ -463,33 +466,17 @@ class NPUPlatform(Platform):
         # due to multiple warmups before actual capturing.
         capturing = False
 
-        # set for sequence parallelism, 1000 is the batch size concurrency
-        # threshold for enabling the flashcomm_v1 or sequence_parallelism feature.
-        # Currently, it is an empirical value. In normal scenarios,
-        # if the concurrency exceeds this threshold,
-        # the performance benefits can be maximized. Conversely,
-        # if the concurrency is below the threshold,
-        # the performance may degrade due to the switching of
-        # communication methods.
         mmrs_fusion = True
         if is_moe_model(vllm_config):
-            flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
-        else:
-            flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
-        pad_size = 0
         padded_length = None
-        if flash_comm_v1_enabled:
-            pad_size = (tp_world_size - (num_tokens % tp_world_size)) % tp_world_size
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
-            if flash_comm_v1_enabled:
-                padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
-                pad_size = padded_length - num_tokens
+            padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
         else:
             max_tokens_across_dp = num_tokens
 
@@ -518,8 +505,6 @@ class NPUPlatform(Platform):
             "capturing": capturing,
             "mmrs_fusion": mmrs_fusion,
             "num_tokens": num_tokens,
-            "flash_comm_v1_enabled": flash_comm_v1_enabled,
-            "pad_size": pad_size,
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,
             "mc2_mask": mc2_mask,
@@ -664,10 +649,10 @@ def _fix_incompatible_config(vllm_config: VllmConfig) -> None:
             )
             att_config.flash_attn_version = None
 
-        # Notify user that the backend will be managed by Ascend plugins,
-        # and for training-inference consistency, when att_config.backend
-        # == AttentionBackendEnum.FLASH_ATTN,it is NOT reset to None
-        if getattr(att_config, "backend", None) is not None and att_config.backend != AttentionBackendEnum.FLASH_ATTN:
+        # Notify the user that the backend will be managed by Ascend plugins.
+        # FA3 is selected directly in get_attn_backend_cls when RL training
+        # consistency is enabled, so it does not depend on this field.
+        if getattr(att_config, "backend", None) is not None:
             logger.info(
                 "User specified attention backend '%s'. Note that Ascend NPU "
                 "will use its registered plugin backend instead. Resetting to None.",
@@ -1024,12 +1009,19 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
         compilation_config.cudagraph_mode = cudagraph_mode
 
 
-def _setup_compile_backend(vllm_config: VllmConfig, compile_backend: str) -> None:
+def _setup_compile_backend(
+    vllm_config: VllmConfig,
+    compile_backend: str,
+    *,
+    enable_shared_expert_dp: bool = False,
+    enable_dsa_cp: bool = False,
+) -> None:
     """Recompute cudagraph sizes and setup the compile backend.
 
-    Recomputes cudagraph capture sizes (SP-aware), then configures the oot
-    compiler and disables npugraph_ex / static kernel when the cudagraph mode
-    does not support them. Writes back into additional_config for workers.
+    Recomputes cudagraph capture sizes (TP token-layout-aware), then configures
+    the oot compiler and disables npugraph_ex / static kernel when the
+    cudagraph mode does not support them. Writes back into additional_config
+    for workers.
     """
     from vllm.config import CompilationMode
     from vllm.config.compilation import CUDAGraphMode
@@ -1044,13 +1036,17 @@ def _setup_compile_backend(vllm_config: VllmConfig, compile_backend: str) -> Non
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
-    # TODO delete graph size update here when compilation_config.pass_config.enable_sp
-    # is supported by vllm-ascend.
+    # Upstream MoE SP shards tokens before the MoE runner, independent shared-
+    # expert DP shards them inside AscendSharedExperts, and DSA-CP shards Q at
+    # its attention boundary. All three layouts require TP-aligned graph gears
+    # so every captured graph has a stable local token shape. Keep the layout
+    # constraint separate from the feature switches so none enables another.
+    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
         and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         and not vllm_config.model_config.enforce_eager
-        and enable_sp(vllm_config)
+        and requires_tp_aligned_capture_sizes
     ):
         original_sizes = compilation_config.cudagraph_capture_sizes
         sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
@@ -1077,7 +1073,7 @@ def _setup_compile_backend(vllm_config: VllmConfig, compile_backend: str) -> Non
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
     elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
-        if compilation_config.mode != CompilationMode.VLLM_COMPILE:
+        if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
             raise AssertionError(
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
@@ -1129,9 +1125,6 @@ def _setup_worker_and_scheduler(
     # Select worker class and refresh block size
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
-        # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
-        if not vllm_config.compilation_config.pass_config.enable_sp:
-            parallel_config.all2all_backend = "flashinfer_all2allv"
         if is_310p():
             parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
         elif ascend_config.xlite_graph_config.enabled:
@@ -1207,10 +1200,10 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
     if enable_sp(vllm_config):
         if vllm_config.parallel_config.tensor_parallel_size <= 1:
-            raise AssertionError("Flash Comm v1 is only supported when tp_size > 1.")
+            raise AssertionError("Sequence parallelism is only supported when tp_size > 1.")
 
         if is_moe_model(vllm_config) and not vllm_config.parallel_config.enable_expert_parallel:
-            raise AssertionError("Flash Comm v1 requires enable_expert_parallel=True for MoE models.")
+            raise AssertionError("Sequence parallelism requires enable_expert_parallel=True for MoE models.")
 
 
 def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
@@ -1235,10 +1228,28 @@ def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
         logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
 
-def _validate_fa3_backend(key, attn_selector_config):
-    if not attn_selector_config.use_batch_invariant:
+def _disable_expandable_segments() -> None:
+    """Remove the allocator option that conflicts with sleep mode."""
+    npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "")
+    if not npu_alloc_configs:
+        return
+
+    filtered_configs = [
+        config.strip()
+        for config in npu_alloc_configs.split(",")
+        if config.strip() and not config.strip().startswith("expandable_segments:")
+    ]
+    updated_configs = ",".join(filtered_configs)
+    if updated_configs != npu_alloc_configs:
+        os.environ["PYTORCH_NPU_ALLOC_CONF"] = updated_configs
+        logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
+
+
+def _validate_fa3_backend(key, _attn_selector_config):
+    rl_config = get_ascend_config().rl_config
+    if not (rl_config.enabled and rl_config.enable_training_consistency):
         logger.info(
-            "FA3 will not be enabled when not in training-inference consistency scenario. "
+            "FA3 will not be enabled when rl_config.enable_training_consistency is false. "
             "Note that Ascend NPU will use its registered plugin backend instead."
         )
         return False

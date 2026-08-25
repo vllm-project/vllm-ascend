@@ -11,7 +11,6 @@ env_common: &env_common
   OMP_NUM_THREADS: 1
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_MLAPO: 1
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   ASCEND_A3_EBA_ENABLE: 1
   VLLM_ENGINE_READY_TIMEOUT_S: 3000
 
@@ -103,7 +102,7 @@ benchmarks:
     max_out_len: 3000
     batch_size: 256
     request_rate: 11.2
-    baseline: 305.2903 
+    baseline: 862.6289
     threshold: 0.97
     
   acc:
