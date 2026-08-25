@@ -378,13 +378,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_topk_indices(target_language_model)
         self._maybe_share_lm_head(model)
-        finish_shared_layer_preparation = getattr(
-            self.model,
-            "finish_shared_layer_preparation",
-            None,
-        )
-        if callable(finish_shared_layer_preparation):
-            finish_shared_layer_preparation()
 
         if (
             self.parallel_drafting
@@ -469,31 +462,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
 
             if share_embeddings:
-                draft_embed_tokens = getattr(
-                    self.model.model,
-                    "embed_tokens",
-                    None,
-                )
-                prepare_shared_layer = getattr(
-                    self.model,
-                    "prepare_shared_layer",
-                    None,
-                )
-                prepared_embed_tokens = (
-                    prepare_shared_layer(
-                        draft_embed_tokens,
-                        target_embed_tokens,
-                        "draft embed_tokens.weight",
-                    )
-                    if callable(prepare_shared_layer)
-                    else None
-                )
-                if prepared_embed_tokens is not None:
-                    self.model.model.embed_tokens = prepared_embed_tokens
-                else:
-                    if hasattr(self.model.model, "embed_tokens"):
-                        del self.model.model.embed_tokens
-                    self.model.model.embed_tokens = target_embed_tokens
+                if hasattr(self.model.model, "embed_tokens"):
+                    del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
                 "[spec_decode/base] PP>1: draft model loaded its own vocab embedding"
@@ -541,21 +512,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         " is not trained."
                     )
                 else:
-                    prepare_shared_layer = getattr(
-                        self.model,
-                        "prepare_shared_layer",
-                        None,
-                    )
-                    prepared_lm_head = (
-                        prepare_shared_layer(
-                            getattr(self.model, "lm_head", None),
-                            target_lm_head,
-                            "draft lm_head.weight",
-                        )
-                        if callable(prepare_shared_layer)
-                        else None
-                    )
-                    self.model.lm_head = target_lm_head if prepared_lm_head is None else prepared_lm_head
+                    self.model.lm_head = target_lm_head
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
