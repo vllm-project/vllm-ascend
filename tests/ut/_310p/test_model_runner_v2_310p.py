@@ -49,6 +49,60 @@ def test_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config())
 
 
+def test_runner_installs_310p_request_state() -> None:
+    request_state = object()
+
+    def init_common_runner(runner, vllm_config, device) -> None:
+        del vllm_config
+        runner.max_num_reqs = 4
+        runner.max_model_len = 128
+        runner.max_num_tokens = 32
+        runner.num_speculative_steps = 0
+        runner.vocab_size = 1024
+        runner.device = device
+
+    with (
+        patch.object(
+            NPUModelRunner,
+            "__init__",
+            autospec=True,
+            side_effect=init_common_runner,
+        ),
+        patch.object(
+            model_runner_module,
+            "Ascend310PRequestState",
+            return_value=request_state,
+        ) as request_state_cls,
+    ):
+        runner = NPUModelRunner310V2(_make_vllm_config(), torch.device("cpu"))
+
+    assert runner.req_states is request_state
+    request_state_cls.assert_called_once_with(
+        max_num_reqs=4,
+        max_model_len=128,
+        max_num_batched_tokens=32,
+        num_speculative_steps=0,
+        vocab_size=1024,
+        device=torch.device("cpu"),
+    )
+
+
+def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    scheduler_output = MagicMock()
+    batch_desc = MagicMock()
+    expected = object()
+
+    with patch.object(runner, "_prepare_inputs_310p", return_value=expected) as prepare_inputs_310p:
+        if model_runner_module.vllm_version_is("0.27.1"):
+            result = runner.prepare_inputs(scheduler_output, batch_desc)
+        else:
+            result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
+
+    assert result is expected
+    prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
+
+
 @pytest.mark.parametrize(("finished_req_ids", "sync_count"), [({"finished"}, 1), (set(), 0)])
 def test_finished_requests_synchronize_before_reusing_layout(finished_req_ids, sync_count) -> None:
     runner = object.__new__(NPUModelRunner310V2)
