@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -297,6 +297,153 @@ def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> Non
 
     expected = torch.tensor([[10, 11, 12, 13, -1, -1, -1, -1, 20, 21, 22, 23, -1, -1, -1, -1]])
     assert torch.equal(result, expected)
+
+
+def test_prepare_attn_uses_persistent_pad_filled_dummy_buffers() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.pcp_world_size = 2
+    manager._local_block_tables = (
+        torch.full((4, 3), 7, dtype=torch.int32),
+    )
+    manager._gathered_kv_slot_mappings = torch.zeros(
+        (1, 16),
+        dtype=torch.int64,
+    )
+    input_batch = SimpleNamespace(
+        is_dummy=True,
+        num_reqs_after_padding=2,
+        num_tokens_after_padding=4,
+    )
+
+    block_tables, slot_mappings = manager.prepare_attn(input_batch)
+
+    persistent_block_table = manager._local_block_tables[0]
+    assert block_tables[0].data_ptr() == persistent_block_table.data_ptr()
+    assert torch.equal(block_tables[0], torch.zeros(2, 3, dtype=torch.int32))
+    assert torch.equal(
+        persistent_block_table[2:],
+        torch.full((2, 3), 7, dtype=torch.int32),
+    )
+    assert (
+        slot_mappings.data_ptr()
+        == manager._gathered_kv_slot_mappings.data_ptr()
+    )
+    assert slot_mappings.shape == (1, 8)
+    assert torch.all(slot_mappings == -1)
+
+
+def test_prepare_attn_delegates_runtime_batches() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    input_batch = SimpleNamespace(is_dummy=False)
+    expected = ((torch.empty(0),), torch.empty(0))
+
+    with patch.object(
+        PCPManager,
+        "prepare_attn",
+        return_value=expected,
+    ) as prepare_attn:
+        actual = manager.prepare_attn(input_batch)
+
+    assert actual is expected
+    prepare_attn.assert_called_once_with(input_batch)
+
+
+def test_partition_batch_preserves_fia_dummy_layout() -> None:
+    global_batch = _make_global_pcp_batch()
+    global_batch.req_ids = ["decode-req"]
+    global_batch.num_scheduled_tokens = np.array([1], dtype=np.int32)
+    global_batch.num_tokens = 1
+    global_batch.num_reqs_after_padding = 2
+    global_batch.num_tokens_after_padding = 4
+    global_batch.query_start_loc_np = np.array([0, 1, 4], dtype=np.int32)
+    global_batch.query_start_loc = torch.tensor(
+        [0, 1, 4],
+        dtype=torch.int32,
+    )
+    global_batch.num_computed_tokens_np = np.array([10], dtype=np.int32)
+    global_batch.prefill_len_np = np.array([10], dtype=np.int32)
+    global_batch.num_computed_prefill_tokens_np = np.array(
+        [10],
+        dtype=np.int32,
+    )
+    global_batch.is_prefilling_np = np.array([False])
+    global_batch.seq_lens = torch.tensor([11, 999], dtype=torch.int32)
+    global_batch.seq_lens_cpu_upper_bound = torch.tensor(
+        [11],
+        dtype=torch.int32,
+    )
+    global_batch.input_ids[:4].copy_(
+        torch.tensor([101, 999, 999, 999], dtype=torch.int32)
+    )
+    global_batch.positions[:4].copy_(
+        torch.tensor([10, 999, 999, 999], dtype=torch.int64)
+    )
+    global_batch.is_padding[:4].fill_(False)
+
+    req_states = SimpleNamespace(
+        last_sampled_tokens=torch.zeros(2, dtype=torch.int64),
+        prefill_len=SimpleNamespace(
+            gpu=torch.zeros(2, dtype=torch.int32)
+        ),
+        draft_tokens=torch.empty((2, 0), dtype=torch.int64),
+    )
+    manager = AscendPCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        req_states=req_states,
+        max_num_reqs=2,
+        max_num_tokens=4,
+    )
+    input_buffers = manager._input_buffers
+    assert input_buffers is not None
+    input_buffers.positions[0] = 10
+    input_buffers.seq_lens[0] = 11
+
+    with (
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.prepare_pos_seq_lens",
+            return_value=None,
+        ),
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.combine_sampled_and_draft_tokens",
+            return_value=torch.zeros(1, dtype=torch.int64),
+        ),
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
+            side_effect=_mock_async_copy_to_cpu,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu",
+            side_effect=_mock_async_copy_to_cpu,
+        ),
+    ):
+        local_batch = manager.partition_batch(global_batch)
+
+    assert local_batch.num_reqs == 1
+    assert local_batch.num_reqs_after_padding == 2
+    assert local_batch.num_tokens == 1
+    assert local_batch.num_tokens_after_padding == 4
+    expected_query_start_loc = np.array([0, 1, 4], dtype=np.int32)
+    np.testing.assert_array_equal(
+        local_batch.query_start_loc_np,
+        expected_query_start_loc,
+    )
+    torch.testing.assert_close(
+        local_batch.query_start_loc,
+        torch.from_numpy(expected_query_start_loc),
+    )
+    assert local_batch.input_ids.tolist() == [101, 0, 0, 0]
+    assert local_batch.positions.tolist() == [10, 0, 0, 0]
+    assert local_batch.seq_lens.tolist() == [11, 0]
+    np.testing.assert_array_equal(
+        local_batch.seq_lens_np,
+        np.array([11, 0], dtype=np.int32),
+    )
+    assert local_batch.seq_lens_cpu_upper_bound.tolist() == [11, 0]
+    assert local_batch.is_padding.tolist() == [False, True, True, True]
+    assert manager._hidden_restore_idx is not None
+    assert manager._hidden_restore_idx[1:4].tolist() == [0, 0, 0]
 
 
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
