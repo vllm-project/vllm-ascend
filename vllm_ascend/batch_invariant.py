@@ -62,15 +62,30 @@ def add_rms_norm(
     return x_, None, residual_
 
 
-def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
-    """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
-    doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
+def reduce_sum(
+    x: torch.Tensor,
+    dim: int | tuple[int, ...] | list[int] | None = None,
+    keepdim: bool = False,
+    *,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Route NPU reductions through the single-dimension batch-invariant op.
+
+    ``torch.sum`` can omit ``dim`` or reduce multiple dimensions, so those
+    forms are decomposed into deterministic single-dimension reductions.
     """
-    dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and dim is not None:
-        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
+    if x.device.type == "npu":
+        if dtype is not None:
+            x = x.to(dtype=dtype)
+        dims = list(range(x.dim())) if dim is None else ([dim] if isinstance(dim, int) else list(dim))
+        if not dims:
+            dims = list(range(x.dim()))
+        dims = sorted((d % x.dim() for d in dims), reverse=not keepdim)
+        for reduce_dim in dims:
+            x = torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, reduce_dim, keepdim)
+        return x
     # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
-    return torch_sum(x, dim, keepdim)
+    return torch_sum(x, dim=dim, keepdim=keepdim, dtype=dtype)
 
 
 def override_envs_for_invariance():
@@ -115,7 +130,8 @@ def enable_batch_invariant_mode():
     if HAS_ASCENDC_BATCH_INVARIANT:
         _batch_invariant_LIB.impl("aten::mm", torch.ops.batch_invariant_ops.npu_mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", torch.ops.batch_invariant_ops.npu_matmul_batch_invariant, "NPU")
-        _batch_invariant_LIB.impl("aten::sum", torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant, "NPU")
+        _batch_invariant_LIB.impl("aten::sum", reduce_sum, "NPU")
+        _batch_invariant_LIB.impl("aten::sum.dim_IntList", reduce_sum, "NPU")
         # torch_npu.npu_fused_infer_attention_score is a function of torch_npu, not a torch.ops.Operator,
         # so we need to patch it directly.
         torch_npu.npu_fused_infer_attention_score = (

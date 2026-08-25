@@ -27,6 +27,22 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
+    def test_dim_sum_uses_batch_invariant_operator(self):
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
+        x.dim.return_value = 2
+        expected = MagicMock(spec=torch.Tensor)
+
+        with patch.object(
+            batch_invariant.torch.ops.batch_invariant_ops,
+            "npu_reduce_sum_batch_invariant",
+            return_value=expected,
+        ) as mock_reduce:
+            result = batch_invariant.reduce_sum(x, [-1], keepdim=True)
+
+        mock_reduce.assert_called_once_with(x, 1, True)
+        assert result is expected
+
     def test_override_envs_for_invariance(self):
         """Test Config and environment variable override"""
         mock_config = MagicMock()
@@ -53,16 +69,15 @@ class TestBatchInvariant:
         batch_invariant.torch.library.Library.assert_called_once_with("aten", "IMPL")
 
         # Verify operator registrations
-        assert mock_library.impl.call_count == 3
+        assert mock_library.impl.call_count == 4
         mock_library.impl.assert_any_call(
             "aten::mm", batch_invariant.torch.ops.batch_invariant_ops.npu_mm_batch_invariant, "NPU"
         )
         mock_library.impl.assert_any_call(
             "aten::matmul", batch_invariant.torch.ops.batch_invariant_ops.npu_matmul_batch_invariant, "NPU"
         )
-        mock_library.impl.assert_any_call(
-            "aten::sum", batch_invariant.torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant, "NPU"
-        )
+        mock_library.impl.assert_any_call("aten::sum", batch_invariant.reduce_sum, "NPU")
+        mock_library.impl.assert_any_call("aten::sum.dim_IntList", batch_invariant.reduce_sum, "NPU")
 
         # Verify torch_npu function patching
         assert (

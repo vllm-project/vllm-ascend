@@ -30,6 +30,48 @@ from vllm_ascend.utils import AscendDeviceType
 LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
 
 
+def test_split_mixed_fia_is_enabled_for_batch_invariance_on_a5():
+    metadata = SimpleNamespace(
+        num_decodes=1,
+        num_prefills=1,
+        attn_state=AscendAttentionState.PrefillCacheHit,
+    )
+
+    with (
+        patch.object(attn_module.envs_vllm, "VLLM_BATCH_INVARIANT", True),
+        patch.object(attn_module, "is_950", return_value=True),
+    ):
+        assert attn_module._should_split_mixed_fia(metadata)
+
+
+def test_split_mixed_fia_is_enabled_for_batch_invariance_on_non_a5():
+    metadata = SimpleNamespace(
+        num_decodes=1,
+        num_prefills=1,
+        attn_state=AscendAttentionState.PrefillNoCache,
+    )
+
+    with (
+        patch.object(attn_module.envs_vllm, "VLLM_BATCH_INVARIANT", True),
+        patch.object(attn_module, "is_950", return_value=False),
+    ):
+        assert attn_module._should_split_mixed_fia(metadata)
+
+
+def test_split_mixed_fia_remains_enabled_for_a5_chunked_prefill():
+    metadata = SimpleNamespace(
+        num_decodes=1,
+        num_prefills=1,
+        attn_state=AscendAttentionState.ChunkedPrefill,
+    )
+
+    with (
+        patch.object(attn_module.envs_vllm, "VLLM_BATCH_INVARIANT", False),
+        patch.object(attn_module, "is_950", return_value=True),
+    ):
+        assert attn_module._should_split_mixed_fia(metadata)
+
+
 class TestAttentionGraphHelpers(TestBase):
     def test_cache_graph_workspace_keeps_first_workspace_by_default(self):
         graph_params = SimpleNamespace(workspaces={1: torch.empty(4)})

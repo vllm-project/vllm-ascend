@@ -21,8 +21,10 @@ from typing import Any
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -160,6 +162,23 @@ class AscendAttentionState(Enum):
     DecodeOnly = 2
     ChunkedPrefill = 3
     SpecDecoding = 4
+
+
+def _should_split_mixed_fia(attn_metadata: "AscendMetadata") -> bool:
+    """Whether a mixed prefill/decode batch must use separate FIA calls.
+
+    Batch-invariant execution requires prefill and decode to be processed
+    separately. Outside batch-invariant mode, preserve the existing A5
+    behavior for performance optimization and leave all other paths unchanged.
+    """
+    is_mixed_prefill_decode = attn_metadata.num_decodes > 0 and attn_metadata.num_prefills > 0
+    return is_mixed_prefill_decode and (
+        (
+            get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
+            and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+        )
+        or envs_vllm.VLLM_BATCH_INVARIANT
+    )
 
 
 @dataclass
@@ -1440,14 +1459,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
-                # ChunkedPrefill mixing prefill+decode: split into a per-phase
-                # FIA call each (A5 only).
-                if (
-                    get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
-                    and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
-                    and attn_metadata.num_decodes > 0
-                    and attn_metadata.num_prefills > 0
-                ):
+                if _should_split_mixed_fia(attn_metadata):
+                    logger.info_once(
+                        "Mixed prefill/decode batches use split FIA; active torch_npu FIA implementation: %s",
+                        repr(torch_npu.npu_fused_infer_attention_score),
+                        scope="global",
+                    )
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
