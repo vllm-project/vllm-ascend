@@ -1,7 +1,10 @@
 """Fused Kimi K3 attention-residual mixture.
 
-This ports the validated v0.26 computation to vLLM 0.27's preallocated
-residual-buffer contract.
+For every token, the operator RMS-normalizes each valid block residual and the
+prefix-sum residual, projects them to scalar scores, applies a softmax across
+those streams, and returns their weighted sum. ``block_residual`` follows
+vLLM's preallocated ``[num_tokens, block_capacity, hidden_size]`` contract;
+``num_valid_blocks`` identifies the initialized prefix of that capacity.
 """
 
 import torch
@@ -90,6 +93,7 @@ def apply_attn_res(
         dtype=prefix_sum.dtype,
         device=prefix_sum.device,
     )
+    # The extra stream is prefix_sum, so NB must cover num_valid_blocks + 1.
     num_streams = triton.next_power_of_2(num_valid_blocks + 1)
     init_device_properties_triton()
     num_vectorcore = get_vectorcore_num()
