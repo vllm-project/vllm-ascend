@@ -73,6 +73,16 @@ def _make_ascend_kv_cache_tensor(
     )
 
 
+def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
+    """Distinct page sizes across a group's cache specs.
+
+    vLLM #51718 removed ``UniformTypeKVCacheSpecs.get_page_sizes()`` on main;
+    the underlying ``kv_cache_specs``/``page_size_bytes`` are unchanged on both
+    lanes, so compute it inline.
+    """
+    return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
+
+
 def _ascend_resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -290,10 +300,10 @@ def _get_kv_cache_groups_uniform_groups(
     # Possibly padding layer tuples for this.
     # Additionally, we also pad KV blocks in each SWA layer, to align the page size
     # with the corresponding layer in the full-MLA group.
-    all_page_sizes = full_mla_spec.get_page_sizes()
+    all_page_sizes = _page_sizes(full_mla_spec)
     swa_mla_groups = []
     for sm_spec in swa_mla_specs:
-        sm_page_sizes = sm_spec.get_page_sizes()
+        sm_page_sizes = _page_sizes(sm_spec)
         layers_per_size: dict[int, list[str]] = defaultdict(list)
         assert max(sm_page_sizes) <= max(all_page_sizes)
 
@@ -355,7 +365,7 @@ def _get_kv_cache_config_deepseek_v4(
     """
     full_mla_spec = kv_cache_groups[0].kv_cache_spec
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(full_mla_spec.get_page_sizes())
+    page_sizes = sorted(_page_sizes(full_mla_spec))
     layer_tuple_page_bytes = sum(page_sizes)
 
     # Pre-bucket each group's layers by page_size (registration order within
