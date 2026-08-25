@@ -813,18 +813,12 @@ class NPUWorker(WorkerBase):
         dist.set_debug_level(dist.DebugLevel.INFO)
 
         rebuild_time_start = time.time()
-        logger.info(
-            "[snapshot] [parallel] rank %s: destroying HCCL and model-parallel groups",
-            self.rank,
-        )
+        logger.info("[snapshot] [parallel] rank %s: destroying HCCL and model-parallel groups", self.rank)
         self.parallel_group_clean_up()
 
-        logger.info(
-            "[snapshot] [parallel] rank %s: rebuilding HCCL and model-parallel groups",
-            self.rank,
-        )
-        # distributed_init_method must point to the Pod where DP rank 0 runs.
-        init_method = self.distributed_init_method
+        logger.info("[snapshot] [parallel] rank %s: rebuilding HCCL and model-parallel groups", self.rank)
+
+        # DP=1, should explicitly reset the distributed_init_method
         master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
         if not master_ip:
             raise RuntimeError(f"Unable to resolve master IP for distributed init method: {init_method}")
@@ -832,15 +826,7 @@ class NPUWorker(WorkerBase):
         if not resume_ports:
             raise RuntimeError("Snapshot world-group resume port is not configured")
         resume_port = resume_ports[-1]
-        new_method = get_distributed_init_method(master_ip, resume_port)
-
-        logger.info(
-            "[snapshot] [parallel] rank %s: distributed_init_method %s -> %s",
-            self.rank,
-            init_method,
-            new_method,
-        )
-        self.distributed_init_method = new_method
+        self.distributed_init_method = get_distributed_init_method(master_ip, resume_port)
 
         with set_current_vllm_config(self.vllm_config):
             self._init_worker_distributed_environment()
@@ -864,10 +850,7 @@ class NPUWorker(WorkerBase):
                 if callable(refresh_fn):
                     refresh_fn()
 
-            logger.info(
-                "[snapshot] [parallel] rank %s: refreshed cached MoE parallel and HCCL groups",
-                self.rank,
-            )
+            logger.info("[snapshot] [parallel] rank %s: refreshed cached MoE parallel and HCCL groups", self.rank)
 
         logger.info(
             "[snapshot] [parallel] rank %s: rebuild_parallel_group cost %.2fs",
