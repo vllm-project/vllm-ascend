@@ -364,8 +364,10 @@ def test_causal_conv_adapter_maps_stateful_arguments(monkeypatch):
         run_mode=0,
     )
 
-    assert len(calls) == 1
-    assert calls[0][4] == {
+    # The first call is an isolated state clone smoke probe; the second call
+    # applies the operator to the live cache only after the probe succeeds.
+    assert len(calls) == 2
+    assert calls[-1][4] == {
         "query_start_loc": query_start_loc,
         "cache_indices": cache_indices,
         "initial_state_mode": initial_state_mode,
@@ -377,6 +379,41 @@ def test_causal_conv_adapter_maps_stateful_arguments(monkeypatch):
     }
     torch.testing.assert_close(output, x + 2)
     torch.testing.assert_close(state, torch.ones_like(state))
+
+
+def test_stateful_runtime_probe_falls_back_without_mutating_live_state():
+    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    state = torch.zeros((1,))
+
+    def failing_fla(value):
+        value.add_(1)
+        raise RuntimeError("OPP load failed")
+
+    def native(value):
+        value.add_(2)
+        return value
+
+    selection = dispatcher.select(
+        GDNOperator.CAUSAL_CONV1D,
+        SIGNATURE,
+        native=native,
+        native_symbol="native.causal_conv1d",
+        fla_resolver=lambda: (failing_fla, "fla_npu.ops.ascendc.causal_conv1d"),
+    )
+    output = dispatcher.execute_with_runtime_probe(
+        GDNOperator.CAUSAL_CONV1D,
+        SIGNATURE,
+        selection,
+        state,
+        native=native,
+        native_symbol="native.causal_conv1d",
+        phase="decode",
+        layer_name="model.layers.0.linear_attn",
+        state_may_be_mutated=True,
+    )
+
+    torch.testing.assert_close(state, torch.full_like(state, 2))
+    torch.testing.assert_close(output, state)
 
 
 def test_decode_pipeline_normalizes_once_and_preserves_native_state_mutation():

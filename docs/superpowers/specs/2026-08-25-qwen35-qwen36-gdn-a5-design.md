@@ -18,7 +18,9 @@ requests, logs the exact implementation selected for every logical operator,
 and falls back to the existing implementation when a replacement cannot be
 loaded or does not pass its probe.
 
-The initial eager inference path has nine dispatch points:
+The initial eager inference path tracks nine logical operators. Seven are
+replacement points; `l2norm_fwd` and `recurrent_gated_delta_rule` deliberately
+retain the existing vLLM-Ascend implementations in Stage 1:
 
 1. `causal_conv1d`
 2. `l2norm_fwd`
@@ -136,36 +138,25 @@ The A5 adapter has a registry keyed by logical operator name. Each entry owns:
 | Logical operator | Preferred replacement | Existing fallback |
 | --- | --- | --- |
 | `causal_conv1d` | `fla_npu.ops.ascendc.causal_conv1d` | `torch.ops._C_ascend.npu_causal_conv1d_custom` |
-| `l2norm_fwd` | `fla_npu.ops.triton.l2norm_fwd` | vLLM FLA `l2norm_fwd` |
+| `l2norm_fwd` | retained native in Stage 1 | vLLM FLA `l2norm_fwd` |
 | `chunk_local_cumsum` | `fla_npu.ops.triton.chunk_local_cumsum` | vLLM-Ascend Triton implementation |
 | `chunk_scaled_dot_kkt` | compatible `fla_npu` AscendC or Triton API | vLLM-Ascend Triton implementation |
 | `solve_tri` | `fla_npu.ops.ascendc.solve_tri`, then its Triton API | vLLM-Ascend `solve_tril` |
 | `recompute_w_u_fwd` | `fla_npu.ops.ascendc.recompute_w_u_fwd` | vLLM-Ascend Triton implementation |
 | `chunk_gated_delta_rule_fwd_h` | `fla_npu.ops.ascendc.chunk_gated_delta_rule_fwd_h` | `torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h` |
 | `chunk_fwd_o` | `fla_npu.ops.ascendc.chunk_fwd_o` | `torch.ops._C_ascend.chunk_fwd_o` |
-| `recurrent_gated_delta_rule` | available installed recurrent API | `torch.ops._C_ascend.npu_recurrent_gated_delta_rule` |
+| `recurrent_gated_delta_rule` | retained native in Stage 1 | `torch.ops._C_ascend.npu_recurrent_gated_delta_rule` |
 
 The README test labels `gdn_fwd_h`, `gdn_fwd_o`, and `recompute_wu_fwd` map to
 the public Python names `chunk_gated_delta_rule_fwd_h`, `chunk_fwd_o`, and
 `recompute_w_u_fwd`.
 
-### Recurrent resolver order
+### Recurrent implementation
 
-The installed recurrent interface is not currently exported consistently by
-all `fla_npu` A5 packages. Its resolver tries these interfaces in order and
-accepts the first one that passes the current stage's probe:
-
-1. `fla_npu.ops.ascendc.recurrent_gated_delta_rule`, if exported;
-2. `torch_npu.npu_recurrent_gated_delta_rule`, if registered by the installed
-   package/OPP;
-3. `torch.ops.ascend_ops.recurrent_gated_delta_rule`, if its extension is
-   already loaded;
-4. `torch.ops._C_ascend.npu_recurrent_gated_delta_rule` as the existing
-   vLLM-Ascend fallback.
-
-The first eager stage probes only ordinary decode. MTP accepted-token support
-and ACL Graph support are separate capabilities and are not inferred from an
-ordinary decode success.
+The inspected `flash-linear-attention-npu` package does not expose a stable
+public recurrent GDN wrapper. Stage 1 therefore keeps
+`torch.ops._C_ascend.npu_recurrent_gated_delta_rule`. MTP accepted-token support
+and ACL Graph support remain separate later-stage capabilities.
 
 ### Backward operators
 
@@ -462,14 +453,16 @@ Unit tests cover:
 
 ### A5 operator-chain tests
 
-For each of the nine dispatch points:
+For each of the seven replacement points:
 
 1. force the replacement while all other operators remain native;
 2. compare output and relevant state with the all-native baseline;
 3. force a probe failure and confirm native fallback;
 4. confirm the selection log names the actual implementation.
 
-After isolated validation, run the complete replacement chain.
+After isolated validation, run the complete replacement chain. Separately
+verify that logs identify `l2norm_fwd` and `recurrent_gated_delta_rule` as the
+retained native implementations.
 
 Initial numerical criteria are:
 
@@ -493,7 +486,7 @@ sufficient acceptance evidence.
 ### Stage 1: eager ordinary prefill and decode
 
 - Add the adapter and registry.
-- Add all nine dispatch points.
+- Add seven replacement points and track the two intentionally native operators.
 - Add capability probes, fallback, and logging.
 - Add unit, operator-chain, and Qwen3.5/Qwen3.6 smoke tests.
 - Validate TP1; include TP2 where model size or the existing test requires it.
@@ -574,7 +567,7 @@ Qwen3.5 and Qwen3.6 smoke tests.
 
 Stage 1 is complete only when:
 
-- all nine dispatch points are implemented;
+- all seven replacement points and both retained-native operators are implemented;
 - every selected backend is visible in logs;
 - missing or incompatible replacements fall back correctly in `auto` mode;
 - strict mode reports precise initialization failures;

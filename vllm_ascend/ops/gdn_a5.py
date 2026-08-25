@@ -127,12 +127,16 @@ def run_gdn_prefill_pipeline(
     initial_state = initial_state.clone()
     initial_state[~has_initial_state, ...] = 0
     initial_state = initial_state.transpose(-1, -2).contiguous()
+    cu_seqlens_host = list(metadata.cu_seqlens_host) if metadata.cu_seqlens_host is not None else None
+    chunk_indices_host = list(metadata.chunk_indices_host) if metadata.chunk_indices_host is not None else None
+    cu_seqlens_kern = list(metadata.cu_seqlens_kern) if metadata.cu_seqlens_kern is not None else None
 
     g = operators[GDNOperator.CHUNK_LOCAL_CUMSUM](
         g,
         chunk_size=chunk_size,
         cu_seqlens=metadata.cu_seqlens,
         chunk_indices=metadata.chunk_indices,
+        block_indices=metadata.block_indices_cumsum,
     )
     a = operators[GDNOperator.CHUNK_SCALED_DOT_KKT](
         k,
@@ -145,9 +149,10 @@ def run_gdn_prefill_pipeline(
     a = operators[GDNOperator.SOLVE_TRI](
         a,
         cu_seqlens=metadata.cu_seqlens,
-        cu_seqlens_host=metadata.cu_seqlens_host,
+        cu_seqlens_host=cu_seqlens_host,
         chunk_indices=metadata.chunk_indices,
-        chunk_indices_host=metadata.chunk_indices_host,
+        chunk_indices_host=chunk_indices_host,
+        chunk_indices_large_block=metadata.chunk_indices_large_block,
         output_dtype=k.dtype,
     )
 
@@ -161,8 +166,10 @@ def run_gdn_prefill_pipeline(
         a_head,
         g_head,
         chunk_size=chunk_size,
-        cu_seqlens=metadata.cu_seqlens_host,
-        chunk_indices=metadata.chunk_indices_host,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_host,
+        cu_seqlens_device=metadata.cu_seqlens,
+        chunk_indices_device=metadata.chunk_indices,
     )
 
     initial_state_kern = initial_state
@@ -175,8 +182,8 @@ def run_gdn_prefill_pipeline(
         g_head,
         initial_state_kern,
         chunk_size=chunk_size,
-        cu_seqlens=metadata.cu_seqlens_kern or metadata.cu_seqlens_host,
-        chunk_indices=metadata.chunk_indices_host,
+        cu_seqlens=cu_seqlens_kern or cu_seqlens_host,
+        chunk_indices=chunk_indices_host,
     )
     if metadata.keep_meta is not None:
         full_state = initial_state.clone()
@@ -191,8 +198,8 @@ def run_gdn_prefill_pipeline(
         g_head,
         scale=scale,
         chunk_size=chunk_size,
-        cu_seqlens=metadata.cu_seqlens_host,
-        chunk_indices=metadata.chunk_indices_host,
+        cu_seqlens=cu_seqlens_host,
+        chunk_indices=chunk_indices_host,
     )
     return output.transpose(1, 2).contiguous(), final_state.transpose(-1, -2).contiguous()
 
@@ -279,6 +286,7 @@ class A5GDNOperatorDispatcher:
         self.config = config
         self.is_a5 = is_a5
         self._selections: dict[tuple[GDNOperator, GDNRuntimeSignature], GDNOperatorSelection] = {}
+        self._runtime_probed: set[tuple[GDNOperator, GDNRuntimeSignature]] = set()
 
     def select(
         self,
@@ -349,15 +357,97 @@ class A5GDNOperatorDispatcher:
         except Exception:
             logger.exception(
                 "GDN A5 operator execution failed: op=%s backend=%s symbol=%s phase=%s "
-                "layer=%s state_may_be_mutated=%s",
+                "layer=%s state_may_be_mutated=%s inputs=%s",
                 operator.value,
                 selection.backend.value,
                 selection.symbol,
                 phase,
                 layer_name,
                 state_may_be_mutated,
+                _tensor_call_metadata(args, kwargs),
             )
             raise
+
+    def execute_with_runtime_probe(
+        self,
+        operator: GDNOperator,
+        signature: GDNRuntimeSignature,
+        selection: GDNOperatorSelection,
+        *args: Any,
+        native: Callable[..., Any],
+        native_symbol: str,
+        phase: str,
+        layer_name: str,
+        state_may_be_mutated: bool,
+        **kwargs: Any,
+    ) -> Any:
+        """Probe a newly resolved replacement before trusting it for requests."""
+
+        cache_key = (operator, signature)
+        selection = self._selections.get(cache_key, selection)
+        if selection.backend is GDNBackendMode.NATIVE or cache_key in self._runtime_probed:
+            return self.execute(
+                operator,
+                selection,
+                *args,
+                phase=phase,
+                layer_name=layer_name,
+                state_may_be_mutated=state_may_be_mutated,
+                **kwargs,
+            )
+
+        probe_args = args
+        probe_kwargs = kwargs
+        if state_may_be_mutated:
+            probe_args = tuple(_clone_probe_value(value) for value in args)
+            probe_kwargs = {key: _clone_probe_value(value) for key, value in kwargs.items()}
+        try:
+            result = selection.operator(*probe_args, **probe_kwargs)
+            probe_tensor = next(
+                (value for value in (*probe_args, *probe_kwargs.values()) if isinstance(value, torch.Tensor)),
+                None,
+            )
+            if probe_tensor is not None and probe_tensor.device.type == "npu":
+                torch.npu.synchronize()
+        except Exception as exc:
+            fallback = self._fallback_or_raise(
+                operator,
+                signature,
+                self.config.mode_for(operator),
+                native,
+                native_symbol,
+                stage="smoke_probe",
+                exc=exc,
+            )
+            return self.execute(
+                operator,
+                fallback,
+                *args,
+                phase=phase,
+                layer_name=layer_name,
+                state_may_be_mutated=state_may_be_mutated,
+                **kwargs,
+            )
+
+        self._runtime_probed.add(cache_key)
+        logger.info(
+            "GDN A5 operator smoke probe passed: op=%s backend=%s symbol=%s layer=%s",
+            operator.value,
+            selection.backend.value,
+            selection.symbol,
+            layer_name,
+        )
+        if not state_may_be_mutated:
+            return result
+        return self.execute(
+            operator,
+            selection,
+            *args,
+            phase=phase,
+            layer_name=layer_name,
+            state_may_be_mutated=True,
+            **kwargs,
+        )
 
     def select_native_only(
         self,
@@ -442,6 +532,36 @@ class A5GDNOperatorDispatcher:
         )
 
 
+def _clone_probe_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.clone()
+    if isinstance(value, tuple):
+        return tuple(_clone_probe_value(item) for item in value)
+    if isinstance(value, list):
+        return [_clone_probe_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _clone_probe_value(item) for key, item in value.items()}
+    return value
+
+
+def _tensor_call_metadata(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    fields: list[str] = []
+    for index, value in enumerate(args):
+        if isinstance(value, torch.Tensor):
+            fields.append(_tensor_metadata(f"arg{index}", value))
+    for name, value in kwargs.items():
+        if isinstance(value, torch.Tensor):
+            fields.append(_tensor_metadata(name, value))
+    return ";".join(fields)
+
+
+def _tensor_metadata(name: str, value: torch.Tensor) -> str:
+    return (
+        f"{name}:shape={tuple(value.shape)},dtype={value.dtype},"
+        f"device={value.device},contiguous={value.is_contiguous()}"
+    )
+
+
 class A5GDNAdapter:
     """Normalize fla_npu/native operator contracts for one Qwen GDN layer."""
 
@@ -470,7 +590,7 @@ class A5GDNAdapter:
         scale: float,
         metadata: GDNPrefillMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        operators = self._prefill_operators(metadata)
+        operators = self._prefill_operators()
         return run_gdn_prefill_pipeline(
             q=q,
             k=k,
@@ -532,6 +652,8 @@ class A5GDNAdapter:
         operator = self._logged_operator(
             GDNOperator.CAUSAL_CONV1D,
             selection,
+            native=native,
+            native_symbol="torch.ops._C_ascend.npu_causal_conv1d_custom",
             phase="prefill" if run_mode == 0 else "decode",
             stateful=True,
         )
@@ -590,18 +712,22 @@ class A5GDNAdapter:
             l2norm=self._logged_operator(
                 GDNOperator.L2NORM_FWD,
                 l2_selection,
+                native=l2norm_fwd,
+                native_symbol="vllm.third_party.fla.l2norm_fwd",
                 phase="decode",
                 stateful=False,
             ),
             recurrent=self._logged_operator(
                 GDNOperator.RECURRENT_GATED_DELTA_RULE,
                 recurrent_selection,
+                native=torch.ops._C_ascend.npu_recurrent_gated_delta_rule,
+                native_symbol="torch.ops._C_ascend.npu_recurrent_gated_delta_rule",
                 phase="decode",
                 stateful=True,
             ),
         )
 
-    def _prefill_operators(self, metadata: GDNPrefillMetadata) -> dict[GDNOperator, Callable[..., Any]]:
+    def _prefill_operators(self) -> dict[GDNOperator, Callable[..., Any]]:
         from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd as native_l2norm
 
         from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import (
@@ -611,18 +737,26 @@ class A5GDNAdapter:
         from vllm_ascend.ops.triton.fla.solve_tril import solve_tril as native_solve
         from vllm_ascend.ops.triton.fla.wy_fast import recompute_w_u_fwd as native_recompute
 
-        def native_cumsum_normalized(gate, *, chunk_size, cu_seqlens, chunk_indices):
+        def native_cumsum_normalized(
+            gate,
+            *,
+            chunk_size,
+            cu_seqlens,
+            chunk_indices,
+            block_indices,
+        ):
             del chunk_indices
             return native_cumsum(
                 gate,
                 chunk_size=chunk_size,
                 cu_seqlens=cu_seqlens,
-                block_indices=metadata.block_indices_cumsum,
+                block_indices=block_indices,
                 head_first=False,
             )
 
         def fla_cumsum(raw):
-            def call(gate, *, chunk_size, cu_seqlens, chunk_indices):
+            def call(gate, *, chunk_size, cu_seqlens, chunk_indices, block_indices):
+                del block_indices
                 indices = None if chunk_indices is None else {str(chunk_size): chunk_indices}
                 return raw(
                     gate,
@@ -666,13 +800,14 @@ class A5GDNAdapter:
             cu_seqlens_host,
             chunk_indices,
             chunk_indices_host,
+            chunk_indices_large_block,
             output_dtype,
         ):
             del cu_seqlens_host, chunk_indices_host
             return native_solve(
                 A=a,
                 cu_seqlens=cu_seqlens,
-                chunk_indices_large_block=metadata.chunk_indices_large_block,
+                chunk_indices_large_block=chunk_indices_large_block,
                 chunk_indices_bt=chunk_indices,
                 output_dtype=output_dtype,
             )
@@ -685,9 +820,10 @@ class A5GDNAdapter:
                 cu_seqlens_host,
                 chunk_indices,
                 chunk_indices_host,
+                chunk_indices_large_block,
                 output_dtype,
             ):
-                del cu_seqlens, chunk_indices
+                del cu_seqlens, chunk_indices, chunk_indices_large_block
                 a = a.to(output_dtype).contiguous()
                 if cu_seqlens_host is None:
                     return raw(a, layout="bsnd")
@@ -710,6 +846,8 @@ class A5GDNAdapter:
             chunk_size,
             cu_seqlens,
             chunk_indices,
+            cu_seqlens_device,
+            chunk_indices_device,
         ):
             del chunk_size, cu_seqlens, chunk_indices
             w, u = native_recompute(
@@ -718,8 +856,8 @@ class A5GDNAdapter:
                 beta=beta_value.transpose(1, 2).contiguous(),
                 g_cumsum=gate.transpose(1, 2).contiguous(),
                 A=a.transpose(1, 2).contiguous(),
-                cu_seqlens=metadata.cu_seqlens,
-                chunk_indices=metadata.chunk_indices,
+                cu_seqlens=cu_seqlens_device,
+                chunk_indices=chunk_indices_device,
             )
             return w.transpose(1, 2).contiguous(), u.transpose(1, 2).contiguous()
 
@@ -734,7 +872,10 @@ class A5GDNAdapter:
                 chunk_size,
                 cu_seqlens,
                 chunk_indices,
+                cu_seqlens_device,
+                chunk_indices_device,
             ):
+                del cu_seqlens_device, chunk_indices_device
                 return raw(
                     key,
                     value,
@@ -869,7 +1010,14 @@ class A5GDNAdapter:
                     native_symbol=native_symbol,
                     fla_resolver=self._normalized_fla_resolver(operator, normalize_fla),
                 )
-            selected[operator] = self._logged_operator(operator, selection, phase="prefill", stateful=False)
+            selected[operator] = self._logged_operator(
+                operator,
+                selection,
+                native=native,
+                native_symbol=native_symbol,
+                phase="prefill",
+                stateful=False,
+            )
         return selected
 
     @staticmethod
@@ -888,14 +1036,19 @@ class A5GDNAdapter:
         operator: GDNOperator,
         selection: GDNOperatorSelection,
         *,
+        native: Callable[..., Any],
+        native_symbol: str,
         phase: str,
         stateful: bool,
     ) -> Callable[..., Any]:
         def call(*args: Any, **kwargs: Any) -> Any:
-            return self.dispatcher.execute(
+            return self.dispatcher.execute_with_runtime_probe(
                 operator,
+                self.signature,
                 selection,
                 *args,
+                native=native,
+                native_symbol=native_symbol,
                 phase=phase,
                 layer_name=self.layer_name,
                 state_may_be_mutated=stateful,
