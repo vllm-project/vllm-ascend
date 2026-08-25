@@ -204,7 +204,7 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         storage_block_size = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][0][0]
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
-        ratio_kwargs = (
+        ratio_kwargs: dict[str, Any] = (
             {"compress_ratio": self.compress_ratio}
             if vllm_version_is("0.27.1")
             else {"tokens_per_state": self.compress_ratio}
