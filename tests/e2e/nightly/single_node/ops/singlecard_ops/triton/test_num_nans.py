@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Kernel source: vllm_ascend/ops/triton/v2/metrics/num_nans.py
-# Coverage: _num_nans_kernel 
+# Coverage: _num_nans_kernel
 """
 Extended precision test for the Ascend-specific _num_nans_kernel.
 
@@ -70,9 +70,7 @@ def _num_nans_ref(logits: torch.Tensor) -> torch.Tensor:
     return torch.isnan(logits).sum(dim=-1).to(torch.int32)
 
 
-def _inject_nans(
-    logits: torch.Tensor, num_nan: int, layout: str, gen: torch.Generator
-) -> None:
+def _inject_nans(logits: torch.Tensor, num_nan: int, layout: str, gen: torch.Generator) -> None:
     """Inject ``num_nan`` NaNs into every row of a CPU tensor, in place.
 
     ``prefix`` writes a contiguous block at the head of each row;
