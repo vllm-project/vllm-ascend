@@ -143,12 +143,10 @@ class AscendPCPManager(PCPManager):
         for pcp_rank in range(self.pcp_world_size):
             source_start = pcp_rank * local_num_tokens
             target_start = pcp_rank * graph_num_tokens
-            graph_slot_mappings[
-                :, target_start : target_start + local_num_tokens
-            ].copy_(compact_slot_mappings[:, source_start : source_start + local_num_tokens])
-            graph_slot_mappings[
-                :, target_start + local_num_tokens : target_start + graph_num_tokens
-            ].fill_(-1)
+            graph_slot_mappings[:, target_start : target_start + local_num_tokens].copy_(
+                compact_slot_mappings[:, source_start : source_start + local_num_tokens]
+            )
+            graph_slot_mappings[:, target_start + local_num_tokens : target_start + graph_num_tokens].fill_(-1)
         return graph_slot_mappings
 
     def build_attention_context(

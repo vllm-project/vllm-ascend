@@ -119,10 +119,7 @@ def test_glm5_2_sfa_pcp_full_decode_only() -> None:
         "prefill, KV-cache reuse, decode graph replay, and attention outputs "
         "work together when serving a request with a long context. "
     ) * 4
-    prompts = [
-        f"{long_prompt} Request identifier: {request_id}."
-        for request_id in range(4)
-    ]
+    prompts = [f"{long_prompt} Request identifier: {request_id}." for request_id in range(4)]
     sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
 
     with VllmRunner(

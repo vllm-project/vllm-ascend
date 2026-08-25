@@ -123,7 +123,7 @@ class AscendSFABackend(AttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_type: str = "",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
@@ -422,7 +422,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             **parallel_metadata,
         )
 
-    def build_for_cudagraph_capture(
+    def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,

@@ -49,9 +49,7 @@ def communicator_switch():
         logger.debug("Restored CudaCommunicator after graph capture.")
 
 
-_NPU_GRAPH_CAPTURE_ERROR_MODE: ContextVar[str | None] = ContextVar(
-    "_npu_graph_capture_error_mode", default=None
-)
+_NPU_GRAPH_CAPTURE_ERROR_MODE: ContextVar[str | None] = ContextVar("_npu_graph_capture_error_mode", default=None)
 
 
 @contextmanager

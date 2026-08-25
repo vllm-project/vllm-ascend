@@ -233,9 +233,7 @@ def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> Non
     with patch.object(PCPManager, "prepare_slot_mappings", return_value=compact_slot_mappings):
         result = manager.prepare_slot_mappings()
 
-    expected = torch.tensor(
-        [[10, 11, 12, 13, -1, -1, -1, -1, 20, 21, 22, 23, -1, -1, -1, -1]]
-    )
+    expected = torch.tensor([[10, 11, 12, 13, -1, -1, -1, -1, 20, 21, 22, 23, -1, -1, -1, -1]])
     assert torch.equal(result, expected)
 
 

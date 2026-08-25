@@ -58,7 +58,7 @@ class AscendAttentionBackend310(AscendAttentionBackend):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-        cache_dtype_str: str = "auto",
+        cache_type: str = "",
     ):
         """
         Determines the shape of the Key-Value (KV) cache tensor.

@@ -8,8 +8,8 @@ import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
-from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -831,7 +831,7 @@ class AscendSFADCPMetadataBuilder(
         self._update_parallel_slot_mapping(metadata, dcp_slot_mapping, num_input_tokens)
         return metadata
 
-    def build_for_cudagraph_capture(
+    def build_for_graph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
