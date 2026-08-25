@@ -1736,6 +1736,47 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         ):
             self.scheduler = MooncakeConnectorScheduler(self.config, "test_engine", MockKVCacheConfig())
 
+    def test_refreshes_dsv4_block_size_before_ascend_config_init(self):
+        config = MockVllmConfig()
+        config.model_config.hf_config.model_type = "deepseek_v4"
+        config.cache_config.block_size = 2
+
+        def assert_block_size_refreshed(vllm_config):
+            self.assertEqual(vllm_config.cache_config.block_size, 32)
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config",
+                side_effect=assert_block_size_refreshed,
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+        ):
+            scheduler = MooncakeConnectorScheduler(config, "test_engine", MockKVCacheConfig())
+
+        self.assertEqual(scheduler.block_size, 32)
+
+    def test_does_not_refresh_non_dsv4_block_size(self):
+        config = MockVllmConfig()
+        config.model_config.hf_config.model_type = "qwen2"
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.refresh_block_size"
+            ) as mock_refresh_block_size,
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+        ):
+            scheduler = MooncakeConnectorScheduler(config, "test_engine", MockKVCacheConfig())
+
+        mock_refresh_block_size.assert_not_called()
+        self.assertEqual(scheduler.block_size, 16)
+
     def _make_remote_decode_request(self, prompt_len: int, request_id: str = "req1"):
         return MockRequest(
             request_id,

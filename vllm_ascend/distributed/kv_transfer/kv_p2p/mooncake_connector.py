@@ -69,7 +69,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer
+from vllm_ascend.utils import enable_custom_op, enable_sfa_dcp_replicated_indexer, refresh_block_size
 
 # isort: off
 if TYPE_CHECKING:
@@ -1691,6 +1691,12 @@ class MooncakeConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, engine_id: str, kv_cache_config: KVCacheConfig):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        model_config = getattr(vllm_config, "model_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        if getattr(hf_config, "model_type", None) == "deepseek_v4":
+            # KV cache initialization replaces the global block size with the
+            # smallest DSV4 cache-group block size (2 for the C4 state group).
+            refresh_block_size(vllm_config)
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
