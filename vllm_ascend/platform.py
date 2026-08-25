@@ -78,55 +78,6 @@ _CUSTOM_OP_REGISTERED = False
 MAX_REDUCED_CAPTURE_SIZES = 4
 
 
-def config_deprecated_logging():
-    """Configure deprecated logging format, when used deprecated codes
-    in vllm-ascend.
-    """
-    import logging
-    import warnings
-
-    # Customize warning format to be one line
-    def one_line_formatwarning(message, category, filename, lineno, line=None):
-        return f"{filename}:{lineno}: {category.__name__}: {message}"
-
-    warnings.formatwarning = one_line_formatwarning
-
-    logging.captureWarnings(True)
-    warnings.simplefilter("once", DeprecationWarning)
-
-    vllm_logger = logging.getLogger("vllm")
-    warnings_logger = logging.getLogger("py.warnings")
-
-    # Propagate vllm logger handlers to warnings logger, to keep the same
-    # format with vllm
-    if vllm_logger.handlers:
-        warnings_logger.handlers = []
-
-        for handler in vllm_logger.handlers:
-            warnings_logger.addHandler(handler)
-
-    warnings_logger.propagate = False
-
-
-def prune_capture_sizes_for_950(vllm_config):
-    original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
-    if not original_sizes:
-        return
-    if len(original_sizes) <= MAX_CAPTURE_SIZES_FOR_950:
-        return
-    step = (len(original_sizes) - 1) / (MAX_CAPTURE_SIZES_FOR_950 - 1)
-    indices = [round(i * step) for i in range(MAX_CAPTURE_SIZES_FOR_950)]
-    indices[0], indices[-1] = 0, len(original_sizes) - 1
-    sampled_sizes = [original_sizes[i] for i in indices]
-    update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
-    logger.warning(
-        "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
-        "and this warning will be cleared soon.",
-        len(original_sizes),
-        MAX_CAPTURE_SIZES_FOR_950,
-    )
-
-
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "Qwen2MoeForCausalLM",
