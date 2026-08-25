@@ -9,7 +9,6 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -33,7 +32,13 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_with_o_proj_tp,
     enable_sfa_dcp_replicated_indexer,
+    vllm_version_is,
 )
+
+if vllm_version_is("0.27.1"):
+    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+else:
+    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
