@@ -772,14 +772,6 @@ class AscendModelSlimConfig(QuantizationConfig):
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
-            if model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
-                # The Ascend K3 adapter replaces this temporary module with a
-                # W8A8 q/k/v projection plus a FLOAT gate projection directly
-                # after upstream construction.
-                from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-
-                logger.debug("Temporarily select unquantized Kimi K3 mixed KDA projection for %s", prefix)
-                return AscendUnquantizedLinearMethod()
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
                 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -826,6 +818,11 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def is_layer_skipped_ascend(self, prefix: str, fused_mapping: Mapping[str, list[str]] = MappingProxyType({})):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
+        if self.model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
+            # The model adapter replaces this temporary packed projection with
+            # separate quantized q/k/v and floating-point gate projections.
+            return True
+
         proj_name = prefix.split(".")[-1]
         if proj_name in fused_mapping:
             shard_prefixes = [
