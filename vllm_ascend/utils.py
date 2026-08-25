@@ -607,6 +607,17 @@ def vllm_version_is(target_vllm_version: str):
         )
 
 
+def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
+    """Layer names covered by a KVCacheTensor.
+
+    vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
+    required `layer_stride` on vLLM main. This helper keeps both lanes readable.
+    """
+    if vllm_version_is("0.27.1"):
+        return kv_cache_tensor.shared_by
+    return kv_cache_tensor.layers
+
+
 def get_max_hidden_layers(hf_config) -> int:
     cfg_dict = hf_config.to_dict()
     layer_counts = []

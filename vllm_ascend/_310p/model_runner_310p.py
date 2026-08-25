@@ -56,6 +56,7 @@ from vllm_ascend.spec_decode.utils import (
 )
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
+    get_kv_cache_tensor_layers,
     is_rc_device,
     lmhead_tp_enable,
 )
@@ -733,8 +734,9 @@ class NPUModelRunner310(NPUModelRunner):
                 layer_kv_cache_spec[layer_name] = group_kv_cache_spec.kv_cache_spec
         # Allocate kv cache buffers according to the kv_cache_config and kv_cache_spec
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
+            shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
+            for idx in range(len(shared_names)):
+                layer_name = shared_names[idx]
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 if "linear_attn" in layer_name and layer_name not in kv_cache:
@@ -753,7 +755,7 @@ class NPUModelRunner310(NPUModelRunner):
                         tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_names:
                         if "linear_attn" in layer_name_inner:
                             kv_cache[layer_name_inner] = state_tensors
                 elif "attn" in layer_name and layer_name not in kv_cache:
@@ -790,7 +792,7 @@ class NPUModelRunner310(NPUModelRunner):
                     v_cache = torch_npu.empty_with_format(
                         size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
                     )
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_names:
                         # shared the kvcache between the self_attn specs in the same group
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             kv_cache[layer_name_inner] = (k_cache, v_cache)
