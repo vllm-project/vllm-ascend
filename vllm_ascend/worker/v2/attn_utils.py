@@ -621,9 +621,7 @@ def _allocate_kv_cache(
         # Use one raw allocation for Mamba and hybrid caches. The reshape step
         # creates the V1-compatible contiguous state views and overlaps
         # Attention K/V with the aligned tail of the same buffer.
-        contains_mamba = any(
-            isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in shared_names
-        )
+        contains_mamba = any(isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in shared_names)
         if contains_mamba or use_hybrid_layout:
             tensor_size = kv_cache_tensor.size
             if vllm_config.kv_transfer_config is None:
