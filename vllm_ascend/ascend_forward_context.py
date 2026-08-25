@@ -141,6 +141,7 @@ def set_ascend_forward_context(
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
@@ -503,6 +504,7 @@ class _ExtraForwardContextProxy:
         "moe_comm_type",
         "moe_comm_method",
         "use_mega_moe",
+        "is_decode_only_node",
         "mmrs_fusion",
         "num_tokens",
         "flash_comm_v1_enabled",

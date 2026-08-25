@@ -19,12 +19,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
-from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, _is_decode_only_node
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
@@ -306,14 +305,13 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         dispatch_quant_mode: int = 0,
         dispatch_quant_out_dtype: torch.dtype | None = None,
-        is_decode_only_node: bool | None = None,
+        *,
+        is_decode_only_node: bool,
     ):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
-        if is_decode_only_node is None:
-            is_decode_only_node = _is_decode_only_node(get_current_vllm_config())
         group = get_mc2_group().device_group
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
@@ -387,6 +385,7 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
         topk_ids: torch.Tensor,
+        is_decode_only_node: bool,
     ):
         # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
         # branch); assert the subtype so mypy resolves it off the base class.
@@ -439,6 +438,7 @@ class FusedMC2CommImpl(MoECommMethod):
             self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
                 dispatch_quant_mode,
                 dispatch_quant_out_dtype,
+                is_decode_only_node=is_decode_only_node,
             )
         else:
             self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
@@ -488,7 +488,11 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
             if _EXTRA_CTX.use_mega_moe:
-                out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
+                out, expert_tokens = self._apply_cann_mega_moe(
+                    fused_experts_input,
+                    topk_ids,
+                    is_decode_only_node=_EXTRA_CTX.is_decode_only_node,
+                )
             else:
                 assert not (
                     fused_experts_input.weights.w1_scale_bias is None
