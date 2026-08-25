@@ -41,7 +41,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.worker.v2.utils import communicator_switch
+from vllm_ascend.worker.v2.utils import communicator_switch, sfa_graph_capture_mode
 
 
 def _prepare_pcp_inputs_to_capture(
@@ -224,7 +224,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
             )
-        with communicator_switch():
+        with communicator_switch(), sfa_graph_capture_mode(self.vllm_config):
             return super().capture(
                 model,
                 model_state,

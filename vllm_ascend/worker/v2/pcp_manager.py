@@ -110,7 +110,14 @@ class AscendPCPManager(PCPManager):
         return local_batch
 
     def prepare_slot_mappings(self) -> torch.Tensor:
-        """Pad PCP slot mappings to the fixed FULL-decode graph layout."""
+        """Pad PCP slot mappings to the fixed FULL-decode graph layout.
+
+        The upstream manager packs current local rows as
+        [rank 0 rows | rank 1 rows | ...]. A full-decode graph pads the model
+        input of each PCP rank to graph_num_tokens. Preserve that rank-major
+        layout when expanding the slot mapping:
+        [rank 0 rows | rank 0 padding | rank 1 rows | rank 1 padding | ...].
+        """
         slot_mappings = super().prepare_slot_mappings()
         assert self._global_batch is not None
         graph_num_tokens = self._global_batch.num_tokens_after_padding
@@ -120,8 +127,29 @@ class AscendPCPManager(PCPManager):
 
         assert self._gathered_kv_slot_mappings is not None
         graph_num_slots = graph_num_tokens * self.pcp_world_size
-        self._gathered_kv_slot_mappings[:, slot_mappings.shape[1] : graph_num_slots].fill_(-1)
-        return self._gathered_kv_slot_mappings[:, :graph_num_slots]
+        local_num_tokens = slot_mappings.shape[1] // self.pcp_world_size
+        if local_num_tokens * self.pcp_world_size != slot_mappings.shape[1]:
+            raise RuntimeError(
+                "PCP gathered slot mappings must contain an equal local span "
+                f"for every rank, got {slot_mappings.shape[1]} slots for "
+                f"pcp_world_size={self.pcp_world_size}."
+            )
+
+        graph_slot_mappings = self._gathered_kv_slot_mappings[:, :graph_num_slots]
+        # The compact source is a view of this reusable destination buffer.
+        # Snapshot it first: a graph stride can overlap the next compact rank
+        # span (for example, 3 compact tokens expanded to a 4-token graph).
+        compact_slot_mappings = slot_mappings.clone()
+        for pcp_rank in range(self.pcp_world_size):
+            source_start = pcp_rank * local_num_tokens
+            target_start = pcp_rank * graph_num_tokens
+            graph_slot_mappings[
+                :, target_start : target_start + local_num_tokens
+            ].copy_(compact_slot_mappings[:, source_start : source_start + local_num_tokens])
+            graph_slot_mappings[
+                :, target_start + local_num_tokens : target_start + graph_num_tokens
+            ].fill_(-1)
+        return graph_slot_mappings
 
     def build_attention_context(
         self,

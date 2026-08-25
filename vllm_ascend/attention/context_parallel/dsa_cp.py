@@ -1030,7 +1030,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.req_qli_metadata[:1024] = metadata
         return self.req_qli_metadata[:1024]
 
-    def build_for_graph_capture(
+    def build_for_cudagraph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,

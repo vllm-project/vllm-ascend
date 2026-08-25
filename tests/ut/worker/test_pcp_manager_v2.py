@@ -22,6 +22,7 @@ from unittest.mock import patch
 import numpy as np
 import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -215,6 +216,27 @@ def test_dummy_attention_context_uses_rank_local_identity_view():
         ),
     )
     assert actual.local_num_tokens_after_padding == input_batch.num_tokens
+
+
+def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.pcp_world_size = 2
+    manager._global_batch = SimpleNamespace(
+        num_tokens_after_padding=8,
+        num_tokens=4,
+        is_prefilling_np=np.array([False, False, False, False]),
+    )
+    manager._gathered_kv_slot_mappings = torch.full((1, 16), -99, dtype=torch.int64)
+    compact_slot_mappings = manager._gathered_kv_slot_mappings[:, :8]
+    compact_slot_mappings.copy_(torch.tensor([[10, 11, 12, 13, 20, 21, 22, 23]]))
+
+    with patch.object(PCPManager, "prepare_slot_mappings", return_value=compact_slot_mappings):
+        result = manager.prepare_slot_mappings()
+
+    expected = torch.tensor(
+        [[10, 11, 12, 13, -1, -1, -1, -1, 20, 21, 22, 23, -1, -1, -1, -1]]
+    )
+    assert torch.equal(result, expected)
 
 
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:

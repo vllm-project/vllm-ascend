@@ -949,7 +949,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             dspark_swa_indices=dspark_swa_indices,
         )
 
-    def build_for_graph_capture(
+    def build_for_cudagraph_capture(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,

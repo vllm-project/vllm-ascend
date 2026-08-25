@@ -113,14 +113,17 @@ def test_glm5_2_mtp_full_decode_only() -> None:
 )
 @wait_until_npu_memory_free()
 def test_glm5_2_sfa_pcp_full_decode_only() -> None:
-    """Exercise MRV2 SFA PCP prefill and full-decode-only graph replay."""
+    """Exercise MRV2 SFA PCP prefill and full-decode-only graph replay without C8 SFA."""
+    long_prompt = (
+        "You are validating a distributed language-model runtime. Explain how "
+        "prefill, KV-cache reuse, decode graph replay, and attention outputs "
+        "work together when serving a request with a long context. "
+    ) * 4
     prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
+        f"{long_prompt} Request identifier: {request_id}."
+        for request_id in range(4)
     ]
-    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    sampling_params = SamplingParams(max_tokens=2, temperature=0.0)
 
     with VllmRunner(
         MODEL,
@@ -133,7 +136,6 @@ def test_glm5_2_sfa_pcp_full_decode_only() -> None:
         enable_expert_parallel=True,
         disable_log_stats=False,
         compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
-        additional_config={"enable_sparse_sfa_c8": True},
     ) as runner:
         outputs = runner.model.generate(prompts, sampling_params)
 

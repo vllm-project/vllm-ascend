@@ -1,11 +1,12 @@
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.logger import logger
 
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
-from vllm_ascend.utils import weak_ref_tensor, weak_ref_tensors
+from vllm_ascend.utils import enable_sfa, weak_ref_tensor, weak_ref_tensors
 
 
 @contextmanager
@@ -48,11 +49,29 @@ def communicator_switch():
         logger.debug("Restored CudaCommunicator after graph capture.")
 
 
+_NPU_GRAPH_CAPTURE_ERROR_MODE: ContextVar[str | None] = ContextVar(
+    "_npu_graph_capture_error_mode", default=None
+)
+
+
+@contextmanager
+def sfa_graph_capture_mode(vllm_config):
+    capture_error_mode = "relaxed" if enable_sfa(vllm_config) else None
+    token = _NPU_GRAPH_CAPTURE_ERROR_MODE.set(capture_error_mode)
+    try:
+        yield
+    finally:
+        _NPU_GRAPH_CAPTURE_ERROR_MODE.reset(token)
+
+
 @contextmanager
 def torch_npu_graph_wrapper(*args, **kwargs):
     # MRV2-specific cleanup hook: intentionally reuse the graph context
     # manager's exit to weak-ref graph workspaces after each capture,
     # without adding another upstream monkey patch.
+    capture_error_mode = _NPU_GRAPH_CAPTURE_ERROR_MODE.get()
+    if capture_error_mode is not None:
+        kwargs.setdefault("capture_error_mode", capture_error_mode)
     try:
         with torch.npu.graph(*args, **kwargs):
             yield
