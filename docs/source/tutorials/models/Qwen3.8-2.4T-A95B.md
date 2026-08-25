@@ -10,15 +10,16 @@ long-horizon agent tasks.
 This document describes the main validation steps for the model, including
 supported features, prerequisites, installation, multi-node deployment,
 functional verification, accuracy and performance evaluation, performance
-tuning, and FAQs. All configurations in this document are for Atlas A3.
+tuning, and FAQs. The validated configurations cover Atlas A3 and Atlas A2
+deployments.
 
 This document is validated and written based on **vLLM-Ascend 0.23.0**. The
 current model (Qwen3.8-2.4T-A95B) is first supported in this version.
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_features.md)
-to get the model's supported feature matrix.
+Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md)
+to get the model support matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 configuration details.
@@ -33,14 +34,15 @@ The following model weights are available:
   memory. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B).
 - `Qwen3.8-2.4T-A95B-w8a8`: approximately 2.33 TiB of storage and weight
   memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8).
-- `Qwen3.8-2.4T-A95B-w4a8`:
-  [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8).
+- `Qwen3.8-2.4T-A95B-w4a8`: approximately 1.21 TiB of storage and weight
+  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8).
 
-This guide includes the following validated A3 deployment configuration:
+This guide includes the following validated deployment configurations:
 
-| Platform | Deployment | Topology |
-| --- | --- | --- |
-| 4 × Atlas 800 A3 (64GB × 16) | Mixed Prefill/Decode deployment | DP4/TP16/EP64 |
+| Platform | Weight | Deployment | Topology |
+| --- | --- | --- | --- |
+| 4 × Atlas 800 A3 (64GB × 16) | W8A8 | Mixed Prefill/Decode deployment | DP4/TP16/EP64 |
+| 8 × Atlas 800 A2 (64GB × 8) | W4A8 | Mixed Prefill/Decode deployment | DP8/TP8/EP64 |
 
 The checkpoint and tokenizer directories must be available at the same paths
 on all serving nodes. The W8A8 deployment uses the lazy Safetensors strategy to
@@ -109,6 +111,45 @@ node. Refer to [using docker](../../installation.md#set-up-using-docker).
     python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
     ```
 
+=== "A2 series"
+
+    Start the docker image on each node.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+    export NAME=vllm-ascend
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+    ```
+
+    After entering the container, verify that vLLM and vLLM-Ascend can be imported:
+
+    ```shell
+    python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
+    ```
+
 ### 4.2 Source Code Installation
 
 You can also build and install `vllm-ascend` from source. Refer to
@@ -121,10 +162,14 @@ and vLLM-Ascend on each node.
 
 ### 5.1 Multi-Node Deployment
 
-The validated mixed deployment uses four Atlas 800 A3 (64GB × 16) nodes. Data
-parallelism spans the four nodes, each node runs one DP rank, and tensor
-parallelism uses all 16 NPUs in the node. The resulting topology is
-DP4/TP16/EP64.
+The validated mixed deployment runs one DP rank per node, uses tensor
+parallelism within each node, and spans expert parallelism across all nodes.
+Select the tab that matches your platform:
+
+- **A3 series**: four Atlas 800 A3 (64GB × 16) nodes, DP4/TP16/EP64, with the
+  W8A8 checkpoint.
+- **A2 series**: eight Atlas 800 A2 (64GB × 8) nodes, DP8/TP8/EP64, with the
+  W4A8 checkpoint.
 
 Before starting the service:
 
@@ -184,7 +229,7 @@ Before starting the service:
             --gpu-memory-utilization 0.85 \
             --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":false,"enable_fused_mc2":1}'
+            --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
         ```
 
     === "Nodes 1-3"
@@ -240,7 +285,7 @@ Before starting the service:
             --gpu-memory-utilization 0.85 \
             --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-            --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":false,"enable_fused_mc2":1}'
+            --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
         ```
 
     The following values differ between the master and worker nodes:
@@ -271,7 +316,178 @@ Before starting the service:
     | `--enable-prefix-caching` | Enables automatic prefix caching. |
     | `--speculative-config` | Enables one Qwen3.5 MTP speculative token. |
     | `--compilation-config` | Uses `FULL_DECODE_ONLY` ACL Graph replay. |
-    | `--additional-config` | Enables CPU binding and Fused MC2 while disabling FlashComm1. |
+    | `--additional-config` | Enables CPU binding and Fused MC2. |
+
+    Common Issues Tip: If a worker exits immediately, confirm that Node 0 is
+    already running, `--data-parallel-address` resolves to Node 0, all nodes
+    use the same RPC port, and every worker uses a unique DP start rank.
+
+=== "A2 series"
+
+    The validated mixed deployment uses eight Atlas 800 A2 (64GB × 8) nodes
+    with the `Qwen3.8-2.4T-A95B-w4a8` checkpoint. Data parallelism spans the
+    eight nodes, each node runs one DP rank, tensor parallelism uses all 8
+    NPUs in the node, and the resulting topology is DP8/TP8/EP64.
+
+    The W4A8 checkpoint is used on A2 so that enough HBM remains for the
+    large activation footprint of the 95B activated parameters. Because the
+    per-token MoE intermediate buffers are large, `--max-num-batched-tokens`
+    is reduced to 4096 and `--gpu-memory-utilization` is raised to 0.92
+    compared with the A3 configuration. The smaller token budget keeps the
+    MoE activation peak low enough to leave KV cache room for a 262144
+    context length.
+
+    === "Node 0"
+
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<QWEN3_8_MODEL_PATH>
+        export TOKENIZER_PATH=<QWEN3_8_TOKENIZER_PATH>
+        export LOCAL_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<NODE0_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DP_SIZE=8
+        export TP_SIZE=8
+
+        export VLLM_ENGINE_READY_TIMEOUT_S=7200
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+        export HCCL_BUFFSIZE=1024
+        export HCCL_BUFFSIZE_EP=2048
+        export HCCL_CONNECT_TIMEOUT=1800
+        export HCCL_EXEC_TIMEOUT=1800
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_INTRA_PCIE_ENABLE=1
+        export HCCL_INTRA_ROCE_ENABLE=0
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export TP_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export TASK_QUEUE_ENABLE=1
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
+
+        vllm serve $MODEL_PATH \
+            --host 0.0.0.0 \
+            --port $PORT \
+            --served-model-name qwen3.8 \
+            --tokenizer $TOKENIZER_PATH \
+            --trust-remote-code \
+            --quantization ascend \
+            --safetensors-load-strategy lazy \
+            --tensor-parallel-size $TP_SIZE \
+            --data-parallel-size $DP_SIZE \
+            --data-parallel-size-local 1 \
+            --data-parallel-address $LOCAL_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --enable-prefix-caching \
+            --enable-expert-parallel \
+            --max-model-len 262144 \
+            --max-num-seqs 8 \
+            --max-num-batched-tokens 4096 \
+            --gpu-memory-utilization 0.92 \
+            --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
+        ```
+
+    === "Nodes 1-7"
+
+        Run this command on every worker. Set `LOCAL_IP` and `NIC_NAME` to the
+        current node and set `DP_START_RANK` to a unique value from `1` to
+        `7`.
+
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<QWEN3_8_MODEL_PATH>
+        export TOKENIZER_PATH=<QWEN3_8_TOKENIZER_PATH>
+        export LOCAL_IP=<WORKER_LOCAL_IP>
+        export NODE0_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<WORKER_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DP_SIZE=8
+        export DP_START_RANK=<1_TO_7>
+        export TP_SIZE=8
+
+        export VLLM_ENGINE_READY_TIMEOUT_S=7200
+        export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+        export HCCL_BUFFSIZE=1024
+        export HCCL_BUFFSIZE_EP=2048
+        export HCCL_CONNECT_TIMEOUT=1800
+        export HCCL_EXEC_TIMEOUT=1800
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_INTRA_PCIE_ENABLE=1
+        export HCCL_INTRA_ROCE_ENABLE=0
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export TP_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export TASK_QUEUE_ENABLE=1
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
+
+        vllm serve $MODEL_PATH \
+            --headless \
+            --host 0.0.0.0 \
+            --port $PORT \
+            --served-model-name qwen3.8 \
+            --tokenizer $TOKENIZER_PATH \
+            --trust-remote-code \
+            --quantization ascend \
+            --safetensors-load-strategy lazy \
+            --tensor-parallel-size $TP_SIZE \
+            --data-parallel-size $DP_SIZE \
+            --data-parallel-size-local 1 \
+            --data-parallel-start-rank $DP_START_RANK \
+            --data-parallel-address $NODE0_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --enable-prefix-caching \
+            --enable-expert-parallel \
+            --max-model-len 262144 \
+            --max-num-seqs 8 \
+            --max-num-batched-tokens 4096 \
+            --gpu-memory-utilization 0.92 \
+            --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
+        ```
+
+    The following values differ between the master and worker nodes:
+
+    | Setting | Node 0 | Nodes 1-7 | Description |
+    | --- | --- | --- | --- |
+    | `LOCAL_IP` | Node 0 IP | Current worker IP | Each node uses its own communication IP. |
+    | `NODE0_IP` | Not required | Node 0 IP | Workers use this address to join the DP group. |
+    | `--headless` | Omitted | Enabled | Workers do not expose an API endpoint. |
+    | `--data-parallel-address` | `$LOCAL_IP` | `$NODE0_IP` | Always resolves to Node 0. |
+    | `--data-parallel-start-rank` | `0` by default | `1` to `7` | Every node must own a unique DP rank. |
+
+    Key deployment parameters:
+
+    | Parameter | Description |
+    | --- | --- |
+    | `--tensor-parallel-size 8` | Uses all 8 NPUs in one A2 node for tensor parallelism. |
+    | `--data-parallel-size 8` | Creates eight global DP ranks across eight nodes. |
+    | `--data-parallel-size-local 1` | Runs one DP rank on the current node. |
+    | `--data-parallel-start-rank` | Selects the global DP rank of a worker node. |
+    | `--enable-expert-parallel` | Enables expert parallelism for the MoE layers. |
+    | `--max-model-len 262144` | Sets the maximum combined input and output length. |
+    | `--quantization ascend` | Enables Ascend W4A8 quantization for the validated checkpoint. |
+    | `--safetensors-load-strategy lazy` | Avoids prefetching the complete checkpoint from NFS. |
+    | `--max-num-seqs 8` | Sets eight active sequences for each DP group. |
+    | `--max-num-batched-tokens 4096` | Controls the scheduler token budget. Larger values increase the MoE activation peak and shrink the KV cache available for the 262144 context. |
+    | `--gpu-memory-utilization 0.92` | Reserves HBM headroom for the weights and activation peak on 64GB nodes. |
+    | `--enable-prefix-caching` | Enables automatic prefix caching. |
+    | `--speculative-config` | Enables one Qwen3.5 MTP speculative token. |
+    | `--compilation-config` | Uses `FULL_DECODE_ONLY` ACL Graph replay. |
+    | `--additional-config` | Enables CPU binding and Fused MC2. |
 
     Common Issues Tip: If a worker exits immediately, confirm that Node 0 is
     already running, `--data-parallel-address` resolves to Node 0, all nodes
@@ -396,7 +612,7 @@ input/output length, request concurrency, prefix cache hit rate, quantization,
 and workload characteristics. Tune the parameters in Section 9.2 based on your
 actual workload.
 
-#### Table 1: Scenario Overview
+**Table 1: Scenario Overview**
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Topology |
 | --- | --- | ---: | --- | --- |
@@ -404,7 +620,7 @@ actual workload.
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
-#### Table 2: Detailed Configuration
+**Table 2: Detailed Configuration**
 
 | Max Num Seqs | Max Model Len | Max Num Batched Tokens | GPU Memory Utilization | MTP Tokens | Prefix Cache | Main Optimizations |
 | ---: | ---: | ---: | ---: | ---: | --- | --- |
@@ -455,7 +671,6 @@ Recommended tuning order:
 | Fused MC2 | `--additional-config '{"enable_fused_mc2":1}'` | Enables fused MoE communication and computation. | Used by the validated configuration. |
 | Lazy Safetensors | `--safetensors-load-strategy lazy` | Avoids prefetching the complete checkpoint from shared storage. | Used for the W8A8 checkpoint. |
 | CPU binding | `--additional-config '{"enable_cpu_binding":true}'` | Reduces CPU scheduling jitter. | Explicitly enabled in the deployment commands. |
-| FlashComm1 | `--additional-config '{"enable_flashcomm1":false}'` | Keeps the validated communication path. | Disabled in the validated configuration. |
 
 ## 10 FAQ
 
@@ -475,4 +690,4 @@ No. Keep `enable_thinking=true`. The response starts with reasoning in a
 
 Select TP, PP, DP, and EP together according to model compatibility, weight
 memory, KV-cache capacity, and communication performance. Validate the
-complete topology on the target A3 cluster.
+complete topology on the target cluster.
