@@ -61,6 +61,7 @@ from vllm_ascend.utils import (
     calc_split_factor,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
+    get_kv_cache_tensor_layers,
 )
 
 if TYPE_CHECKING:
@@ -591,7 +592,8 @@ def _allocate_kv_cache(
     use_hybrid_layout = has_mamba and has_attention
 
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        if not kv_cache_tensor.shared_by:
+        shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
+        if not shared_names:
             continue
 
         if is_dsv4_model:
@@ -605,18 +607,18 @@ def _allocate_kv_cache(
                     device=device,
                 )
                 raw_tensor = _align_memory(raw_tensor, alignment)[: kv_cache_tensor.size]
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
 
-        example_layer_name = kv_cache_tensor.shared_by[0]
+        example_layer_name = shared_names[0]
         example_spec = layer_kv_cache_spec[example_layer_name]
 
         # Use one raw allocation for Mamba and hybrid caches. The reshape step
         # creates the V1-compatible contiguous state views and overlaps
         # Attention K/V with the aligned tail of the same buffer.
         contains_mamba = any(
-            isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in kv_cache_tensor.shared_by
+            isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in shared_names
         )
         if contains_mamba or use_hybrid_layout:
             tensor_size = kv_cache_tensor.size
@@ -629,7 +631,7 @@ def _allocate_kv_cache(
                     device=device,
                 )
                 tensor = _align_memory(tensor, alignment)[:tensor_size]
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = tensor
             continue
         assert isinstance(example_spec, AttentionSpec)
@@ -671,7 +673,7 @@ def _allocate_kv_cache(
                 )
                 raw_cache = (k_tensor,)
 
-            for layer_name_inner in kv_cache_tensor.shared_by:
+            for layer_name_inner in shared_names:
                 kv_cache_raw_tensors[layer_name_inner] = raw_cache
 
             continue
@@ -680,7 +682,7 @@ def _allocate_kv_cache(
         if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
             k_size = kv_cache_tensor.size
             k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = k_tensor
         else:
             k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
@@ -694,7 +696,7 @@ def _allocate_kv_cache(
             v_size = int(kv_cache_tensor.size // v_factor)
             k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
             v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_names:
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
