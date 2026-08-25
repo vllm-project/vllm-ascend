@@ -15,11 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import os
-
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["OMP_NUM_THREADS"] = "1"
-
 import pytest
 
 from tests.e2e.conftest import wait_until_npu_memory_free
