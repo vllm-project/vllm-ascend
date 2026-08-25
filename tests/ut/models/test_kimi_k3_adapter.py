@@ -680,6 +680,9 @@ def test_k3_dspark_reuses_modelslim_rotation_loader(monkeypatch):
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
     model.rotation_path = "rotation.safetensors"
+    model.target_model_path = "/target"
+    model.model = SimpleNamespace(embed_tokens=object())
+    model.lm_head = object()
     source_weights = [
         ("context_proj.weight", torch.ones(2, 4)),
         ("context_norm.weight", torch.ones(2)),
@@ -710,47 +713,32 @@ def test_k3_dspark_reuses_modelslim_rotation_loader(monkeypatch):
         "vllm_ascend.models.kimi_k3_dspark.process_weight",
         process_weight,
     )
+    load_target_layer = MagicMock()
+    monkeypatch.setattr(
+        "vllm_ascend.models.kimi_k3_dspark.load_quarot_target_layer",
+        load_target_layer,
+    )
 
     model.load_weights(iter(source_weights))
 
     process_weight.assert_called_once()
     torch.testing.assert_close(process_weight.call_args.args[0], source_weights[0][1])
     torch.testing.assert_close(process_weight.call_args.args[1], rotation)
-    assert model._shared_layer_rotation is rotation
+    assert load_target_layer.call_count == 2
+    assert load_target_layer.call_args_list[0].args[:2] == (
+        model.model.embed_tokens,
+        model.target_model_path,
+    )
+    assert load_target_layer.call_args_list[1].args[:2] == (
+        model.lm_head,
+        model.target_model_path,
+    )
+    assert model.has_own_embed_tokens
+    assert model.has_own_lm_head
     assert seen_weights[0][0] == "context_proj.weight"
     assert seen_weights[0][1] is rotated_weight
     assert seen_weights[1][0] == source_weights[1][0]
     assert seen_weights[1][1] is source_weights[1][1]
-
-
-def test_k3_dspark_prepares_unrotated_shared_layer():
-    class NonCopyableCommGroup:
-        def __deepcopy__(self, memo):
-            del memo
-            raise TypeError("cannot pickle ProcessGroup")
-
-    model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
-    nn.Module.__init__(model)
-    rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
-    model._shared_layer_rotation = rotation
-    target = nn.Linear(2, 3, bias=False)
-    target.comm_group = NonCopyableCommGroup()
-    target_weight = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    target.weight.data.copy_(target_weight)
-
-    prepared = model.prepare_shared_layer(
-        None,
-        target,
-        "draft embed_tokens.weight",
-    )
-
-    assert prepared is not None
-    assert prepared is not target
-    assert prepared.comm_group is target.comm_group
-    torch.testing.assert_close(prepared.weight, target_weight @ rotation.T)
-    torch.testing.assert_close(target.weight, target_weight)
-    model.finish_shared_layer_preparation()
-    assert model._shared_layer_rotation is None
 
 
 def test_k3_dspark_embed_input_ids_keeps_text_only_path():
