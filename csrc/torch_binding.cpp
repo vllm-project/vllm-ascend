@@ -32,6 +32,7 @@
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 #include "batch_matmul_transpose/batch_matmul_transpose_torch_adpt.h"
+#include "gather_pa_kv_cache/gather_pa_kv_cache_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
 #include "mc2/dispatch_ffn_combine/dispatch_ffn_combine_torch_adpt.h"
@@ -2093,6 +2094,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
             "batch_matmul_transpose(Tensor tensor_a, Tensor tensor_b, Tensor tensor_c, str? format_mode=None, str? quant_mode=None) -> ()");
     ops.impl("batch_matmul_transpose", torch::kPrivateUse1, &vllm_ascend::batch_matmul_transpose);
+
+    ops.def(
+        "gather_pa_kv_cache(Tensor key_cache, Tensor value_cache, Tensor block_tables, Tensor seq_lens, "
+        "                   Tensor(a!) key, Tensor(b!) value, *, Tensor? seq_offset=None, "
+        "                   str cache_mode=\"Norm\", bool is_seq_lens_cumsum=False) -> ()");
+    ops.impl("gather_pa_kv_cache", torch::kPrivateUse1, &vllm_ascend::gather_pa_kv_cache);
 
     ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
