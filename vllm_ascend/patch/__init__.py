@@ -811,17 +811,6 @@
 #       Then register `DSAAttention` through vLLM's post-load weight-processing
 #       registry instead of monkey-patching model-loader helpers.
 #
-# ** 14. File: worker/patch_qwen3_5.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
-#    Why:
-#       The class Qwen3_5GatedDeltaNet reuse the `_forward_core` method of Qwen3NextGatedDeltaNet,
-#       but the ascendC ops of Qwen3NextGatedDeltaNet do not support ssm_state with float32 format.
-#    How：
-#       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
-#    Future Plan:
-#       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
-#
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`

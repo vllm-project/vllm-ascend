@@ -3,6 +3,30 @@ from vllm import ModelRegistry
 
 def register_model():
     ModelRegistry.register_model(
+        "Qwen3_5ForCausalLM",
+        "vllm_ascend.models.qwen3_5:AscendQwen3_5ForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "Qwen3_5MoeForCausalLM",
+        "vllm_ascend.models.qwen3_5:AscendQwen3_5MoeForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "Qwen3_5ForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5:AscendQwen3_5ForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Qwen3_5MoeForConditionalGeneration",
+        "vllm_ascend.models.qwen3_5:AscendQwen3_5MoeForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Qwen3_5MTP",
+        "vllm_ascend.models.qwen3_5:AscendQwen3_5MTP",
+    )
+    ModelRegistry.register_model(
+        "Qwen3_5MoeMTP",
+        "vllm_ascend.models.qwen3_5:AscendQwen3_5MoeMTP",
+    )
+    ModelRegistry.register_model(
         "DeepseekV4ForCausalLM", "vllm_ascend.models.deepseek_v4.model:AscendDeepseekV4ForCausalLM"
     )
     ModelRegistry.register_model(

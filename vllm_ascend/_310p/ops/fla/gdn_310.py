@@ -20,6 +20,9 @@
 import torch
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    QwenGatedDeltaNetAttention,
+)
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -29,6 +32,7 @@ from vllm_ascend._310p.ops.fla.fused_gdn_gating import fused_gdn_gating_pytorch
 from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.utils import enable_sp
 
 
@@ -427,3 +431,17 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 )
             )
         maybe_save_kv_layer_to_connector("", [])
+
+
+class AscendQwenGatedDeltaNetAttention310(QwenGatedDeltaNetAttention):
+    """310P implementation registered for vLLM's Qwen GDN pluggable layer."""
+
+    _split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
+    get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+    _forward_core = AscendGatedDeltaNetAttention310._forward_core
+    get_state_dtype = AscendGatedDeltaNetAttention310.get_state_dtype
+    get_attn_backend = AscendGatedDeltaNetAttention310.get_attn_backend
+
+    def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
+        # The Triton warmup is CUDA-only and unsupported by the 310P runtime.
+        return None

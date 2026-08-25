@@ -21,6 +21,9 @@ from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    QwenGatedDeltaNetAttention,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
@@ -591,3 +594,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
         maybe_save_kv_layer_to_connector("", [])
+
+
+class AscendQwenGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
+    """Ascend implementation registered for vLLM's Qwen GDN pluggable layer."""
+
+    _split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
+    get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
+    get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
+    forward = AscendGatedDeltaNetAttention.forward
+    _forward_core = AscendGatedDeltaNetAttention._forward_core
+    _warmup_prefill_kernels = AscendGatedDeltaNetAttention._warmup_prefill_kernels
