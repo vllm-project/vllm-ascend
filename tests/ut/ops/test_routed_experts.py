@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts, EplbExpertTensorList
+
 from vllm_ascend.utils import vllm_version_is
 
 

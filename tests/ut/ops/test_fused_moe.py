@@ -8,17 +8,18 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
-from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
-from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
-from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.routed_experts import (
     AscendRoutedExperts,
     AscendUnquantizedFusedMoEMethod,
     make_eplb_placement_config,
     use_multistage_eplb_load,
 )
+
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
+from vllm_ascend.ops.fused_moe import routed_experts as routed_experts_module
+from vllm_ascend.ops.fused_moe import shared_experts as shared_experts_module
+from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
 from vllm_ascend.ops.fused_moe.router import fused_topk_router as fused_topk_router_module
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import AscendFusedTopKRouter
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
