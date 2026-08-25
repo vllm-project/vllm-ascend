@@ -23,9 +23,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+import torch.nn as nn
 from vllm.config import CUDAGraphMode
+from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM
 
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.llm_base_proposer import (
+    _HIDDEN_STATE_DRAFTER_TYPES,
+    AscendSpecDecodeBaseProposer,
+)
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
 # two composite modes that mix FULL with NONE / PIECEWISE.
@@ -76,16 +82,22 @@ class TestMultimodalImageTokenIndex:
 
         assert image_token_index == 789
 
-    def test_kimi_uses_media_placeholder_token_id(self):
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "KimiK25ForConditionalGeneration",
+            "KimiK3ForConditionalGeneration",
+            "AscendKimiK3ForConditionalGeneration",
+        ],
+    )
+    def test_kimi_uses_media_placeholder_token_id(self, model_name: str):
         config = SimpleNamespace(
             image_token_id=123,
             image_token_index=456,
             media_placeholder_token_id=789,
         )
 
-        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
-            "KimiK25ForConditionalGeneration", config
-        )
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(model_name, config)
 
         assert image_token_index == 789
 
@@ -134,6 +146,119 @@ def test_load_model_reads_validated_draft_window_size():
 
     assert proposer.draft_window_size == 4096
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
+
+
+def test_kimi_k3_dspark_is_supported_as_hidden_state_drafter():
+    assert K3DSparkForCausalLM in _HIDDEN_STATE_DRAFTER_TYPES
+
+
+class TestQuaRotDraftBoundaries:
+    @staticmethod
+    def _make_proposer() -> AscendSpecDecodeBaseProposer:
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "dspark"
+        proposer.device = torch.device("cpu")
+        proposer.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(model="target"),
+            quant_config=SimpleNamespace(),
+        )
+        return proposer
+
+    @pytest.mark.parametrize(
+        "draft_class_name",
+        ["K3DSparkForCausalLM", "Qwen3DSparkForCausalLM"],
+    )
+    def test_loads_rotation_for_shared_dspark_boundaries(self, monkeypatch, draft_class_name):
+        class FakeDSpark:
+            pass
+
+        proposer = self._make_proposer()
+        rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        proposer.model = FakeDSpark()
+        monkeypatch.setattr(
+            f"vllm_ascend.spec_decode.llm_base_proposer.{draft_class_name}",
+            FakeDSpark,
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.get_rotation_path",
+            lambda _: "rotation.safetensors",
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.get_rotation_matrix",
+            lambda _: rotation,
+        )
+
+        proposer._maybe_load_quarot_rotation()
+
+        torch.testing.assert_close(proposer._quarot_rotation, rotation)
+
+    def test_does_not_apply_dspark_boundary_rotation_to_other_drafts(self, monkeypatch):
+        proposer = self._make_proposer()
+        proposer.model = SimpleNamespace()
+        calls = []
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.get_rotation_path",
+            lambda config: calls.append(config),
+        )
+
+        proposer._maybe_load_quarot_rotation()
+
+        assert calls == []
+
+    def test_materializes_unrotated_shared_layer(self):
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
+        target = nn.Linear(2, 3, bias=False)
+        target_weight = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        target.weight.data.copy_(target_weight)
+
+        prepared = proposer._prepare_unrotated_shared_layer(
+            None,
+            target,
+            "draft embed_tokens.weight",
+        )
+
+        assert prepared is not None
+        assert prepared is not target
+        torch.testing.assert_close(
+            prepared.weight,
+            target_weight @ proposer._quarot_rotation.T,
+        )
+        torch.testing.assert_close(target.weight, target_weight)
+
+    def test_materialized_layer_reuses_noncopyable_comm_group(self):
+        class NonCopyableCommGroup:
+            def __deepcopy__(self, memo):
+                del memo
+                raise TypeError("cannot pickle ProcessGroup")
+
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.eye(2)
+        target = nn.Linear(2, 3, bias=False)
+        target.comm_group = NonCopyableCommGroup()
+
+        prepared = proposer._prepare_unrotated_shared_layer(
+            None,
+            target,
+            "draft embed_tokens.weight",
+        )
+
+        assert prepared is not None
+        assert prepared.comm_group is target.comm_group
+        assert prepared.weight.data_ptr() != target.weight.data_ptr()
+
+    def test_incompatible_shared_layer_fails_instead_of_aliasing(self):
+        proposer = self._make_proposer()
+        proposer._quarot_rotation = torch.eye(2)
+        target = nn.Linear(2, 3, bias=False)
+        draft = nn.Linear(3, 3, bias=False)
+
+        with pytest.raises(RuntimeError):
+            proposer._prepare_unrotated_shared_layer(
+                draft,
+                target,
+                "draft lm_head.weight",
+            )
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:
