@@ -53,7 +53,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
-from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -817,17 +816,6 @@ class NPUWorker(WorkerBase):
         self.parallel_group_clean_up()
 
         logger.info("[snapshot] [parallel] rank %s: rebuilding HCCL and model-parallel groups", self.rank)
-
-        # DP=1, should explicitly reset the distributed_init_method
-        master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
-        if not master_ip:
-            raise RuntimeError(f"Unable to resolve master IP for distributed init method: {init_method}")
-        resume_ports = self.vllm_config.parallel_config._snapshot_data_parallel_port_list
-        if not resume_ports:
-            raise RuntimeError("Snapshot world-group resume port is not configured")
-        resume_port = resume_ports[-1]
-        self.distributed_init_method = get_distributed_init_method(master_ip, resume_port)
-
         with set_current_vllm_config(self.vllm_config):
             self._init_worker_distributed_environment()
 
