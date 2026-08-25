@@ -29,7 +29,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheTensor,
 )
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
 def _make_int8_block_view(
@@ -191,7 +191,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         layer_is_packed = {
             layer_name: bool(kv_tensor.block_stride)
             for kv_tensor in kv_cache_config.kv_cache_tensors
-            for layer_name in (kv_tensor.shared_by if vllm_version_is("0.27.1") else kv_tensor.layers)
+            for layer_name in get_kv_cache_tensor_layers(kv_tensor)
         }
 
         canonical_tensors: list[CanonicalKVCacheTensor] = []
