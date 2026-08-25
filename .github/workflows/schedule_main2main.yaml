@@ -139,8 +139,11 @@ jobs:
 
   main2main:
     needs: [resolve-source, ensure-csrc-cache]
-    runs-on: linux-aarch64-a2b1-8
-    timeout-minutes: 2880
+    # All analysis/planning/adapter/QA/pre-CI/final-gate work runs on a pure
+    # CPU runner; E2E runs on the A2/A3/310P GPU runners via the external
+    # main2main-e2e workflows (dispatched by step 0 below).
+    runs-on: linux-amd64-cpu-8-hk
+    timeout-minutes: 1440
     concurrency:
       group: main2main
       cancel-in-progress: false
@@ -168,14 +171,22 @@ jobs:
         shell: bash -el {0}
     env:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-      MAIN2MAIN_IMAGE_TAG: 9.1.0-910b-ubuntu22.04-py3.12
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
       HEAD_FORK: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
-      MAIN2MAIN_CASES_FILE: .github/workflows/scripts/main2main_tests.json
+      # External E2E on the A2/A3/310P runners (select_tests.py ready-all
+      # selection, identical to PR CI).  The flow dispatches the prep + exec
+      # workflows against HEAD_FORK; MAIN2MAIN_E2E_PREP_RUN_ID is filled by
+      # the "Pre-start E2E runner envs" step so the flow reuses that run.
+      MAIN2MAIN_E2E_MODE: cumulative
+      MAIN2MAIN_E2E_REPO: vllm-ascend-ci/vllm-ascend
+      MAIN2MAIN_E2E_BRANCH: main2main_e2e
+      # npu-smi exists in the CANN container but there is no device on the
+      # CPU runner — skip the mega_moe JIT warmup entirely.
+      MAIN2MAIN_SKIP_NPU_WARMUP: 'true'
       MAIN2MAIN_LOG_HELPERS: |
         print_group() {
           local title="$1"
@@ -202,22 +213,6 @@ jobs:
 
       - name: Exclude vllm dir from ascend git
         run: echo "vllm-upstream/" >> .git/info/exclude
-
-      - name: Load main2main test cases
-        run: |
-          set -eu
-          if [ ! -f "${MAIN2MAIN_CASES_FILE}" ]; then
-            echo "::error::main2main test cases file not found: ${MAIN2MAIN_CASES_FILE}"
-            exit 1
-          fi
-          CASES=$(jq -r '.cases | join(" ")' "${MAIN2MAIN_CASES_FILE}")
-          if [ -z "${CASES}" ]; then
-            echo "::error::no test cases loaded from ${MAIN2MAIN_CASES_FILE}"
-            exit 1
-          fi
-          echo "Loaded $(jq '.cases | length' "${MAIN2MAIN_CASES_FILE}") test cases:"
-          printf '%s\n' "${CASES}"
-          echo "MAIN2MAIN_TEST_CASES=${CASES}" >> "$GITHUB_ENV"
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
@@ -261,12 +256,35 @@ jobs:
           git config user.email "main2main-bot@users.noreply.github.com"
           gh --version
 
-      - name: Check npu and CANN info
-        if: ${{ !cancelled() }}
+      - name: Pre-start E2E runner envs
+        continue-on-error: true
         run: |
-          npu-smi info || true
-          if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
-            cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info || true
+          set -euo pipefail
+          # Dispatch the A2/A3/310P environment prep NOW (in parallel with the
+          # remaining CPU installs) so the first E2E round does not wait for
+          # csrc builds / dependency installs.  The flow reuses this run id
+          # (MAIN2MAIN_E2E_PREP_RUN_ID) instead of dispatching again.
+          VLLM_COMMIT="${TARGET_COMMIT}"
+          if [ -z "${VLLM_COMMIT}" ]; then
+            VLLM_COMMIT=$(git -C vllm-upstream rev-parse HEAD)
+          fi
+          echo "Pre-starting main2main E2E env prep for vllm=${VLLM_COMMIT} (A2/A3/310P)..."
+          gh workflow run main2main-e2e-prep.yaml \
+            --repo "${HEAD_FORK}" \
+            --ref main \
+            -f "vllm=${VLLM_COMMIT}" -f "base_ref=main"
+          for i in $(seq 1 12); do
+            RUN_ID=$(gh run list --repo "${HEAD_FORK}" \
+              --workflow main2main-e2e-prep.yaml \
+              --event workflow_dispatch --limit 1 \
+              --json databaseId --jq '.[0].databaseId // empty' \
+              2>/dev/null || true)
+            [ -n "${RUN_ID:-}" ] && break
+            sleep 5
+          done
+          if [ -n "${RUN_ID:-}" ]; then
+            echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+            echo "Prep run ${RUN_ID} started"
           fi
 
       - name: Install opencode + main2main-flow
@@ -276,7 +294,7 @@ jobs:
           set -euxo pipefail
 
           NODE_INSTALL_DIR="/opt/nodejs"
-          NODE_ARCHIVE_NAME="node-v${NODE_VERSION}-linux-arm64.tar.gz"
+          NODE_ARCHIVE_NAME="node-v${NODE_VERSION}-linux-x64.tar.gz"
           NODE_ARCHIVE="/tmp/${NODE_ARCHIVE_NAME}"
           NODE_CHECKSUMS="/tmp/node-v${NODE_VERSION}-SHASUMS256.txt"
           curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
@@ -361,86 +379,25 @@ jobs:
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          # Fail closed so a git error cannot silently produce sha256(empty).
-          set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-
-          # Match the standalone cache producer's tracked csrc build inputs.
-          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
-          if [ -z "$CSRC_MANIFEST" ]; then
-            echo "::error::No tracked csrc inputs found."
-            exit 1
-          fi
-
-          CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
-
-      - name: Get architecture
-        id: get_arch
-        run: |
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
-            aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
-            *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
-          esac
-
-      - name: Restore vllm-ascend csrc cache
-        id: cache-csrc
-        uses: runs-on/cache/restore@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          # During the rollout, tolerate misses so main2main can use the existing
-          # NPU build while CPU cache production proves stable.
-          # Restore fail-on-cache-miss to true after the transition period.
-          fail-on-cache-miss: false
-
-      - name: Install Mooncake wheel
-        run: |
-          set -euxo pipefail
-          apt-get install -y --no-install-recommends \
-            libibverbs1 \
-            ibverbs-providers \
-            librdmacm1 \
-            libnuma1 \
-            libcurl4
-          ldconfig
-          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.9-cp312-cp312-manylinux_2_35_aarch64.whl"
-          pip install --no-cache-dir --no-deps \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
-
       - name: Install vllm-project/vllm from source
         working-directory: vllm-upstream
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
-      - name: Install vllm-ascend
+      # CPU-runner install mirrors PR CI's cpu group (COMPILE_CUSTOM_KERNELS=0,
+      # no csrc build — the GPU runners own kernel compilation via the
+      # main2main-e2e-prep workflow).  vllm-ascend must still be importable
+      # for the final quality gate's CPU-UT batch.
+      - name: Install vllm-ascend no device
         working-directory: ${{ github.workspace }}
         env:
-          CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+          SOC_VERSION: ascend910b1
+          COMPILE_CUSTOM_KERNELS: 0
         run: |
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
-          # Preserve main2main availability during the transition by compiling
-          # on the NPU only when the CPU-produced cache is unavailable.
-          if [ "$CSRC_CACHE_HIT" = "true" ]; then
-            echo "csrc cache hit: skip kernel compilation"
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            echo "csrc cache miss: compile kernels on the NPU runner"
-            uv pip install -e . --no-build-isolation
-          fi
+          uv pip install -e .
 
       - name: Run main2main flow
         id: run-main2main
