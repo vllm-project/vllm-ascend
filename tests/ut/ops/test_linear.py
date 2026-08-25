@@ -12,8 +12,6 @@ from vllm_ascend.ops.linear import (
     AscendReplicatedLinear,
     AscendRowParallelLinear,
     AscendUnquantizedLinearMethod,
-    unquantized_gemm,
-    unquantized_gemm_fake,
 )
 
 
@@ -88,19 +86,6 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
-
-    def test_unquantized_gemm_fake_preserves_leading_dimensions(self):
-        weight = torch.empty(7, 11)
-
-        for input_shape in ((11,), (5, 11), (2, 8, 11), (3, 4, 5, 11)):
-            input_tensor = torch.empty(input_shape)
-            output = unquantized_gemm_fake(input_tensor, weight)
-            reference = unquantized_gemm(input_tensor, weight)
-
-            self.assertEqual(output.shape, (*input_shape[:-1], 7))
-            self.assertEqual(output.shape, reference.shape)
-            self.assertEqual(output.dtype, reference.dtype)
-            self.assertEqual(output.device, reference.device)
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):

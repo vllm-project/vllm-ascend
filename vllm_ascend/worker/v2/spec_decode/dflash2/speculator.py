@@ -61,8 +61,8 @@ def _selector_walk_kernel_ascend(
             # int32 Philox path; realized FP32 logits are kept for verification.
             position = (tl.load(sample_pos_ptr + flat) - 1).to(tl.int32)
             gumbel_seed = tl.randint(seed.to(tl.int32), position)
-            # Token ids key the noise so the draft and target sample the same
-            # candidate from the same request seed and position.
+            # Token ids key the noise, preserving the upstream DFlash2
+            # candidate-sampling contract.
             uniform = tl_rand32(
                 gumbel_seed,
                 candidates.to(tl.int32),
@@ -100,16 +100,14 @@ class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> nn.Module:
         model = super().load_draft_model(target_model, target_attn_layer_names)
-        if self.speculative_config.enforce_eager:
-            # The draft ModelConfig currently inherits the target's compile
-            # setting, so speculative_config.enforce_eager alone does not stop
-            # independently decorated modules (notably CandidateSelector) from
-            # invoking torch.compile.  Disable compilation on this draft model
-            # instance only; changing the model classes globally would also
-            # affect unrelated DFlash and MRV1 instances in the same process.
-            for module in model.modules():
-                if hasattr(module, "do_not_compile"):
-                    module.do_not_compile = True
+        # DFlash2's draft RoPE and CandidateSelector still hit unsupported NPU
+        # FakeTensor/broadcast paths under torch.compile. Disable torch.compile
+        # on this draft instance only; ACLGraph capture remains controlled by
+        # init_cudagraph_manager, and the target model is left untouched.
+        target_module_ids = {id(module) for module in target_model.modules()}
+        for module in model.modules():
+            if id(module) not in target_module_ids and hasattr(module, "do_not_compile"):
+                module.do_not_compile = True
         return model
 
     def _sample_path(

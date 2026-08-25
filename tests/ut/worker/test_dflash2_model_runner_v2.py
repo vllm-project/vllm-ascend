@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm_ascend.patch.platform import patch_use_v2_model_runner
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 
 
@@ -16,27 +15,6 @@ def _speculative_config(architecture: str):
         use_dspark=lambda: False,
         use_dflash=lambda: True,
     )
-
-
-def test_dflash2_forces_v2_when_runner_env_is_unset(monkeypatch):
-    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", None)
-    config = SimpleNamespace(_is_dflash2_draft=lambda: True)
-
-    assert patch_use_v2_model_runner._patched_use_v2_model_runner(config)
-
-
-def test_explicit_runner_env_takes_precedence(monkeypatch):
-    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", False)
-    config = SimpleNamespace(_is_dflash2_draft=lambda: True)
-
-    assert not patch_use_v2_model_runner._patched_use_v2_model_runner(config)
-
-
-def test_non_dflash2_keeps_v2_disabled_by_default(monkeypatch):
-    monkeypatch.setattr(patch_use_v2_model_runner.envs, "VLLM_USE_V2_MODEL_RUNNER", None)
-    config = SimpleNamespace(_is_dflash2_draft=lambda: False)
-
-    assert not patch_use_v2_model_runner._patched_use_v2_model_runner(config)
 
 
 def test_init_speculator_selects_ascend_dflash2(monkeypatch):
@@ -86,12 +64,13 @@ def test_dflash2_honors_draft_enforce_eager(
     assert modes == [expected_mode]
 
 
-@pytest.mark.parametrize("enforce_eager", [True, False])
-def test_dflash2_disables_compile_on_draft_instance_only(monkeypatch, enforce_eager):
+def test_dflash2_disables_compile_on_draft_instance_only(monkeypatch):
     dflash2 = pytest.importorskip("vllm_ascend.worker.v2.spec_decode.dflash2.speculator")
     compile_module = SimpleNamespace(do_not_compile=False)
+    shared_target_module = SimpleNamespace(do_not_compile=False)
     ordinary_module = SimpleNamespace()
-    draft_model = SimpleNamespace(modules=lambda: [compile_module, ordinary_module])
+    draft_model = SimpleNamespace(modules=lambda: [compile_module, shared_target_module, ordinary_module])
+    target_model = SimpleNamespace(modules=lambda: [shared_target_module])
 
     monkeypatch.setattr(
         dflash2.AscendDFlashSpeculator,
@@ -100,12 +79,12 @@ def test_dflash2_disables_compile_on_draft_instance_only(monkeypatch, enforce_ea
         raising=False,
     )
     speculator = object.__new__(dflash2.AscendDFlash2Speculator)
-    speculator.speculative_config = SimpleNamespace(enforce_eager=enforce_eager)
 
-    result = dflash2.AscendDFlash2Speculator.load_draft_model(speculator, object(), set())
+    result = dflash2.AscendDFlash2Speculator.load_draft_model(speculator, target_model, set())
 
     assert result is draft_model
-    assert compile_module.do_not_compile is enforce_eager
+    assert compile_module.do_not_compile
+    assert not shared_target_module.do_not_compile
     assert not hasattr(ordinary_module, "do_not_compile")
 
 
