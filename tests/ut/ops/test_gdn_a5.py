@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 import pytest
 import torch
+from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_a5 import (
@@ -68,6 +70,8 @@ def test_parse_gdn_backend_config_rejects_invalid_global_mode(mode):
         "unknown=native",
         "causal_conv1d=invalid",
         "causal_conv1d=auto",
+        "l2norm_fwd=fla_npu",
+        "recurrent_gated_delta_rule=fla_npu",
         "causal_conv1d=native,causal_conv1d=fla_npu",
         "causal_conv1d",
         "=native",
@@ -122,6 +126,32 @@ def test_auto_falls_back_when_fla_symbol_is_missing():
     assert selection.operator("input") == ("native", "input")
 
 
+def test_fallback_log_identifies_operator_backend_stage_and_exception():
+    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+
+    def missing_resolver():
+        raise ImportError("missing op_api library")
+
+    with patch("vllm_ascend.ops.gdn_a5.logger.warning") as warning:
+        dispatcher.select(
+            GDNOperator.SOLVE_TRI,
+            SIGNATURE,
+            native=_native_operator,
+            native_symbol="native.solve_tri",
+            fla_resolver=missing_resolver,
+        )
+
+    message, operator, requested, stage, exception_name, reason = warning.call_args.args
+    assert "op=%s" in message
+    assert "requested=%s" in message
+    assert "stage=%s" in message
+    assert operator == "solve_tri"
+    assert requested == "auto"
+    assert stage == "resolve"
+    assert exception_name == "ImportError"
+    assert reason == "missing op_api library"
+
+
 def test_strict_fla_mode_does_not_hide_probe_failure():
     dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("fla_npu", ""), is_a5=True)
 
@@ -134,6 +164,26 @@ def test_strict_fla_mode_does_not_hide_probe_failure():
             fla_resolver=lambda: (_fla_operator, "fla_npu.ops.ascendc.chunk_fwd_o"),
             probe=lambda operator: False,
         )
+
+
+def test_strict_adapter_validation_aggregates_missing_symbols(monkeypatch):
+    def resolver(operator):
+        if operator in {GDNOperator.CAUSAL_CONV1D, GDNOperator.SOLVE_TRI}:
+            raise ImportError(f"missing {operator.value}")
+        return _fla_operator, f"fla_npu.{operator.value}"
+
+    monkeypatch.setattr("vllm_ascend.ops.gdn_a5.resolve_fla_operator", resolver)
+    with pytest.raises(RuntimeError) as error:
+        A5GDNAdapter(
+            parse_gdn_backend_config("fla_npu", ""),
+            SIGNATURE,
+            layer_name="model.layers.0.linear_attn",
+            is_a5=True,
+        )
+
+    message = str(error.value)
+    assert "causal_conv1d: missing causal_conv1d" in message
+    assert "solve_tri: missing solve_tri" in message
 
 
 def test_native_mode_does_not_resolve_fla_operator():
@@ -416,6 +466,135 @@ def test_stateful_runtime_probe_falls_back_without_mutating_live_state():
     torch.testing.assert_close(output, state)
 
 
+def test_causal_conv_prefill_and_decode_are_probed_separately():
+    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    calls = 0
+
+    def causal(input_tensor, weight, bias, conv_state, **kwargs):
+        nonlocal calls
+        del weight, bias, kwargs
+        calls += 1
+        conv_state.add_(1)
+        return input_tensor
+
+    selection = dispatcher.select(
+        GDNOperator.CAUSAL_CONV1D,
+        SIGNATURE,
+        native=causal,
+        native_symbol="native.causal_conv1d",
+        fla_resolver=lambda: (causal, "fla_npu.ops.ascendc.causal_conv1d"),
+    )
+    x = torch.zeros((1, 2))
+    state = torch.zeros((1, 1, 2))
+    common = {
+        "native": causal,
+        "native_symbol": "native.causal_conv1d",
+        "layer_name": "model.layers.0.linear_attn",
+        "state_may_be_mutated": True,
+        "query_start_loc": torch.tensor([0, 1]),
+        "cache_indices": torch.tensor([0]),
+        "initial_state_mode": None,
+        "num_accepted_tokens": None,
+        "activation_mode": 1,
+        "pad_slot_id": -1,
+        "run_mode": 0,
+        "head_num": 0,
+    }
+    dispatcher.execute_with_runtime_probe(
+        GDNOperator.CAUSAL_CONV1D,
+        SIGNATURE,
+        selection,
+        x,
+        torch.zeros((1, 2)),
+        None,
+        state,
+        phase="prefill",
+        **common,
+    )
+    common["run_mode"] = 1
+    dispatcher.execute_with_runtime_probe(
+        GDNOperator.CAUSAL_CONV1D,
+        SIGNATURE,
+        selection,
+        x,
+        torch.zeros((1, 2)),
+        None,
+        state,
+        phase="decode",
+        **common,
+    )
+
+    assert calls == 4
+    torch.testing.assert_close(state, torch.full_like(state, 2))
+
+
+def test_runtime_probe_falls_back_on_invalid_output_contract():
+    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+
+    def native(gate, **kwargs):
+        del kwargs
+        return gate
+
+    selection = dispatcher.select(
+        GDNOperator.CHUNK_LOCAL_CUMSUM,
+        SIGNATURE,
+        native=native,
+        native_symbol="native.chunk_local_cumsum",
+        fla_resolver=lambda: (
+            lambda gate, **kwargs: gate[..., :1],
+            "fla_npu.ops.triton.chunk_local_cumsum",
+        ),
+    )
+    gate = torch.zeros((1, 3, 2))
+    output = dispatcher.execute_with_runtime_probe(
+        GDNOperator.CHUNK_LOCAL_CUMSUM,
+        SIGNATURE,
+        selection,
+        gate,
+        native=native,
+        native_symbol="native.chunk_local_cumsum",
+        phase="prefill",
+        layer_name="model.layers.0.linear_attn",
+        state_may_be_mutated=False,
+        chunk_size=64,
+        cu_seqlens=None,
+        chunk_indices=None,
+        block_indices=None,
+    )
+
+    assert output is gate
+
+
+def test_stage1_warmup_runs_prefill_and_both_causal_modes_once(monkeypatch):
+    adapter = A5GDNAdapter(
+        parse_gdn_backend_config("auto", ""),
+        SIGNATURE,
+        layer_name="model.layers.0.linear_attn",
+        is_a5=True,
+    )
+    calls = []
+    monkeypatch.setattr(adapter, "prefill", lambda **kwargs: calls.append(("prefill", kwargs)))
+    monkeypatch.setattr(
+        adapter,
+        "causal_conv1d",
+        lambda **kwargs: calls.append(("causal", kwargs["run_mode"])),
+    )
+
+    adapter.warmup(
+        conv_weight=torch.zeros((4, 16), dtype=torch.bfloat16),
+        conv_bias=None,
+        state_dtype=torch.float32,
+    )
+    adapter.warmup(
+        conv_weight=torch.zeros((4, 16), dtype=torch.bfloat16),
+        conv_bias=None,
+        state_dtype=torch.float32,
+    )
+
+    assert [call[0] for call in calls] == ["prefill", "causal", "causal"]
+    assert calls[1:] == [("causal", 0), ("causal", 1)]
+
+
 def test_decode_pipeline_normalizes_once_and_preserves_native_state_mutation():
     calls = []
     state = torch.zeros((4, 2, 4, 4))
@@ -455,7 +634,7 @@ def test_decode_pipeline_copies_functional_state_once():
     state = torch.zeros((2, 1, 2, 2))
 
     def recurrent(**kwargs):
-        return kwargs["value"], torch.full_like(kwargs["state"], 5)
+        return kwargs["value"], torch.full_like(kwargs["state"][:1], 5)
 
     run_gdn_decode_pipeline(
         q=torch.zeros((1, 1, 1, 2)),
@@ -471,7 +650,8 @@ def test_decode_pipeline_copies_functional_state_once():
         recurrent=recurrent,
     )
 
-    torch.testing.assert_close(state, torch.full_like(state, 5))
+    torch.testing.assert_close(state[0], torch.full_like(state[0], 5))
+    torch.testing.assert_close(state[1], torch.zeros_like(state[1]))
 
 
 def _fake_gdn_layer():
@@ -506,6 +686,34 @@ def test_a5_routing_constructs_and_caches_one_adapter(monkeypatch):
     assert second is first
 
 
+def test_a5_routing_shares_dispatcher_across_layers(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
+    monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
+
+    with (
+        patch.dict(AscendGatedDeltaNetAttention._a5_gdn_dispatchers, {}, clear=True),
+        patch("vllm_ascend.ops.gdn.is_950", return_value=True),
+        patch(
+            "vllm_ascend.ops.gdn.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+    ):
+        first = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+            _fake_gdn_layer(),
+            torch.zeros((1, 128), dtype=torch.bfloat16),
+            torch.float32,
+        )
+        second = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+            _fake_gdn_layer(),
+            torch.zeros((1, 128), dtype=torch.bfloat16),
+            torch.float32,
+        )
+
+    assert first is not None
+    assert second is not None
+    assert second.dispatcher is first.dispatcher
+
+
 def test_a5_routing_preserves_exact_native_path(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "native")
     monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
@@ -524,3 +732,151 @@ def test_a5_routing_preserves_exact_native_path(monkeypatch):
         )
 
     assert adapter is None
+
+
+def test_a5_routing_rejects_non_bfloat16_strict_operator_override(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
+    monkeypatch.setenv(
+        "VLLM_ASCEND_GDN_OP_BACKENDS",
+        "causal_conv1d=fla_npu",
+    )
+
+    with (
+        patch("vllm_ascend.ops.gdn.is_950", return_value=True),
+        patch(
+            "vllm_ascend.ops.gdn.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        pytest.raises(RuntimeError, match="requires bfloat16"),
+    ):
+        AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+            _fake_gdn_layer(),
+            torch.zeros((1, 128), dtype=torch.float16),
+            torch.float32,
+        )
+
+
+def test_a5_mixed_decode_prefill_routes_and_merges_outputs():
+    conv_state = torch.zeros((3, 1, 2))
+    ssm_state = torch.zeros((2, 1, 2, 2))
+
+    def rearrange_mixed_qkv(value):
+        if value is None:
+            return None, None, None
+        projected = value.reshape(1, value.shape[0], 1, 2)
+        return projected, projected, projected
+
+    layer = SimpleNamespace(
+        prefix="layers.0.linear_attn",
+        kv_cache=(conv_state, ssm_state),
+        conv1d=SimpleNamespace(weight=torch.zeros((2, 1, 2)), bias=None),
+        activation=None,
+        A_log=torch.zeros(1),
+        dt_bias=torch.zeros(1),
+        rearrange_mixed_qkv=rearrange_mixed_qkv,
+    )
+
+    chunk_meta = SimpleNamespace(
+        cu_seqlens_host=(0, 2),
+        chunk_indices_chunk64=torch.zeros((1, 2), dtype=torch.int32),
+        chunk_indices_chunk64_host=(0, 0),
+        cu_seqlens_kern=(0, 2),
+        keep_meta=None,
+        block_indices_cumsum=torch.zeros((1, 2), dtype=torch.int32),
+        chunk_indices_large_block=torch.zeros((1, 2), dtype=torch.int32),
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=1,
+        num_prefill_tokens=2,
+        num_decodes=1,
+        num_decode_tokens=1,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=3,
+        non_spec_query_start_loc=torch.tensor([0, 1, 3], dtype=torch.int32),
+        non_spec_state_indices_tensor=torch.tensor([0, 1], dtype=torch.int32),
+        prefill_query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        prefill_state_indices=torch.tensor([1], dtype=torch.int64),
+        prefill_has_initial_state=torch.tensor([True]),
+    )
+    metadata.non_spec_prefill_metadata = SimpleNamespace(
+        causal_conv1d=SimpleNamespace(
+            query_start_loc=metadata.non_spec_query_start_loc,
+            cache_indices=torch.tensor([0, 1], dtype=torch.int32),
+            initial_state_mode=torch.tensor([True, True]),
+        ),
+        chunk=chunk_meta,
+    )
+    metadata.non_spec_decode_metadata = SimpleNamespace(
+        actual_seq_lengths=torch.tensor([0, 1], dtype=torch.int32),
+    )
+
+    adapter = SimpleNamespace()
+
+    def causal_conv1d(**kwargs):
+        assert kwargs["run_mode"] == 0
+        torch.testing.assert_close(
+            kwargs["query_start_loc"],
+            torch.tensor([0, 1, 3], dtype=torch.int32),
+        )
+        indices = kwargs["cache_indices"].to(torch.int64)
+        update = torch.ones_like(kwargs["conv_state"].index_select(0, indices))
+        kwargs["conv_state"].index_add_(0, indices, update)
+        return kwargs["x"]
+
+    def decode(**kwargs):
+        indices = kwargs["ssm_state_indices"].to(torch.int64)
+        update = torch.ones_like(kwargs["state"].index_select(0, indices))
+        kwargs["state"].index_add_(0, indices, update)
+        return torch.full_like(kwargs["v"], 10)
+
+    def prefill(**kwargs):
+        output = torch.full_like(kwargs["v"], 20)
+        return output, kwargs["initial_state"] + 2
+
+    adapter.causal_conv1d = causal_conv1d
+    adapter.decode = decode
+    adapter.prefill = prefill
+
+    forward_context = ForwardContext(
+        no_compile_layers={layer.prefix: layer},
+        attn_metadata={layer.prefix: metadata},
+        slot_mapping={},
+    )
+    core_attn_out = torch.empty((3, 1, 2))
+    gating = (
+        torch.zeros((1, 3, 1)),
+        torch.zeros((1, 3, 1)),
+    )
+
+    with (
+        override_forward_context(forward_context),
+        patch(
+            "vllm_ascend.ops.gdn.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch.object(
+            AscendGatedDeltaNetAttention,
+            "_get_a5_gdn_adapter",
+            return_value=adapter,
+        ),
+        patch(
+            "vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating",
+            return_value=gating,
+        ),
+        patch("vllm_ascend.ops.gdn.maybe_save_kv_layer_to_connector"),
+    ):
+        AscendGatedDeltaNetAttention._forward_core(
+            layer,
+            torch.zeros((3, 2)),
+            torch.zeros((3, 1)),
+            torch.zeros((3, 1)),
+            core_attn_out,
+        )
+
+    torch.testing.assert_close(core_attn_out[0], torch.full_like(core_attn_out[0], 10))
+    torch.testing.assert_close(core_attn_out[1:], torch.full_like(core_attn_out[1:], 20))
+    torch.testing.assert_close(conv_state[:2], torch.ones_like(conv_state[:2]))
+    torch.testing.assert_close(conv_state[2], torch.zeros_like(conv_state[2]))
+    torch.testing.assert_close(ssm_state[0], torch.ones_like(ssm_state[0]))
+    torch.testing.assert_close(ssm_state[1], torch.full_like(ssm_state[1], 2))

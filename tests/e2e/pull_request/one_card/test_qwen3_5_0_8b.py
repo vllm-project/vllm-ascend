@@ -20,12 +20,15 @@ import os
 from unittest.mock import patch
 
 import huggingface_hub
+import pytest
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
+from vllm_ascend.device.device_config import is_950
 
 
+@pytest.mark.skipif(not is_950(), reason="A5-only GDN model smoke")
 @wait_until_npu_memory_free()
 def test_qwen3_5_gdn_a5_eager_smoke():
     """Verify ordinary eager prefill/decode with the A5 GDN adapter."""
@@ -37,7 +40,7 @@ def test_qwen3_5_gdn_a5_eager_smoke():
     )
 
     outputs_by_backend = {}
-    for backend in ("native", "auto"):
+    for backend in ("native", "fla_npu"):
         with (
             patch.dict(os.environ, {"VLLM_ASCEND_GDN_BACKEND": backend}),
             VllmRunner(
@@ -60,8 +63,8 @@ def test_qwen3_5_gdn_a5_eager_smoke():
                 max_tokens=16,
             )
 
-    assert outputs_by_backend["auto"][0][1], "Generated output should not be empty."
-    assert outputs_by_backend["auto"] == outputs_by_backend["native"]
+    assert outputs_by_backend["fla_npu"][0][1], "Generated output should not be empty."
+    assert outputs_by_backend["fla_npu"] == outputs_by_backend["native"]
 
 
 @wait_until_npu_memory_free()

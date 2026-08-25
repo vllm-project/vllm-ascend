@@ -32,6 +32,13 @@ class GDNOperator(StrEnum):
     RECURRENT_GATED_DELTA_RULE = "recurrent_gated_delta_rule"
 
 
+_STAGE1_NATIVE_ONLY = {
+    GDNOperator.L2NORM_FWD,
+    GDNOperator.RECURRENT_GATED_DELTA_RULE,
+}
+_STAGE1_REPLACEMENTS = tuple(operator for operator in GDNOperator if operator not in _STAGE1_NATIVE_ONLY)
+
+
 @dataclass(frozen=True)
 class GDNBackendConfig:
     mode: GDNBackendMode
@@ -111,6 +118,7 @@ def run_gdn_prefill_pipeline(
             f"got g={tuple(g.shape)} beta={tuple(beta.shape)}."
         )
 
+    output_dtype = q.dtype
     l2norm = operators[GDNOperator.L2NORM_FWD]
     q = l2norm(q)
     k = l2norm(k)
@@ -201,7 +209,10 @@ def run_gdn_prefill_pipeline(
         cu_seqlens=cu_seqlens_host,
         chunk_indices=chunk_indices_host,
     )
-    return output.transpose(1, 2).contiguous(), final_state.transpose(-1, -2).contiguous()
+    return (
+        output.to(output_dtype).transpose(1, 2).contiguous(),
+        final_state.transpose(-1, -2).contiguous(),
+    )
 
 
 def run_gdn_decode_pipeline(
@@ -236,7 +247,12 @@ def run_gdn_decode_pipeline(
     )
     if isinstance(result, (tuple, list)):
         output, final_state = result
-        state.copy_(final_state)
+        if final_state.shape[0] != ssm_state_indices.numel():
+            raise RuntimeError(
+                "Functional recurrent GDN must return one state per ssm_state_indices entry, "
+                f"got final_state={tuple(final_state.shape)} indices={ssm_state_indices.numel()}."
+            )
+        state.index_copy_(0, ssm_state_indices.to(torch.long), final_state)
     else:
         output = result
     return output.unsqueeze(0)
@@ -286,7 +302,9 @@ class A5GDNOperatorDispatcher:
         self.config = config
         self.is_a5 = is_a5
         self._selections: dict[tuple[GDNOperator, GDNRuntimeSignature], GDNOperatorSelection] = {}
-        self._runtime_probed: set[tuple[GDNOperator, GDNRuntimeSignature]] = set()
+        self._runtime_probed: set[tuple[GDNOperator, GDNRuntimeSignature, str]] = set()
+        self.strict_symbols_validated = False
+        self.warmed_up: set[tuple[GDNRuntimeSignature, int]] = set()
 
     def select(
         self,
@@ -383,9 +401,10 @@ class A5GDNOperatorDispatcher:
     ) -> Any:
         """Probe a newly resolved replacement before trusting it for requests."""
 
-        cache_key = (operator, signature)
-        selection = self._selections.get(cache_key, selection)
-        if selection.backend is GDNBackendMode.NATIVE or cache_key in self._runtime_probed:
+        selection_key = (operator, signature)
+        probe_key = (operator, signature, phase)
+        selection = self._selections.get(selection_key, selection)
+        if selection.backend is GDNBackendMode.NATIVE or probe_key in self._runtime_probed:
             return self.execute(
                 operator,
                 selection,
@@ -409,6 +428,9 @@ class A5GDNOperatorDispatcher:
             )
             if probe_tensor is not None and probe_tensor.device.type == "npu":
                 torch.npu.synchronize()
+            _validate_probe_result(operator, result, probe_args, probe_kwargs)
+            if operator is GDNOperator.CAUSAL_CONV1D:
+                _validate_causal_conv_probe_state(args, probe_args, probe_kwargs)
         except Exception as exc:
             fallback = self._fallback_or_raise(
                 operator,
@@ -429,7 +451,7 @@ class A5GDNOperatorDispatcher:
                 **kwargs,
             )
 
-        self._runtime_probed.add(cache_key)
+        self._runtime_probed.add(probe_key)
         logger.info(
             "GDN A5 operator smoke probe passed: op=%s backend=%s symbol=%s layer=%s",
             operator.value,
@@ -562,6 +584,82 @@ def _tensor_metadata(name: str, value: torch.Tensor) -> str:
     )
 
 
+def _validate_probe_result(
+    operator: GDNOperator,
+    result: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> None:
+    if operator in {
+        GDNOperator.CAUSAL_CONV1D,
+        GDNOperator.CHUNK_LOCAL_CUMSUM,
+    }:
+        _validate_tensor_result(operator, result, args[0].shape, args[0].dtype)
+        return
+    if operator is GDNOperator.CHUNK_SCALED_DOT_KKT:
+        key = args[0]
+        expected_shape = (key.shape[0], key.shape[2], key.shape[1], kwargs["chunk_size"])
+        _validate_tensor_result(operator, result, expected_shape, torch.float32)
+        return
+    if operator is GDNOperator.SOLVE_TRI:
+        _validate_tensor_result(operator, result, args[0].shape, kwargs["output_dtype"])
+        return
+    if operator is GDNOperator.RECOMPUTE_W_U_FWD:
+        if not isinstance(result, (tuple, list)) or len(result) != 2:
+            raise RuntimeError(f"{operator.value} probe expected a two-tensor result")
+        _validate_tensor_result(operator, result[0], args[0].shape, args[0].dtype)
+        _validate_tensor_result(operator, result[1], args[1].shape, args[1].dtype)
+        return
+    if operator is GDNOperator.CHUNK_GATED_DELTA_RULE_FWD_H:
+        if not isinstance(result, (tuple, list)) or len(result) != 3:
+            raise RuntimeError(f"{operator.value} probe expected a three-tensor result")
+        _validate_tensor_result(operator, result[1], args[2].shape, args[2].dtype)
+        _validate_tensor_result(operator, result[2], args[4].shape, args[4].dtype)
+        if not isinstance(result[0], torch.Tensor) or result[0].ndim != 5:
+            raise RuntimeError(f"{operator.value} probe returned an invalid h tensor")
+        _validate_finite(operator, result[0])
+        return
+    if operator is GDNOperator.CHUNK_FWD_O:
+        expected_shape = (*args[0].shape[:-1], args[2].shape[-1])
+        _validate_tensor_result(operator, result, expected_shape, args[0].dtype)
+
+
+def _validate_tensor_result(
+    operator: GDNOperator,
+    result: Any,
+    expected_shape: torch.Size | tuple[int, ...],
+    expected_dtype: torch.dtype,
+) -> None:
+    if not isinstance(result, torch.Tensor):
+        raise RuntimeError(f"{operator.value} probe did not return a tensor")
+    if tuple(result.shape) != tuple(expected_shape):
+        raise RuntimeError(
+            f"{operator.value} probe shape mismatch: expected {tuple(expected_shape)}, got {tuple(result.shape)}"
+        )
+    if result.dtype != expected_dtype:
+        raise RuntimeError(
+            f"{operator.value} probe dtype mismatch: expected {expected_dtype}, got {result.dtype}"
+        )
+    _validate_finite(operator, result)
+
+
+def _validate_finite(operator: GDNOperator, result: torch.Tensor) -> None:
+    if result.is_floating_point() and not bool(torch.isfinite(result).all()):
+        raise RuntimeError(f"{operator.value} probe returned non-finite values")
+
+
+def _validate_causal_conv_probe_state(
+    live_args: tuple[Any, ...],
+    probe_args: tuple[Any, ...],
+    probe_kwargs: dict[str, Any],
+) -> None:
+    cache_indices = probe_kwargs["cache_indices"]
+    pad_slot_id = probe_kwargs["pad_slot_id"]
+    has_live_slot = bool(cache_indices.ne(pad_slot_id).any())
+    if live_args[0].numel() > 0 and has_live_slot and torch.equal(probe_args[3], live_args[3]):
+        raise RuntimeError("causal_conv1d probe did not update its scratch convolution state")
+
+
 class A5GDNAdapter:
     """Normalize fla_npu/native operator contracts for one Qwen GDN layer."""
 
@@ -572,10 +670,27 @@ class A5GDNAdapter:
         *,
         layer_name: str,
         is_a5: bool,
+        dispatcher: A5GDNOperatorDispatcher | None = None,
     ) -> None:
         self.signature = signature
         self.layer_name = layer_name
-        self.dispatcher = A5GDNOperatorDispatcher(config, is_a5=is_a5)
+        self.dispatcher = dispatcher or A5GDNOperatorDispatcher(config, is_a5=is_a5)
+        if not self.dispatcher.strict_symbols_validated:
+            self._validate_strict_symbols(config)
+            self.dispatcher.strict_symbols_validated = True
+
+    @staticmethod
+    def _validate_strict_symbols(config: GDNBackendConfig) -> None:
+        failures: list[str] = []
+        for operator in _STAGE1_REPLACEMENTS:
+            if config.mode_for(operator) is not GDNBackendMode.FLA_NPU:
+                continue
+            try:
+                resolve_fla_operator(operator)
+            except Exception as exc:
+                failures.append(f"{operator.value}: {_first_line(exc)}")
+        if failures:
+            raise RuntimeError("GDN strict fla_npu validation failed: " + "; ".join(failures))
 
     def prefill(
         self,
@@ -603,6 +718,85 @@ class A5GDNAdapter:
             metadata=metadata,
             operators=operators,
             chunk_size=self.signature.chunk_size,
+        )
+
+    def warmup(
+        self,
+        *,
+        conv_weight: torch.Tensor,
+        conv_bias: torch.Tensor | None,
+        state_dtype: torch.dtype,
+    ) -> None:
+        """Resolve and scratch-probe all Stage-1 replacement contracts."""
+
+        warmup_key = (self.signature, int(conv_weight.shape[0]))
+        if warmup_key in self.dispatcher.warmed_up:
+            return
+
+        device = conv_weight.device
+        dtype = conv_weight.dtype
+        tokens = self.signature.chunk_size
+        nk = self.signature.num_key_heads
+        nv = self.signature.num_value_heads
+        dk = self.signature.key_dim
+        dv = self.signature.value_dim
+        cu_seqlens = torch.tensor([0, tokens], dtype=torch.int64, device=device)
+        chunk_indices = torch.tensor([[0, 0]], dtype=torch.int64, device=device)
+        metadata = GDNPrefillMetadata(
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_host=(0, tokens),
+            chunk_indices=chunk_indices,
+            chunk_indices_host=(0, 0),
+            block_indices_cumsum=chunk_indices,
+            chunk_indices_large_block=chunk_indices,
+        )
+        with torch.no_grad():
+            self.prefill(
+                q=torch.full((1, tokens, nk, dk), 0.125, dtype=dtype, device=device),
+                k=torch.full((1, tokens, nk, dk), 0.25, dtype=dtype, device=device),
+                v=torch.full((1, tokens, nv, dv), 0.0625, dtype=dtype, device=device),
+                g=torch.full((1, tokens, nv), -0.01, dtype=torch.float32, device=device),
+                beta=torch.full((1, tokens, nv), 0.5, dtype=dtype, device=device),
+                initial_state=torch.zeros((1, nv, dv, dk), dtype=state_dtype, device=device),
+                has_initial_state=torch.tensor([False], dtype=torch.bool, device=device),
+                scale=dk**-0.5,
+                metadata=metadata,
+            )
+
+            channels = int(conv_weight.shape[1])
+            state_len = int(conv_weight.shape[0]) - 1
+            conv_state = torch.zeros(
+                (1, state_len, channels),
+                dtype=dtype,
+                device=device,
+            )
+            conv_kwargs = {
+                "x": torch.full((1, channels), 0.125, dtype=dtype, device=device),
+                "weight": conv_weight,
+                "bias": conv_bias,
+                "conv_state": conv_state,
+                "query_start_loc": torch.tensor([0, 1], dtype=torch.int32, device=device),
+                "cache_indices": torch.tensor([0], dtype=torch.int32, device=device),
+                "initial_state_mode": torch.tensor([0], dtype=torch.int32, device=device),
+                "activation_mode": 1,
+                "pad_slot_id": -1,
+            }
+            self.causal_conv1d(run_mode=0, **conv_kwargs)
+            conv_kwargs["initial_state_mode"] = None
+            self.causal_conv1d(run_mode=1, **conv_kwargs)
+            if device.type == "npu":
+                torch.npu.synchronize()
+
+        self.dispatcher.warmed_up.add(warmup_key)
+        logger.info(
+            "GDN A5 Stage 1 warmup completed: soc=%s dtype=%s state_dtype=%s nk=%d nv=%d dk=%d dv=%d",
+            self.signature.soc,
+            self.signature.dtype,
+            self.signature.state_dtype,
+            nk,
+            nv,
+            dk,
+            dv,
         )
 
     def causal_conv1d(
@@ -892,9 +1086,9 @@ class A5GDNAdapter:
 
         def native_fwd_h(key, w, u, gate, initial_state, *, chunk_size, cu_seqlens, chunk_indices):
             return torch.ops._C_ascend.chunk_gated_delta_rule_fwd_h(
-                key,
-                w,
-                u,
+                key.to(torch.bfloat16),
+                w.to(torch.bfloat16),
+                u.to(torch.bfloat16),
                 g=gate,
                 gk=None,
                 initial_state=initial_state,
@@ -929,8 +1123,8 @@ class A5GDNAdapter:
 
         def native_fwd_o(query, key, value, h, gate, *, scale, chunk_size, cu_seqlens, chunk_indices):
             return torch.ops._C_ascend.chunk_fwd_o(
-                query,
-                key,
+                query.to(torch.bfloat16),
+                key.to(torch.bfloat16),
                 value,
                 h,
                 scale,
@@ -1089,6 +1283,11 @@ def parse_gdn_backend_config(mode: str, operator_overrides: str) -> GDNBackendCo
             raise ValueError(f"Invalid GDN operator backend override {raw_entry!r}: unknown backend.") from exc
         if backend is GDNBackendMode.AUTO:
             raise ValueError(f"Invalid GDN operator backend override {raw_entry!r}: auto is only a global mode.")
+        if backend is GDNBackendMode.FLA_NPU and operator in _STAGE1_NATIVE_ONLY:
+            raise ValueError(
+                f"Invalid GDN operator backend override {raw_entry!r}: "
+                f"{operator.value} is retained native in Stage 1."
+            )
         if operator in overrides:
             raise ValueError(f"Invalid GDN operator backend override {raw_entry!r}: duplicate operator.")
         overrides[operator] = backend

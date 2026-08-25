@@ -226,7 +226,8 @@ Each probe verifies the properties relevant to that operator:
 - supported dtype and layout;
 - representative Qwen head dimensions;
 - output shape, dtype, and finite values;
-- state update semantics for causal convolution and recurrent GDN;
+- state update semantics for causal convolution, plus retained-native recurrent
+  GDN cache parity in the repository smoke test;
 - grouped `Nk`/`Nv` handling where applicable;
 - required optional arguments and return tuple shape.
 
@@ -242,6 +243,14 @@ ordinary/MTP mode, eager/ACL Graph mode
 
 This prevents a BF16 success from being incorrectly reused for FP32 state, or
 an ordinary decode success from being treated as proof of MTP support.
+
+Strict mode resolves the complete Stage-1 public symbol set during model
+warmup. Shape- and metadata-dependent execution probes run on the first
+warmup/ordinary invocation of each contract. Causal convolution uses separate
+prefill and decode probe keys and clones its cache for each probe. Probe results
+validate output structure, shape, dtype and finiteness; stateful probes also
+verify scratch-state mutation. Capability and selection caches are shared
+across GDN layers for the same worker configuration and runtime signature.
 
 ### Repository-level A5 smoke tests
 
@@ -490,6 +499,8 @@ sufficient acceptance evidence.
 - Add capability probes, fallback, and logging.
 - Add unit, operator-chain, and Qwen3.5/Qwen3.6 smoke tests.
 - Validate TP1; include TP2 where model size or the existing test requires it.
+- Limit replacement routing to BF16 activations. Other dtypes keep the native
+  path unless strict mode is requested, which raises an unsupported-dtype error.
 
 ### Stage 2: eager MTP
 

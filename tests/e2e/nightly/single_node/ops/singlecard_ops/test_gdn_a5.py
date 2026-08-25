@@ -19,9 +19,15 @@ pytestmark = pytest.mark.skipif(not is_950(), reason="A5-only GDN operator smoke
 torch_npu.npu.set_compile_mode(jit_compile=False)
 
 
-def _adapter(mode: str) -> A5GDNAdapter:
+def _assert_output_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    cosine = F.cosine_similarity(actual.float().flatten(), expected.float().flatten(), dim=0)
+    assert cosine.item() >= 0.999
+    torch.testing.assert_close(actual, expected, rtol=5e-3, atol=5e-3)
+
+
+def _adapter(mode: str, overrides: str = "") -> A5GDNAdapter:
     return A5GDNAdapter(
-        parse_gdn_backend_config(mode, ""),
+        parse_gdn_backend_config(mode, overrides),
         GDNRuntimeSignature(
             soc="ascend950",
             dtype="bfloat16",
@@ -37,11 +43,14 @@ def _adapter(mode: str) -> A5GDNAdapter:
 
 
 def _prefill_metadata(tokens: int) -> GDNPrefillMetadata:
-    cu_cpu = torch.tensor([0, tokens], dtype=torch.int64)
+    return _prefill_metadata_from_cu(torch.tensor([0, tokens], dtype=torch.int64))
+
+
+def _prefill_metadata_from_cu(cu_cpu: torch.Tensor) -> GDNPrefillMetadata:
     chunk64_cpu = prepare_chunk_indices(cu_cpu, 64)
     return GDNPrefillMetadata(
         cu_seqlens=cu_cpu.npu(),
-        cu_seqlens_host=(0, tokens),
+        cu_seqlens_host=tuple(int(value) for value in cu_cpu.tolist()),
         chunk_indices=chunk64_cpu.npu(),
         chunk_indices_host=tuple(int(value) for value in chunk64_cpu.flatten().tolist()),
         block_indices_cumsum=prepare_chunk_indices(cu_cpu, 2048).npu(),
@@ -49,28 +58,25 @@ def _prefill_metadata(tokens: int) -> GDNPrefillMetadata:
     )
 
 
-@pytest.mark.parametrize("tokens", [1, 63, 64, 65])
-def test_gdn_a5_prefill_fla_matches_native(tokens):
+def _prefill_inputs(tokens: int):
     torch.manual_seed(7)
     q = torch.randn((1, tokens, 1, 128), dtype=torch.bfloat16, device="npu")
-    k = torch.randn_like(q)
-    v = torch.randn((1, tokens, 2, 128), dtype=torch.bfloat16, device="npu")
-    g = F.logsigmoid(torch.randn((1, tokens, 2), dtype=torch.float32, device="npu"))
-    beta = torch.sigmoid(torch.randn((1, tokens, 2), dtype=torch.bfloat16, device="npu"))
-    state = torch.randn((1, 2, 128, 128), dtype=torch.float32, device="npu")
-    has_state = torch.tensor([True], dtype=torch.bool, device="npu")
-    metadata = _prefill_metadata(tokens)
-    kwargs = {
+    return {
         "q": q,
-        "k": k,
-        "v": v,
-        "g": g,
-        "beta": beta,
-        "initial_state": state,
-        "has_initial_state": has_state,
+        "k": torch.randn_like(q),
+        "v": torch.randn((1, tokens, 2, 128), dtype=torch.bfloat16, device="npu"),
+        "g": F.logsigmoid(torch.randn((1, tokens, 2), dtype=torch.float32, device="npu")),
+        "beta": torch.sigmoid(torch.randn((1, tokens, 2), dtype=torch.bfloat16, device="npu")),
+        "initial_state": torch.randn((1, 2, 128, 128), dtype=torch.float32, device="npu"),
+        "has_initial_state": torch.tensor([True], dtype=torch.bool, device="npu"),
         "scale": 128**-0.5,
-        "metadata": metadata,
+        "metadata": _prefill_metadata(tokens),
     }
+
+
+@pytest.mark.parametrize("tokens", [1, 63, 64, 65])
+def test_gdn_a5_prefill_fla_matches_native(tokens):
+    kwargs = _prefill_inputs(tokens)
 
     native_output, native_state = _adapter("native").prefill(**kwargs)
     fla_output, fla_state = _adapter("fla_npu").prefill(**kwargs)
@@ -78,7 +84,42 @@ def test_gdn_a5_prefill_fla_matches_native(tokens):
 
     assert torch.isfinite(fla_output.float()).all()
     assert torch.isfinite(fla_state.float()).all()
-    torch.testing.assert_close(fla_output, native_output, rtol=5e-3, atol=5e-3)
+    _assert_output_close(fla_output, native_output)
+    torch.testing.assert_close(fla_state, native_state, rtol=5e-3, atol=5e-3)
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        "chunk_local_cumsum",
+        "chunk_scaled_dot_kkt",
+        "solve_tri",
+        "recompute_w_u_fwd",
+        "chunk_gated_delta_rule_fwd_h",
+        "chunk_fwd_o",
+    ],
+)
+def test_gdn_a5_each_prefill_replacement_matches_native(operator):
+    kwargs = _prefill_inputs(65)
+    native_output, native_state = _adapter("native").prefill(**kwargs)
+    candidate_output, candidate_state = _adapter("native", f"{operator}=fla_npu").prefill(**kwargs)
+    torch.npu.synchronize()
+
+    _assert_output_close(candidate_output, native_output)
+    torch.testing.assert_close(candidate_state, native_state, rtol=5e-3, atol=5e-3)
+
+
+def test_gdn_a5_varlen_multiple_sequences_matches_native():
+    kwargs = _prefill_inputs(64)
+    kwargs["initial_state"] = torch.randn((2, 2, 128, 128), dtype=torch.float32, device="npu")
+    kwargs["has_initial_state"] = torch.tensor([False, True], dtype=torch.bool, device="npu")
+    kwargs["metadata"] = _prefill_metadata_from_cu(torch.tensor([0, 1, 64], dtype=torch.int64))
+
+    native_output, native_state = _adapter("native").prefill(**kwargs)
+    fla_output, fla_state = _adapter("fla_npu").prefill(**kwargs)
+    torch.npu.synchronize()
+
+    _assert_output_close(fla_output, native_output)
     torch.testing.assert_close(fla_state, native_state, rtol=5e-3, atol=5e-3)
 
 
@@ -105,12 +146,18 @@ def test_gdn_a5_causal_conv_fla_matches_native_cache_update():
     }
     native_state = state.clone()
     fla_state = state.clone()
+    native_adapter = _adapter("native")
+    fla_adapter = _adapter("native", "causal_conv1d=fla_npu")
 
-    native_output = _adapter("native").causal_conv1d(conv_state=native_state, **kwargs)
-    fla_output = _adapter("fla_npu").causal_conv1d(conv_state=fla_state, **kwargs)
+    native_output = native_adapter.causal_conv1d(conv_state=native_state, **kwargs)
+    fla_output = fla_adapter.causal_conv1d(conv_state=fla_state, **kwargs)
+    kwargs["x"] = x * 0.5
+    native_output_next = native_adapter.causal_conv1d(conv_state=native_state, **kwargs)
+    fla_output_next = fla_adapter.causal_conv1d(conv_state=fla_state, **kwargs)
     torch.npu.synchronize()
 
-    torch.testing.assert_close(fla_output, native_output, rtol=5e-3, atol=5e-3)
+    _assert_output_close(fla_output, native_output)
+    _assert_output_close(fla_output_next, native_output_next)
     torch.testing.assert_close(fla_state, native_state, rtol=5e-3, atol=5e-3)
 
 
@@ -129,10 +176,16 @@ def test_gdn_a5_ordinary_decode_preserves_native_recurrent_path():
     }
     native_state = state.clone()
     auto_state = state.clone()
+    native_adapter = _adapter("native")
+    auto_adapter = _adapter("auto")
 
-    native_output = _adapter("native").decode(state=native_state, **kwargs)
-    auto_output = _adapter("auto").decode(state=auto_state, **kwargs)
+    native_output = native_adapter.decode(state=native_state, **kwargs)
+    auto_output = auto_adapter.decode(state=auto_state, **kwargs)
+    kwargs["q"] = kwargs["q"] * 0.5
+    native_output_next = native_adapter.decode(state=native_state, **kwargs)
+    auto_output_next = auto_adapter.decode(state=auto_state, **kwargs)
     torch.npu.synchronize()
 
-    torch.testing.assert_close(auto_output, native_output, rtol=5e-3, atol=5e-3)
+    _assert_output_close(auto_output, native_output)
+    _assert_output_close(auto_output_next, native_output_next)
     torch.testing.assert_close(auto_state, native_state, rtol=5e-3, atol=5e-3)

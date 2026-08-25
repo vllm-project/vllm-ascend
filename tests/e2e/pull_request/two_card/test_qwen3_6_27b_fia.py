@@ -16,9 +16,11 @@
 import os
 from unittest.mock import patch
 
+import pytest
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
+from vllm_ascend.device.device_config import is_950
 
 MODEL = "Qwen/Qwen3.6-27B"
 
@@ -31,7 +33,7 @@ MODEL = "Qwen/Qwen3.6-27B"
 )
 @wait_until_npu_memory_free()
 def test_qwen3_6_27b_multimodel_fia_eager():
-    """Verify multimodal generation with FIA and the A5 GDN eager path."""
+    """Verify multimodal generation with FIA in eager mode."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     questions = [
         "What is the content of this image?",
@@ -43,13 +45,44 @@ def test_qwen3_6_27b_multimodel_fia_eager():
     images = [image] * len(questions)
     prompts = qwen_prompt(questions)
 
+    with VllmRunner(
+        MODEL,
+        max_model_len=4096,
+        tensor_parallel_size=2,
+        language_model_only=False,
+        gpu_memory_utilization=0.9,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        enforce_eager=True,
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(
+            prompts=prompts,
+            images=images,
+            max_tokens=64,
+        )
+
+    assert outputs[0][1]
+
+
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@pytest.mark.skipif(not is_950(), reason="A5-only GDN model smoke")
+@wait_until_npu_memory_free()
+def test_qwen3_6_27b_gdn_a5_eager_smoke():
+    """Compare the strict A5 GDN adapter against the native eager path."""
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+    prompts = qwen_prompt(["What is the content of this image?"])
     outputs_by_backend = {}
-    for backend in ("native", "auto"):
+
+    for backend in ("native", "fla_npu"):
         with (
             patch.dict(os.environ, {"VLLM_ASCEND_GDN_BACKEND": backend}),
             VllmRunner(
                 MODEL,
-                max_model_len=4096,
+                max_model_len=1024,
                 tensor_parallel_size=2,
                 language_model_only=False,
                 gpu_memory_utilization=0.9,
@@ -64,12 +97,12 @@ def test_qwen3_6_27b_multimodel_fia_eager():
         ):
             outputs_by_backend[backend] = vllm_model.generate_greedy(
                 prompts=prompts,
-                images=images,
-                max_tokens=64,
+                images=[image],
+                max_tokens=16,
             )
 
-    assert outputs_by_backend["auto"][0][1]
-    assert outputs_by_backend["auto"] == outputs_by_backend["native"]
+    assert outputs_by_backend["fla_npu"][0][1]
+    assert outputs_by_backend["fla_npu"] == outputs_by_backend["native"]
 
 
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})

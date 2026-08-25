@@ -34,6 +34,7 @@ from vllm_ascend.device.device_config import is_950
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_a5 import (
     A5GDNAdapter,
+    A5GDNOperatorDispatcher,
     GDNBackendMode,
     GDNPrefillMetadata as A5GDNPrefillMetadata,
     GDNRuntimeSignature,
@@ -50,25 +51,37 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
     _fused_chunk_available: bool | None = None
+    _a5_gdn_dispatchers: dict[tuple[str, str], A5GDNOperatorDispatcher] = {}
 
     def _get_a5_gdn_adapter(
         self,
         activation: torch.Tensor,
-        state: torch.Tensor,
+        state: torch.Tensor | torch.dtype,
     ) -> A5GDNAdapter | None:
-        if not is_950() or get_pcp_group().world_size != 1:
+        if not is_950() or getattr(self, "num_spec", 0) > 0 or get_pcp_group().world_size != 1:
             return None
 
         mode_value = ascend_envs.VLLM_ASCEND_GDN_BACKEND
         overrides_value = ascend_envs.VLLM_ASCEND_GDN_OP_BACKENDS
         config = parse_gdn_backend_config(mode_value, overrides_value)
+        strict_replacement_requested = config.mode is GDNBackendMode.FLA_NPU or any(
+            backend is GDNBackendMode.FLA_NPU for backend in config.overrides.values()
+        )
+        if activation.dtype is not torch.bfloat16:
+            if strict_replacement_requested:
+                raise RuntimeError(
+                    "Strict fla_npu GDN selection requires bfloat16 activations in Stage 1, "
+                    f"got {activation.dtype}."
+                )
+            return None
         if config.mode is GDNBackendMode.NATIVE and all(
             backend is GDNBackendMode.NATIVE for backend in config.overrides.values()
         ):
             return None
 
         dtype = str(activation.dtype).removeprefix("torch.")
-        state_dtype = str(state.dtype).removeprefix("torch.")
+        state_torch_dtype = state.dtype if isinstance(state, torch.Tensor) else state
+        state_dtype = str(state_torch_dtype).removeprefix("torch.")
         signature = GDNRuntimeSignature(
             soc="ascend950",
             dtype=dtype,
@@ -81,6 +94,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         cache_key = (mode_value, overrides_value, signature)
         cached = getattr(self, "_a5_gdn_adapter_cache", None)
         if cached is None or cached[0] != cache_key:
+            dispatcher_key = (mode_value, overrides_value)
+            dispatcher = AscendGatedDeltaNetAttention._a5_gdn_dispatchers.get(dispatcher_key)
+            if dispatcher is None:
+                dispatcher = A5GDNOperatorDispatcher(config, is_a5=True)
+                AscendGatedDeltaNetAttention._a5_gdn_dispatchers[dispatcher_key] = dispatcher
             cached = (
                 cache_key,
                 A5GDNAdapter(
@@ -88,6 +106,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     signature,
                     layer_name=self.prefix,
                     is_a5=True,
+                    dispatcher=dispatcher,
                 ),
             )
             self._a5_gdn_adapter_cache = cached
@@ -237,6 +256,23 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
+        if is_950():
+            state_dtype = self.get_state_dtype()[1]
+            a5_warmup_adapter = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+                self,
+                hidden_states,
+                state_dtype,
+            )
+            if a5_warmup_adapter is not None:
+                conv_weight = self.conv1d.weight.view(
+                    self.conv1d.weight.size(0),
+                    self.conv1d.weight.size(2),
+                ).transpose(0, 1)
+                a5_warmup_adapter.warmup(
+                    conv_weight=conv_weight,
+                    conv_bias=self.conv1d.bias,
+                    state_dtype=state_dtype,
+                )
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
