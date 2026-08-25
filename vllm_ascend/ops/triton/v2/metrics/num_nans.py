@@ -28,6 +28,9 @@ def _num_nans_kernel(
 
 
 def get_num_nans(logits: torch.Tensor) -> torch.Tensor:
+    assert logits.ndim == 2, (
+        f"logits only support a 2D tensor now, but got shape {tuple(logits.shape)}"
+    )
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 8192
     num_nans = torch.empty(num_reqs, dtype=torch.int32, device=logits.device)
