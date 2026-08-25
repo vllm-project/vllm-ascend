@@ -269,6 +269,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
+    def _maybe_remove_d2t(self, draft_model: nn.Module) -> None:
+        """Drop the identity d2t mapping of a full-vocab EAGLE3 draft."""
+        if self.method != "eagle3":
+            return
+        target_vocab_size = self.speculative_config.draft_model_config.get_vocab_size()
+        draft_vocab_size = draft_model.config.draft_vocab_size
+        if draft_vocab_size == target_vocab_size:
+            draft_model.draft_id_to_target_id = None
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -290,6 +299,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 model_config=self.speculative_config.draft_model_config,
                 load_config=self.speculative_config.draft_load_config,
             )
+            self._maybe_remove_d2t(model)
+
         return model
 
     def load_model(self, model: nn.Module) -> None:

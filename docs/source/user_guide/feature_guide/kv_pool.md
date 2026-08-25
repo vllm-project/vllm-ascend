@@ -75,12 +75,15 @@ export PYTHONHASHSEED=0
         python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
         ```
 
+        Mooncake `0.3.11.post1` remains supported when `tenant_id` is omitted or resolves to `default`. A non-default tenant requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts `tenant_id`; use Mooncake `0.3.12` or later for multi-tenant deployments.
+
 ### Step 2.2: Run Mooncake Master
 
 **Note:** Before proceeding, review the following Mooncake guides:
 
 * [Mooncake Store Deployment Guide](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/mooncake-store-deployment-guide.md)
 * [SSD Offload](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/ssd/ssd-offload.md)
+* [Tenant Quota Management](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/mooncake-store-deployment-guide.md#tenant-quota-management)
 
 #### Step 2.2.1: Configure mooncake.json
 
@@ -96,7 +99,8 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "preferred_segment": false,
     "prefer_alloc_in_same_node": true,
     "enable_ssd_offload": false, # only required when the SSD offload feature is enabled
-    "ssd_offload_path": "/nvme/mooncake_offload" # only required when the SSD offload feature is enabled)
+    "ssd_offload_path": "/nvme/mooncake_offload", # only required when the SSD offload feature is enabled)
+    "tenant_id": "default"
 }
 ```
 
@@ -111,6 +115,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 | `prefer_alloc_in_same_node` | Whether to prefer allocating KV on the same node. Defaults to **true**. |
 | `enable_ssd_offload` | Set to `true` to enable SSD offload. Environment variables are not supported. |
 | `ssd_offload_path` | **Required when `enable_ssd_offload` is `true`.** Absolute path to a local directory where Mooncake stores offloaded KV data (for example, `/nvme/mooncake_offload`). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symbolic links, and paths containing `..` are rejected by Mooncake. |
+| `tenant_id` | Optional Mooncake tenant namespace. Missing, `null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. Non-default tenants require Mooncake `0.3.12` or later. |
 
 #### Step 2.2.2: Start mooncake_master
 
@@ -129,6 +134,43 @@ mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_rati
 | `default_kv_lease_ttl` | Controls the default lease TTL for KV objects (milliseconds). Keep it larger than `ASCEND_CONNECT_TIMEOUT` and `ASCEND_TRANSFER_TIMEOUT`. |
 | `enable_offload` | Set to `true` to enable SSD offload in Mooncake master. Keep the master port aligned with `master_server_address` in `mooncake.json`. Only required when SSD offload is enabled. |
 | `client_ttl` | Seconds a client stays alive after the last Ping. CLI default is `10`; see [SEGMENT_NOT_FOUND with SSD offload](#5321-segment_not_found-with-ssd-offload). Only required when SSD offload is enabled. |
+
+#### Step 2.2.3: Enable Strict Multi-Tenant Mode
+
+Tenant IDs are ignored for object placement while strict multi-tenant mode is disabled, and objects remain in the `default` namespace. To enable isolated namespaces and per-tenant memory quota admission, start Mooncake master with strict multi-tenant mode and a policy connector:
+
+```shell
+mooncake_master \
+    --port 50088 \
+    --enable_multi_tenants=true \
+    --tenant_quota_connector_type=file \
+    --tenant_quota_connector_uri=/etc/mooncake/tenant_quotas.yaml
+```
+
+For example, `/etc/mooncake/tenant_quotas.yaml` can contain:
+
+```yaml
+version: 1
+
+tenants:
+  - name: tenant-a
+    quota: 200GB
+  - name: tenant-b
+    quota: 200GB
+  - name: default
+    quota: 100GB
+```
+
+The file connector can be replaced with `etcd` when Mooncake is built with `STORE_USE_ETCD=ON`; in that case, set `tenant_quota_connector_uri` to the etcd endpoints. Strict mode rejects writes for unregistered tenants, including `default`, so every tenant used by vLLM-Ascend must appear in the policy.
+
+Mooncake exposes tenant quota snapshots through the master metrics HTTP port (default `9003`):
+
+```shell
+curl -s http://<master_host>:9003/api/v1/tenant_quotas
+curl -s "http://<master_host>:9003/api/v1/tenant_quotas?tenant_id=tenant-a"
+```
+
+`tenant_id` is an instance-level namespace and quota identity, not an authentication mechanism. A client that can access Mooncake can still declare a tenant ID. Keep incompatible models, model versions, quantization formats, and KV layouts in separate model or release namespaces even when tenant isolation is enabled.
 
 ### Step 2.3: PD Disaggregation Scenario
 
