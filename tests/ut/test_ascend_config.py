@@ -505,11 +505,10 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_weight_nz_mode_ignores_removed_env(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"weight_nz_mode": 2}
         with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}):
             ascend_config = init_ascend_config(test_vllm_config)
 
-        self.assertEqual(ascend_config.weight_nz_mode, 2)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.warning")
