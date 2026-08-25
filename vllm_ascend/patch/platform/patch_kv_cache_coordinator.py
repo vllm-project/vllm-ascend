@@ -584,13 +584,12 @@ else:
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_num_batched_tokens: int | None = None,
-        num_prefill_lookahead: int | None = None,
+        num_prefill_lookahead: int = 0,
     ) -> KVCacheCoordinator:
         # Keep pcp_world_size in this patched function for upstream call
         # compatibility; platform validation guarantees that it is one.
         del pcp_world_size
         token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
-        prefill_lookahead = 0 if num_prefill_lookahead is None else num_prefill_lookahead
         if _is_deepseek_v4_kv_cache_config(kv_cache_config):
             return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
                 kv_cache_config,
@@ -606,7 +605,7 @@ else:
                 max_in_flight_tokens=token_budget,
                 max_num_batched_tokens=token_budget,
                 scheduler_block_size=scheduler_block_size,
-                num_prefill_lookahead=prefill_lookahead,
+                num_prefill_lookahead=num_prefill_lookahead,
             )
 
         if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
@@ -623,8 +622,7 @@ else:
             )
             orig_kwargs["max_in_flight_tokens"] = token_budget
             orig_kwargs["scheduler_block_size"] = scheduler_block_size
-            if num_prefill_lookahead is not None:
-                orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+            orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
             return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
         return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
@@ -641,7 +639,7 @@ else:
             max_in_flight_tokens=token_budget,
             max_num_batched_tokens=token_budget,
             scheduler_block_size=scheduler_block_size,
-            num_prefill_lookahead=prefill_lookahead,
+            num_prefill_lookahead=num_prefill_lookahead,
         )
 
 
