@@ -33,8 +33,43 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0) -> KVCacheTensor:
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.27.1"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=page_size,
+        block_stride=page_size,
+        offset=0,
+    )
+
+
+def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttentionSpec:
+    """Build a DSV4 AscendMLAAttentionSpec; #51718 moved compress_ratio ->
+    tokens_per_state on main."""
+    ratio_kwargs = (
+        {"compress_ratio": compress_ratio} if vllm_version_is("0.27.1") else {"tokens_per_state": compress_ratio}
+    )
+    return AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version="deepseek_v4",
+        **ratio_kwargs,
+    )
+
+
+def _spec_compress_ratio(spec) -> int:
+    """Compression ratio of an MLA spec on either vLLM lane."""
+    return spec.compress_ratio if vllm_version_is("0.27.1") else spec.tokens_per_state
 
 
 @pytest.mark.parametrize(
@@ -169,17 +204,21 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
     assert spec.storage_block_size == cache_config.block_size
     merged_spec = spec.merge([spec])
-    assert merged_spec.compress_ratio == cache_layer.compress_ratio
+    if vllm_version_is("0.27.1"):
+        assert merged_spec.compress_ratio == cache_layer.compress_ratio
+    else:
+        assert merged_spec.tokens_per_state == cache_layer.compress_ratio
     assert merged_spec.storage_block_size == cache_config.block_size
 
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
-            KVCacheTensor(
-                size=num_blocks * spec.page_size_bytes,
-                shared_by=[layer_name],
-            )
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [layer_name],
+                spec.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -268,21 +307,14 @@ def _make_dsa_metadata_groups():
         "model.layers.0.self_attn.indexer",
     ]
     specs = [
-        AscendMLAAttentionSpec(
-            block_size=storage_block_size * compress_ratio,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.bfloat16,
-            compress_ratio=compress_ratio,
-            model_version="deepseek_v4",
-        )
+        _make_dsv4_mla_spec(storage_block_size * compress_ratio, compress_ratio)
         for storage_block_size, compress_ratio in ((32, 4), (64, 128))
     ]
     calls: list[dict[str, Any]] = []
     attn_groups = [
         [
             AttentionGroup(
-                backend=(AscendDSAC4Backend if spec.compress_ratio == 4 else AscendDSAC128Backend),
+                backend=(AscendDSAC4Backend if _spec_compress_ratio(spec) == 4 else AscendDSAC128Backend),
                 layer_names=[layer_name],
                 kv_cache_spec=spec,
                 kv_cache_group_id=group_id,
@@ -306,13 +338,7 @@ def _make_dsa_metadata_groups():
 
 
 def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
-    spec = AscendMLAAttentionSpec(
-        block_size=128,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        compress_ratio=4,
-    )
+    spec = _make_dsv4_mla_spec(128, 4)
     attn_groups = [
         [
             AttentionGroup(

@@ -18,6 +18,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
@@ -49,8 +51,16 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @property
     def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels."""
-        return self.block_size // self.compress_ratio
+        """Return the physical block size consumed by Ascend kernels.
+
+        vLLM #51718 replaced ``MLAAttentionSpec.compress_ratio`` with
+        ``AttentionSpec.tokens_per_state`` on main. Both express how many
+        logical tokens one physical stored state covers, so the physical block
+        size is ``block_size // ratio`` on either lane.
+        """
+        if vllm_version_is("0.27.1"):
+            return self.block_size // self.compress_ratio
+        return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -76,6 +86,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.cache_sparse_sfa_c8,
                 spec.store_on_host,
                 spec.alignment,
+                spec.compress_ratio if vllm_version_is("0.27.1") else spec.tokens_per_state,
             )
             for spec in specs
         }
