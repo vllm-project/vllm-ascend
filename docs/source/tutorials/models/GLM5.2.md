@@ -339,53 +339,20 @@ Before you start, please
 
     def parse_args():
         parser = argparse.ArgumentParser()
-        parser.add_argument(
-            "--dp-size",
-            type=int,
-            required=True,
-            help="Data parallel size."
-        )
-        parser.add_argument(
-            "--tp-size",
-            type=int,
-            default=1,
-            help="Tensor parallel size."
-        )
-        parser.add_argument(
-            "--dp-size-local",
-            type=int,
-            default=-1,
-            help="Local data parallel size."
-        )
-        parser.add_argument(
-            "--dp-rank-start",
-            type=int,
-            default=0,
-            help="Starting rank for data parallel."
-        )
-        parser.add_argument(
-            "--dp-address",
-            type=str,
-            required=True,
-            help="IP address for data parallel master node."
-        )
-        parser.add_argument(
-            "--dp-rpc-port",
-            type=str,
-            default=12345,
-            help="Port for data parallel master node."
-        )
-        parser.add_argument(
-            "--vllm-start-port",
-            type=int,
-            default=9000,
-            help="Starting port for the engine."
-        )
+        parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
+        parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+        parser.add_argument("--pp-size", type=int, default=1, help="Pipeline parallel size.")
+        parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
+        parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
+        parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
+        parser.add_argument("--dp-rpc-port", type=str, default="12321", help="Port for data parallel master node.")
+        parser.add_argument("--vllm-start-port", type=int, default=8000, help="Starting port for the engine.")
         return parser.parse_args()
 
     args = parse_args()
     dp_size = args.dp_size
     tp_size = args.tp_size
+    pp_size = args.pp_size
     dp_size_local = args.dp_size_local
     if dp_size_local == -1:
         dp_size_local = dp_size
@@ -393,6 +360,8 @@ Before you start, please
     dp_address = args.dp_address
     dp_rpc_port = args.dp_rpc_port
     vllm_start_port = args.vllm_start_port
+    # 一个 DP 副本占 tp×pp 张连续卡（pp=1 时退化为现状的 tp）
+    gpus_per_dp_rank = tp_size * pp_size
 
     def run_command(visible_devices, dp_rank, vllm_engine_port):
         command = [
@@ -405,6 +374,7 @@ Before you start, please
             dp_address,
             dp_rpc_port,
             str(tp_size),
+            str(pp_size),
         ]
         subprocess.run(command, check=True)
 
@@ -415,14 +385,16 @@ Before you start, please
             sys.exit(1)
 
         processes = []
-        num_cards = dp_size_local * tp_size
+        num_cards = dp_size_local * gpus_per_dp_rank
+
         for i in range(dp_size_local):
             dp_rank = dp_rank_start + i
             vllm_engine_port = vllm_start_port + i
-            visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
-            process = multiprocessing.Process(target=run_command,
-                                            args=(visible_devices, dp_rank,
-                                                    vllm_engine_port))
+            visible_devices = ",".join(str(x) for x in range(i * gpus_per_dp_rank, (i + 1) * gpus_per_dp_rank))
+            process = multiprocessing.Process(
+                target=run_command,
+                args=(visible_devices, dp_rank, vllm_engine_port)
+            )
             processes.append(process)
             process.start()
 
@@ -435,12 +407,11 @@ Before you start, please
 
 `GLM-5.2-w8a8c8` PD disaggregation can be deployed on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node).
 
-**Prefill node 0** (`run_dp_template.sh`): `node_rank=0`, engine port `9081`. The value of `node_p0_ip` must be consistent with the `local_ip` set on prefill node 0 (PP master node).
+**Prefill node 0** (`run_dp_template.sh`): `node_rank=0`, engine port `9081` (PP master node, `--master-addr` uses `$local_ip`).
 
 ```shell
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
-        node_p0_ip="xxxx" # ip of prefill node 0 (PP master node)
         # pp=2
         export VLLM_PP_LAYER_PARTITION="41,37"
         node_rank=0
@@ -473,7 +444,7 @@ Before you start, please
             --port 9081 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
-            --master-addr $node_p0_ip \
+            --master-addr $local_ip \
             --master-port 7060 \
             --nnodes 2 \
             --node-rank 0 \
@@ -508,7 +479,7 @@ Before you start, please
         }'
 ```
 
-**Prefill node 1** (`run_dp_template.sh`): `node_rank=1`, engine port `9082`. Both prefill nodes form a single PP2 engine, so `--master-addr` points to prefill node 0 and the KV transfer `engine_id` stays `0`.
+**Prefill node 1** (`run_dp_template.sh`): `node_rank=1`, non-master node running with `--headless` (no API server). Both prefill nodes form a single PP2 engine, so `--master-addr` points to prefill node 0 and the KV transfer `engine_id` stays `0`.
 
 ```shell
         nic_name="xxxx" # change to your own nic name
@@ -543,13 +514,13 @@ Before you start, please
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
             --host 0.0.0.0 \
-            --port 9082 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
             --master-addr $node_p0_ip \
             --master-port 7060 \
             --nnodes 2 \
             --node-rank 1 \
+            --headless \
             --tensor-parallel-size 16 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp","enforce_eager":true}' \
@@ -739,14 +710,14 @@ Once the preparation is done, start the server on each node:
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --pp-size 1 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 12321 --vllm-start-port 8000
     ```
 
 4. Decode node 1:
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --pp-size 1 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12321 --vllm-start-port 8000
     ```
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
@@ -756,14 +727,12 @@ unset http_proxy
 unset https_proxy
 
 python load_balance_proxy_server_example.py \
-    --port 8000 \
+    --port 9000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
       $node_p0_ip \
-      $node_p1_ip \
     --prefiller-ports \
       9081 \
-      9082 \
     --decoder-hosts \
       $node_d0_ip \
       $node_d0_ip \
@@ -774,8 +743,8 @@ python load_balance_proxy_server_example.py \
       $node_d1_ip \
       $node_d1_ip \
     --decoder-ports \
-      9900 9901 9902 9903 \
-      9900 9901 9902 9903
+      8000 8001 8002 8003 \
+      8000 8001 8002 8003
 ```
 
 **Notice:**
@@ -791,11 +760,12 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 |---------|----|--------|-------|-----------|
 |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks across all nodes).|
 |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|
+|`--pp-size`|int|No|1|Pipeline parallel size within each DP rank.|
 |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on the current node. If not set, defaults to `--dp-size`.|
 |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks on this node.|
 |`--dp-address`|str|Yes|-|IP address of the data parallel master node (node 0).|
-|`--dp-rpc-port`|str|No|12345|RPC port for data parallel master communication.|
-|`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
+|`--dp-rpc-port`|str|No|12321|RPC port for data parallel master communication.|
+|`--vllm-start-port`|int|No|8000|Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index.|
 
 **Prefill node-specific configurations (PP2):**
 
@@ -822,7 +792,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 
 **Request forwarding (proxy):**
 
-- The proxy command maps every prefill engine endpoint (2 prefiller hosts/ports) and every decode engine endpoint (8 decoder hosts/ports) to a single entry point on port `8000`.
+- The proxy command maps every prefill engine endpoint (1 prefiller host/port) and every decode engine endpoint (8 decoder hosts/ports) to a single entry point on port `9000`.
 - The proxy program can be found in [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
 
 Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
