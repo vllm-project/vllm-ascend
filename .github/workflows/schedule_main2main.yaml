@@ -184,6 +184,10 @@ jobs:
       MAIN2MAIN_E2E_MODE: cumulative
       MAIN2MAIN_E2E_REPO: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_E2E_BRANCH: main2main_e2e
+      # Pin the flow revision the install step clones.  Kept on
+      # feature/e2e-external while the 3-runner E2E change is under
+      # validation (main2main_flow PR #3); remove once that PR merges.
+      MAIN2MAIN_FLOW_REF: feature/e2e-external
       # npu-smi exists in the CANN container but there is no device on the
       # CPU runner — skip the mega_moe JIT warmup entirely.
       MAIN2MAIN_SKIP_NPU_WARMUP: 'true'
@@ -344,10 +348,16 @@ jobs:
           # ensure git push uses gh token
           git config --global credential.helper "!gh auth git-credential"
 
-          # install main2main_flow
+          # install main2main_flow; the pinned ref also re-applies on
+          # self-hosted runners where /tmp persists between runs
           M2M_FLOW_DIR="/tmp/main2main_flow"
+          FLOW_REF="${MAIN2MAIN_FLOW_REF:-main}"
           if [ ! -d "${M2M_FLOW_DIR}/.git" ]; then
-            git clone https://github.com/vllm-ascend/main2main_flow.git "${M2M_FLOW_DIR}"
+            git clone --branch "${FLOW_REF}" \
+              https://github.com/vllm-ascend/main2main_flow.git "${M2M_FLOW_DIR}"
+          else
+            git -C "${M2M_FLOW_DIR}" fetch origin "${FLOW_REF}"
+            git -C "${M2M_FLOW_DIR}" checkout --detach FETCH_HEAD
           fi
           pip install -e "${M2M_FLOW_DIR}"
 
