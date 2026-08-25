@@ -593,8 +593,6 @@ class AscendFusedMoE(FusedMoE):
                     output_dtype=torch.int32,
                 )
                 # Execute activation concurrently with gmm2.
-
-                maybe_wait_event(fused_moe_evts.before_gmm2)
                 clamp_limit = fused_moe_evts.swiglu_limit or 0.0
                 group_index = None
                 if clamp_limit <= 0.0:
