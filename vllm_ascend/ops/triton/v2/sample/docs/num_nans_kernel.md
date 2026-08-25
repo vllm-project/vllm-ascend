@@ -52,17 +52,6 @@
 - 单测文件为了可独立运行（不依赖 patch 加载顺序），在 import 后同样做一次模块级
   libdevice 重绑定，再启动内核。
 
-### 单测中的 `vllm.triton_utils` shim
-
-- 测试环境安装的 triton-ascend 3.2.x 早于 `triton.experimental.gluon`（及
-  `triton.experimental.gluon.nvidia`）的引入时间，而 `vllm.triton_utils` 会无条件
-  导入 gluon，直接导入真实包会抛 `ModuleNotFoundError`。
-- 单测在任何 `vllm.*` 导入之前，向 `sys.modules` 安装一个 package 形状的
-  `vllm.triton_utils` shim：`__path__` 指向真实的 `triton_utils` 目录（子模块
-  `allocation` / `libdevice` / `importing` 仍从磁盘加载），`tl` / `triton` 直接取自
-  已安装的 triton，gluon 相关属性用占位符代替。真实包的 `__init__.py` 因此不会
-  执行，内核测试得以独立运行。
-
 ## 调用示例
 
 ```python
