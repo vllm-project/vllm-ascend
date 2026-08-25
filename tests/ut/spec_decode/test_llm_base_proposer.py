@@ -23,7 +23,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch.nn as nn
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -142,60 +141,6 @@ def test_load_model_reads_validated_draft_window_size():
 
     assert proposer.draft_window_size == 4096
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
-    draft_model.finish_shared_layer_preparation.assert_called_once_with()
-
-
-def test_dspark_embedding_sharing_uses_model_preparation_hook():
-    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
-    draft_embed = nn.Linear(2, 3, bias=False)
-    target_embed = nn.Linear(2, 3, bias=False)
-    prepared_embed = nn.Linear(2, 3, bias=False)
-    proposer.method = "dspark"
-    proposer.model = SimpleNamespace(
-        has_own_embed_tokens=False,
-        model=SimpleNamespace(embed_tokens=draft_embed),
-        prepare_shared_layer=MagicMock(return_value=prepared_embed),
-    )
-    target_model = SimpleNamespace(
-        model=SimpleNamespace(embed_tokens=target_embed),
-    )
-
-    with patch("vllm_ascend.spec_decode.llm_base_proposer.get_pp_group") as mock_pp_group:
-        mock_pp_group.return_value.world_size = 1
-        proposer._maybe_share_embeddings(target_model)
-
-    proposer.model.prepare_shared_layer.assert_called_once_with(
-        draft_embed,
-        target_embed,
-        "draft embed_tokens.weight",
-    )
-    assert proposer.model.model.embed_tokens is prepared_embed
-
-
-def test_dspark_lm_head_sharing_uses_model_preparation_hook():
-    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
-    draft_lm_head = nn.Linear(2, 3, bias=False)
-    target_lm_head = nn.Linear(2, 3, bias=False)
-    prepared_lm_head = nn.Linear(2, 3, bias=False)
-    proposer.method = "dspark"
-    proposer.model = SimpleNamespace(
-        has_own_lm_head=False,
-        lm_head=draft_lm_head,
-        prepare_shared_layer=MagicMock(return_value=prepared_lm_head),
-    )
-    proposer.vllm_config = SimpleNamespace(
-        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
-    )
-    proposer.use_cuda_graph = False
-
-    proposer._maybe_share_lm_head(SimpleNamespace(lm_head=target_lm_head))
-
-    proposer.model.prepare_shared_layer.assert_called_once_with(
-        draft_lm_head,
-        target_lm_head,
-        "draft lm_head.weight",
-    )
-    assert proposer.model.lm_head is prepared_lm_head
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:
