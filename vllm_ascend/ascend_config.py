@@ -394,7 +394,14 @@ class AscendConfig:
     draft_window_size: int | None = None
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
-    mega_moe_max_tokens: int = 131072
+    # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
+    # The same value is passed as dispatch_ffn_combine's max_output_size
+    # and CANN MegaMoe buffer's max_recv_token_num.
+    # This is a reference value: if the actual per-rank received token
+    # count exceeds it, tokens may be truncated, causing precision
+    # degradation. Do not set it too large because workspace memory scales
+    # linearly with this value. Default 65536.
+    mega_moe_max_tokens: int = 65536
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
