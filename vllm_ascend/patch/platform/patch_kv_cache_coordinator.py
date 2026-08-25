@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
-from collections.abc import Mapping
 from math import lcm
 
 import vllm
@@ -31,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+from vllm_ascend.core.kv_cache_interface import is_deepseek_v4_kv_cache_spec
 from vllm_ascend.utils import vllm_version_is
 
 USE_MULTI_GROUPS_KV_CACHE = True
@@ -47,24 +47,8 @@ def _select_kv_token_budget(
     return token_budget if token_budget is not None else max_model_len
 
 
-def _is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
-    if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
-        return True
-
-    nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
-    if nested_specs is None:
-        return False
-
-    if isinstance(nested_specs, Mapping):
-        nested_specs = nested_specs.values()
-    elif not isinstance(nested_specs, (list, tuple, set)):
-        return False
-
-    return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in nested_specs)
-
-
 def _is_deepseek_v4_kv_cache_config(kv_cache_config: KVCacheConfig) -> bool:
-    return any(_is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
+    return any(is_deepseek_v4_kv_cache_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups)
 
 
 class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):

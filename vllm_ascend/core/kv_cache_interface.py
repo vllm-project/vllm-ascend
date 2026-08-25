@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
@@ -28,6 +29,23 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+
+
+def is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether a KV cache spec (or its nested specs) targets DeepSeekV4."""
+    if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
+        return True
+
+    nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if nested_specs is None:
+        return False
+
+    if isinstance(nested_specs, Mapping):
+        nested_specs = nested_specs.values()
+    elif not isinstance(nested_specs, (list, tuple, set)):
+        return False
+
+    return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in nested_specs)
 
 
 @dataclass(frozen=True, kw_only=True)
