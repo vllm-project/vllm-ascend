@@ -55,14 +55,12 @@ class NPUModelRunner310V2(NPUModelRunner):
     @staticmethod
     def _validate_config(vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
-        # TODO: Support multimodal and hybrid models in the next 310P MRV2 iteration.
-        if model_config.is_multimodal_model or model_config.is_hybrid:
-            raise NotImplementedError("Multimodal and hybrid models are not supported by model runner v2 on 310P.")
+        # Qwen3-VL (multimodal + MRoPE) is in scope for this 310P MRv2 iteration.
+        # Hybrid/GDN (Qwen3.5) remains deferred here; keep the hard reject.
+        if model_config.is_hybrid:
+            raise NotImplementedError("Hybrid models are not supported by model runner v2 on 310P.")
         if model_config.use_mla:
             raise NotImplementedError("MLA is not supported by model runner v2 on 310P.")
-        # TODO: Support multi-dimensional RoPE in the next 310P MRV2 iteration.
-        if getattr(model_config, "uses_mrope", False):
-            raise NotImplementedError("Multi-dimensional RoPE is not supported by model runner v2 on 310P.")
         if getattr(model_config, "enable_sleep_mode", False):
             raise NotImplementedError("Sleep mode is not supported by model runner v2 on 310P.")
 

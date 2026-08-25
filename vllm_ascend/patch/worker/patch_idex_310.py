@@ -1,4 +1,5 @@
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
+from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
 from vllm.third_party.flash_linear_attention.ops import index as fla_index
 
 from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -6,6 +7,7 @@ from vllm_ascend._310p.ops.fla.idex import (
     prepare_chunk_indices_310,
     prepare_chunk_offsets_310,
 )
+from vllm_ascend._310p.ops.qwen3vl_310 import fast_pos_embed_interpolate_310
 from vllm_ascend._310p.spec_decode.llm_base_proposer_310 import AscendSpecDecodeBaseProposer310
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -37,8 +39,14 @@ QwenGatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get
 # MTP ACL graph padding replay fixes provided by gdn_attn_builder_310.py.
 QwenGatedDeltaNetAttention.get_attn_backend = AscendGatedDeltaNetAttention310.get_attn_backend
 
+# 310P: ``patch_qwen3vl`` is not loaded (see ``patch/worker/__init__.py``).
+# Force native bilinear pos-embed so Qwen3-VL encoder profiling does not depend
+# on Triton Ascend / bishengir Ascend310P3 support.
+Qwen3_VisionTransformer.fast_pos_embed_interpolate = (  # type: ignore[method-assign]
+    fast_pos_embed_interpolate_310
+)
+
 if is_rc_device():
-    from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
 
     from vllm_ascend._310p.ops.gdn_attn_builder_310 import GDNAttentionMetadataBuilder310

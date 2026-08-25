@@ -13,6 +13,8 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
+from vllm_ascend._310p.worker.v2.rope import Ascend310PRopeState, get_310p_rope_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -20,7 +22,7 @@ from .sampler import Ascend310PSampler
 
 
 class Ascend310PModelState(AscendModelState):
-    """Model state with the Triton-free 310P sampler."""
+    """Model state with Triton-free 310P sampler / MRoPE and encoder support."""
 
     # TODO: Refactor the sampler override to use Triton Dispatcher after vLLM
     # RFC #45133 lands.
@@ -32,15 +34,30 @@ class Ascend310PModelState(AscendModelState):
         encoder_cache: EncoderCache | None,
         device: torch.device,
     ) -> None:
-        if encoder_cache is not None:
-            # TODO: Support multimodal encoder state in the next 310P MRV2 iteration.
-            raise NotImplementedError("Multimodal encoder state is not supported by model runner v2 on 310P.")
-        # Plain-text Qwen3 uses ordinary 1D RoPE, for which upstream returns
-        # no RopeState and therefore does not launch its Triton position kernel.
-        super().__init__(vllm_config, model, encoder_cache, device)
+        # Initialize the full Ascend/DefaultModelState contract first so
+        # attributes such as ``prompt_embeds_state`` / ``encoder_runner`` exist,
+        # then swap RoPE to the Triton-free 310P implementation.
+        AscendModelState.__init__(self, vllm_config, model, encoder_cache, device)
         # ACLGraph replays the tensor addresses bound during capture. Keep every
         # captured seq_lens buffer so its contents can be refreshed before replay.
         self._capture_seq_lens_by_ptr: dict[int, torch.Tensor] = {}
+        self._replace_310p_rope_state(encoder_cache)
+
+    def _replace_310p_rope_state(self, encoder_cache: EncoderCache | None) -> None:
+        self.rope_state = get_310p_rope_state(
+            self.model_config,
+            self.model,
+            self.max_num_reqs,
+            self.max_num_tokens,
+            self.max_model_len,
+            self.device,
+        )
+        try:
+            from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
+        except ImportError:
+            self.mm_pruner = None
+        else:
+            self.mm_pruner = maybe_create_mm_pruner(self.model_config, self.model, self.rope_state, encoder_cache)
 
     def _record_capture_seq_lens(self, seq_lens: torch.Tensor) -> None:
         """Record the largest captured view for each physical buffer."""
@@ -83,6 +100,25 @@ class Ascend310PModelState(AscendModelState):
             kv_cache_config,
             for_capture=for_capture,
         )
+
+    def prepare_inputs(self, input_batch: AscendInputBatch, req_states):
+        if self.rope_state is None:
+            return super().prepare_inputs(input_batch, req_states)
+
+        assert isinstance(self.rope_state, Ascend310PRopeState)
+        # Upstream RopeState.prepare_positions uses Triton; 310P builds positions
+        # on CPU from staged prefill tables, then H2D copies.
+        self.rope_state.prepare_positions_cpu(
+            input_batch.idx_mapping_np,
+            input_batch.query_start_loc_np,
+            req_states.prefill_len.np,
+            req_states.num_computed_tokens_np,
+            input_batch.num_tokens_after_padding,
+        )
+        positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
+        if self.model_config.uses_mrope:
+            prepare_mrope_cos_sin_slices_from_runner(self, positions)
+        return {"positions": positions}
 
     def custom_sampler(self, sampler):
         del sampler

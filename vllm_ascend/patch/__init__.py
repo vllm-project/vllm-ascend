@@ -683,11 +683,24 @@
 #       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
 #       GDN attention backend. RC devices also route upstream GDNAttentionBackend
 #       to the 310P metadata builder.
+#
+#   4. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.fast_pos_embed_interpolate`
+#      (+ `rot_pos_emb` on RC)
+#    Why:
+#       On 310P, `patch_qwen3vl` is not imported. Upstream may pick the Triton
+#       bilinear pos-embed path when HAS_TRITON is true, but bishengir has no
+#       Ascend310P3 target, so Qwen3-VL encoder profile/image prefill fails.
+#       RC also needs blocking H2D in `rot_pos_emb` to avoid indexing races.
+#    How:
+#       Always bind `fast_pos_embed_interpolate_310` (native interpolate). On RC
+#       also bind `rot_pos_emb_310`. Implementations live under
+#       `vllm_ascend/_310p/ops/qwen3vl_310.py`.
 #    Related PR (if no, explain why):
 #       No, 310P custom operator and backend behavior are vllm-ascend specific.
 #    Future Plan:
 #       Remove this patch when upstream exposes stable hooks for 310P GDN
-#       chunk metadata, spec-decode input layout, and backend selection.
+#       chunk metadata, spec-decode input layout, backend selection, and
+#       vision pos-embed dispatch that does not require Triton on 310P.
 #
 # ** 8. File: worker/patch_kimi_k25.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

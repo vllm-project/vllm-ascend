@@ -16,6 +16,33 @@
 #
 
 import torch
+from vllm.model_executor.models.qwen3_vl import pos_embed_interpolate_native
+
+
+def fast_pos_embed_interpolate_310(self, grid_thw: list[list[int]]) -> torch.Tensor:
+    """Replace the upstream Triton bilinear pos-embed kernel on 310P.
+
+    ``Qwen3_VisionTransformer.fast_pos_embed_interpolate`` selects
+    ``triton_pos_embed_interpolate`` whenever ``HAS_TRITON`` is true. Triton
+    Ascend may be importable on 310P, but ``bishengir-compile`` does not accept
+    ``--target=Ascend310P3``, so encoder profile/image prefill crashes.
+    Keep the same native interpolate fallback that ``patch_qwen3vl`` uses on
+    910B; on 310P that patch is not loaded (see ``patch/worker/__init__.py``).
+    """
+    outputs = []
+    for t, h, w in grid_thw:
+        outputs.append(
+            pos_embed_interpolate_native(
+                self.pos_embed.weight,
+                t,
+                h,
+                w,
+                self.num_grid_per_side,
+                self.spatial_merge_size,
+                self.dtype,
+            )
+        )
+    return torch.cat(outputs, dim=0)
 
 
 # 310P RC: non_blocking H2D copy in rot_pos_emb can race with subsequent indexing.

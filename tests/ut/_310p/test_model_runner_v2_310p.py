@@ -48,6 +48,21 @@ def test_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config())
 
 
+def test_config_accepts_qwen3_vl_multimodal_mrope() -> None:
+    """Qwen3-VL is multimodal + MRoPE; first-release 310P MRv2 must allow it."""
+    config = _make_vllm_config()
+    config.model_config.is_multimodal_model = True
+    config.model_config.uses_mrope = True
+    NPUModelRunner310V2._validate_config(config)
+
+
+def test_config_rejects_hybrid_models() -> None:
+    config = _make_vllm_config()
+    config.model_config.is_hybrid = True
+    with pytest.raises(NotImplementedError, match="Hybrid models"):
+        NPUModelRunner310V2._validate_config(config)
+
+
 @pytest.mark.parametrize(("finished_req_ids", "sync_count"), [({"finished"}, 1), (set(), 0)])
 def test_finished_requests_synchronize_before_reusing_layout(finished_req_ids, sync_count) -> None:
     runner = object.__new__(NPUModelRunner310V2)
