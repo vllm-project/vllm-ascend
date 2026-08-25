@@ -1552,10 +1552,14 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     kwargs = mock_sparse_attention_score.call_args.kwargs
     assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([2, 2], dtype=torch.int32))
     assert kwargs["actual_seq_lengths_kv"] is seq_lens
+    assert torch.equal(kwargs["cu_seq_lengths_q"], torch.tensor([0, 2, 4], dtype=torch.int64))
+    assert torch.equal(kwargs["cu_seq_lengths_kv"], torch.tensor([0, 129, 514], dtype=torch.int64))
     assert torch.equal(
         kwargs["select_num_idx"],
         torch.tensor([[2, 1, 2, 0], [2, 1, 2, 1]], dtype=torch.int32),
     )
     assert kwargs["block_size"] == 128
     assert kwargs["top_k"] == 2
+    assert kwargs["kv_input_layout"] == "PAGED_BBND"
+    assert kwargs["softmax_precision"] in (0, 1)
     assert torch.equal(output, torch.ones_like(output))

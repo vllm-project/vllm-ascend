@@ -1,0 +1,8 @@
+nodes:
+  - backend: pyaclnn
+    task: ['accuracy']
+    devices: [4]
+  - backend: cpu
+    name: gpu
+    task: ['accuracy']
+    devices: [4]

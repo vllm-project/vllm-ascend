@@ -1,0 +1,339 @@
+api: pytorch
+api_type: aclnn_genericblocksparseattention
+aclnn_api_type: aclnn_genericblocksparseattentioninputprocess
+version: v2.1
+name: torch.generic_block_sparse_attention
+aclnn_name: aclnnGenericBlockSparseAttention
+expected_error_msg: null
+# arch35 (A5/950) full-quant: quantType=5, FP8 Q/K/V, softmaxPrecision=1
+dtype_numbers: 100
+extra_numbers: 0
+generate: generate_generic_block_sparse_attention_quant
+standard:
+  acc:
+    cv_fused_double_benchmark:
+      max_re_ratio: 2
+      avg_re_ratio: 1.2
+      root_mean_squared_ratio: 1.2
+inputs:
+  - name: query
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp8e4m3 ]
+    shapes:
+      dim_numbers:
+        values: [3]
+      max_length: 1048576
+    ranges:
+      valid:
+        values: [ [-5, 5] ]
+      invalid:
+        values: [ [-5, 5] ]
+  - name: key
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp8e4m3 ]
+    shapes:
+      dim_numbers:
+        values: [4]
+      max_length: 1048576
+    ranges:
+      valid:
+        values: [ [-5, 5] ]
+      invalid:
+        values: [ [-5, 5] ]
+  - name: value
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp8e4m3 ]
+    shapes:
+      dim_numbers:
+        values: [4]
+      max_length: 1048576
+    ranges:
+      valid:
+        values: [ [-5, 5] ]
+      invalid:
+        values: [ [-5, 5] ]
+  - name: sparseBlockIdx
+    type: tensor
+    required: true
+    dtypes:
+      values: [ int32 ]
+    shapes:
+      dim_numbers:
+        values: [3]
+      dim_values:
+        values: [ [1, 16] ]
+  - name: sparseBlockCount
+    type: tensor
+    required: true
+    dtypes:
+      values: [ int32 ]
+    shapes:
+      dim_numbers:
+        values: [2]
+      dim_values:
+        values: [ [1, 16] ]
+  - name: metadataOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ int32 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        # Protocol buffer INT32[1024]; generator forces exact size.
+        values: [ [1024, 1024] ]
+  - name: attenMaskOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ bool ]
+    shapes:
+      dim_numbers:
+        values: [2]
+      dim_values:
+        values: [ [1, 50] ]
+  - name: qDequantScaleOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp32 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        values: [ [1, 8] ]
+  - name: kDequantScaleOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp32 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        values: [ [1, 8] ]
+  - name: vDequantScaleOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp32 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        values: [ [1, 8] ]
+  - name: pQuantScaleOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp32 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        values: [ [1, 8] ]
+  - name: cuSeqLengthsQOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ int64 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        values: [ [2, 8] ]
+  - name: cuSeqLengthsKvOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ int64 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        values: [ [2, 8] ]
+  - name: sequsedQOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ int32 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        values: [ [1, 8] ]
+  - name: sequsedKvOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ int32 ]
+    shapes:
+      dim_numbers:
+        values: [1]
+      dim_values:
+        values: [ [1, 8] ]
+  - name: blockTableOptional
+    type: tensor
+    required: true
+    dtypes:
+      values: [ int32 ]
+    shapes:
+      dim_numbers:
+        values: [2]
+      dim_values:
+        values: [ [1, 16] ]
+  - name: blockShape
+    type: attr_tuple
+    required: true
+    dtypes:
+      values: [ int ]
+    tuple_numbers:
+      values: [ 2 ]
+    ranges:
+      valid:
+        values: [ [1, 128] ]
+      invalid:
+        values: [ [1, 128] ]
+  - name: isPackedGQA
+    type: attr
+    required: true
+    dtypes:
+      values: [ int ]
+    ranges:
+      valid:
+        values: [ 1 ]
+      invalid:
+        values: [ 1 ]
+  - name: layoutQ
+    type: attr
+    required: true
+    dtypes:
+      values: [ string ]
+    ranges:
+      valid:
+        values: [ "TND" ]
+      invalid:
+        values: [ "TND" ]
+  - name: layoutKv
+    type: attr
+    required: true
+    dtypes:
+      values: [ string ]
+    ranges:
+      valid:
+        values: [ "PAGED_BBND" ]
+      invalid:
+        values: [ "PAGED_BBND" ]
+  - name: scaleValue
+    type: attr
+    required: true
+    dtypes:
+      values: [ double ]
+    ranges:
+      valid:
+        values: [ [0.0, 1.0] ]
+      invalid:
+        values: [ [0.0, 1.0] ]
+  - name: maskType
+    type: attr
+    required: true
+    dtypes:
+      values: [ int ]
+    ranges:
+      valid:
+        values: [ 1 ]
+      invalid:
+        values: [ 1 ]
+  - name: quantType
+    type: attr
+    required: true
+    dtypes:
+      values: [ int ]
+    ranges:
+      valid:
+        values: [ 5 ]
+      invalid:
+        values: [ 5 ]
+  - name: dstTypeMax
+    type: attr
+    required: true
+    dtypes:
+      values: [ double ]
+    ranges:
+      valid:
+        values: [ 0.0 ]
+      invalid:
+        values: [ 0.0 ]
+  - name: softmaxPrecision
+    type: attr
+    required: true
+    dtypes:
+      values: [ int ]
+    ranges:
+      valid:
+        values: [ 1 ]
+      invalid:
+        values: [ 1 ]
+  - name: winLeft
+    type: attr
+    required: true
+    dtypes:
+      values: [ int ]
+    ranges:
+      valid:
+        values: [ -1 ]
+      invalid:
+        values: [ -1 ]
+  - name: winRight
+    type: attr
+    required: true
+    dtypes:
+      values: [ int ]
+    ranges:
+      valid:
+        values: [ -1 ]
+      invalid:
+        values: [ -1 ]
+  - name: returnSoftmaxlse
+    type: attr
+    required: true
+    dtypes:
+      values: [ int ]
+    ranges:
+      valid:
+        values: [ 0 ]
+      invalid:
+        values: [ 0 ]
+  - name: attentionOut
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp16, bf16 ]
+    shapes:
+      dim_numbers:
+        values: [3]
+    ranges:
+      valid:
+        values: [[0]]
+      invalid:
+        values: [[0]]
+  - name: softmaxLse
+    type: tensor
+    required: true
+    dtypes:
+      values: [ fp32 ]
+    shapes:
+      dim_numbers:
+        values: [3]
+    ranges:
+      valid:
+        values: [[0]]
+      invalid:
+        values: [[0]]

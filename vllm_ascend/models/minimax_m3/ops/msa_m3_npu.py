@@ -18,11 +18,19 @@ _SPARSE_ATTN_INNER_PRECISE = 4
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _ASCEND_DEVICE_TYPE = get_ascend_device_type()
+_SPARSE_ATTN_SOFTMAX_PRECISION = int(_ASCEND_DEVICE_TYPE == AscendDeviceType.A5)
 
 if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
+
+
+def _lengths_to_cu_seqlens(seq_lens: torch.Tensor) -> torch.Tensor:
+    """Build the INT64 prefix lengths required by GBSA metadata."""
+    seq_lens_i64 = seq_lens.to(torch.int64)
+    zero = torch.zeros(1, dtype=torch.int64, device=seq_lens.device)
+    return torch.cat((zero, torch.cumsum(seq_lens_i64, dim=0)))
 
 
 def _k2q_csr_block_stats(cu_block_lens: torch.Tensor) -> tuple[int, int]:
@@ -513,11 +521,15 @@ def _minimax_m3_sparse_attn_a3(
         select_num_idx=_select_num_idx_from_topk(topk_idx),
         actual_seq_lengths=q_lens_t,
         actual_seq_lengths_kv=seq_lens,
+        cu_seq_lengths_q=cu_seqlens_q.to(torch.int64),
+        cu_seq_lengths_kv=_lengths_to_cu_seqlens(seq_lens),
+        kv_input_layout="PAGED_BBND",
         num_key_value_heads=num_kv_heads,
         scale_value=sm_scale,
         block_size=block_size,
         top_k=topk_idx.shape[-1],
         inner_precise=_SPARSE_ATTN_INNER_PRECISE,
+        softmax_precision=_SPARSE_ATTN_SOFTMAX_PRECISION,
     )
     output.copy_(out)
 
@@ -630,10 +642,14 @@ def minimax_m3_sparse_attn_decode(
         select_num_idx=_select_num_idx_from_topk(topk_idx),
         actual_seq_lengths=query_lens,
         actual_seq_lengths_kv=seq_lens,
+        cu_seq_lengths_q=_lengths_to_cu_seqlens(query_lens),
+        cu_seq_lengths_kv=_lengths_to_cu_seqlens(seq_lens),
+        kv_input_layout="PAGED_BBND",
         num_key_value_heads=num_kv_heads,
         scale_value=sm_scale,
         block_size=block_size,
         top_k=topk_idx.shape[-1],
         inner_precise=_SPARSE_ATTN_INNER_PRECISE,
+        softmax_precision=_SPARSE_ATTN_SOFTMAX_PRECISION,
     )
     output.copy_(out)
