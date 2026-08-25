@@ -16,11 +16,52 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
+from unittest.mock import patch
+
 import huggingface_hub
 from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
+
+
+@wait_until_npu_memory_free()
+def test_qwen3_5_gdn_a5_eager_smoke():
+    """Verify ordinary eager prefill/decode with the A5 GDN adapter."""
+    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+    prompts = qwen_prompt(["Describe this image briefly."])
+    model_path = hf_snapshot_download(
+        "Qwen/Qwen3.5-0.8B",
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+    )
+
+    outputs_by_backend = {}
+    for backend in ("native", "auto"):
+        with (
+            patch.dict(os.environ, {"VLLM_ASCEND_GDN_BACKEND": backend}),
+            VllmRunner(
+                model_path,
+                dtype="bfloat16",
+                max_model_len=1024,
+                max_num_batched_tokens=512,
+                limit_mm_per_prompt={"image": 1},
+                mm_processor_kwargs={
+                    "min_pixels": 28 * 28,
+                    "max_pixels": 640 * 28 * 28,
+                    "fps": 1,
+                },
+                enforce_eager=True,
+            ) as runner,
+        ):
+            outputs_by_backend[backend] = runner.generate_greedy(
+                prompts=prompts,
+                images=[image],
+                max_tokens=16,
+            )
+
+    assert outputs_by_backend["auto"][0][1], "Generated output should not be empty."
+    assert outputs_by_backend["auto"] == outputs_by_backend["native"]
 
 
 @wait_until_npu_memory_free()
