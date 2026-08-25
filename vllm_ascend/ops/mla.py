@@ -163,6 +163,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         # both layernorms as extra args, so this flag has no effect here and is
         # accepted for signature compatibility only.
         fuse_qkv_rmsnorm: bool = False,
+        sliding_window: int | None = None,
+        k_rope_only_layernorm: nn.Module | None = None,
+        sdpa_gate_type: str | None = None,
+        q_lora_scale: float = 1.0,
+        kv_lora_scale: float = 1.0,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -202,6 +207,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             use_sparse=mla_modules.is_sparse,
             indexer=ascend_indexer,
             skip_topk=skip_topk,
+            sliding_window=sliding_window,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
             non_causal_multi_token_decode=non_causal_multi_token_decode,
             # extra args
@@ -212,6 +218,10 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             q_proj=mla_modules.q_proj,
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
+            k_rope_only_layernorm=k_rope_only_layernorm,
+            sdpa_gate_type=sdpa_gate_type,
+            q_lora_scale=q_lora_scale,
+            kv_lora_scale=kv_lora_scale,
             o_proj=mla_modules.o_proj,
             g_proj=mla_modules.g_proj,
             use_mla_rope=mla_modules.rotary_emb is not None,

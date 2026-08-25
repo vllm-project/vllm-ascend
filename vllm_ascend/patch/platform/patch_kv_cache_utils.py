@@ -237,6 +237,9 @@ def group_and_unify_kv_cache_specs(
         elif isinstance(spec, MLAAttentionSpec):
             logical_block_specs[spec.block_size][name] = spec
 
+    if len(logical_block_specs) < 2:
+        return None
+
     mla_uniform_specs = []
     for block_size in sorted(logical_block_specs):
         spec_dict = logical_block_specs[block_size]

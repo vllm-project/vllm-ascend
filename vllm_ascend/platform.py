@@ -298,6 +298,10 @@ class NPUPlatform(Platform):
 
         register_deepseek_v4_vision_config_convertor()
 
+        from vllm_ascend.patch.platform.patch_dots3_note import register_dots3_note_video
+
+        register_dots3_note_video()
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
