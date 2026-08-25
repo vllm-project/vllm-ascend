@@ -53,6 +53,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
+from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -145,6 +146,13 @@ class NPUWorker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        if vllm_config.snapshot_config is not None:
+            # Worker and EngineCore receive separate config copies. Leave the
+            # first reserved port to workers and the second to EngineCore.
+            ports = self.parallel_config._snapshot_data_parallel_port_list
+            assert ports is not None and len(ports) == 2
+            ports.pop()
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -815,22 +823,18 @@ class NPUWorker(WorkerBase):
             "[snapshot] [parallel] rank %s: rebuilding HCCL and model-parallel groups",
             self.rank,
         )
-        import urllib.parse
-
         # distributed_init_method must point to the Pod where DP rank 0 runs.
         init_method = self.distributed_init_method
-        parsed = urllib.parse.urlparse(init_method)
         master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
-
         if not master_ip:
             raise RuntimeError(f"Unable to resolve master IP for distributed init method: {init_method}")
-        port = parsed.port
-        if port is None:
-            raise RuntimeError(f"Invalid distributed init method URL (missing port): {init_method}")
-        new_method = urllib.parse.urlunparse(parsed._replace(netloc=f"{master_ip}:{port + 1}"))
+        resume_port = self.vllm_config.parallel_config._snapshot_data_parallel_port_list.pop()
+        if not resume_port:
+            raise RuntimeError("Snapshot world-group resume port is not configured")
+        new_method = get_distributed_init_method(master_ip, resume_port)
 
         logger.info(
-            "[snapshot] [parallel] rank %s: distributed_init_method %s -> %s (port+1)",
+            "[snapshot] [parallel] rank %s: distributed_init_method %s -> %s",
             self.rank,
             init_method,
             new_method,
@@ -1232,7 +1236,11 @@ class NPUWorker(WorkerBase):
         """Initialize the distributed environment."""
         init_batch_invariance()
         init_distributed_environment(
-            self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
+            self.parallel_config.world_size,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+            "hccl",
         )
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,

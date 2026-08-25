@@ -45,7 +45,10 @@ def worker(npu_worker_cls):
             is_kv_producer=False,
             is_kv_consumer=True,
         ),
-        parallel_config=SimpleNamespace(data_parallel_master_ip="1.1.1.1"),
+        parallel_config=SimpleNamespace(
+            data_parallel_master_ip="1.1.1.1",
+            _snapshot_data_parallel_port_list=[29502],
+        ),
         snapshot_config=object(),
     )
     worker.distributed_init_method = "tcp://127.0.0.1:29500"
@@ -182,8 +185,8 @@ def test_rebuild_parallel_group_after_resume_updates_init_method(worker):
         mock_init.side_effect = lambda: calls.append("init")
         worker.rebuild_parallel_group_after_resume()
 
-    assert worker.distributed_init_method == "tcp://10.0.0.1:29501"
-    mock_init.assert_called_once()
+    assert worker.distributed_init_method == "tcp://10.0.0.1:29502"
+    mock_init.assert_called_once_with()
     assert calls == ["init"]
     assert moe_config.tp_group is tp_group
     assert moe_config.dp_group is dp_group
