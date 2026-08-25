@@ -42,6 +42,7 @@ class AscendMetadata:
     seq_lens: list[int] = None
     query_start_loc: list[int] = None
     block_table: torch.Tensor = None
+    slot_mapping: torch.Tensor = None
 
 
 class AscendAttentionBackend(AttentionBackend):
@@ -127,6 +128,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             seq_lens=common_attn_metadata.seq_lens_list,
             query_start_loc=common_attn_metadata.query_start_loc_list,
             block_table=common_attn_metadata.block_table_tensor,
+            slot_mapping=common_attn_metadata.slot_mapping[:common_attn_metadata.num_actual_tokens],
         )
 
     def update_draft_decode_metadata(self, metadata: AscendMetadata) -> None:
@@ -189,6 +191,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
             slot_mapping=slot_mapping,
         )
         notify_kv_cache_written()
+    
+    def reshape_and_cache(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+    ):
+        if len(kv_cache) > 1:
+            key_cache, value_cache = kv_cache[0], kv_cache[1]
+            slots = attn_metadata.slot_mapping
+            DeviceOperator.reshape_and_cache(
+                key=key,
+                value=value,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                slot_mapping=slots.to(torch.int32),
+            )
+            notify_kv_cache_written()
+        return query, key, value
 
     def forward(
         self,
@@ -207,7 +230,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata is None:
             return output.fill_(0)
 
+        query, key, value = self.reshape_and_cache(
+            query, key, value, kv_cache, attn_metadata
+        )
+
         record_attention_compute_start()
+
         query = query[: attn_metadata.num_actual_tokens]
         output_view = output[: attn_metadata.num_actual_tokens]
         key_cache, value_cache = kv_cache[0], kv_cache[1]
