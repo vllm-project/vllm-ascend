@@ -45,6 +45,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_co
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
+from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     prepare_sparse_kv_offload_mtp_dummy_metadata,
@@ -768,8 +769,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method in ("eagle3", "dflash", "dspark"):
+            model = self.model
+            if isinstance(model, BreakableACLGraphWrapper):
+                model = model.unwrap()
             assert isinstance(
-                self.get_model(),
+                model,
                 (
                     Eagle3LlamaForCausalLM,
                     DFlashQwen3ForCausalLM,

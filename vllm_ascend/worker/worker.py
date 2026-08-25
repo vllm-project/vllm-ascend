@@ -19,6 +19,7 @@
 
 import copy
 import gc
+import inspect
 import logging
 from types import NoneType
 from typing import Any
@@ -58,6 +59,9 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.profiling_chunk_predictor import (
+    _attach_profiling_chunk_execution_time,
+)
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
@@ -692,7 +696,16 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        if not self.use_v2_model_runner:
+            return self.model_runner.sample_tokens(grammar_output)
+
+        output = self.model_runner.sample_tokens(grammar_output)
+        _attach_profiling_chunk_execution_time(
+            self.model_runner.ascend_config.scheduler_config.profiling_chunk_config,
+            self.model_runner,
+            output,
+        )
+        return output
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -862,16 +875,25 @@ class NPUWorker(WorkerBase):
 
         start = time.perf_counter()
 
-        # Run real model forward with force_attention=True
-        # This ensures attention is actually executed, not skipped.
-        # Without force_attention, attn_metadata may be None and attention
-        # won't run, making profiling results inaccurate.
-        # _dummy_run handles PP internally (intermediate tensors, etc.)
-        self.model_runner._dummy_run(
-            num_tokens=num_tokens,
-            force_attention=True,  # Critical: ensure attention is executed
-            profile_cpp=True,
-        )
+        # Run a real model forward with attention enabled in eager mode.
+        # _dummy_run handles PP internally (intermediate tensors, etc.).
+        old_max_num_reqs = self.model_runner.max_num_reqs
+        try:
+            self.model_runner.max_num_reqs = 1
+
+            dummy_run_kwargs = {
+                "num_tokens": num_tokens,
+                "force_attention": True,
+                "is_profile": False,
+                "cudagraph_runtime_mode": CUDAGraphMode.NONE,
+            }
+
+            if "profile_cpp" in inspect.signature(self.model_runner._dummy_run).parameters:
+                dummy_run_kwargs["profile_cpp"] = True
+
+            self.model_runner._dummy_run(**dummy_run_kwargs)
+        finally:
+            self.model_runner.max_num_reqs = old_max_num_reqs
 
         # Synchronize after forward to ensure NPU operations complete
         torch.npu.synchronize()
