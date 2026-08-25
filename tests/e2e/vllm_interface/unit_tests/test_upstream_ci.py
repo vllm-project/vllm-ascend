@@ -59,16 +59,12 @@ def test_resolve_vllm_range_requires_git_metadata(tmp_path: Path) -> None:
 
 
 def test_build_analysis_command_uses_fixed_upstream_pr_scope(tmp_path: Path) -> None:
-    cache_dir = tmp_path / "cache"
-    upstream_cache_dir = tmp_path / "upstream-cache"
     command = build_analysis_command(
         vllm_root=tmp_path / "vllm",
         ascend_root=tmp_path / "vllm-ascend",
         old_sha="old",
         new_sha="new",
         ascend_sha="ascend",
-        downstream_index_cache_dir=cache_dir,
-        upstream_file_index_cache_dir=upstream_cache_dir,
         index_workers=4,
     )
 
@@ -84,5 +80,3 @@ def test_build_analysis_command_uses_fixed_upstream_pr_scope(tmp_path: Path) -> 
     assert "--expect-external-sha" not in command
     assert command[command.index("--analysis-workers") + 1] == "3"
     assert command[command.index("--index-workers") + 1] == "4"
-    assert command[command.index("--downstream-index-cache-dir") + 1] == str(cache_dir)
-    assert command[command.index("--upstream-file-index-cache-dir") + 1] == str(upstream_cache_dir)

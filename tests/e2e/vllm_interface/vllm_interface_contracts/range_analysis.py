@@ -2613,8 +2613,6 @@ def analyze_range(
     new: str,
     expect_ascend_sha: str,
     analysis_workers: int = 3,
-    downstream_index_cache_dir: Path | None = None,
-    upstream_file_index_cache_dir: Path | None = None,
     index_workers: int = 1,
 ) -> dict[str, Any]:
     """Run the upstream vLLM interface CI analysis for an exact range."""
@@ -2634,9 +2632,6 @@ def analyze_range(
     generator = InterfaceBoundaryGenerator(
         vllm_root,
         ascend_root,
-        source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha},
-        downstream_index_cache_dir=downstream_index_cache_dir,
-        upstream_file_index_cache_dir=upstream_file_index_cache_dir,
         index_workers=index_workers,
     )
     phase_started = _diagnostic_timing("repository_indexing", phase_started, timings)
@@ -2789,7 +2784,6 @@ def analyze_range(
                     "direct_call_analysis",
                 ],
             },
-            "repository_index_cache": generator.repository_index_cache,
             "timings_seconds": timings,
         },
         "summary": {

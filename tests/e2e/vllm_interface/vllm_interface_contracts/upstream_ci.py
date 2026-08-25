@@ -67,8 +67,6 @@ def build_analysis_command(
     new_sha: str,
     ascend_sha: str,
     analysis_workers: int = 3,
-    downstream_index_cache_dir: Path | None = None,
-    upstream_file_index_cache_dir: Path | None = None,
     index_workers: int = 1,
 ) -> list[str]:
     """Build the repository CLI command used by the upstream pytest entry."""
@@ -94,20 +92,6 @@ def build_analysis_command(
         "--index-workers",
         str(index_workers),
     ]
-    if downstream_index_cache_dir is not None:
-        command.extend(
-            [
-                "--downstream-index-cache-dir",
-                str(downstream_index_cache_dir),
-            ]
-        )
-    if upstream_file_index_cache_dir is not None:
-        command.extend(
-            [
-                "--upstream-file-index-cache-dir",
-                str(upstream_file_index_cache_dir),
-            ]
-        )
     return command
 
 

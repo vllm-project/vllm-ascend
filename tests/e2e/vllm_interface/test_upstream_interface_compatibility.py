@@ -28,8 +28,6 @@ from tests.e2e.vllm_interface.vllm_interface_contracts.upstream_ci import (
 )
 
 VLLM_UPSTREAM_CHECKOUT = Path("/workspace/vllm")
-DOWNSTREAM_INDEX_CACHE_DIR = Path.home() / ".cache" / "vllm-interface" / "repository-index"
-UPSTREAM_FILE_INDEX_CACHE_DIR = Path.home() / ".cache" / "vllm-interface" / "file-fragments"
 
 
 def test_upstream_interface_compatibility() -> None:
@@ -49,8 +47,6 @@ def test_upstream_interface_compatibility() -> None:
         new_sha=new_sha,
         ascend_sha=ascend_sha,
         analysis_workers=3,
-        downstream_index_cache_dir=DOWNSTREAM_INDEX_CACHE_DIR,
-        upstream_file_index_cache_dir=UPSTREAM_FILE_INDEX_CACHE_DIR,
         index_workers=4,
     )
 

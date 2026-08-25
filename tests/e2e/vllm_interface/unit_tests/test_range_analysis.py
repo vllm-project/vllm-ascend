@@ -724,11 +724,7 @@ def test_triton_signature_contract_does_not_require_pinned_repository_shas(
         new_source=("from vllm.triton_utils import triton\n\n@triton.jit\ndef kernel(value, BLOCK_SIZE): pass\n"),
         consumer_source="VALUE = 1\n",
     )
-    engine = InterfaceBoundaryGenerator(
-        roots[0],
-        roots[1],
-        source_versions={"vllm": roots[3], "vllm_ascend": roots[4]},
-    )
+    engine = InterfaceBoundaryGenerator(roots[0], roots[1])
     callable_info = engine.upstream.find_callable("vllm.api.kernel")
     assert callable_info is not None
 
@@ -1383,12 +1379,8 @@ def test_generator_uses_lazy_mro_without_emitting_inheritance_relations(
             "    def run(self, value): return value\n"
         ),
     )
-    vllm_root, ascend_root, _, new_sha, ascend_sha = roots
-    engine = InterfaceBoundaryGenerator(
-        vllm_root,
-        ascend_root,
-        source_versions={"vllm": new_sha, "vllm_ascend": ascend_sha},
-    )
+    vllm_root, ascend_root, _, _, _ = roots
+    engine = InterfaceBoundaryGenerator(vllm_root, ascend_root)
 
     relations = engine.generate()
 
@@ -1601,7 +1593,7 @@ def test_parallel_analysis_matches_serial_results(tmp_path: Path) -> None:
     assert parallel["metadata"]["execution"]["analysis_workers_used"] == 3
 
 
-def test_file_fragment_index_matches_repository_index(tmp_path: Path) -> None:
+def test_parallel_file_fragment_index_matches_repository_index(tmp_path: Path) -> None:
     root = tmp_path / "repository"
     _write(root, "vllm/__init__.py", "")
     _write(root, "vllm/accessors.py", "def read(self): return self._value\n")
@@ -1617,13 +1609,11 @@ def test_file_fragment_index_matches_repository_index(tmp_path: Path) -> None:
     )
 
     regular = RepositoryIndex(root, "vllm")
-    fragmented, cache_status = _repository_index_from_file_fragments(
+    fragmented = _repository_index_from_file_fragments(
         root,
         "vllm",
         ordinary_descriptor_decorators=frozenset(),
-        source_version=None,
-        cache_dir=None,
-        index_workers=1,
+        index_workers=2,
     )
 
     def snapshot(index: RepositoryIndex) -> dict[str, object]:
@@ -1647,124 +1637,4 @@ def test_file_fragment_index_matches_repository_index(tmp_path: Path) -> None:
             "symbols": sorted(index.unconditional_symbols),
         }
 
-    assert cache_status["status"] == "disabled"
     assert snapshot(fragmented) == snapshot(regular)
-
-
-def test_process_file_fragments_reuse_unchanged_git_blobs(tmp_path: Path) -> None:
-    root = tmp_path / "repository"
-    root.mkdir()
-    _git(root, "init")
-    _write(root, "vllm/__init__.py", "")
-    _write(root, "vllm/accessors.py", "def read(self): return self._value\n")
-    _write(
-        root,
-        "vllm/model.py",
-        "class Model:\n    def run(self, item): return item\n",
-    )
-    first_sha = _commit(root, "first")
-    cache_dir = tmp_path / "file-cache"
-
-    cold, cold_status = _repository_index_from_file_fragments(
-        root,
-        "vllm",
-        ordinary_descriptor_decorators=frozenset(),
-        source_version=first_sha,
-        cache_dir=cache_dir,
-        index_workers=2,
-    )
-    hot, hot_status = _repository_index_from_file_fragments(
-        root,
-        "vllm",
-        ordinary_descriptor_decorators=frozenset(),
-        source_version=first_sha,
-        cache_dir=cache_dir,
-        index_workers=2,
-    )
-    assert cold_status["status"] == "miss"
-    assert cold_status["workers_used"] == 2
-    assert cold_status["hit_ratio"] == 0.0
-    assert cold_status["database_bytes"] > 0
-    assert hot_status["status"] == "hit"
-    assert hot_status["cache_hits"] == 3
-    assert hot_status["hit_ratio"] == 1.0
-    assert sorted(hot.callables) == sorted(cold.callables)
-
-    _write(
-        root,
-        "vllm/model.py",
-        "class Model:\n    def run(self, item, optional=None): return item\n",
-    )
-    second_sha = _commit(root, "second")
-    incremental, incremental_status = _repository_index_from_file_fragments(
-        root,
-        "vllm",
-        ordinary_descriptor_decorators=frozenset(),
-        source_version=second_sha,
-        cache_dir=cache_dir,
-        index_workers=2,
-    )
-    regular = RepositoryIndex(root, "vllm")
-
-    assert incremental_status["status"] == "partial_hit"
-    assert incremental_status["cache_hits"] == 2
-    assert incremental_status["cache_misses"] == 1
-    assert incremental_status["hit_ratio"] == 0.666667
-    assert (
-        incremental.callables["vllm.model.Model.run"].signature == regular.callables["vllm.model.Model.run"].signature
-    )
-
-
-def test_downstream_repository_index_cache_miss_then_hit(tmp_path: Path) -> None:
-    roots = _call_repositories(
-        tmp_path,
-        old_source=("class Base:\n    @classmethod\n    def run(cls, value): return value\n"),
-        new_source=("class Base:\n    @classmethod\n    def run(cls, value, required): return value\n"),
-        consumer_source=(
-            "from vllm.api import Base\n\nclass Child(Base):\n    @classmethod\n    def run(cls, value): return value\n"
-        ),
-    )
-    cache_dir = tmp_path / "repository-index-cache"
-    first = analyze_range(
-        vllm_root=roots[0],
-        ascend_root=roots[1],
-        old=roots[2],
-        new=roots[3],
-        expect_ascend_sha=roots[4],
-        analysis_workers=1,
-        downstream_index_cache_dir=cache_dir,
-    )
-    second = analyze_range(
-        vllm_root=roots[0],
-        ascend_root=roots[1],
-        old=roots[2],
-        new=roots[3],
-        expect_ascend_sha=roots[4],
-        analysis_workers=1,
-        downstream_index_cache_dir=cache_dir,
-    )
-
-    first_cache = first["metadata"]["repository_index_cache"]["downstream"]
-    second_cache = second["metadata"]["repository_index_cache"]["downstream"]
-    assert first_cache["status"] == "miss"
-    assert second_cache["status"] == "hit"
-    assert first_cache["key"] == second_cache["key"]
-    assert len(list(cache_dir.glob("vllm_ascend-*.pickle"))) == 1
-    assert second["findings"] == first["findings"]
-    assert second["summary"] == first["summary"]
-
-    Path(str(second_cache["path"])).write_bytes(b"invalid cache")
-    rebuilt = analyze_range(
-        vllm_root=roots[0],
-        ascend_root=roots[1],
-        old=roots[2],
-        new=roots[3],
-        expect_ascend_sha=roots[4],
-        analysis_workers=1,
-        downstream_index_cache_dir=cache_dir,
-    )
-    rebuilt_cache = rebuilt["metadata"]["repository_index_cache"]["downstream"]
-    assert rebuilt_cache["status"] == "invalid_rebuilt"
-    assert rebuilt_cache["reason"].startswith("UnpicklingError:")
-    assert rebuilt["findings"] == first["findings"]
-    assert rebuilt["summary"] == first["summary"]

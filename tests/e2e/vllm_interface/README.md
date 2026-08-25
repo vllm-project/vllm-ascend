@@ -25,9 +25,8 @@ tests/e2e/vllm_interface/
 3. Record the current vllm-ascend Git revision.
 4. Run `python -m tests.e2e.vllm_interface.vllm_interface_contracts`; this package has one fixed `vllm-interface`
    analysis scope and does not expose a main2main scenario switch.
-5. Reuse unchanged upstream file fragments by Git blob SHA, build misses with a process pool, and load the downstream
-   source index cache. Then run relation comparison, direct-import analysis, and direct-call analysis concurrently
-   inside the same job.
+5. Parse upstream Python files in bounded batches with a process pool, build the downstream source index, and then run
+   relation comparison, direct-import analysis, and direct-call analysis concurrently inside the same job.
 6. Render the compatibility summary in memory and print it directly to the pytest job log, together with the selected
    revisions and phase timings. The CI path does not create report files.
 7. Fail the pytest case only when the analyzer reports an introduced break or cannot complete a valid analysis.
@@ -64,35 +63,15 @@ comparison, direct-import analysis, and direct-call discovery/comparison. The br
 caches and their findings are merged in a fixed order before the existing deterministic finding sort. The upstream CI
 entry uses three workers. Use `--analysis-workers 1` to reproduce the serial execution path.
 
-### Downstream repository-index cache
+### Process-parallel upstream indexing
 
-The upstream CI entry stores the parsed `vllm_ascend` `RepositoryIndex` under
-`~/.cache/vllm-interface/repository-index`. A cache key includes the vllm-ascend source version and package-tree SHA,
-generator and cache-schema versions, Python cache tag, and descriptor-analysis inputs. The cache is bypassed when the
-downstream package has uncommitted source changes. Cache files are written atomically, and an invalid cache is rebuilt
-without turning a cache failure into an analysis failure.
+Each run parses the complete vLLM source tree. Python files are grouped into bounded batches and analyzed with a
+`ProcessPoolExecutor`; the upstream CI entry uses four index workers. The parent process merges fragments in sorted
+source order and always runs global class-variant, star-import, dataclass, callable-alias, and consistency finalization.
+This keeps cross-module results deterministic. Use `--index-workers 1` to use the serial indexing path.
 
-The cache directory contains Python pickle data and therefore must be writable only by the trusted CI identity. To
-reuse the index across otherwise ephemeral Buildkite jobs, mount a persistent trusted cache volume at this path or pass
-another trusted location with `--downstream-index-cache-dir`. Cache state (`miss`, `hit`, `bypassed`,
-`invalid_rebuilt`, or `write_error`) and split upstream/downstream indexing timings are recorded internally. Phase
-timings are printed in the job log.
-
-### Upstream file-fragment cache and process indexing
-
-The complete vLLM index changes at every upstream PR SHA, but most source files do not. The analyzer therefore stores
-pre-finalization file fragments in a SQLite database under `~/.cache/vllm-interface/file-fragments`. Each row is keyed
-by the file path, Git blob SHA, generator/cache versions, Python cache tag, and descriptor-analysis inputs. Unchanged
-files can be reused across different PR commits, while changed, added, or invalid fragments are rebuilt.
-
-Cache misses are grouped into bounded batches and analyzed with a `ProcessPoolExecutor`; the upstream CI entry uses four
-index workers. The parent process merges fragments in sorted source order and always reruns global class-variant, star
-import, dataclass, callable-alias, and consistency finalization. This keeps cross-module results deterministic. Use
-`--index-workers 1` to disable process parallelism without disabling the file cache.
-
-Metadata records the total file count, hits, misses, hit ratio, invalid rows, worker count, database size, and separate
-load, build, write, and merge/finalization timings. The cache is bypassed for an uncommitted upstream package. The
-SQLite payload contains Python pickle data, so its directory must be writable only by the trusted CI identity.
+The CI implementation does not write or restore persistent repository-index or file-fragment data. This avoids relying
+on state that is not preserved by the job's ephemeral container.
 
 ### Classification and result
 
@@ -124,7 +103,7 @@ Running the E2E entry outside the upstream vLLM NPU image skips it because `/wor
 pytest -q tests/e2e/vllm_interface/test_upstream_interface_compatibility.py
 ```
 
-Run an exact range serially while using a local downstream-index cache:
+Run an exact range with the same in-job parallel settings used by upstream CI:
 
 ```bash
 python -m tests.e2e.vllm_interface.vllm_interface_contracts analyze-range \
@@ -133,8 +112,6 @@ python -m tests.e2e.vllm_interface.vllm_interface_contracts analyze-range \
   --old <old-sha> \
   --new <new-sha> \
   --expect-ascend-sha <ascend-sha> \
-  --analysis-workers 1 \
-  --index-workers 4 \
-  --upstream-file-index-cache-dir ~/.cache/vllm-interface/file-fragments \
-  --downstream-index-cache-dir ~/.cache/vllm-interface/repository-index
+  --analysis-workers 3 \
+  --index-workers 4
 ```

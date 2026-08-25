@@ -31,8 +31,6 @@ def _add_sources(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--vllm-root", type=Path, required=True)
     parser.add_argument("--ascend-root", type=Path, required=True)
     parser.add_argument("--expect-ascend-sha", required=True)
-    parser.add_argument("--downstream-index-cache-dir", type=Path)
-    parser.add_argument("--upstream-file-index-cache-dir", type=Path)
     parser.add_argument("--index-workers", type=int, default=1)
 
 
@@ -53,8 +51,6 @@ def _analyze(args: argparse.Namespace) -> int:
         new=args.new,
         expect_ascend_sha=args.expect_ascend_sha,
         analysis_workers=args.analysis_workers,
-        downstream_index_cache_dir=args.downstream_index_cache_dir,
-        upstream_file_index_cache_dir=args.upstream_file_index_cache_dir,
         index_workers=args.index_workers,
     )
     print(render_upstream_pr_summary(report))
