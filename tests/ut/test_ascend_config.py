@@ -506,7 +506,6 @@ class TestAscendConfig(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_fused_mc2_ignores_removed_env(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {"enable_fused_mc2": 0}
         with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FUSED_MC2": "1"}):
             ascend_config = init_ascend_config(test_vllm_config)
 
