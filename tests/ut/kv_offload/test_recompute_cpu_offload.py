@@ -197,6 +197,7 @@ def test_recompute_cpu_offload_scheduler_aligns_sliding_window_blocks():
 def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():
     scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
     scheduler._group_is_sliding_window = [True]
+    scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )
@@ -231,6 +232,7 @@ def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():
 def test_recompute_cpu_offload_scheduler_h2d_skips_sliding_window_null_blocks():
     scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
     scheduler._group_is_sliding_window = [True]
+    scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )
@@ -262,6 +264,7 @@ def test_recompute_cpu_offload_scheduler_h2d_skips_sliding_window_null_blocks():
 def test_recompute_cpu_offload_scheduler_h2d_clips_mtp_tail_blocks():
     scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
     scheduler._group_is_sliding_window = [False]
+    scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )

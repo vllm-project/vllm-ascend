@@ -9,7 +9,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "1800"
   SERVER_PORT: "DEFAULT_PORT"
 
@@ -33,7 +32,7 @@ _server_cmd: &server_cmd
   - "16384"
   - "--gpu-memory-utilization"
   - "0.9"
-  - "--enable-expert-parallel "
+  - "--enable-expert-parallel"
   - "--port"
   - "$SERVER_PORT"
   - "--no-enable-prefix-caching"
@@ -63,7 +62,7 @@ _benchmarks: &benchmarks
 
 test_cases:
   - name: "Qwen3_235B_Accuracy_PIECEWISE_gsm8k_lite"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -78,7 +77,7 @@ test_cases:
       <<: *benchmarks
 
   - name: "Qwen3_235B_Accuracy_FULL_Graph_gsm8k_lite"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -92,7 +91,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks
   - name: "Qwen3_235B_Accuracy_EPLB_gsm8k_lite"
-    model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
     envs:
       <<: *envs
       DYNAMIC_EPLB: "true"
@@ -102,3 +101,4 @@ test_cases:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     benchmarks:
       <<: *benchmarks
+

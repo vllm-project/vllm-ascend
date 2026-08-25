@@ -14,7 +14,7 @@ from vllm_ascend.eplb.core.eplb_utils import generate_global_placement, generate
 
 class TestAscendConfig(unittest.TestCase):
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
-    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
+    @patch("vllm_ascend.platform._fix_incompatible_config")
     def setUp(self, mock_fix_incompatible_config):
         vllm_config = VllmConfig()
         vllm_config.model_config = MagicMock()

@@ -28,6 +28,11 @@ Two input modes are supported (mutually exclusive):
   comment. Module matching is bypassed entirely; each path is routed
   directly to the appropriate runner.
 
+- ``--test-list-file``: File-driven. The input is a text file with one
+  pytest target per line (UT or E2E). Lines starting with ``#`` and
+  blank lines are ignored. Supports file paths, directories, and
+  ``::nodeid`` suffixes for test classes or methods.
+
 Pipeline (PR-driven mode):
   1. Diff       -- get changed files from git.
   2. Match      -- identify affected modules via test_config.yaml.
@@ -36,12 +41,13 @@ Pipeline (PR-driven mode):
   5. Partition  -- split test groups across parallel runners by estimated time.
   6. Output     -- write test_groups / has_tests / matched_modules.
 
-Test-only optimization:
-  If a PR changes only files under ``tests/`` (no source code touched), the
-  module-matching step is bypassed. Only the ``default_cpu_ut`` module (which
-  is always-on) and the changed test files themselves are run. This avoids
-  the broad regression triggered by ``optional: false`` modules when the
-  intent of the PR is purely to add or adjust tests.
+Test/tool-scoped optimization:
+  In PR-driven mode, the workflow passes both the full diff and the changed
+  files matched by the PR test path filter. If the filtered files contain only
+  test paths and/or non-bisect ``tools`` paths, normal module matching is
+  bypassed. The selector runs ``default_cpu_ut`` and directly changed test
+  files. Files outside the PR test filter, such as nightly-only files and docs,
+  do not widen the test scope. Bisect changes retain their dedicated policy.
 
 Bisect-tool optimization:
   If a PR is scoped to ``tools/bisect`` and its paired UT/config/format files,
@@ -78,6 +84,7 @@ class NpuType(str, Enum):
     A2 = "a2"
     A3 = "a3"
     _310P = "310p"
+    A5 = "a5"
     CPU = "cpu"
 
 
@@ -96,6 +103,12 @@ _DEFAULT_KEY: RunnerKey = (0, NpuType.CPU)
 # The always-on CPU UT module. In test-only changes, only this module
 # is selected for UT runs (along with the changed test files).
 DEFAULT_CPU_UT_MODULE = "default_cpu_ut"
+
+# Coverage-based recommendation emits this batch label (not a real pytest
+# path) to represent the always-on CPU UT suite. Map it to ``tests/ut`` so
+# the ``--test-list-file`` flow runs the same CPU UTs as the diff flow.
+CPU_UT_BATCH_ALIAS = "cpu-ut"
+CPU_UT_BATCH_PATH = "tests/ut"
 
 _BISECT_TOOL_ROOTS = ("tools/bisect", "tests/ut/tools/bisect")
 _BISECT_TOOL_SUPPORT_FILES = {
@@ -263,6 +276,32 @@ def _resolve_config_inheritance(config: list[dict]) -> list[dict]:
     return [resolve(module["name"]) for module in config]
 
 
+def _filter_label_gated_modules(
+    config: list[dict],
+    pr_labels: str | None,
+) -> tuple[list[dict], set[str]]:
+    """Drop modules whose ``required_pr_labels`` are not all present.
+
+    Label gating is opt-in: it only takes effect when *pr_labels* is
+    provided (the PR-driven path). Returns the filtered config plus the
+    test targets owned by gated modules, so the test-only fallback can
+    skip them as well.
+    """
+    if pr_labels is None:
+        return config, set()
+    labels = {label.strip() for label in pr_labels.split(",") if label.strip()}
+    active: list[dict] = []
+    gated_targets: set[str] = set()
+    for module in config:
+        required = set(_as_base_list(module.get("required_pr_labels", [])))
+        if required and not required.issubset(labels):
+            for target in module.get("tests", []):
+                gated_targets.add(_pytest_node_file_path(target).rstrip("/"))
+            continue
+        active.append(module)
+    return active, gated_targets
+
+
 def _match_modules(
     changed_files: list[str],
     config: list[dict],
@@ -345,6 +384,14 @@ def _is_skipped_test_target(target: str, skip_tests: set[str]) -> bool:
     return target in skip_tests or _pytest_node_file_path(target) in skip_tests
 
 
+def _is_gated_test_target(target: str, gated_targets: set[str]) -> bool:
+    """Return True if *target* belongs to a label-gated module."""
+    if not gated_targets:
+        return False
+    target = _pytest_node_file_path(target).rstrip("/")
+    return any(target == gated or target.startswith(gated + "/") for gated in gated_targets)
+
+
 def _is_ut_path(path: str) -> bool:
     return path == "tests/ut" or path.startswith("tests/ut/")
 
@@ -357,14 +404,17 @@ def _is_test_path(path: str) -> bool:
     return _is_ut_path(path) or _is_e2e_path(path)
 
 
-def _is_test_only_change(changed_files: list[str]) -> bool:
-    """Return True if *changed_files* contains only files under ``tests/``.
+def _is_cpu_ut_scoped_change(changed_files: list[str]) -> bool:
+    """Return True when PR-filtered changes only require CPU UT.
 
-    When a PR touches nothing but test files, there is no source change
-    requiring broad regression; only the changed tests (and the always-on
-    ``default_cpu_ut`` module) need to run.
+    The workflow removes files outside its source-path filter before passing
+    this list. Ordinary tools and test-only changes share the same broad CPU
+    UT coverage; bisect paths retain their dedicated selection policy.
     """
-    return bool(changed_files) and all(_is_test_path(f) for f in changed_files)
+    return bool(changed_files) and all(
+        _is_test_path(f) or (_matches_path_dependency(f, "tools") and not _is_bisect_tool_scoped_path(f))
+        for f in changed_files
+    )
 
 
 def _is_bisect_tool_scoped_path(file_path: str) -> bool:
@@ -473,6 +523,74 @@ def _scan_e2e_test_dir(
                             groups[f_key].append(f)
             else:
                 _scan_e2e_test_dir(str(entry), groups)
+
+
+def _load_test_list_file(path: Path) -> list[str]:
+    """Load pytest targets from *path*, one per non-empty, non-comment line."""
+    targets: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if line:
+            targets.append(_as_posix_path(line))
+    return targets
+
+
+def _route_explicit_test_target(
+    target: str,
+    groups: dict[RunnerKey, list[str]],
+) -> None:
+    """Route a single explicit UT/E2E target to the appropriate runner group."""
+    # The coverage recommender emits "cpu-ut" (the batch label of the
+    # default_cpu_ut module) instead of the real pytest path "tests/ut".
+    # Map it back so the recommended path runs the same CPU UTs the
+    # diff-based select-tests path selects for default_cpu_ut: tests/ut
+    # scanned with cpu_only=True, i.e. NPU-convention subdirs are skipped
+    # and the remaining files route to the CPU runner.
+    cpu_only = False
+    if target == CPU_UT_BATCH_ALIAS:
+        target = CPU_UT_BATCH_PATH
+        file_path = target
+        cpu_only = True
+    else:
+        file_path = _pytest_node_file_path(target)
+    if not _is_test_path(file_path):
+        print(
+            f"Warning: Skipping non-test path: {target}",
+            file=sys.stderr,
+        )
+        return
+
+    path = Path(file_path)
+    if not path.exists():
+        print(
+            f"Warning: Path does not exist: {target}",
+            file=sys.stderr,
+        )
+        return
+
+    if _is_ut_path(file_path):
+        if "::" in target or path.is_file():
+            key = _route_ut_dir(file_path)
+            if cpu_only and key != _DEFAULT_KEY:
+                print(
+                    f"Warning: cpu_only module test {target} routes to NPU runner;"
+                    " check test_config.yaml for misconfigured cpu_only tests.",
+                    file=sys.stderr,
+                )
+                return
+            groups[key].append(target)
+        else:
+            _scan_ut_test_dir(target, groups, cpu_only=cpu_only)
+        return
+
+    if _is_e2e_path(file_path):
+        _scan_e2e_test_dir(target, groups)
+        return
+
+    print(
+        f"Warning: Skipping unrecognized test path: {target}",
+        file=sys.stderr,
+    )
 
 
 def _dedup_groups(groups: dict[RunnerKey, list[str]]) -> None:
@@ -732,6 +850,20 @@ def main():
         "Supports ``::nodeid`` suffix (e.g. ``test_foo.py::TestClass::test_method``) "
         "to run a single test method.",
     )
+    input_group.add_argument(
+        "--test-list-file",
+        type=Path,
+        help="Path to a text file listing pytest targets to run (one per line). "
+        "Supports UT and E2E paths, directories, and ``::nodeid`` suffixes for "
+        "test classes or methods. Blank lines and ``#`` comments are ignored.",
+    )
+    parser.add_argument(
+        "--filtered-changed-files-json",
+        type=str,
+        default=None,
+        help="JSON array containing changed files matched by the PR workflow path filter. "
+        "Used only for test-scoped detection and changed-test collection.",
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -743,12 +875,31 @@ def main():
         action="store_true",
         help="Run tests for all configured modules regardless of changed files",
     )
-
+    parser.add_argument(
+        "--modules",
+        type=str,
+        default=None,
+        help="Force-select specific modules (comma-separated), bypassing file-change matching",
+    )
+    parser.add_argument(
+        "--runner-override",
+        type=str,
+        default=None,
+        help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
+    )
+    parser.add_argument(
+        "--pr-labels",
+        type=str,
+        default=None,
+        help="Comma-separated labels on the triggering PR. When provided, modules "
+        "declaring ``required_pr_labels`` that are not fully present are excluded.",
+    )
     args = parser.parse_args()
     docs = list(yaml.safe_load_all(args.config.read_text()))
     config = _resolve_config_inheritance(docs[0])
     meta = docs[1] if len(docs) >= 2 and docs[1] else {}
     _load_runner_mapping(meta)
+    config, gated_test_targets = _filter_label_gated_modules(config, args.pr_labels)
 
     skip_tests: set[str] = set()
     for module in config:
@@ -759,40 +910,80 @@ def main():
         matched_modules: list[str] = []
         all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
         for path in args.explicit_e2e_tests:
-            if not _is_e2e_path(path):
+            if not _is_e2e_path(_pytest_node_file_path(path)):
                 print(
                     f"Warning: Skipping non-e2e path: {path}",
                     file=sys.stderr,
                 )
                 continue
             _scan_e2e_test_dir(path, all_groups)
+    elif args.test_list_file:
+        if not args.test_list_file.is_file():
+            print(
+                f"ERROR: Test list file does not exist: {args.test_list_file}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        matched_modules = []
+        all_groups = defaultdict(list)
+        explicit_targets = _load_test_list_file(args.test_list_file)
+        if not explicit_targets:
+            print(
+                f"Warning: Test list file is empty: {args.test_list_file}",
+                file=sys.stderr,
+            )
+        for target in explicit_targets:
+            _route_explicit_test_target(target, all_groups)
+        _dedup_groups(all_groups)
     else:
         changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
+        filtered_changed_files = changed_files
+        if args.filtered_changed_files_json is not None:
+            try:
+                filtered_changed_files = json.loads(args.filtered_changed_files_json)
+            except json.JSONDecodeError as exc:
+                parser.error(f"Invalid --filtered-changed-files-json: {exc}")
+            if not isinstance(filtered_changed_files, list) or not all(
+                isinstance(file_path, str) for file_path in filtered_changed_files
+            ):
+                parser.error("--filtered-changed-files-json must be a JSON array of strings")
         bisect_tool_scoped_change = _is_bisect_tool_scoped_change(changed_files)
-        test_only_change = _is_test_only_change(changed_files)
+        cpu_ut_scoped_change = _is_cpu_ut_scoped_change(filtered_changed_files)
         if bisect_tool_scoped_change:
             print(
                 "Detected bisect tool-scoped change: running only matching tool modules (skipping always-on modules).",
                 file=sys.stderr,
             )
-        elif test_only_change:
+        elif cpu_ut_scoped_change:
             print(
-                "Detected test-only change: running only default_cpu_ut"
+                "Detected CPU-UT-scoped change: running only default_cpu_ut"
                 " and the changed test files (skipping source-driven modules).",
                 file=sys.stderr,
             )
         if args.run_all_modules:
             matched_modules = [module["name"] for module in config]
+        elif args.modules:
+            requested = set(args.modules.split(","))
+            available = {m["name"] for m in config}
+            missing = requested - available
+            if missing:
+                print(
+                    f"ERROR: unknown module(s): {', '.join(sorted(missing))}. "
+                    f"Available: {', '.join(sorted(available))}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            matched_modules = sorted(requested)
         elif bisect_tool_scoped_change:
             matched_modules = _match_modules(changed_files, config, include_always=False)
-        elif test_only_change:
+        elif cpu_ut_scoped_change:
             matched_modules = [m["name"] for m in config if m["name"] == DEFAULT_CPU_UT_MODULE]
         else:
             matched_modules = _match_modules(changed_files, config)
         test_dirs, cpu_only_dirs = _collect_test_dirs(matched_modules, config)
 
         changed_test_files = []
-        for f in changed_files:
+        for f in filtered_changed_files:
             if not _is_test_path(f):
                 continue
             target = Path(_pytest_node_file_path(f))
@@ -832,6 +1023,8 @@ def main():
             for f in changed_targets:
                 if _is_skipped_test_target(f, skip_tests):
                     continue
+                if _is_gated_test_target(f, gated_test_targets):
+                    continue
                 if _is_ut_path(f):
                     key = _route_ut_dir(f)
                     all_groups[key].append(f)
@@ -841,6 +1034,16 @@ def main():
                         all_groups[key].append(f)
 
         _dedup_groups(all_groups)
+
+    if args.runner_override:
+        override_key = _parse_runner_key(args.runner_override)
+        overridden: dict[RunnerKey, list[str]] = {}
+        for (num_npus, npu_type), tests in all_groups.items():
+            if npu_type == NpuType.CPU:
+                overridden[(num_npus, npu_type)] = tests
+            else:
+                overridden.setdefault(override_key, []).extend(tests)
+        all_groups = overridden
 
     if skip_tests:
         for key in list(all_groups.keys()):

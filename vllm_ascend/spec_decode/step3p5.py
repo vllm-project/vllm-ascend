@@ -23,6 +23,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_co
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
 
@@ -148,10 +149,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         extra_attn_metadata_args: dict[str, Any] = {}
         if self.use_compress:
             extra_attn_metadata_args = dict(
-                prefill_ratio_to_sas_metadata=dict(),
-                decode_ratio_to_sas_metadata=dict(),
                 common_ratio_to_sas_metadata=dict(),
-                block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
 
         for attn_group in self.draft_attn_groups:
@@ -195,7 +193,8 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
                 return draft_token_ids, None
             logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
             if lmhead_tp_enable():
-                logits = get_lmhead_tp_group().all_to_all(logits)
+                # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
+                logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
             else:
                 logits = self.model.model.logits_processor._gather_logits(logits)
         else:
@@ -323,6 +322,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
 
     def _propose(
         self,
+        num_speculative_tokens: int,
         target_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
         target_hidden_states: torch.Tensor,
@@ -340,8 +340,19 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Dynamic SD: honor the scheduled per-step K, unified with
+        # ``AscendSpecDecodeBaseProposer._propose`` (this override does not call
+        # ``super()``, so it sets the value itself).
+        self.num_speculative_tokens = num_speculative_tokens
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
+
+        # Dynamic SD may schedule K == 0: return an empty [batch_size, 0] draft
+        # (mirrors AscendSpecDecodeBaseProposer._propose) so the downstream
+        # copy/unpack paths -- which key off ``draft_token_ids.shape[1]`` -- stay
+        # consistent. This override does not inherit the base's early return.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(batch_size, 0, device=target_token_ids.device, dtype=torch.int64)
 
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1

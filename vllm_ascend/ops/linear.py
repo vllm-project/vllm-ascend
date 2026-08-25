@@ -41,9 +41,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
+from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
 from vllm_ascend.utils import (
     AscendDeviceType,
-    enable_sp,
     get_ascend_device_type,
     is_310p,
     maybe_trans_nz,
@@ -80,8 +80,12 @@ def _should_keep_nd_for_310p_weight(weight: torch.Tensor) -> bool:
     return is_310p() and weight.ndim >= 2 and (weight.shape[-1] == 1 or weight.shape[-2] == 1)
 
 
-class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
+
+    tp_weight_gather_specs = (TPWeightGatherSpec("weight", gather_dim=1),)
+    tp_weight_output_gather_specs = (TPWeightGatherSpec("weight"),)
+    supports_tp_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
@@ -275,9 +279,6 @@ class AscendRowParallelLinear(RowParallelLinear):
     and the original TP group in other modules.
     """
 
-    # NOTE: Globally unique prefix identifier used in SP scenarios
-    unique_prefix_idx = 0
-
     def __init__(
         self,
         input_size: int,
@@ -294,16 +295,6 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        # TODO(kunpengW-code): Specifying the prefix in linear layers of some models in the vLLM.
-        if enable_sp():
-            compilation_config = get_current_vllm_config().compilation_config
-            unique_prefix = prefix
-            if prefix in compilation_config.static_forward_context:
-                unique_prefix = f"{prefix}.unique_prefix{AscendRowParallelLinear.unique_prefix_idx}"
-                AscendRowParallelLinear.unique_prefix_idx += 1
-            self.unique_prefix = unique_prefix
-            compilation_config.static_forward_context[unique_prefix] = self
-
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(disable_tp, prefix, self, "row")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after
         # linear of vllm supports custom comm group

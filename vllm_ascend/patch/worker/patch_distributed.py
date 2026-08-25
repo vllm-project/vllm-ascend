@@ -98,7 +98,7 @@ def _patch_destroy_distributed_environment():
 
 
 class GroupCoordinatorPatch(GroupCoordinator):
-    def __init__(
+    def __init__(  # type: ignore[misc]
         self,
         group_ranks: list[list[int]],
         local_rank: int,
@@ -106,7 +106,10 @@ class GroupCoordinatorPatch(GroupCoordinator):
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        use_all2all: bool = False,
     ):
+        self.use_all2all = use_all2all
+
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
         _register_group(self)
@@ -114,10 +117,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
         self.backend = _normalize_backend(torch_distributed_backend)
-        self._acquired_hccl_keys: list[HcclPgKey] = []
-        self._unshared_hccl_groups: list[object] = []
+        self.torch_distributed_backend = torch_distributed_backend
+        self._acquired_hccl_keys: list[HcclPgKey] = []  # type: ignore[no-redef]
+        self._unshared_hccl_groups: list[object] = []  # type: ignore[no-redef]
         self.use_device_communicator = use_device_communicator
-        self.device_communicator: NPUCommunicator | None = None
+        self.device_communicator: NPUCommunicator | None = None  # type: ignore[no-redef]
         self.mq_broadcaster = None
         self.cpu_group = None
         self.device_group = None
@@ -244,25 +248,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
         assert self.device_group is not None
         self._init_device_communicator()
         return True
-
-    def all_to_all(
-        self,
-        input_: torch.Tensor,
-        scatter_dim: int = 0,
-        gather_dim: int = -1,
-        scatter_sizes: list[int] | None = None,
-        gather_sizes: list[int] | None = None,
-    ) -> torch.Tensor:
-        if self.world_size == 1:
-            return input_
-        assert -input_.dim() <= scatter_dim < input_.dim(), (
-            f"Invalid scatter dim ({scatter_dim}) for input tensor with shape {input_.size()}"
-        )
-        assert -input_.dim() <= gather_dim < input_.dim(), (
-            f"Invalid gather dim ({gather_dim}) for input tensor with shape {input_.size()}"
-        )
-        assert self.device_communicator is not None, "device_communicator should be initialized when world_size > 1"
-        return self.device_communicator.all_to_all(input_, scatter_dim, gather_dim, scatter_sizes, gather_sizes)
 
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
