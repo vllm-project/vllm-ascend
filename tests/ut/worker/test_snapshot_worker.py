@@ -46,6 +46,7 @@ def worker(npu_worker_cls):
             is_kv_consumer=True,
         ),
         parallel_config=SimpleNamespace(data_parallel_master_ip="1.1.1.1"),
+        snapshot_config=object(),
     )
     worker.distributed_init_method = "tcp://127.0.0.1:29500"
     return worker
@@ -133,13 +134,19 @@ def test_re_load_weights_delegates_to_model_runner(worker):
     worker.model_runner.restore_model.assert_called_once_with(path="/tmp/model")
 
 
-def test_parallel_group_clean_up_destroys_parallel_and_dist_env(worker):
+@pytest.mark.parametrize("snapshot_config", [object(), None])
+def test_parallel_group_clean_up_destroys_parallel_and_dist_env(
+    worker, snapshot_config
+):
+    worker.vllm_config.snapshot_config = snapshot_config
     with (
         patch("vllm_ascend.worker.worker.destroy_ascend_model_parallel") as mock_destroy,
         patch("vllm_ascend.worker.worker.cleanup_dist_env_for_snapshot") as mock_cleanup,
+        patch("vllm_ascend.worker.worker.snapshot_hccl_teardown") as teardown,
     ):
         worker.parallel_group_clean_up()
 
+    teardown.assert_called_once_with(snapshot_config is not None)
     mock_destroy.assert_called_once()
     mock_cleanup.assert_called_once()
 

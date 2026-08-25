@@ -7,27 +7,14 @@ from unittest.mock import MagicMock, patch
 
 sys.modules.setdefault("torch_npu", types.ModuleType("torch_npu"))
 
-from vllm_ascend.snapshot.distributed import (  # noqa: E402
-    _abort_hccl_process_group,
-    cleanup_dist_env_for_snapshot,
+from vllm_ascend.snapshot.distributed import cleanup_dist_env_for_snapshot  # noqa: E402
+from vllm_ascend.snapshot.state import (  # noqa: E402
+    is_snapshot_hccl_teardown_enabled,
+    snapshot_hccl_teardown,
 )
 
 
-def test_abort_hccl_process_group_uses_npu_backend():
-    process_group = MagicMock()
-    backend = process_group._get_backend.return_value
-
-    with patch(
-        "vllm_ascend.snapshot.distributed.torch.device",
-        return_value="npu-device",
-    ):
-        _abort_hccl_process_group(process_group)
-
-    process_group._get_backend.assert_called_once_with("npu-device")
-    backend.abort_hccl_comm.assert_called_once_with("reinit")
-
-
-def test_snapshot_cleanup_injects_hccl_destroyer():
+def test_snapshot_cleanup_uses_standard_distributed_destroy():
     with (
         patch("vllm_ascend.snapshot.distributed.destroy_model_parallel") as destroy_model,
         patch("vllm_ascend.snapshot.distributed.destroy_distributed_environment") as destroy_world,
@@ -35,6 +22,15 @@ def test_snapshot_cleanup_injects_hccl_destroyer():
     ):
         cleanup_dist_env_for_snapshot()
 
-    destroy_model.assert_called_once_with(_abort_hccl_process_group)
-    destroy_world.assert_called_once_with(_abort_hccl_process_group)
+    destroy_model.assert_called_once_with()
+    destroy_world.assert_called_once_with()
     reset.assert_called_once_with()
+
+
+def test_snapshot_hccl_teardown_is_scoped():
+    assert not is_snapshot_hccl_teardown_enabled()
+
+    with snapshot_hccl_teardown(True):
+        assert is_snapshot_hccl_teardown_enabled()
+
+    assert not is_snapshot_hccl_teardown_enabled()

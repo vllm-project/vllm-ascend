@@ -75,6 +75,7 @@ from vllm_ascend.distributed.parallel_state import (
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.snapshot.distributed import cleanup_dist_env_for_snapshot
+from vllm_ascend.snapshot.state import snapshot_hccl_teardown
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
@@ -789,10 +790,12 @@ class NPUWorker(WorkerBase):
         self.model_runner.restore_model(path=model_path)
 
     def parallel_group_clean_up(self) -> None:
-        destroy_ascend_model_parallel()
-        logger.info("[snapshot] [parallel] rank %s: destroy_ascend_model_parallel done", self.rank)
-        cleanup_dist_env_for_snapshot()
-        logger.info("[snapshot] [parallel] rank %s: cleanup_dist_env_for_snapshot done", self.rank)
+        snapshot_enabled = getattr(self.vllm_config, "snapshot_config", None) is not None
+        with snapshot_hccl_teardown(snapshot_enabled):
+            destroy_ascend_model_parallel()
+            logger.info("[snapshot] [parallel] rank %s: destroy_ascend_model_parallel done", self.rank)
+            cleanup_dist_env_for_snapshot()
+            logger.info("[snapshot] [parallel] rank %s: cleanup_dist_env_for_snapshot done", self.rank)
 
     def rebuild_parallel_group_after_resume(self) -> None:
         """[snapshot] Tear down and re-init HCCL / TP / PP parallel groups after resume."""
