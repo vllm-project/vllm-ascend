@@ -206,6 +206,53 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+SNAPSHOT_DEBUG_MAX_TARGET_FORWARDS = 4
+SNAPSHOT_DEBUG_FINGERPRINT_STATS = (
+    "min",
+    "max",
+    "mean",
+    "norm",
+    "sum",
+    "abs_sum",
+)
+
+
+def _snapshot_debug_tensor_fingerprint(tensor: torch.Tensor) -> list[float]:
+    values = tensor.detach().reshape(-1).float()
+    fingerprint = torch.cat(
+        (
+            torch.stack(
+                (
+                    values.min(),
+                    values.max(),
+                    values.mean(),
+                    torch.linalg.vector_norm(values),
+                    values.sum(),
+                    values.abs().sum(),
+                )
+            ),
+            values[:16],
+        )
+    )
+    return fingerprint.cpu().tolist()
+
+
+def _get_snapshot_debug_target_model(model: nn.Module) -> nn.Module:
+    target_models = [
+        module
+        for module in model.modules()
+        if hasattr(module, "snapshot_debug_hidden_states")
+        and hasattr(module, "start_layer")
+        and hasattr(module, "end_layer")
+        and hasattr(module, "layers")
+    ]
+    if len(target_models) != 1:
+        raise RuntimeError(
+            "Snapshot target hidden-state debugging requires exactly one "
+            "instrumented DeepseekV2Model, but found "
+            f"{len(target_models)} under {type(model).__name__}"
+        )
+    return target_models[0]
 
 
 @dataclass
@@ -287,6 +334,18 @@ class NPUModelRunner(GPUModelRunner):
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+        snapshot_config = getattr(vllm_config, "snapshot_config", None)
+        self._snapshot_debug_target_enabled = (
+            snapshot_config is not None
+            and self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and get_pp_group().world_size == 1
+        )
+        self._snapshot_debug_epoch = 0
+        self._snapshot_debug_target_forward_count = 0
+        self._snapshot_debug_current_forward = -1
+        self._snapshot_debug_target_model: nn.Module | None = None
 
         if not vllm_version_is("0.23.0"):
             self.pin_memory = PIN_MEMORY
@@ -736,6 +795,70 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+
+    def _log_snapshot_debug_hidden_states(
+        self,
+        name: str,
+        hidden_states: torch.Tensor,
+    ) -> None:
+        forward_id = self._snapshot_debug_current_forward
+        if (
+            not self._snapshot_debug_target_enabled
+            or forward_id < 0
+            or forward_id >= SNAPSHOT_DEBUG_MAX_TARGET_FORWARDS
+        ):
+            return
+
+        rank = dist.get_rank() if dist.is_initialized() else -1
+        fingerprint = _snapshot_debug_tensor_fingerprint(hidden_states)
+        logger.info(
+            "[snapshot-target][rank=%d][epoch=%d][forward=%d][%s] "
+            "shape=%s dtype=%s data_ptr=%#x storage_ptr=%#x "
+            "storage_offset=%d min=%.8e max=%.8e mean=%.8e "
+            "norm=%.8e sum=%.8e abs_sum=%.8e sample=%s",
+            rank,
+            self._snapshot_debug_epoch,
+            forward_id,
+            name,
+            tuple(hidden_states.shape),
+            hidden_states.dtype,
+            hidden_states.data_ptr(),
+            hidden_states.untyped_storage().data_ptr(),
+            hidden_states.storage_offset(),
+            *fingerprint[:len(SNAPSHOT_DEBUG_FINGERPRINT_STATS)],
+            fingerprint[len(SNAPSHOT_DEBUG_FINGERPRINT_STATS):],
+        )
+
+    def _log_snapshot_debug_logits_aliases(
+        self,
+        hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
+        logits: torch.Tensor,
+    ) -> None:
+        forward_id = self._snapshot_debug_current_forward
+        if (
+            not self._snapshot_debug_target_enabled
+            or forward_id < 0
+            or forward_id >= SNAPSHOT_DEBUG_MAX_TARGET_FORWARDS
+        ):
+            return
+
+        rank = dist.get_rank() if dist.is_initialized() else -1
+        logger.info(
+            "[snapshot-target][rank=%d][epoch=%d][forward=%d]"
+            "[logits_alias] hidden_storage=%#x sample_storage=%#x "
+            "logits_storage=%#x hidden_sample_alias=%s hidden_logits_alias=%s",
+            rank,
+            self._snapshot_debug_epoch,
+            forward_id,
+            hidden_states.untyped_storage().data_ptr(),
+            sample_hidden_states.untyped_storage().data_ptr(),
+            logits.untyped_storage().data_ptr(),
+            hidden_states.untyped_storage().data_ptr()
+            == sample_hidden_states.untyped_storage().data_ptr(),
+            hidden_states.untyped_storage().data_ptr()
+            == logits.untyped_storage().data_ptr(),
+        )
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
@@ -1853,6 +1976,27 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         target_hidden_states = hidden_states[token_indices]
             assert self.drafter is not None
+            forward_id = self._snapshot_debug_current_forward
+            if (
+                self._snapshot_debug_target_enabled
+                and forward_id < SNAPSHOT_DEBUG_MAX_TARGET_FORWARDS
+            ):
+                rank = dist.get_rank() if dist.is_initialized() else -1
+                fingerprint = _snapshot_debug_tensor_fingerprint(
+                    target_hidden_states
+                )
+                logger.info(
+                    "[snapshot-target][rank=%d][epoch=%d][forward=%d]"
+                    "[mtp_input.before_copy] shape=%s "
+                    "min=%.8e max=%.8e mean=%.8e norm=%.8e "
+                    "sum=%.8e abs_sum=%.8e sample=%s",
+                    rank,
+                    self._snapshot_debug_epoch,
+                    forward_id,
+                    tuple(target_hidden_states.shape),
+                    *fingerprint[:len(SNAPSHOT_DEBUG_FINGERPRINT_STATS)],
+                    fingerprint[len(SNAPSHOT_DEBUG_FINGERPRINT_STATS):],
+                )
             draft_token_ids = self.drafter._propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -2281,7 +2425,62 @@ class NPUModelRunner(GPUModelRunner):
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
-            if self.use_aux_hidden_state_outputs:
+            if self._snapshot_debug_target_enabled:
+                hidden_states, target_layer_fingerprints = hidden_states
+                forward_id = self._snapshot_debug_target_forward_count
+                self._snapshot_debug_current_forward = forward_id
+                self._snapshot_debug_target_forward_count += 1
+                self._log_snapshot_debug_hidden_states(
+                    "target_output.after_return", hidden_states
+                )
+                if forward_id < SNAPSHOT_DEBUG_MAX_TARGET_FORWARDS:
+                    rank = dist.get_rank() if dist.is_initialized() else -1
+                    fingerprints = target_layer_fingerprints.float().cpu().tolist()
+                    target_model = self._snapshot_debug_target_model
+                    assert target_model is not None
+                    layer_ids = ["embedding"]
+                    for layer_idx in range(
+                        target_model.start_layer,
+                        target_model.end_layer,
+                    ):
+                        layer_ids.extend((f"layer_{layer_idx}.attention",
+                                          f"layer_{layer_idx}.output"))
+                    layer_ids.append("final_norm")
+                    logger.info(
+                        "[snapshot-target][rank=%d][epoch=%d][forward=%d] "
+                        "num_tokens=%d num_scheduled_tokens=%d "
+                        "use_spec_decode=%s cudagraph_mode=%s "
+                        "hidden_shape=%s hidden_dtype=%s req_ids=%s "
+                        "input_ids[:64]=%s positions[:64]=%s",
+                        rank,
+                        self._snapshot_debug_epoch,
+                        forward_id,
+                        num_tokens_padded,
+                        num_scheduled_tokens,
+                        use_spec_decode,
+                        cudagraph_mode,
+                        tuple(hidden_states.shape),
+                        hidden_states.dtype,
+                        self.input_batch.req_ids,
+                        input_ids.detach().reshape(-1)[:64].cpu().tolist(),
+                        positions.detach().reshape(-1)[:64].cpu().tolist(),
+                    )
+                    for layer_id, fingerprint in zip(
+                        layer_ids, fingerprints, strict=True
+                    ):
+                        logger.info(
+                            "[snapshot-target][rank=%d][epoch=%d]"
+                            "[forward=%d][%s] "
+                            "min=%.8e max=%.8e mean=%.8e norm=%.8e "
+                            "sum=%.8e abs_sum=%.8e sample=%s",
+                            rank,
+                            self._snapshot_debug_epoch,
+                            forward_id,
+                            layer_id,
+                            *fingerprint[:len(SNAPSHOT_DEBUG_FINGERPRINT_STATS)],
+                            fingerprint[len(SNAPSHOT_DEBUG_FINGERPRINT_STATS):],
+                        )
+            elif self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = hidden_states
             if self.pcp_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
@@ -2335,6 +2534,15 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
+
+            if self._snapshot_debug_target_enabled:
+                assert logits is not None
+                self._log_snapshot_debug_hidden_states(
+                    "target_output.after_logits", hidden_states
+                )
+                self._log_snapshot_debug_logits_aliases(
+                    hidden_states, sample_hidden_states, logits
+                )
 
             # Apply structured output bitmasks if present
             self.execute_model_state = ExecuteModelState(
@@ -2415,6 +2623,9 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+        self._log_snapshot_debug_hidden_states(
+            "target_output.after_sample", hidden_states
+        )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -2427,6 +2638,9 @@ class NPUModelRunner(GPUModelRunner):
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
+            self._log_snapshot_debug_hidden_states(
+                "target_output.before_propose", hidden_states
+            )
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
                 self.input_batch.sampling_metadata,
@@ -2456,6 +2670,9 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states,
             scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
+        )
+        self._log_snapshot_debug_hidden_states(
+            "target_output.after_bookkeeping", hidden_states
         )
 
         with record_function_or_nullcontext("draft_token"):
@@ -3588,7 +3805,7 @@ class NPUModelRunner(GPUModelRunner):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
-            if self.use_aux_hidden_state_outputs:
+            if self._snapshot_debug_target_enabled or self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
                 hidden_states = outputs
@@ -3825,6 +4042,9 @@ class NPUModelRunner(GPUModelRunner):
         # drafter's look-ahead slot computation can read, producing an
         # out-of-range KV slot that crashes npu_kv_rmsnorm_rope_cache.
         self._reset_resume_block_table_device_buffers()
+        self._snapshot_debug_epoch += 1
+        self._snapshot_debug_target_forward_count = 0
+        self._snapshot_debug_current_forward = -1
 
     def _reset_resume_graph_update_streams(self) -> None:
         if hasattr(self, "update_stream"):
@@ -4236,8 +4456,8 @@ class NPUModelRunner(GPUModelRunner):
                 sanity_tensors = get_sanity_tensors()
             except Exception as exc:  # noqa: BLE001
                 failed.append(
-                    "%s.get_derived_weight_sanity_tensors:%s:%s"
-                    % (name, type(exc).__name__, exc)
+                    f"{name}.get_derived_weight_sanity_tensors:"
+                    f"{type(exc).__name__}:{exc}"
                 )
                 continue
             for attr, tensor in sanity_tensors.items():
@@ -4296,6 +4516,17 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
                 DefaultModelLoader._init_ep_weight_filter = mock_pass
             self.model: nn.Module = get_model(vllm_config=self.vllm_config)
+            if self._snapshot_debug_target_enabled:
+                target_model = _get_snapshot_debug_target_model(self.model)
+                self._snapshot_debug_target_model = target_model
+                target_model.snapshot_debug_hidden_states = True
+                for layer in target_model.layers:
+                    layer.snapshot_debug_hidden_states = True
+                logger.info(
+                    "[snapshot-target] enabled per-layer target hidden-state "
+                    "fingerprints for the first %d forwards",
+                    SNAPSHOT_DEBUG_MAX_TARGET_FORWARDS,
+                )
             for name, _ in self.model.named_parameters():
                 # sinks is a kind of parameter in attention
                 # only set in weight name

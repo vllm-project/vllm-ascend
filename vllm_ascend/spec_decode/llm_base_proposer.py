@@ -75,6 +75,35 @@ def patch_tensor_parallel_group(tp_group):
 _PREPARE_INPUTS_BLOCK_SIZE = 4
 
 
+def _log_drafter_tensor(name: str, step: int, tensor: torch.Tensor | None) -> None:
+    if tensor is None:
+        return
+    value = tensor.detach()
+    flat = value.reshape(-1)
+    numeric = flat.float()
+    stats = torch.stack(
+        (
+            numeric.min(),
+            numeric.max(),
+            numeric.mean(),
+            torch.linalg.vector_norm(numeric),
+        )
+    ).cpu().tolist()
+    sample = flat[:16].float().cpu().tolist()
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
+    logger.info(
+        "[drafter-forward][rank=%d][step=%d] %s shape=%s dtype=%s "
+        "min=%.8e max=%.8e mean=%.8e norm=%.8e sample=%s",
+        rank,
+        step,
+        name,
+        tuple(value.shape),
+        value.dtype,
+        *stats,
+        sample,
+    )
+
+
 # TODO: Remove it when the bug of fx-graph is solved
 # patch vllm_config to be in CompilationMode.NONE temporarily
 @contextmanager
@@ -1086,6 +1115,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
             draft_model.set_skip_topk(False)
 
+        _log_drafter_tensor("input_ids", 0, model_input_ids)
+        _log_drafter_tensor("positions", 0, model_positions)
+        _log_drafter_tensor("hidden_states.input", 0, model_kwargs.get("hidden_states"))
         ret_hidden_states = self.model(**model_kwargs)
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
@@ -1175,6 +1207,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     is_logits=True,
                 )
             draft_token_ids = logits.argmax(dim=-1)
+
+        _log_drafter_tensor("hidden_states.output", 0, last_hidden_states)
+        _log_drafter_tensor("draft_token_ids", 0, draft_token_ids)
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1278,6 +1313,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = model_hidden_states
 
+            spec_step_idx = draft_index + 1
+            _log_drafter_tensor("input_ids", spec_step_idx, model_input_ids)
+            _log_drafter_tensor("positions", spec_step_idx, model_positions)
+            _log_drafter_tensor("hidden_states.input", spec_step_idx, model_kwargs.get("hidden_states"))
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
                 last_hidden_states = ret_hidden_states
@@ -1322,6 +1361,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     logits = logits[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
                 draft_token_ids = logits.argmax(dim=-1)
+
+            _log_drafter_tensor("hidden_states.output", spec_step_idx, last_hidden_states)
+            _log_drafter_tensor("draft_token_ids", spec_step_idx, draft_token_ids)
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
