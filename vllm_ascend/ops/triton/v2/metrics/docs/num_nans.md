@@ -94,16 +94,22 @@ print(num_nans.cpu())  # 期望 [10, 0, 0, 0]
 ## test ut
 
 精度 UT 位于
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_num_nans_kernel.py`，
+`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_num_nans.py`，
 直接测试本 Ascend 内核，与 CPU 参考实现
-（`torch.isnan(logits).sum(dim=-1).to(torch.int32)`）逐位比对：
+（`torch.isnan(logits).sum(dim=-1).to(torch.int32)`）逐位比对
+（`rtol=0, atol=0`）：
 
-- 参数组合：`num_reqs ∈ {1, 2, 4, 8}` × `vocab_size ∈ {128, 1024, 8192,
-  16384}` × `frac_nan ∈ {0.0, 0.1, 0.5, 1.0}`，共 64 组；覆盖单块/多块迭代、
-  部分掩码生效、按比例注入 NaN。
-- 边界专项：`test_no_nans`（全 1 输入，期望每行计数为 0）、
-  `test_all_nans`（全 NaN 输入，期望每行计数等于 `vocab_size`）。
+- 参数组合：`dtype ∈ {fp32, bf16, fp16}` × NaN 布局（行头连续 / 逐行
+  随机散布） × 形状（`(num_reqs, vocab_size)` 覆盖 128/5000/8192/10000/
+  16384，含尾部掩码、非 2 幂、单块/多块 + 部分尾部掩码组合） ×
+  `frac_nan ∈ {0.0, 0.1, 0.5, 1.0}`，共 120 组；`frac_nan=0.0/1.0` 同时
+  覆盖全无 NaN 与全 NaN 边界。数据在 CPU 上以 fp32 构造并注入 NaN 后
+  再转目标 dtype，参考值按转换后的张量计算，验证低精度输入经内核
+  `.to(tl.float32)` 上转后 NaN 不丢失、不误产生。
+- 特殊值专项：`test_num_nans_special_values_not_counted`，将 ±Inf/±0.0/
+  max-finite/min-normal/subnormal 平铺满行，要求计数为 0；另一行在其上
+  叠加散布 NaN，要求恰好计数，防止 CANN `isnan` 退化为无穷/指数类判断。
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_num_nans_kernel.py #--noconftest
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_num_nans.py
 ```
