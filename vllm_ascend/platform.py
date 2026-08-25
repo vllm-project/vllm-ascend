@@ -1104,17 +1104,11 @@ def _setup_compile_backend(
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
-    # Upstream MoE SP shards tokens before the MoE runner, independent shared-
-    # expert DP shards them inside AscendSharedExperts, and DSA-CP shards Q at
-    # its attention boundary. All three layouts require TP-aligned graph gears
-    # so every captured graph has a stable local token shape. Keep the layout
-    # constraint separate from the feature switches so none enables another.
-    requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
         and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         and not vllm_config.model_config.enforce_eager
-        and requires_tp_aligned_capture_sizes
+        and enable_sp(vllm_config)
     ):
         original_sizes = compilation_config.cudagraph_capture_sizes
         sp_aclgraph_sizes = vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
@@ -1193,6 +1187,11 @@ def _setup_worker_and_scheduler(
     # Select worker class and refresh block size
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
+        # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
+        if ("enable_flashcomm1" not in vllm_config.additional_config) and (
+            not os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1")
+        ):
+            parallel_config.all2all_backend = "flashinfer_all2allv"
         if is_310p():
             parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
         elif ascend_config.xlite_graph_config.enabled:
