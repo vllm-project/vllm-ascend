@@ -1391,7 +1391,6 @@ class NPUModelRunner(GPUModelRunner):
         draft_token_idx = logits_indices[target_logits_indices + 1]
         num_reqs = len(num_draft_tokens)
         total_num_sampled_tokens = cu_num_sampled_tokens[-1]
-        max_reqs = self.max_num_reqs
         max_tokens = self.max_num_tokens
         assert total_num_sampled_tokens <= max_tokens
         assert total_num_draft_tokens <= max_tokens
