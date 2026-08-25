@@ -186,6 +186,7 @@ def test_rebuild_parallel_group_after_resume_updates_init_method(worker):
         worker.rebuild_parallel_group_after_resume()
 
     assert worker.distributed_init_method == "tcp://10.0.0.1:29502"
+    assert worker.vllm_config.parallel_config._snapshot_data_parallel_port_list == [29502]
     mock_init.assert_called_once_with()
     assert calls == ["init"]
     assert moe_config.tp_group is tp_group

@@ -828,9 +828,10 @@ class NPUWorker(WorkerBase):
         master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
         if not master_ip:
             raise RuntimeError(f"Unable to resolve master IP for distributed init method: {init_method}")
-        resume_port = self.vllm_config.parallel_config._snapshot_data_parallel_port_list.pop()
-        if not resume_port:
+        resume_ports = self.vllm_config.parallel_config._snapshot_data_parallel_port_list
+        if not resume_ports:
             raise RuntimeError("Snapshot world-group resume port is not configured")
+        resume_port = resume_ports[-1]
         new_method = get_distributed_init_method(master_ip, resume_port)
 
         logger.info(
