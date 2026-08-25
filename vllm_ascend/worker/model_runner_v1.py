@@ -182,6 +182,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     get_c_env,
+    get_kv_cache_tensor_layers,
     global_stream,
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
@@ -4387,15 +4388,16 @@ class NPUModelRunner(GPUModelRunner):
         # have only linear or attention layers, for example, the mtp layer.
         self.hybrid_with_attn_and_mamba = False
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
             use_mamba, use_attn = False, False
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_layers:
                 if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
                     use_mamba = True
                 if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
+            for idx in range(len(shared_layers)):
+                layer_name = shared_layers[idx]
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
                 if (
                     "linear_attn" in layer_name
@@ -4410,11 +4412,11 @@ class NPUModelRunner(GPUModelRunner):
                     # bfloat16 hidden-states data (same bytes, different interpretation).
                     has_mamba = any(
                         isinstance(layer_kv_cache_spec.get(ln), MambaSpec)
-                        for ln in kv_cache_tensor.shared_by
+                        for ln in shared_layers
                     )
                     has_hidden = any(
                         is_hidden_state_cache_spec(layer_kv_cache_spec.get(ln))
-                        for ln in kv_cache_tensor.shared_by
+                        for ln in shared_layers
                     )
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
@@ -4432,13 +4434,13 @@ class NPUModelRunner(GPUModelRunner):
                             cache_size_aligned = kv_cache_tensor.size + alignment
                             tensor_hs = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                             tensor_hs = self._align_memory(tensor_hs, alignment)[: kv_cache_tensor.size]
-                        for layer_name_inner in kv_cache_tensor.shared_by:
+                        for layer_name_inner in shared_layers:
                             if is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name_inner)):
                                 kv_cache_raw_tensors[layer_name_inner] = tensor_hs
                             else:
                                 kv_cache_raw_tensors[layer_name_inner] = tensor
                     else:
-                        for layer_name_inner in kv_cache_tensor.shared_by:
+                        for layer_name_inner in shared_layers:
                             kv_cache_raw_tensors[layer_name_inner] = tensor
 
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
@@ -4450,7 +4452,7 @@ class NPUModelRunner(GPUModelRunner):
                         cache_size_aligned = kv_cache_tensor.size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layers:
                         # shared the kvcache between the self_attn specs in the same group
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif (
@@ -4491,7 +4493,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         raw_cache = (k_tensor,)
 
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layers:
                         kv_cache_raw_tensors[layer_name_inner] = raw_cache
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
@@ -4535,7 +4537,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.sparse_kv_offload_config.keep_device_kv_cache,
                             self._allocate_int8_cache_tensor,
                         )
-                        assert len(kv_cache_tensor.shared_by) == 1, "Sparse KV offload do not support HMA."
+                        assert len(shared_layers) == 1, "Sparse KV offload do not support HMA."
                         kv_cache_raw_tensors[layer_name] = raw_tensors
                         continue
                     # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
@@ -4552,7 +4554,7 @@ class NPUModelRunner(GPUModelRunner):
                             alignment,
                         )
 
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layers:
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             if current_sparse_sfa_c8:
