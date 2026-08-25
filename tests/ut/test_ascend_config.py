@@ -442,7 +442,6 @@ class TestAscendConfig(TestBase):
 
         self.assertEqual(ascend_config.enable_fused_mc2, 1)
         self.assertFalse(ascend_config.enable_mlapo)
-        self.assertFalse(ascend_config.msmonitor_use_daemon)
         self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 2)
         mock_info_once.assert_any_call(
@@ -501,6 +500,16 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         mock_info_once.assert_any_call("AscendConfig.enable_mlapo is set from additional_config with value True.")
         mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_msmonitor_daemon_uses_additional_config(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"msmonitor_use_daemon": True}
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertTrue(ascend_config.msmonitor_use_daemon)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
