@@ -298,6 +298,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.enable_enpu = self.runner.enable_enpu
         self.use_eagle = self.runner.use_eagle
 
+    def restore_runtime_buffers(self) -> None:
+        """Restore immutable device lookup buffers after snapshot resume."""
+        self.arange.copy_(self.arange_cpu)
+
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
             self.speculative_config.disable_padded_drafter_batch

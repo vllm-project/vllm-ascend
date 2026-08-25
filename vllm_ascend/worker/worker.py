@@ -1027,6 +1027,7 @@ class NPUWorker(WorkerBase):
 
         # re-capture graph and warm up model after snapshot restore
         self.model_runner.capture_model()
+        self.model_runner.restore_drafter_runtime_buffers()
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.

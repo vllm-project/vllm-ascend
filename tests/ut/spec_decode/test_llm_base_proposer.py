@@ -21,6 +21,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -38,6 +39,16 @@ NON_FULL_CUDAGRAPH_MODES = [
     CUDAGraphMode.NONE,
     CUDAGraphMode.PIECEWISE,
 ]
+
+
+def test_restore_runtime_buffers_restores_arange() -> None:
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.arange_cpu = torch.arange(8, dtype=torch.int32)
+    proposer.arange = torch.zeros(8, dtype=torch.int32)
+
+    proposer.restore_runtime_buffers()
+
+    torch.testing.assert_close(proposer.arange, proposer.arange_cpu)
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:

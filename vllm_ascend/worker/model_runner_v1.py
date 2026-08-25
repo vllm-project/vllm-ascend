@@ -4031,6 +4031,7 @@ class NPUModelRunner(GPUModelRunner):
         # suspend. MTP/spec-decode paths synchronize these events on the first
         # post-resume request; stale handles cause aclrtSynchronizeEvent failures.
         self._reset_resume_npu_event_handles()
+        self.restore_drafter_runtime_buffers()
         # Clear per-builder runtime metadata cache (MLA/DSA/etc.) so the first
         # post-resume forward cannot read stale host/device tensors.
         self._reset_resume_attention_builder_runtime_states()
@@ -4045,6 +4046,10 @@ class NPUModelRunner(GPUModelRunner):
         self._snapshot_debug_epoch += 1
         self._snapshot_debug_target_forward_count = 0
         self._snapshot_debug_current_forward = -1
+
+    def restore_drafter_runtime_buffers(self) -> None:
+        if isinstance(self.drafter, AscendEagleProposer):
+            self.drafter.restore_runtime_buffers()
 
     def _reset_resume_graph_update_streams(self) -> None:
         if hasattr(self, "update_stream"):
