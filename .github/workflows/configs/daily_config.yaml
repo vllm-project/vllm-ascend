@@ -48,6 +48,7 @@ daily:
         tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
         tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
         tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py
+        tests/e2e/pull_request/two_card/test_sp_pass.py
 
   # --- A3: PR E2E four-card smoke (pytest-driven, runs on a3-4) ---
   # Coverage: DP-TP2 / MTP step3p5 / CP accuracy / graph mode.
