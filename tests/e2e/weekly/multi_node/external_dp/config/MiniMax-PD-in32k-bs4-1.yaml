@@ -51,6 +51,7 @@ templates:
   - node_index: 0
     envs:
       <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       HCCL_BUFFSIZE: "1200"
     server_cmd_template:
       - --host
@@ -101,6 +102,7 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
       HCCL_BUFFSIZE: "512"
     server_cmd_template:
       - --host
@@ -154,6 +156,7 @@ templates:
   - node_index: 2
     envs:
       <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
       HCCL_BUFFSIZE: "512"
     server_cmd_template:
       - --host

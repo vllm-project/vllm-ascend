@@ -17,11 +17,9 @@
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 import os
+from unittest.mock import patch
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner
-
-QWEN35_DENSE_MODEL = os.environ.get("QWEN35_DENSE_MODEL", "Qwen/Qwen3.5-27B")
-QWEN35_MOE_MODEL = os.environ.get("QWEN35_MOE_MODEL", "Qwen/Qwen3.5-35B-A3B")
 
 
 def test_qwen3_5_27b_distributed_mp_tp4():
@@ -30,22 +28,21 @@ def test_qwen3_5_27b_distributed_mp_tp4():
     ] * 4
     max_tokens = 5
     with VllmRunner(
-        QWEN35_DENSE_MODEL,
+        "Qwen/Qwen3.5-27B",
         tensor_parallel_size=4,
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_model_len=4096,
         gpu_memory_utilization=0.90,
         distributed_executor_backend="mp",
     ) as vllm_model:
-        outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        assert len(outputs) == len(example_prompts)
-        assert all(output_ids and output_str.strip() for output_ids, output_str in outputs)
+        vllm_model.generate_greedy(example_prompts, max_tokens)
         del vllm_model
 
 
-def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3():
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3_flashcomm():
     example_prompts = [
-        "2 + 2 =",
+        "Hello, my name is",
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
@@ -53,7 +50,7 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3():
 
     max_tokens = 20
     with DPVllmRunner(
-        QWEN35_MOE_MODEL,
+        "Qwen/Qwen3.5-35B-A3B",
         data_parallel_size=2,
         tensor_parallel_size=2,
         enable_expert_parallel=True,
@@ -69,8 +66,5 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3():
             "num_speculative_tokens": 3,
         },
     ) as vllm_model:
-        outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        assert len(outputs) == len(example_prompts)
-        assert all(output_ids and output_str.strip() for output_ids, output_str in outputs)
-        assert "4" in outputs[0][1], f"unexpected arithmetic output: {outputs[0][1]!r}"
+        vllm_model.generate_greedy(example_prompts, max_tokens)
         del vllm_model

@@ -1401,8 +1401,10 @@ class AscendSFAImpl(MLAAttentionImpl):
     def _prepare_native_hidden_states(
         self,
         hidden_states: torch.Tensor,
-        attn_metadata: M,
+        need_gather_q_kv: bool,
     ) -> torch.Tensor:
+        if self.enable_sp:
+            return torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states.contiguous(), need_gather_q_kv)
         return hidden_states
 
     def _finalize_o_proj(
@@ -1484,6 +1486,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
+        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
@@ -1519,6 +1522,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             fused_type = PreprocessType.NATIVE
 
         if fused_type != PreprocessType.NATIVE:
+            if self.enable_sp:
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                    hidden_states.contiguous(), need_gather_q_kv
+                )
             if fused_type == PreprocessType.PROLOG_V3:
                 assert slot_mapping.numel() == hidden_states.shape[0], (
                     "SFA Prolog V3 requires one cache index per input token, "
@@ -1550,7 +1557,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # native
         else:
             assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
-            hidden_states = self._prepare_native_hidden_states(hidden_states, attn_metadata)
+            hidden_states = self._prepare_native_hidden_states(hidden_states, need_gather_q_kv)
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_no_split = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],

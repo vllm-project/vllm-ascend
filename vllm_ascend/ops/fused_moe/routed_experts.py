@@ -517,8 +517,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            # The SP model wrapper already shards and gathers the MoE sequence.
-            replace_allreduce=self.moe_config.is_sequence_parallel,
+            replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
             quant_type=self.quant_type,
         )
         hidden_states = prepare_output.hidden_states

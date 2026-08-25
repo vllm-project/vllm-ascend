@@ -181,6 +181,14 @@
     - tests/ut/compilation
     - tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py
 
+- name: compilation_sp_pass_pass
+  optional: false
+  source_file_dependencies:
+    - vllm_ascend/compilation/passes/sequence_parallelism_moe.py
+    - vllm_ascend/compilation/passes/sequence_parallelism.py
+  tests:
+    - tests/e2e/pull_request/two_card/test_sp_pass.py
+
 - name: compilation_no_test
   optional: false
   source_file_dependencies:
@@ -229,7 +237,7 @@
     - tests/e2e/pull_request/two_card/test_data_parallel.py
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
     - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
-    - tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py
+    - tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py
     - tests/e2e/pull_request/two_card/test_disaggregated_encoder.py
 
 # EPLB
@@ -383,6 +391,9 @@
     - vllm_ascend/ops/layer_shard_linear.py
   tests:
     - tests/ut/ops
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_deepseek_v2_lite_fc1_tp2
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_fc1_tp2
+    - tests/e2e/pull_request/two_card/test_flashcomm_distributed.py::test_qwen3_dense_prefetch_mlp_weight_tp2
 
 - name: ops_gdn
   optional: false
@@ -834,21 +845,24 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 450
   tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py: 1590
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
-  tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
-  tests/e2e/pull_request/two_card/test_data_parallel.py: 520
-  tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
-  tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 230
-  tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 180
-  tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 560
-  tests/e2e/pull_request/two_card/test_prefix_caching.py: 420
-  tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 260
-  tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 370
-  tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 570
-  tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 470
+  tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 520
+  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 1140
+  tests/e2e/pull_request/two_card/test_data_parallel.py: 560
+  tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 170
+  tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 160
+  tests/e2e/pull_request/two_card/test_flashcomm_distributed.py: 170
+  tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py: 220
+  tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 780
+  tests/e2e/pull_request/two_card/test_prefix_caching.py: 450
+  tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 360
+  tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 330
+  tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 510
+  tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 490
   tests/e2e/pull_request/two_card/test_qwen3_performance.py: 20
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 290
+  tests/e2e/pull_request/two_card/test_sequence_parallelism_moe.py: 60
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 1060
+  tests/e2e/pull_request/two_card/test_sp_pass.py: 280
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 130
   tests/e2e/pull_request/two_card/test_xlite.py: 740
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 500
@@ -864,7 +878,6 @@ estimated_times:
   tests/e2e/pull_request/eight_card/test_glm5_2.py: 1360
   tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 930
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
-  tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 340
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 950
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 690

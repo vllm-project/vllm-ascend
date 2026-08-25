@@ -849,6 +849,12 @@
 # ** 17. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
+#    Why:
+#       support flash comm v1 for qwen3vl.
+#    How：
+#       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
+#    Future Plan:
+#       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
 #   2. `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.start_layer`,
 #      `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.end_layer`
 #    Why:

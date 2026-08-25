@@ -810,11 +810,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
-        # Pre-hc_head residual stream buffer for the speculative draft
-        # (MTP / DSpark / DFlash). Only needed when the decoder consumes
-        # target-model hidden states; allocating it unconditionally would
-        # permanently cost max_num_batched_tokens * hc_dim per rank.
-        # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
+        # Pre-hc_head residual stream buffer for the MTP draft. Only needed
+        # when speculative decoding is enabled; allocating it unconditionally
+        # would permanently cost max_num_batched_tokens * hc_dim per rank.
         spec_config = vllm_config.speculative_config
         needs_mtp_hidden_states = spec_config is not None and (
             spec_config.use_eagle() or spec_config.uses_draft_model()
@@ -849,6 +847,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -887,9 +887,25 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_hidden_states.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
+        # Skipped entirely when speculative decoding is disabled: the buffer
+        # is None and the all_gather below would be pure overhead. When
+        # FlashComm1 (sequence parallelism) is enabled, tokens are
+        # partitioned across TP ranks via reduce_scatter in each layer's
+        # row-parallel output projection.  We must all_gather here so the
+        # MTP layers receive the full token set — otherwise only rank 0's
+        # partition is valid and the rest of the buffer holds stale data,
+        # leading to NaN values and low acceptance rate.
         if self._mtp_hidden_buffer is not None:
-            num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+            if _EXTRA_CTX.flash_comm_v1_enabled:
+                h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
+                pad_size = _EXTRA_CTX.pad_size
+                if pad_size > 0:
+                    h_states_flat = h_states_flat[:-pad_size]
+                num_tokens = h_states_flat.shape[0]
+                self._mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
+            else:
+                num_tokens = hidden_states.shape[0]
+                self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
