@@ -31,6 +31,7 @@ def _apply_attn_res_kernel(
     NUM_CORES: tl.constexpr,
     NB: tl.constexpr,
 ):
+    tl.static_assert(NB >= B + 1, "NB must include all block residuals and prefix_sum")
     block_size = (N - 1) // NUM_CORES + 1
     pid = tl.program_id(0)
     tok0 = pid * block_size
