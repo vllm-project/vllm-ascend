@@ -486,3 +486,41 @@ def test_all_nan_target_logits_in_range(temperature: float):
 
     gc.collect()
     torch.npu.empty_cache()
+
+
+@torch.inference_mode()
+def test_greedy_placeholder_emits_target_argmax():
+    """Greedy sampling skips resampling and relies on the rejection kernel
+    storing the target argmax at the rejected position. A placeholder must not
+    bypass that store, or the output slot is returned uninitialized.
+    """
+    torch.manual_seed(0)
+    device = "npu"
+    num_trials = 512
+    K = 3
+
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device)
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device)
+
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        K,
+        temperature=0.0,
+        num_trials=num_trials,
+    )
+    target_argmax = int(target_logits_1d.argmax())
+    draft_sampled = inputs["draft_sampled"].view(num_trials, K + 1)
+    # Accept the first draft so that the rejection lands on the placeholder.
+    draft_sampled[:, 1] = target_argmax
+    draft_sampled[:, 2:] = -1
+
+    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=K)
+
+    assert torch.equal(num_sampled, torch.full_like(num_sampled, 2))
+    steps = torch.arange(K + 1, device=device).unsqueeze(0)
+    emitted = sampled[steps < num_sampled.unsqueeze(1)]
+    assert (emitted == target_argmax).all(), "Greedy sampling emitted a token that is not the target argmax"
+
+    gc.collect()
+    torch.npu.empty_cache()
