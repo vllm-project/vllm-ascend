@@ -1,0 +1,297 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# One round of the main2main external E2E on the three GPU runners
+# (A2/A3/310P).  Reuses the persistent environment prepared by
+# main2main-e2e-prep.yaml (marker match skips all install steps; a missing
+# env falls back to the inline prep composite).  Each job:
+#
+#   1. checks out the signal branch (accumulated patch + test_groups.json)
+#   2. filters test_groups.json by chip and runs the ready-all tests with
+#      run_selected_tests.sh --timing (same script as PR CI)
+#   3. uploads artifact main2main-e2e-round-<N>-<chip> with results.json +
+#      per-test logs; the flow re-parses them with the ci_log_summary
+#      pipeline (e2e_dispatch.py)
+#
+# Tests that the job never reached are marked NOT_RUN in results.json so a
+# crashed group cannot look like a pass.
+name: main2main E2E exec
+
+on:
+  workflow_dispatch:
+    inputs:
+      vllm:
+        type: string
+        required: true
+        description: 'The vllm commit hash or tag to test (TARGET_COMMIT).'
+      base_ref:
+        type: string
+        required: false
+        default: 'main'
+        description: 'The vllm-ascend base ref (for csrc diff + env marker).'
+      round:
+        type: number
+        required: false
+        default: 1
+        description: 'Fix-loop round number (artifacts carry it).'
+      signal_branch:
+        type: string
+        required: false
+        default: 'main2main_e2e'
+        description: 'Fork branch carrying the accumulated patch + test_groups.json.'
+      timeout_minutes:
+        type: number
+        required: false
+        default: 480
+        description: 'Job timeout in minutes.'
+      image_tag_a3:
+        type: string
+        required: false
+        default: '9.1.0-a3-ubuntu22.04-py3.12'
+        description: 'CANN image tag for the A3 (800i) runner container.'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  e2e:
+    name: e2e-${{ matrix.chip }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chip: a2
+            runner: linux-aarch64-a2b1-8
+            image_tag: 9.1.0-910b-ubuntu22.04-py3.12
+            max_jobs: '184'
+          - chip: a3
+            runner: linux-aarch64-a3-800i-16-cn12-001
+            image_tag: ${{ inputs.image_tag_a3 }}
+            max_jobs: '184'
+          - chip: 310p
+            runner: linux-aarch64-310p-4
+            image_tag: 9.1.0-310p-ubuntu22.04-py3.12
+            max_jobs: '92'
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HF_HUB_OFFLINE: 1
+        MAX_JOBS: 4
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+        UV_HTTP_TIMEOUT: 120
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
+    steps:
+      - name: Check NPU availability
+        run: |
+          npu-smi info
+
+      - name: Check env freshness
+        id: env-check
+        run: |
+          marker="$GITHUB_WORKSPACE/.ready"
+          fresh=false
+          if [ -f "$marker" ] \
+            && grep -qx "vllm=${{ inputs.vllm }}" "$marker" \
+            && grep -qx "base_ref=${{ inputs.base_ref }}" "$marker" \
+            && grep -qx "image_tag=${{ matrix.image_tag }}" "$marker" \
+            && [ -x "$GITHUB_WORKSPACE/.venv/bin/activate" ] \
+            && [ -d "$GITHUB_WORKSPACE/vllm-empty/.git" ] \
+            && [ -d "$GITHUB_WORKSPACE/.git" ]; then
+            fresh=true
+            echo "Reusing prepared env at $GITHUB_WORKSPACE"
+          else
+            echo "Env missing or stale - falling back to inline prep"
+          fi
+          echo "fresh=$fresh" >> "$GITHUB_OUTPUT"
+
+      - name: Build env from scratch (fallback)
+        if: steps.env-check.outputs.fresh != 'true'
+        uses: ./.github/actions/main2main-e2e-prep/action.yaml
+        with:
+          vllm: ${{ inputs.vllm }}
+          base_ref: ${{ inputs.base_ref }}
+          image_tag: ${{ matrix.image_tag }}
+          max_jobs: ${{ matrix.max_jobs }}
+
+      - name: Checkout signal branch
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          # Fresh GITHUB_TOKEN: the prep checkout's stored credential is dead
+          # (expired) — always fetch with an explicit token URL.
+          git fetch --force --no-tags \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}" \
+            "${{ inputs.signal_branch }}"
+          git checkout --force --detach FETCH_HEAD
+          git submodule sync --recursive
+          git submodule update --init --recursive
+          echo "--- signal HEAD ---"
+          git log -1 --oneline
+          ls -la test_groups.json
+
+      - name: Rebuild kernels if csrc inputs changed
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          # Refresh the local base_ref ref (prep-time origin/main may predate
+          # the accumulated patch; diff against the base the patch built on).
+          git fetch --force --no-tags \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}" \
+            "${{ inputs.base_ref }}"
+          BASE_SHA=$(git rev-parse FETCH_HEAD)
+          CHANGED=$(git diff --name-only "$BASE_SHA" HEAD -- csrc setup.py CMakeLists.txt cmake)
+          if [ -n "$CHANGED" ]; then
+            echo "csrc inputs changed vs ${{ inputs.base_ref }} ($BASE_SHA):"
+            echo "$CHANGED"
+            echo "Rebuilding kernels (one-time per csrc change)"
+            source "$GITHUB_WORKSPACE/.venv/bin/activate"
+            export MAX_JOBS=$(( ${{ matrix.max_jobs }} ))
+            uv pip install -e . --no-build-isolation
+          else
+            echo "csrc unchanged - reusing built kernels"
+          fi
+
+      - name: Prepare results dir and filter test groups
+        id: filter
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          RESULTS_DIR="$GITHUB_WORKSPACE/main2main-e2e-results"
+          rm -rf "$RESULTS_DIR"
+          mkdir -p "$RESULTS_DIR"
+          echo "RESULTS_DIR=$RESULTS_DIR" >> "$GITHUB_ENV"
+          python3 - "${{ matrix.chip }}" <<'PY'
+          import json, os, sys
+          chip = sys.argv[1]
+          groups = json.load(open(os.path.join(os.environ["GITHUB_WORKSPACE"], "test_groups.json")))
+          mine = [g for g in groups if g.get("npu_type") == chip]
+          expected = []
+          for g in mine:
+              expected += g.get("tests", "").split()
+          results = os.environ["RESULTS_DIR"]
+          json.dump(mine, open(f"{results}/groups.json", "w"), indent=2)
+          json.dump(expected, open(f"{results}/expected_tests.json", "w"), indent=2)
+          print(f"chip={chip} groups={len(mine)} tests={len(expected)}")
+          if not mine:
+              print("NO_GROUPS")
+          PY
+
+      - name: Run selected tests
+        run: |
+          set -uo pipefail
+          cd "$GITHUB_WORKSPACE"
+          source "$GITHUB_WORKSPACE/.venv/bin/activate"
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+          export VLLM_WORKER_MULTIPROC_METHOD=spawn
+          python3 -c 'import json; [print(json.dumps(g)) for g in json.load(open("'$RESULTS_DIR'/groups.json"))]' \
+            > "$RESULTS_DIR/groups.txt"
+          if [ ! -s "$RESULTS_DIR/groups.txt" ]; then
+            echo "no test groups for this chip - skipping test run"
+            exit 0
+          fi
+          g=0
+          while IFS= read -r gjson; do
+            g=$((g+1))
+            npu=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["npu_type"])' "$gjson")
+            num=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["num_npus"])' "$gjson")
+            tests=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["tests"])' "$gjson")
+            echo "=== group $g: $npu x$num: $tests ==="
+            .github/workflows/scripts/run_selected_tests.sh "$npu" "$num" with-device --timing $tests \
+              > "$RESULTS_DIR/group-$g-$npu-${num}card-run.log" 2>&1
+            rc=$?
+            echo "group $g exit=$rc (timing mode: all targets attempted)"
+            # run_selected_tests.sh reuses one log dir (and resets its
+            # per-group test_index): snapshot the logs before the next group.
+            mkdir -p "$RESULTS_DIR/group-$g-$npu-${num}card"
+            cp "$RUNNER_TEMP"/selected-tests-*/[0-9]*.log \
+              "$RESULTS_DIR/group-$g-$npu-${num}card/" 2>/dev/null || true
+            cp "$RUNNER_TEMP"/selected-tests-*/test_timing_data.json \
+              "$RESULTS_DIR/group-$g-$npu-${num}card/" 2>/dev/null || true
+          done < "$RESULTS_DIR/groups.txt"
+          # Infra errors are reported through the artifact; never fail the
+          # job (the flow re-parses whatever made it to the artifact).
+          exit 0
+
+      - name: Assemble results.json
+        run: |
+          set -uo pipefail
+          cd "$GITHUB_WORKSPACE"
+          python3 - "${{ matrix.chip }}" <<'PY'
+          import json, os, glob, sys
+          chip = sys.argv[1]
+          results = os.environ["RESULTS_DIR"]
+          expected = json.load(open(f"{results}/expected_tests.json"))
+          num_npus = 0
+          for g in json.load(open(f"{results}/groups.json")):
+              num_npus = max(num_npus, int(g.get("num_npus", 0)))
+          entries = []
+          elapsed_total = 0.0
+          for gdir in sorted(glob.glob(f"{results}/group-*")):
+              if not os.path.isdir(gdir):
+                  continue
+              timing = []
+              tpath = f"{gdir}/test_timing_data.json"
+              if os.path.exists(tpath):
+                  timing = json.load(open(tpath))
+              # run_selected_tests.sh names logs ${index}-${slug}.log with
+              # the index restarting per group; timing entries keep order.
+              for i, t in enumerate(timing, 1):
+                  logs = sorted(glob.glob(f"{gdir}/{i}-*"))
+                  passed = bool(t.get("passed"))
+                  entries.append({
+                      "name": t.get("name", ""),
+                      "passed": passed,
+                      "exit_code": 0 if passed else 1,
+                      "elapsed": float(t.get("elapsed", 0)),
+                      "log": os.path.basename(logs[0]) if logs else "",
+                      "status": "PASSED" if passed else "FAILED",
+                  })
+                  elapsed_total += float(t.get("elapsed", 0))
+          ran = {e["name"] for e in entries if e["name"]}
+          for name in expected:
+              if name not in ran:
+                  entries.append({"name": name, "passed": False,
+                                  "exit_code": 1, "elapsed": 0.0, "log": "",
+                                  "status": "NOT_RUN"})
+          out = {"chip": chip, "npu_type": chip, "num_npus": num_npus,
+                 "elapsed_s": round(elapsed_total, 1), "tests": entries}
+          json.dump(out, open(f"{results}/results.json", "w"), indent=2)
+          print(f"results.json: {len(entries)} tests "
+                f"({len(ran)} run, {len(entries) - len(ran)} not-run)")
+          PY
+
+      - name: Upload E2E results
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: main2main-e2e-round-${{ inputs.round }}-${{ matrix.chip }}
+          path: ${{ github.workspace }}/main2main-e2e-results/*
+          if-no-files-found: ignore
+          retention-days: 14

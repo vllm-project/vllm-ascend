@@ -1,0 +1,226 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# Build the persistent main2main E2E environment from scratch on a GPU
+# runner: vllm (TARGET_DEVICE=empty) + vllm-ascend editable install +
+# csrc cache restore/compile + all test dependencies, everything under
+# $GITHUB_WORKSPACE (persistent on the self-hosted runner's filesystem).
+#
+# The workspace layout is fixed so the exec workflow (main2main-e2e.yaml)
+# can reuse it across rounds:
+#   $GITHUB_WORKSPACE/vllm-empty   vllm checkout + install
+#   $GITHUB_WORKSPACE/.venv        venv (system-site-packages: sees the
+#                                  container's CANN/torch)
+#   $GITHUB_WORKSPACE              vllm-ascend checkout (editable install ->
+#                                  python patches apply without reinstall)
+#   $GITHUB_WORKSPACE/.ready       freshness marker (vllm/base_ref/image_tag)
+#
+# The caller decides whether a rebuild is needed (marker check) and skips
+# this composite when the env is already fresh.  Steps mirror
+# _selected_tests.yaml's install section.
+name: main2main E2E env prep
+
+inputs:
+  vllm:
+    required: true
+    description: 'vllm commit to test against (TARGET_COMMIT).'
+  base_ref:
+    required: false
+    default: 'main'
+    description: 'vllm-ascend ref to prepare (usually main).'
+  image_tag:
+    required: true
+    description: 'CANN container image tag for this chip.'
+  max_jobs:
+    required: false
+    default: '96'
+    description: 'MAX_JOBS for the csrc build on this chip.'
+
+runs:
+  using: composite
+  steps:
+    - name: Clean previous env state
+      shell: bash -el {0}
+      run: |
+        # The ascend checkout is reset by actions/checkout below; wipe the
+        # parts checkout never touches (venv + vllm checkout + marker).
+        rm -rf "$GITHUB_WORKSPACE/vllm-empty" \
+               "$GITHUB_WORKSPACE/.venv" \
+               "$GITHUB_WORKSPACE/.ready" \
+               "$GITHUB_WORKSPACE"/main2main-e2e-round-*
+
+    - name: Install packages
+      shell: bash -el {0}
+      run: |
+        sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+        pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+        apt-get update -y
+        apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        pip install uv
+
+    - name: Create persistent venv
+      shell: bash -el {0}
+      run: |
+        # --system-site-packages: the CANN container's system python holds
+        # torch/torch_npu; the venv only layers the project deps on top.
+        uv venv --system-site-packages "$GITHUB_WORKSPACE/.venv" \
+          || python3 -m venv --system-site-packages "$GITHUB_WORKSPACE/.venv"
+        "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install --upgrade uv || true
+
+    - name: Checkout vllm-project/vllm repo
+      uses: actions/checkout@v7
+      with:
+        repository: vllm-project/vllm
+        ref: ${{ inputs.vllm }}
+        path: ./vllm-empty
+
+    - name: Install vllm-project/vllm from source
+      shell: bash -el {0}
+      working-directory: ./vllm-empty
+      run: |
+        source "$GITHUB_WORKSPACE/.venv/bin/activate"
+        VLLM_TARGET_DEVICE=empty uv pip install .
+        pip uninstall -y triton
+
+    - name: Checkout vllm-project/vllm-ascend repo
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ inputs.base_ref }}
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: Get csrc hash
+      id: get_csrc_hash
+      shell: bash -el {0}
+      run: |
+        # Fail closed so a git error cannot be converted into sha256(empty)
+        # and then appear to be a legitimate cache miss.
+        set -euo pipefail
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        cd "$GITHUB_WORKSPACE"
+
+        # Match the cache producer's tracked csrc build inputs exactly.
+        CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+        if [ -z "$CSRC_MANIFEST" ]; then
+          echo "::error::No tracked csrc inputs found."
+          exit 1
+        fi
+
+        CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
+        echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
+
+    - name: Get architecture
+      id: get_arch
+      shell: bash -el {0}
+      run: |
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
+          aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
+          *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
+        esac
+
+    - name: Restore vllm-ascend csrc cache
+      id: cache-csrc
+      uses: runs-on/cache/restore@v5
+      with:
+        path: |
+          vllm_ascend/_cann_ops_custom
+          vllm_ascend/*.so
+          vllm_ascend/lib
+          vllm_ascend/include
+        key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ inputs.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+        # Same tolerance as PR CI: a miss compiles on the NPU runner once,
+        # after which the artifacts persist in the workspace.
+        fail-on-cache-miss: false
+
+    - name: Install Mooncake wheel
+      shell: bash -el {0}
+      run: |
+        set -euxo pipefail
+
+        apt-get install -y --no-install-recommends \
+          libibverbs1 \
+          ibverbs-providers \
+          librdmacm1 \
+          libnuma1
+        ldconfig
+
+        source "$GITHUB_WORKSPACE/.venv/bin/activate"
+        pip install --no-cache-dir --no-deps \
+          -i https://mirrors.aliyun.com/pypi/simple/ \
+          mooncake-transfer-engine-npu==0.3.11.post1
+
+        pip show mooncake-transfer-engine-npu || true
+
+    - name: Install vllm-project/vllm-ascend with device
+      env:
+        CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+      shell: bash -el {0}
+      run: |
+        source "$GITHUB_WORKSPACE/.venv/bin/activate"
+        export MAX_JOBS=$(( ${{ inputs.max_jobs }} ))
+        pip install uc-manager
+        uv pip install -r requirements-dev.txt
+        uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
+        # Preserve CI availability during the transition by compiling on the
+        # NPU only when the new CPU-produced cache is unavailable.
+        if [ "$CSRC_CACHE_HIT" = "true" ]; then
+          echo "csrc cache hit: skip kernel compilation"
+          COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+        else
+          echo "csrc cache miss: compile kernels on the NPU runner"
+          uv pip install -e . --no-build-isolation
+        fi
+
+    - name: Verify required AscendC custom ops are registered (310p)
+      if: ${{ inputs.image_tag == '9.1.0-310p-ubuntu22.04-py3.12' }}
+      shell: bash -el {0}
+      run: |
+        source "$GITHUB_WORKSPACE/.venv/bin/activate"
+        python - <<'PY'
+        import sys, torch
+        import vllm_ascend.vllm_ascend_C  # noqa: F401
+        ops = torch.ops._C_ascend
+        missing = [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if not hasattr(ops, n)]
+        if missing:
+            print(f"::error::Missing AscendC ops after install: {missing}. "
+                  f"Cache contents are stale or build skipped registration.", file=sys.stderr)
+            sys.exit(1)
+        print("AscendC chunk-gdr ops registered:",
+              [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if hasattr(ops, n)])
+        PY
+
+    - name: Uninstall Triton for 310P tests
+      if: ${{ inputs.image_tag == '9.1.0-310p-ubuntu22.04-py3.12' }}
+      shell: bash -el {0}
+      run: |
+        source "$GITHUB_WORKSPACE/.venv/bin/activate"
+        pip uninstall -y triton-ascend triton
+
+    - name: Write freshness marker
+      shell: bash -el {0}
+      run: |
+        cat > "$GITHUB_WORKSPACE/.ready" <<EOF
+        vllm=${{ inputs.vllm }}
+        base_ref=${{ inputs.base_ref }}
+        image_tag=${{ inputs.image_tag }}
+        ready=true
+        EOF
+        echo "Prepared main2main E2E env:"
+        cat "$GITHUB_WORKSPACE/.ready"
