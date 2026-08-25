@@ -28,6 +28,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
+from vllm.v1.worker.gpu import pcp_manager as vllm_pcp_manager
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
@@ -70,6 +71,27 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+
+@contextmanager
+def _use_ascend_pcp_manager_for_vllm_0271():
+    """Make the legacy vLLM PCP builder instantiate the Ascend manager.
+
+    vLLM 0.27.1 hard-codes ``PCPManager`` inside
+    ``maybe_build_pcp_manager``. Newer versions accept a manager class from
+    the model runner, so this compatibility shim is needed only while the
+    legacy builder runs.
+    """
+    if not vllm_version_is("0.27.1"):
+        yield
+        return
+
+    original_pcp_manager_cls = vllm_pcp_manager.PCPManager
+    vllm_pcp_manager.PCPManager = AscendPCPManager
+    try:
+        yield
+    finally:
+        vllm_pcp_manager.PCPManager = original_pcp_manager_cls
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -190,7 +212,7 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        with graph_manager_wrapper(self):
+        with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -702,6 +724,7 @@ class NPUModelRunner(GPUModelRunner):
                     input_batch.num_scheduled_tokens
                     - (input_batch.num_draft_tokens_per_req if input_batch.num_draft_tokens_per_req is not None else 0),
                 )
+
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
 

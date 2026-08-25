@@ -20,12 +20,19 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
+from vllm.config import CUDAGraphMode
+from vllm.v1.worker.gpu import pcp_manager as vllm_pcp_manager
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.model_runner import (
+    NPUModelRunner,
+    _use_ascend_pcp_manager_for_vllm_0271,
+)
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
@@ -240,3 +247,53 @@ def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> Non
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
     runner = NPUModelRunner.__new__(NPUModelRunner)
     assert runner.pcp_manager_cls is AscendPCPManager
+
+
+@pytest.mark.skipif(
+    not vllm_version_is("0.27.1"),
+    reason="vLLM 0.27.1 is the only version with the hard-coded PCP manager builder",
+)
+def test_vllm_0271_builder_uses_ascend_pcp_manager() -> None:
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=4,
+            max_num_batched_tokens=16,
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        ),
+    )
+    original_pcp_manager_cls = vllm_pcp_manager.PCPManager
+
+    with (
+        patch(
+            "vllm.v1.worker.gpu.pcp_manager.get_pcp_group",
+            return_value=SimpleNamespace(rank_in_group=0),
+        ),
+        patch.object(PCPManager, "validate_config") as upstream_validate_config,
+        patch.object(AscendPCPManager, "__init__", return_value=None) as init_manager,
+        _use_ascend_pcp_manager_for_vllm_0271(),
+    ):
+        manager = vllm_pcp_manager.maybe_build_pcp_manager(
+            vllm_config,
+            torch.device("cpu"),
+            False,
+            object(),
+            object(),
+        )
+
+    assert type(manager) is AscendPCPManager
+    assert vllm_pcp_manager.PCPManager is original_pcp_manager_cls
+    upstream_validate_config.assert_called_once()
+    validated_config, supports_mm_inputs = upstream_validate_config.call_args.args
+    assert validated_config is not vllm_config
+    assert validated_config.compilation_config is not vllm_config.compilation_config
+    assert validated_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+    assert supports_mm_inputs is False
+    init_manager.assert_called_once()
