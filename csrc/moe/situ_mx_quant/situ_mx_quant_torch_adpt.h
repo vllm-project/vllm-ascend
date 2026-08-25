@@ -45,6 +45,8 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant(
                 "situ_mx_quant: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
                 dst_type);
     if (group_list.has_value()) {
+        TORCH_CHECK(group_list->device() == x.device(),
+                    "situ_mx_quant: group_list must be on the same device as x");
         TORCH_CHECK(group_list->dim() == 1 && group_list->numel() > 0,
                     "situ_mx_quant: group_list must be a non-empty 1-D tensor");
         TORCH_CHECK(group_list->scalar_type() == at::kLong,
