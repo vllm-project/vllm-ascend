@@ -10,6 +10,10 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
@@ -35,9 +39,13 @@ from vllm_ascend.models.kimi_k3 import (
 from vllm_ascend.models.llama_eagle3 import (
     get_rotation_matrix,
     get_rotation_path,
-    prepare_quarot_shared_layer,
+    load_quarot_target_layer,
 )
-from vllm_ascend.models.qwen3_dspark import process_weight
+from vllm_ascend.models.qwen3_dspark import (
+    TARGET_EMBED_WEIGHT_NAMES,
+    TARGET_LM_HEAD_WEIGHT_NAMES,
+    process_weight,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 
 
@@ -241,27 +249,20 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             scale=getattr(self.config, "logit_scale", 1.0),
         )
         self.rotation_path = get_rotation_path(vllm_config)
-        self._shared_layer_rotation: torch.Tensor | None = None
-
-    def prepare_shared_layer(
-        self,
-        draft_layer: nn.Module | None,
-        target_layer: nn.Module,
-        label: str,
-    ) -> nn.Module | None:
-        rotation = self._shared_layer_rotation
-        if rotation is None:
-            return None
-        draft_layer, self._shared_layer_rotation = prepare_quarot_shared_layer(
-            draft_layer,
-            target_layer,
-            rotation,
-            label,
-        )
-        return draft_layer
-
-    def finish_shared_layer_preparation(self) -> None:
-        self._shared_layer_rotation = None
+        self.target_model_path = vllm_config.model_config.model
+        if self.rotation_path is not None:
+            target_config = vllm_config.model_config.hf_text_config
+            model_prefix = maybe_prefix(prefix, "model")
+            self.model.embed_tokens = VocabParallelEmbedding(
+                target_config.vocab_size,
+                target_config.hidden_size,
+                prefix=maybe_prefix(model_prefix, "embed_tokens"),
+            )
+            self.lm_head = ParallelLMHead(
+                target_config.vocab_size,
+                target_config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
 
     def load_weights(
         self,
@@ -275,10 +276,9 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         interface without creating that extra packed parameter.
         """
         loader = AutoWeightsLoader(self)
-        self._shared_layer_rotation = None
+        rotation_weight = None
         if self.rotation_path is not None:
             rotation_weight = get_rotation_matrix(self.rotation_path)
-            self._shared_layer_rotation = rotation_weight
             weights = (
                 (
                     name,
@@ -286,7 +286,30 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
                 )
                 for name, loaded_weight in weights
             )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_weights = loader.load_weights(
+            weights,
+            mapper=self.hf_to_vllm_mapper,
+        )
+        if rotation_weight is not None:
+            assert self.model.embed_tokens is not None
+            assert self.lm_head is not None
+            load_quarot_target_layer(
+                self.model.embed_tokens,
+                self.target_model_path,
+                TARGET_EMBED_WEIGHT_NAMES,
+                rotation_weight,
+                "draft embed_tokens.weight",
+            )
+            load_quarot_target_layer(
+                self.lm_head,
+                self.target_model_path,
+                TARGET_LM_HEAD_WEIGHT_NAMES,
+                rotation_weight,
+                "draft lm_head.weight",
+            )
+            self.has_own_embed_tokens = True
+            self.has_own_lm_head = True
+        return loaded_weights
 
     def embed_input_ids(
         self,

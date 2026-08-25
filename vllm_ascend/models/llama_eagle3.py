@@ -1,10 +1,11 @@
-import copy
+import json
 import logging
 import os
 from collections.abc import Iterable
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file
 from torch import nn
 from vllm.config import VllmConfig
@@ -54,34 +55,71 @@ def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
         raise e
 
 
+def _find_safetensors_weight(
+    model_path: Path,
+    weight_names: tuple[str, ...],
+) -> tuple[Path, str]:
+    """Locate one target tensor without loading unrelated checkpoint shards."""
+    for index_path in sorted(model_path.glob("*.safetensors.index.json")):
+        with index_path.open(encoding="utf-8") as index_file:
+            weight_map = json.load(index_file).get("weight_map", {})
+        for weight_name in weight_names:
+            if shard_name := weight_map.get(weight_name):
+                return model_path / shard_name, weight_name
+
+    for shard_path in sorted(model_path.glob("*.safetensors")):
+        with safe_open(shard_path, framework="pt", device="cpu") as shard:
+            shard_keys = set(shard.keys())
+        for weight_name in weight_names:
+            if weight_name in shard_keys:
+                return shard_path, weight_name
+
+    raise KeyError(f"None of {weight_names!r} was found in the target checkpoint at {model_path}.")
+
+
 @torch.inference_mode()
-def prepare_quarot_shared_layer(
-    draft_layer: nn.Module | None,
-    target_layer: nn.Module,
+def load_quarot_target_layer(
+    layer: nn.Module,
+    target_model_path: Path | str,
+    weight_names: tuple[str, ...],
     rotation: torch.Tensor,
     label: str,
-) -> tuple[nn.Module, torch.Tensor]:
-    """Create a draft-owned target layer in the unrotated hidden basis."""
-    if draft_layer is None:
-        comm_group = getattr(target_layer, "comm_group", None)
-        memo = {id(comm_group): comm_group} if comm_group is not None else None
-        draft_layer = copy.deepcopy(target_layer, memo)
+) -> None:
+    """Load one target vocab shard into the draft's unrotated hidden basis."""
+    target_model_path = Path(target_model_path)
+    shard_path, weight_name = _find_safetensors_weight(
+        target_model_path,
+        weight_names,
+    )
+    shard_indices = getattr(layer, "shard_indices", None)
+    if shard_indices is None:
+        start_index = 0
+        end_index = layer.weight.shape[0]
+    else:
+        start_index = shard_indices.org_vocab_start_index
+        end_index = shard_indices.org_vocab_end_index
+
+    with safe_open(shard_path, framework="pt", device="cpu") as shard:
+        target_weight = shard.get_slice(weight_name)[start_index:end_index]
 
     rotation = rotation.to(
-        device=target_layer.weight.device,
+        device=layer.weight.device,
         dtype=torch.float32,
     )
-    unrotated = torch.matmul(
-        target_layer.weight.data.to(torch.float32),
-        rotation.T,
+    target_weight = target_weight.to(
+        device=layer.weight.device,
+        dtype=torch.float32,
     )
-    draft_layer.weight.data.copy_(unrotated.to(draft_layer.weight.dtype))
+    aligned_weight = torch.matmul(target_weight, rotation.T)
+    loaded_rows = aligned_weight.shape[0]
+    layer.weight.data[:loaded_rows].copy_(aligned_weight.to(layer.weight.dtype))
+    layer.weight.data[loaded_rows:].zero_()
     logger.info(
-        "[spec_decode/quarot] Copied and aligned shared %s (weight=%s).",
+        "[spec_decode/quarot] Loaded and aligned %s from %s (%s).",
         label,
-        tuple(draft_layer.weight.shape),
+        shard_path.name,
+        tuple(layer.weight.shape),
     )
-    return draft_layer, rotation
 
 
 def compute_rotation_matrix3(Q: torch.Tensor) -> torch.Tensor:
