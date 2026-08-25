@@ -45,32 +45,58 @@ def _npu_gumbel_block_argmax(
     temp_ptr,
     seeds_ptr,
     pos_ptr,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
+    # [max_num_reqs, num_cols, vocab_size]
+    logits_cache_ptr,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
+    logits_cache_col_ptr,
     vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr = False,
 ):
-    # Convert token_idx to int64 before pointer arithmetic so the offset
-    # does not overflow int32 at large token counts (matches the other
-    # kernels that cast tl.program_id(0) up front).
+    # NPU port of the upstream gumbel_block_argmax (vllm/v1/worker/gpu/
+    # sample/gumbel.py). The signature must stay aligned with upstream so
+    # this can be patched into rejection_sampler_utils.gumbel_block_argmax
+    # and resolved by the upstream kernels. NPU adaptations:
+    #   1. token_idx is upcast to int64 before pointer arithmetic so the
+    #      offset does not overflow int32 at large token counts.
+    #   2. pos is cast to int32: triton-ascend's philox (umulhi) only
+    #      supports int32/uint32 operands.
+    #   3. Noise is always fp32 tl.rand clamped away from zero (equivalent
+    #      to upstream tl_rand32 includes_zero=False); fp64 (tl_rand64) is
+    #      unsupported on NPU and guarded at the host level.
+    #   4. Plain scalar loads instead of upstream's mask=is_valid_req
+    #      masked loads: req_state_idx is always valid in the rejection
+    #      sampler path and 0-d masked loads are unverified on
+    #      triton-ascend.
     token_idx = token_idx.to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    if temp != 0.0 and APPLY_TEMPERATURE:
-        logits = logits / temp
-
-    if processed_logits_ptr is not None:
-        if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
+    if logits_cache_ptr is not None:
+        # Store the logits *before* temperature. Dividing first would
+        # produce a value that is generally not representable in the
+        # cache's dtype, forcing it to be fp32. Consumers (the rejection
+        # sampler) divide by the same temperature on load, which
+        # reproduces the value used below bitwise.
+        if PER_TOKEN_COL:
+            col = tl.load(logits_cache_col_ptr + token_idx)
         else:
-            col = 0
+            col = tl.load(logits_cache_col_ptr)
         tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
+            logits_cache_ptr + req_state_idx * logits_cache_stride_0 + col * logits_cache_stride_1 + block,
             logits,
             mask=mask,
         )
 
+    if temp != 0.0 and APPLY_TEMPERATURE:
+        # Apply temperature.
+        # NOTE(woosuk): Match the behavior of _temperature_kernel.
+        # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
+        logits = logits / temp
+
+    # NPU: fp64 is unsupported; always reduce in fp32. USE_FP64 is kept
+    # for signature compatibility and guarded at the host level.
     logits = logits.to(tl.float32)
     if temp != 0.0:
         seed = tl.load(seeds_ptr + req_state_idx)
@@ -78,9 +104,15 @@ def _npu_gumbel_block_argmax(
         # supports int32/uint32). Position values fit in int32 in practice.
         pos = tl.load(pos_ptr + token_idx).to(tl.int32)
         gumbel_seed = tl.randint(seed, pos)
-        # NPU: use tl.rand (float32) instead of tl_rand64 (float64 not supported)
-        r = tl.rand(gumbel_seed, block).to(tl.float32)
-        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+        # NPU: tl.rand (fp32) clamped away from zero, matching upstream
+        # tl_rand32(includes_zero=False). Draw the large-noise tail (which
+        # decides the argmax winner) from u -> 0, where fp32 has fine
+        # resolution, instead of u -> 1 (see upstream gumbel.py for the
+        # full log1p rationale).
+        u = tl.rand(gumbel_seed, block).to(tl.float32)
+        u = tl.maximum(u, 4.6566127342e-10)
+        gumbel_noise = -tl.log(-tldevice.log1p(-u))
+        # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
 
     value, idx = tl.max(logits, axis=0, return_indices=True)
@@ -222,11 +254,13 @@ def _resample_kernel(
         temp_ptr,
         seed_ptr,
         pos_ptr,
-        None,
-        0,
-        None,
+        None,  # logits_cache_ptr
+        0,  # logits_cache_stride_0
+        0,  # logits_cache_stride_1
+        None,  # logits_cache_col_ptr
         vocab_size,
         APPLY_TEMPERATURE=False,
+        USE_FP64=False,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(
