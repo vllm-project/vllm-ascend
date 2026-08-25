@@ -26,8 +26,15 @@ constexpr uint32_t DCP_SIZE_ATTR_INDEX = 0;
 constexpr uint32_t DCP_RANK_ATTR_INDEX = 1;
 constexpr uint32_t INTERLEAVE_SIZE_ATTR_INDEX = 2;
 constexpr uint32_t MAX_TOP_K = 8192;
+constexpr uint32_t MAX_CHUNK_ELEMENTS = 2048;
+constexpr uint32_t MIN_CHUNK_ELEMENTS = 256;
+constexpr uint32_t VECTOR_ALIGN_ELEMENTS = 256;
 constexpr uint32_t ALIGN_BYTES = 32;
 constexpr uint64_t UB_RESERVED_BYTES = 8 * 1024;
+constexpr uint32_t POWER_OF_TWO_BUFFER_COUNT = 4;
+constexpr uint32_t VECTOR_MAGIC_BUFFER_COUNT = 8;
+constexpr uint32_t MASK_BUFFER_COUNT = 3;
+constexpr uint32_t LIBDIVIDE_ADD_MARKER = 0x40;
 
 uint32_t AlignUp(uint64_t value, uint32_t alignment)
 {
@@ -48,6 +55,37 @@ bool IsPowerOfTwo(uint32_t value)
 {
     return value != 0 && (value & (value - 1)) == 0;
 }
+
+struct U32MagicDivider {
+    uint32_t magic;
+    uint32_t more;
+};
+
+// Host-side equivalent of libdivide_u32_gen. The A3 kernel synthesizes the
+// corresponding unsigned mulhi exactly from 16-bit partial products.
+U32MagicDivider MakeU32MagicDivider(uint32_t divisor)
+{
+    uint32_t floorLog2 = Log2Floor(divisor);
+    if (IsPowerOfTwo(divisor)) {
+        return {0, floorLog2};
+    }
+
+    uint64_t dividend = uint64_t{1} << (32 + floorLog2);
+    uint32_t proposedMagic = static_cast<uint32_t>(dividend / divisor);
+    uint32_t remainder = static_cast<uint32_t>(dividend % divisor);
+    uint32_t error = divisor - remainder;
+    uint32_t more = floorLog2;
+    if (error >= (uint32_t{1} << floorLog2)) {
+        proposedMagic += proposedMagic;
+        uint32_t twiceRemainder = remainder + remainder;
+        if (twiceRemainder >= divisor || twiceRemainder < remainder) {
+            ++proposedMagic;
+        }
+        more |= LIBDIVIDE_ADD_MARKER;
+    }
+    return {proposedMagic + 1, more};
+}
+
 }  // namespace
 
 static ge::graphStatus SfaRemapSparseIndicesTilingFunc(gert::TilingContext* context)
@@ -132,9 +170,9 @@ static ge::graphStatus SfaRemapSparseIndicesTilingFunc(gert::TilingContext* cont
     OP_CHECK_NULL_WITH_CONTEXT(context, dcpSizePtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, dcpRankPtr);
     OP_CHECK_NULL_WITH_CONTEXT(context, interleaveSizePtr);
-    if (*dcpSizePtr <= 1 || *dcpSizePtr > std::numeric_limits<uint32_t>::max() ||
+    if (*dcpSizePtr <= 1 || *dcpSizePtr > std::numeric_limits<int32_t>::max() ||
         *dcpRankPtr < 0 || *dcpRankPtr >= *dcpSizePtr ||
-        *interleaveSizePtr <= 0 || *interleaveSizePtr > std::numeric_limits<uint32_t>::max()) {
+        *interleaveSizePtr <= 0 || *interleaveSizePtr > std::numeric_limits<int32_t>::max()) {
         OP_LOGE(context->GetNodeName(), "Invalid dcpSize, dcpRank, or interleaveSize.");
         return ge::GRAPH_FAILED;
     }
@@ -144,16 +182,40 @@ static ge::graphStatus SfaRemapSparseIndicesTilingFunc(gert::TilingContext* cont
     uint32_t interleaveSize = static_cast<uint32_t>(*interleaveSizePtr);
     uint32_t interleaveShift = Log2Floor(interleaveSize);
     uint32_t dcpInterleaveShift = interleaveShift + Log2Floor(dcpSize);
-    bool usePowerOfTwo = IsPowerOfTwo(dcpSize) && IsPowerOfTwo(interleaveSize) &&
-                         dcpSize < static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) &&
-                         dcpInterleaveShift < 32;
+    bool usePowerOfTwo = IsPowerOfTwo(dcpSize) && IsPowerOfTwo(interleaveSize);
+    U32MagicDivider interleaveDivider = MakeU32MagicDivider(interleaveSize);
+    U32MagicDivider dcpDivider = MakeU32MagicDivider(dcpSize);
 
-    uint32_t bufferBytes = AlignUp(static_cast<uint64_t>(topK) * sizeof(int32_t), ALIGN_BYTES);
-    uint64_t requiredUbBytes = static_cast<uint64_t>(bufferBytes) * 2 + UB_RESERVED_BYTES;
+    // Process wide rows in stable chunks. This keeps the exact Vector path for
+    // every supported topK instead of falling back to a Scalar compaction when
+    // the full row does not fit in UB.
+    uint32_t fullBufferCount = usePowerOfTwo ? POWER_OF_TWO_BUFFER_COUNT : VECTOR_MAGIC_BUFFER_COUNT;
+    uint32_t chunkElements = std::min(topK, MAX_CHUNK_ELEMENTS);
+    uint32_t alignedElements = 0;
+    uint32_t bufferBytes = 0;
+    uint32_t maskBytes = 0;
+    uint64_t requiredUbBytes = 0;
+    while (true) {
+        alignedElements = AlignUp(chunkElements, VECTOR_ALIGN_ELEMENTS);
+        bufferBytes = AlignUp(static_cast<uint64_t>(alignedElements) * sizeof(int32_t), ALIGN_BYTES);
+        maskBytes = AlignUp((alignedElements + 7) / 8, ALIGN_BYTES);
+        requiredUbBytes = static_cast<uint64_t>(bufferBytes) * fullBufferCount +
+                          static_cast<uint64_t>(maskBytes) * MASK_BUFFER_COUNT + UB_RESERVED_BYTES;
+        if (requiredUbBytes <= ubSize) {
+            break;
+        }
+        if (chunkElements <= MIN_CHUNK_ELEMENTS) {
+            break;
+        }
+        chunkElements = std::max(MIN_CHUNK_ELEMENTS, chunkElements / 2);
+    }
     if (requiredUbBytes > ubSize) {
-        OP_LOGE(context->GetNodeName(), "UB size is insufficient for topK=%u.", topK);
+        OP_LOGE(context->GetNodeName(),
+                "UB size is insufficient for a 256-element Vector chunk: required=%lu, available=%lu.",
+                requiredUbBytes, ubSize);
         return ge::GRAPH_FAILED;
     }
+    bool useVectorMagicDivision = !usePowerOfTwo;
 
     uint32_t usedCoreNum = std::min(rows, aivCoreNum);
     uint32_t rowsPerCore = (rows + usedCoreNum - 1) / usedCoreNum;
@@ -167,8 +229,15 @@ static ge::graphStatus SfaRemapSparseIndicesTilingFunc(gert::TilingContext* cont
     tilingData.set_interleaveShift(interleaveShift);
     tilingData.set_dcpInterleaveShift(dcpInterleaveShift);
     tilingData.set_usePowerOfTwo(static_cast<uint32_t>(usePowerOfTwo));
+    tilingData.set_useVectorMagicDivision(static_cast<uint32_t>(useVectorMagicDivision));
+    tilingData.set_interleaveMagic(interleaveDivider.magic);
+    tilingData.set_interleaveMore(interleaveDivider.more);
+    tilingData.set_dcpMagic(dcpDivider.magic);
+    tilingData.set_dcpMore(dcpDivider.more);
     tilingData.set_rowsPerCore(rowsPerCore);
+    tilingData.set_chunkElements(chunkElements);
     tilingData.set_bufferBytes(bufferBytes);
+    tilingData.set_maskBytes(maskBytes);
 
     size_t* workspaceSize = context->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, workspaceSize);

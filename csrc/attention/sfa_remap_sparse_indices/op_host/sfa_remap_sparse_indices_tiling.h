@@ -23,8 +23,15 @@ BEGIN_TILING_DATA_DEF(SfaRemapSparseIndicesTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, interleaveShift);
     TILING_DATA_FIELD_DEF(uint32_t, dcpInterleaveShift);
     TILING_DATA_FIELD_DEF(uint32_t, usePowerOfTwo);
+    TILING_DATA_FIELD_DEF(uint32_t, useVectorMagicDivision);
+    TILING_DATA_FIELD_DEF(uint32_t, interleaveMagic);
+    TILING_DATA_FIELD_DEF(uint32_t, interleaveMore);
+    TILING_DATA_FIELD_DEF(uint32_t, dcpMagic);
+    TILING_DATA_FIELD_DEF(uint32_t, dcpMore);
     TILING_DATA_FIELD_DEF(uint32_t, rowsPerCore);
+    TILING_DATA_FIELD_DEF(uint32_t, chunkElements);
     TILING_DATA_FIELD_DEF(uint32_t, bufferBytes);
+    TILING_DATA_FIELD_DEF(uint32_t, maskBytes);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(SfaRemapSparseIndices, SfaRemapSparseIndicesTilingData)
