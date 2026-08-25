@@ -134,7 +134,10 @@ class NPUModelRunner(GPUModelRunner):
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
-        self.req_states: AscendRequestState = AscendRequestState(
+        # TODO: Refactor the 310P fallback to use Triton Dispatcher after vLLM
+        # RFC #45133 lands.
+        request_state_cls = getattr(self, "request_state_cls", AscendRequestState)
+        self.req_states: AscendRequestState = request_state_cls(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
@@ -258,6 +261,89 @@ class NPUModelRunner(GPUModelRunner):
                 self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
+    def _prepare_prefill_inputs(
+        self,
+        input_ids: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        all_token_ids: torch.Tensor,
+        prefill_len: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        *,
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+    ) -> None:
+        # TODO: Refactor platform overrides to use Triton Dispatcher after
+        # vLLM RFC #45133 lands.
+        del idx_mapping_np, query_start_loc_np
+        prepare_prefill_inputs(
+            input_ids,
+            next_prefill_tokens,
+            idx_mapping,
+            query_start_loc,
+            all_token_ids,
+            prefill_len,
+            num_computed_tokens,
+        )
+
+    def _prepare_pos_seq_lens(
+        self,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        positions: torch.Tensor,
+        seq_lens: torch.Tensor,
+        *,
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+    ) -> None:
+        # TODO: Refactor platform overrides to use Triton Dispatcher after
+        # vLLM RFC #45133 lands.
+        del idx_mapping_np, query_start_loc_np, num_scheduled_tokens
+        prepare_pos_seq_lens(
+            idx_mapping,
+            query_start_loc,
+            num_computed_tokens,
+            positions,
+            seq_lens,
+        )
+
+    def _combine_sampled_and_draft_tokens(
+        self,
+        input_ids: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        last_sampled_tokens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        prefill_len: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        num_logits: int,
+        num_bonus_tokens: int,
+        *,
+        idx_mapping_np: np.ndarray,
+        query_start_loc_np: np.ndarray,
+        seq_lens_np: np.ndarray,
+        prefill_len_np: np.ndarray,
+    ) -> torch.Tensor:
+        # TODO: Refactor platform overrides to use Triton Dispatcher after
+        # vLLM RFC #45133 lands.
+        del idx_mapping_np, query_start_loc_np, seq_lens_np, prefill_len_np
+        return combine_sampled_and_draft_tokens(
+            input_ids,
+            idx_mapping,
+            last_sampled_tokens,
+            query_start_loc,
+            seq_lens,
+            prefill_len,
+            draft_tokens,
+            cu_num_logits,
+            num_logits,
+            num_bonus_tokens,
+        )
+
     if vllm_version_is("0.27.1"):
 
         def prepare_inputs(
@@ -367,7 +453,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Get prefill tokens if any.
             if batch_has_prefill:
-                prepare_prefill_inputs(
+                self._prepare_prefill_inputs(
                     self.input_buffers.input_ids,
                     self.req_states.next_prefill_tokens,
                     idx_mapping,
@@ -375,15 +461,20 @@ class NPUModelRunner(GPUModelRunner):
                     self.req_states.all_token_ids.gpu,
                     self.req_states.prefill_len.gpu,
                     self.req_states.num_computed_tokens.gpu,
+                    idx_mapping_np=idx_mapping_np,
+                    query_start_loc_np=query_start_loc_np,
                 )
 
             # Prepare positions and seq_lens.
-            prepare_pos_seq_lens(
+            self._prepare_pos_seq_lens(
                 idx_mapping,
                 query_start_loc,
                 self.req_states.num_computed_tokens.gpu,
                 self.input_buffers.positions,
                 self.input_buffers.seq_lens,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+                num_scheduled_tokens=num_scheduled_tokens,
             )
             seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
@@ -392,7 +483,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
-            logits_indices = combine_sampled_and_draft_tokens(
+            logits_indices = self._combine_sampled_and_draft_tokens(
                 self.input_buffers.input_ids,
                 idx_mapping,
                 self.req_states.last_sampled_tokens,
@@ -403,6 +494,10 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_logits,
                 total_num_logits,
                 self.model_state.num_new_sampled_tokens_per_step,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_np=self.input_buffers.seq_lens_np[:num_reqs],
+                prefill_len_np=prefill_len_np,
             )
 
             # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
@@ -584,7 +679,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Get prefill tokens if any.
             if batch_has_prefill:
-                prepare_prefill_inputs(
+                self._prepare_prefill_inputs(
                     self.input_buffers.input_ids,
                     self.req_states.next_prefill_tokens,
                     idx_mapping,
@@ -592,15 +687,20 @@ class NPUModelRunner(GPUModelRunner):
                     self.req_states.all_token_ids.gpu,
                     self.req_states.prefill_len.gpu,
                     self.req_states.num_computed_tokens.gpu,
+                    idx_mapping_np=idx_mapping_np,
+                    query_start_loc_np=query_start_loc_np,
                 )
 
             # Prepare positions and seq_lens.
-            prepare_pos_seq_lens(
+            self._prepare_pos_seq_lens(
                 idx_mapping,
                 query_start_loc,
                 self.req_states.num_computed_tokens.gpu,
                 self.input_buffers.positions,
                 self.input_buffers.seq_lens,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+                num_scheduled_tokens=num_scheduled_tokens,
             )
             seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
@@ -609,7 +709,7 @@ class NPUModelRunner(GPUModelRunner):
 
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
-            logits_indices = combine_sampled_and_draft_tokens(
+            logits_indices = self._combine_sampled_and_draft_tokens(
                 self.input_buffers.input_ids,
                 idx_mapping,
                 self.req_states.last_sampled_tokens,
@@ -620,6 +720,10 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_logits,
                 total_num_logits,
                 self.model_state.num_new_sampled_tokens_per_step,
+                idx_mapping_np=idx_mapping_np,
+                query_start_loc_np=query_start_loc_np,
+                seq_lens_np=self.input_buffers.seq_lens_np[:num_reqs],
+                prefill_len_np=prefill_len_np,
             )
 
             # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
