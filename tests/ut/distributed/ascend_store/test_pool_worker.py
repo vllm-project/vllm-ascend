@@ -162,6 +162,8 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.kv_recv_thread = MagicMock()
         worker.external_slot_release_waiter = MagicMock()
         worker._submit_ready_layer_loads = MagicMock()
+        worker._load_start_times = {}
+        worker._layerwise_load_keys = {}
 
         worker.wait_for_layer_load()
 

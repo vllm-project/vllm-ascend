@@ -32,6 +32,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_gva_layerwise_config,
     get_layerwise_kv_cache_specs,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
@@ -138,6 +141,8 @@ class KVPoolScheduler:
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
         self._loading_req_ids: set[str] = set()
         self._delayed_free_req_ids: set[str] = set()
+        # KV pool observability: delayed-release gauge snapshots.
+        self._kv_stats = AscendStoreKVConnectorStats()
 
         self._block_pool: BlockPool | None = None
         self.sending_event_id = 0
@@ -870,7 +875,16 @@ class KVPoolScheduler:
                     self.touch_sending_mamba_blocks(req_meta)
                     meta.add_request(req_meta)
 
+        # KV pool observability: snapshot the delayed-release window size
+        # for this scheduling step.
+        self._kv_stats.record_delayed_release(len(self._delayed_free_req_ids))
         return meta
+
+    def get_stats(self) -> AscendStoreKVConnectorStats:
+        """Return the latest delayed-release snapshot (and reset it)."""
+        stats = self._kv_stats
+        self._kv_stats = AscendStoreKVConnectorStats()
+        return stats
 
     def get_sending_event_id(self):
         """
