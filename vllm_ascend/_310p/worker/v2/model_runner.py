@@ -274,7 +274,7 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     else:
 
-        def prepare_inputs(  # type: ignore[misc]
+        def prepare_inputs(  # type: ignore[misc, override]
             self,
             scheduler_output: SchedulerOutput,
             batch_req_state: BatchReqState,
