@@ -306,7 +306,7 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
 
     # Features from --additional-config JSON
     additional = _parse_json_flag(cmd_list, "--additional-config")
-    if additional.get("enable_weight_nz_layout"):
+    if additional.get("weight_nz_mode", 0) != 0:
         features.append("weight_nz_layout")
     tc = additional.get("torchair_graph_config") or {}
     if isinstance(tc, dict) and tc.get("enabled"):
