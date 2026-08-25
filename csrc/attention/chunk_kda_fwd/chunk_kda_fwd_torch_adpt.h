@@ -9,7 +9,7 @@
 #include <string>
 #include <tuple>
 
-#include "attention/kda_torch_adpt_common.h"
+#include "../kda_torch_adpt_common.h"
 
 namespace vllm_ascend {
 
