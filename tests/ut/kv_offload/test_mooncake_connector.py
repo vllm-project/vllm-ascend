@@ -88,7 +88,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers  # noqa: E402
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is  # noqa: E402
 
 for _k, _v in _saved_modules.items():
     sys.modules[_k] = _v
@@ -400,8 +400,17 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             get_kv_cache_tensor_layers(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors
         }
         self.assertEqual(allocated_config.num_blocks, num_blocks)
-        self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
-        self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
+        if vllm_version_is("0.27.1"):
+            self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
+            self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
+        else:
+            # vLLM #51718: on main every layer tensor in a KV cache group shares
+            # one allocation sized by the group's total bytes-per-block
+            # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
+            # tensor.size is the sum of the two page sizes times num_blocks.
+            group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
+            self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
+            self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
 
         kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
