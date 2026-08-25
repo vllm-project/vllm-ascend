@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
@@ -87,6 +87,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             )
 
         setup_moe_comm_method(self.moe_config)
+        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
+        if alltoall_comm is not None:
+            expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
+            if expert_ids_per_ep_rank is not None:
+                self.routed_experts.register_buffer(
+                    "expert_ids_per_ep_rank",
+                    expert_ids_per_ep_rank,
+                    persistent=False,
+                )
 
     @property
     def is_internal_router(self) -> bool:
