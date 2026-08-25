@@ -43,9 +43,9 @@ def _reference_remap(
 
 @pytest.mark.parametrize(
     ("dcp_size", "rank", "interleave_size"),
-    [(2, 0, 1), (3, 1, 96), (8, 3, 64), (16, 7, 128)],
+    [(2, 0, 1), (3, 1, 3), (3, 1, 96), (8, 3, 64), (16, 7, 128), (16, 15, 257)],
 )
-@pytest.mark.parametrize("num_rows", [5, 16, 64, 128])
+@pytest.mark.parametrize("num_rows", [1, 5, 16, 64, 128])
 @torch.inference_mode()
 def test_sfa_remap_sparse_indices(
     dcp_size: int,
@@ -76,7 +76,29 @@ def test_sfa_remap_sparse_indices(
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("top_k", [1, 7, 512, 2048, 8192])
+@pytest.mark.parametrize(
+    "top_k",
+    [
+        1,
+        7,
+        31,
+        32,
+        33,
+        63,
+        64,
+        65,
+        127,
+        128,
+        129,
+        511,
+        512,
+        2047,
+        2048,
+        2049,
+        8191,
+        8192,
+    ],
+)
 @torch.inference_mode()
 def test_sfa_remap_sparse_indices_supports_dynamic_top_k(top_k: int) -> None:
     indices = torch.arange(
@@ -96,7 +118,19 @@ def test_sfa_remap_sparse_indices_supports_dynamic_top_k(top_k: int) -> None:
 @torch.inference_mode()
 def test_sfa_remap_sparse_indices_preserves_large_integer_precision() -> None:
     indices = torch.tensor(
-        [[16_777_216, 16_777_217, 16_777_344, -1]],
+        [
+            [
+                -(2**31),
+                -7,
+                -1,
+                0,
+                16_777_216,
+                16_777_217,
+                16_777_344,
+                2_147_483_646,
+                2_147_483_647,
+            ]
+        ],
         dtype=torch.int32,
         device="npu",
     )
