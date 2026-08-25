@@ -7,6 +7,7 @@ upstream vLLM.  Only the CUDA-specific convolution and KDA execution is
 replaced here with the Ascend metadata builder and AscendC operators.
 """
 
+from collections.abc import Callable
 from functools import wraps
 
 import torch
@@ -23,6 +24,7 @@ from vllm.models.kimi_k3.nvidia.kda import (
     _KimiGDNMergedColumnParallelLinear,
 )
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -30,6 +32,20 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.kda.kda import fused_kda_gate
+
+apply_kda_rms_norm_sigmoid_gate: (
+    Callable[
+        [torch.Tensor, torch.Tensor, torch.Tensor, float],
+        torch.Tensor,
+    ]
+    | None
+) = None
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.kda.fused_norm_gate import (
+        apply_kda_rms_norm_sigmoid_gate as triton_apply_kda_rms_norm_sigmoid_gate,
+    )
+
+    apply_kda_rms_norm_sigmoid_gate = triton_apply_kda_rms_norm_sigmoid_gate
 
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
@@ -560,11 +576,25 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         elif core_non_spec is not None:
             core_attn_out[:, :num_actual_tokens] = core_non_spec
 
-        # Let vLLM's CustomOp dispatch select FusedRMSNormGated.forward_native
-        # on Ascend. Calling the CUDA/Triton helper directly bypasses platform
-        # dispatch.
-        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
+        # Prefer the fused RMSNorm + sigmoid gate Triton kernel when
+        # available; otherwise fall back to vLLM's CustomOp dispatch selecting
+        # FusedRMSNormGated.forward_native on Ascend.
+        normalized = self._apply_output_norm_gate(core_attn_out[:, :num_actual_tokens], g2)
         # Mask again after the norm gate: zero * sigmoid(NaN) is still NaN in
         # static padding rows whose captured gate values are not live.
         core_attn_out[:, :num_actual_tokens].copy_(_zero_padded_output(normalized, num_live_tokens))
         core_attn_out[:, num_actual_tokens:].zero_()
+
+    def _apply_output_norm_gate(
+        self,
+        core_attn_out: torch.Tensor,
+        output_gate: torch.Tensor,
+    ) -> torch.Tensor:
+        if apply_kda_rms_norm_sigmoid_gate is not None:
+            return apply_kda_rms_norm_sigmoid_gate(
+                core_attn_out,
+                output_gate,
+                self.o_norm.weight,
+                self.o_norm.eps,
+            )
+        return self.o_norm(core_attn_out, output_gate)
