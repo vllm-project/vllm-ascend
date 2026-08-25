@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
 )
+from vllm_ascend.utils import vllm_version_is
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
@@ -45,6 +46,29 @@ if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_
 
     UniformTypeKVCacheSpecs.max_num_blocks_per_req = (  # type: ignore[method-assign]
         _uniform_type_max_num_blocks_per_req
+    )
+
+
+def _make_ascend_kv_cache_tensor(
+    size: int,
+    layer_names: list[str],
+    page_size: int,
+) -> KVCacheTensor:
+    """Build a KVCacheTensor for Ascend's shared-buffer model.
+
+    vLLM #51718 renamed `shared_by` to `layers` and made `layer_stride`
+    required on main. Ascend's runner only consumes `size` and the layer
+    names, so layer_stride/block_stride are set to the page size to form a
+    valid, self-consistent descriptor.
+    """
+    if vllm_version_is("0.27.1"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=page_size,
+        block_stride=page_size,
+        offset=0,
     )
 
 
@@ -367,9 +391,11 @@ def _get_kv_cache_config_deepseek_v4(
                 bucket = b.get(ps)
                 if bucket is not None and tuple_idx < len(bucket):
                     shared_by.append(bucket[tuple_idx])
-            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=shared_by))
+            kv_cache_tensors.append(_make_ascend_kv_cache_tensor(ps * num_blocks, shared_by, ps))
     for i in range(len(mtp_layer_names)):
-        kv_cache_tensors.append(KVCacheTensor(size=mtp_page_size * num_blocks, shared_by=[mtp_layer_names[i]]))
+        kv_cache_tensors.append(
+            _make_ascend_kv_cache_tensor(mtp_page_size * num_blocks, [mtp_layer_names[i]], mtp_page_size)
+        )
 
     return num_blocks, kv_cache_tensors
 
