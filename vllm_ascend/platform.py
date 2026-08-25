@@ -1183,11 +1183,7 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
             "needs to be equal if PCP or DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if (
-        use_sparse
-        and cp_size > 1
-        and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
-    ):
+    if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
         logger.warning_once(
             "The current SFA context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
