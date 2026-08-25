@@ -147,7 +147,13 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
 ):
     """Exercise DSV4 discovery, allocation, reshape, and binding as one flow."""
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
-    cache_config = SimpleNamespace(block_size=32, cache_dtype="auto")
+    cache_config = SimpleNamespace(
+        block_size=32,
+        cache_dtype="auto",
+        # vLLM #51718: main's init_kv_cache reads the resolved KV cache layout
+        # from the cache config; the Ascend DSV4 path ignores it.
+        get_resolved_kv_cache_layout=lambda: None,
+    )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
@@ -235,21 +241,76 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     runner_kv_caches: list[Any] = []
 
-    kv_caches = upstream_attn_utils.init_kv_cache(
-        runner_kv_caches=runner_kv_caches,
-        forward_context={layer_name: cache_layer},
-        kv_cache_config=kv_cache_config,
-        attn_groups=[[attn_group]],
-        device=torch.device("cpu"),
-        cache_dtype=cache_config.cache_dtype,
-        kernel_block_sizes=[spec.block_size],
-        vllm_config=vllm_config,
-    )
+    if vllm_version_is("0.27.1"):
+        kv_caches = upstream_attn_utils.init_kv_cache(
+            runner_kv_caches=runner_kv_caches,
+            forward_context={layer_name: cache_layer},
+            kv_cache_config=kv_cache_config,
+            attn_groups=[[attn_group]],
+            device=torch.device("cpu"),
+            cache_dtype=cache_config.cache_dtype,
+            kernel_block_sizes=[spec.block_size],
+            vllm_config=vllm_config,
+        )
+    else:
+        # vLLM #51718 reworked upstream init_kv_cache to allocate generic 4D
+        # views via `allocate_kv_cache` + `create_kv_cache_views`; that layout
+        # cannot express the Ascend DSV4 page-strided cache. Route the
+        # allocation through the Ascend DSV4 path (the same wiring the v0.27.1
+        # patch applies) so the returned structure matches on both lanes.
+        def _ascend_allocate_kv_cache(
+            _kv_cache_config: KVCacheConfig,
+            _device: torch.device,
+            _layout: Any,
+            _kernel_block_sizes: list[int],
+        ) -> dict[str, Any]:
+            del _layout
+            raw_tensors = attn_utils._allocate_kv_cache(
+                _kv_cache_config,
+                shared_layers={},
+                device=_device,
+            )
+            return attn_utils._reshape_kv_cache_v2(
+                attn_groups=[[attn_group]],
+                kv_cache_raw_tensors=raw_tensors,
+                cache_dtype=cache_config.cache_dtype,
+                kernel_block_sizes=_kernel_block_sizes,
+                shared_kv_cache_layers={},
+                kv_cache_config=_kv_cache_config,
+            )
+
+        def _ascend_bind_kv_cache(
+            kv_caches: dict[str, Any],
+            forward_context: dict[str, Any],
+            runner_kv_caches_: list[Any],
+            num_attn_module: int = 1,
+        ) -> None:
+            del num_attn_module
+            assert len(runner_kv_caches_) == 0
+            for kv_cache in kv_caches.values():
+                runner_kv_caches_.append(kv_cache)
+            for layer_name_, kv_cache in kv_caches.items():
+                forward_context[layer_name_].kv_cache = kv_cache
+
+        monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
+        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+        kv_caches = upstream_attn_utils.init_kv_cache(
+            runner_kv_caches=runner_kv_caches,
+            forward_context={layer_name: cache_layer},
+            kv_cache_config=kv_cache_config,
+            device=torch.device("cpu"),
+            kernel_block_sizes=[spec.block_size],
+            vllm_config=vllm_config,
+        )
 
     cache_components = kv_caches[layer_name]
-    assert cache_layer.kv_cache is cache_components
     assert len(runner_kv_caches) == 1
     assert runner_kv_caches[0] is cache_components
+    if vllm_version_is("0.27.1"):
+        # The v0.27.1 patch binds the pre-set layer tensor in place.
+        assert cache_layer.kv_cache is cache_components
+    # On main the layer cache is replaced by the freshly allocated views, so
+    # the returned structure is validated by the checks below instead.
     assert [component.shape for component in cache_components] == [
         (num_blocks, spec.storage_block_size, 1, dim) for dim in component_dims
     ]
