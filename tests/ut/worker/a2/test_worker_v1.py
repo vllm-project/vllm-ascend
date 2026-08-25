@@ -840,9 +840,7 @@ class TestNPUWorker(TestBase):
         worker.vllm_config = MagicMock()
         worker.get_kv_cache_spec = MagicMock(return_value={"layer": MagicMock()})
 
-        with patch(
-            "vllm_ascend.worker.worker.plan_sparse_kv_offload_memory"
-        ) as mock_plan_memory:
+        with patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory") as mock_plan_memory:
             mock_plan_memory.return_value = SimpleNamespace(
                 npu_limit_blocks=1,
                 dram_limit_blocks=1,
@@ -869,17 +867,13 @@ class TestNPUWorker(TestBase):
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
         worker.model_runner = MagicMock()
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
-        worker._apply_kv_offload_decode_memory_constraints = MagicMock(
-            return_value=4096
-        )
+        worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
 
         result = worker.determine_available_memory()
 
         self.assertEqual(result, 4096)
         worker.model_runner.profile_run.assert_called_once_with()
-        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(
-            8192
-        )
+        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(8192)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
@@ -950,9 +944,7 @@ class TestNPUWorker(TestBase):
             # result = requested_memory(8000) - non_kv_cache_memory(3500) = 4500
             expected_result = int(10000 * 0.8 - 3500)
             self.assertEqual(result, expected_result)
-            worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(
-                expected_result
-            )
+            worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(expected_result)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")

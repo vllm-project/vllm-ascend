@@ -493,9 +493,7 @@ class NPUWorker(WorkerBase):
             return int(available_device_memory_bytes)
 
         kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
-        dram_limit_bytes = int(
-            sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes
-        )
+        dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes)
         budget = plan_sparse_kv_offload_memory(
             kv_cache_spec=kv_cache_spec,
             vllm_config=self.vllm_config,
@@ -548,9 +546,7 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
-            return self._apply_kv_offload_decode_memory_constraints(
-                kv_cache_memory_bytes
-            )
+            return self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -613,10 +609,8 @@ class NPUWorker(WorkerBase):
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
-        self.available_kv_cache_memory_bytes = (
-            self._apply_kv_offload_decode_memory_constraints(
-                self.available_kv_cache_memory_bytes
-            )
+        self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
+            self.available_kv_cache_memory_bytes
         )
 
         return int(self.available_kv_cache_memory_bytes)

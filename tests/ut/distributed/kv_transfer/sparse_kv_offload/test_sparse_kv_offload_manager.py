@@ -56,12 +56,8 @@ def _make_memory_plan_inputs(max_num_seqs=2):
             store_on_host=False,
         ),
     }
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs)
-    )
-    alignment_reserve = (
-        2 * manager_module._CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
-    )
+    vllm_config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs))
+    alignment_reserve = 2 * manager_module._CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
     return specs, vllm_config, alignment_reserve
 
 
@@ -157,9 +153,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         )
 
         for invalid_specs, message in invalid_cases:
-            with self.subTest(message=message), self.assertRaisesRegex(
-                ValueError, message
-            ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 plan_sparse_kv_offload_memory(
                     kv_cache_spec=invalid_specs,
                     vllm_config=vllm_config,
@@ -230,9 +224,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         )
         kv_cache_config = SimpleNamespace(
             num_blocks=200,
-            kv_cache_groups=[
-                SimpleNamespace(layer_names=["host.0"], kv_cache_spec=spec)
-            ],
+            kv_cache_groups=[SimpleNamespace(layer_names=["host.0"], kv_cache_spec=spec)],
         )
         vllm_config = SimpleNamespace(
             model_config=SimpleNamespace(
@@ -255,9 +247,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         return vllm_config, kv_cache_config, offload_config
 
     def test_manager_initializes_offload_with_planned_pool_size(self):
-        vllm_config, kv_cache_config, offload_config = (
-            self._make_manager_init_inputs()
-        )
+        vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         planned_pool_size = 4096
         for rank, expected_alloc_size in ((0, planned_pool_size), (1, 0)):
             with self.subTest(rank=rank):
@@ -327,9 +317,7 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 tp_group.barrier.assert_called_once_with()
 
     def test_manager_rejects_pool_larger_than_dram_limit(self):
-        vllm_config, kv_cache_config, offload_config = (
-            self._make_manager_init_inputs()
-        )
+        vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()
         offload_backend = SimpleNamespace(
             OffloadConfig=MagicMock(),
             Scene=SimpleNamespace(SHARED="shared"),

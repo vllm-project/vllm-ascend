@@ -1,7 +1,7 @@
 import contextlib
 import os
-from dataclasses import dataclass
 import typing
+from dataclasses import dataclass
 from zlib import adler32
 
 import numpy as np
@@ -184,10 +184,7 @@ def _split_host_device_kv_specs(
         raise ValueError("Sparse KV offload requires at least one device KV cache spec")
     block_sizes = {spec.block_size for spec in host_specs + device_specs}
     if len(block_sizes) != 1:
-        raise ValueError(
-            "Sparse KV offload memory planning requires one shared block size, "
-            f"got {sorted(block_sizes)}"
-        )
+        raise ValueError(f"Sparse KV offload memory planning requires one shared block size, got {sorted(block_sizes)}")
     return host_specs, device_specs
 
 
@@ -204,15 +201,11 @@ def plan_sparse_kv_offload_memory(
     device_page_size_bytes = sum(spec.page_size_bytes for spec in device_specs)
     total_page_size_bytes = host_page_size_bytes + device_page_size_bytes
 
-    host_alignment_reserve_bytes = (
-        len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
-    )
+    host_alignment_reserve_bytes = len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
     usable_dram_bytes = max(dram_limit_bytes - host_alignment_reserve_bytes, 0)
     dram_limit_blocks = usable_dram_bytes // host_page_size_bytes
 
-    npu_page_size_bytes = (
-        total_page_size_bytes if keep_device_kv_cache else device_page_size_bytes
-    )
+    npu_page_size_bytes = total_page_size_bytes if keep_device_kv_cache else device_page_size_bytes
     npu_limit_blocks = max(available_device_memory_bytes, 0) // npu_page_size_bytes
 
     max_blocks_per_request = max(
@@ -222,10 +215,7 @@ def plan_sparse_kv_offload_memory(
         )
         for spec in host_specs + device_specs
     )
-    workload_limit_blocks = (
-        max_blocks_per_request * vllm_config.scheduler_config.max_num_seqs
-        + _VLLM_NULL_BLOCK_COUNT
-    )
+    workload_limit_blocks = max_blocks_per_request * vllm_config.scheduler_config.max_num_seqs + _VLLM_NULL_BLOCK_COUNT
 
     limits = {
         "npu": npu_limit_blocks,
@@ -259,23 +249,12 @@ def get_sparse_kv_offload_cpu_pool_size_bytes(
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
             layer_specs.update(group.kv_cache_spec.kv_cache_specs)
         else:
-            layer_specs.update(
-                (layer_name, group.kv_cache_spec)
-                for layer_name in group.layer_names
-            )
-    host_specs = [
-        spec
-        for spec in layer_specs.values()
-        if getattr(spec, "store_on_host", False)
-    ]
+            layer_specs.update((layer_name, group.kv_cache_spec) for layer_name in group.layer_names)
+    host_specs = [spec for spec in layer_specs.values() if getattr(spec, "store_on_host", False)]
     if not host_specs:
         raise ValueError("Sparse KV offload requires host-resident KV cache specs")
-    raw_host_bytes = kv_cache_config.num_blocks * sum(
-        spec.page_size_bytes for spec in host_specs
-    )
-    alignment_reserve_bytes = (
-        len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
-    )
+    raw_host_bytes = kv_cache_config.num_blocks * sum(spec.page_size_bytes for spec in host_specs)
+    alignment_reserve_bytes = len(host_specs) * _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER
     return raw_host_bytes + alignment_reserve_bytes
 
 
@@ -484,12 +463,8 @@ class SparseKVOffloadManager:
 
         self._build_cpp()
 
-        dram_limit_bytes = int(
-            sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30)
-        )
-        planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(
-            kv_cache_config
-        )
+        dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30))
+        planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
         if planned_pool_size_bytes > dram_limit_bytes:
             raise ValueError(
                 "Sparse KV offload planned CPU pool exceeds DRAM limit after "
