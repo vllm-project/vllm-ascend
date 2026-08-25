@@ -88,7 +88,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers
+from vllm_ascend.utils import get_kv_cache_tensor_layers  # noqa: E402
 
 for _k, _v in _saved_modules.items():
     sys.modules[_k] = _v
@@ -349,7 +349,9 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
             available_memory=uniform_spec.page_size_bytes * num_blocks,
         )
-        allocated_sizes = {get_kv_cache_tensor_layers(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors}
+        allocated_sizes = {
+            get_kv_cache_tensor_layers(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors
+        }
         self.assertEqual(allocated_config.num_blocks, num_blocks)
         self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
         self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
