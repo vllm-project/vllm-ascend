@@ -499,7 +499,9 @@ def test_ascend_mamba_manager_does_not_overcount_non_align_cache() -> None:
         num_tokens_main_model=48,
     )
 
-    assert num_blocks == 3
+    # Preserve the upstream non-align result: the extra synchronous-load
+    # state block is specific to ``mamba_cache_mode="align"``.
+    assert num_blocks == 2
 
 
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
