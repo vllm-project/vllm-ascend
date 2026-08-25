@@ -3,6 +3,7 @@
 import torch
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
+from vllm_ascend.attention.context_parallel.sfa_remap import remap_sparse_indices_pytorch
 
 
 def _make_impl(rank: int, interleave_size: int = 2) -> AscendSFADCPImpl:
@@ -11,8 +12,8 @@ def _make_impl(rank: int, interleave_size: int = 2) -> AscendSFADCPImpl:
     impl.dcp_rank = rank
     impl._dcp_interleave_size = interleave_size
     impl._dcp_index_topk = 8
-    impl._remap_order = torch.arange(8, dtype=torch.float32)
-    impl._remap_invalid_index = torch.tensor(-1.0)
+    impl._sfa_remap_backend = "pytorch"
+    impl._sfa_remap_impl = remap_sparse_indices_pytorch
     return impl
 
 

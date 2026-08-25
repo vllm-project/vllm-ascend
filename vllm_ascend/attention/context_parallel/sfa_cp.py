@@ -11,6 +11,7 @@ from vllm.distributed import get_tp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -35,6 +36,18 @@ from vllm_ascend.utils import (
 )
 
 M = TypeVar("M", bound=AscendSFAMetadata)
+
+SFA_REMAP_BACKEND_ENV = "VLLM_ASCEND_SFA_REMAP_BACKEND"
+SFA_REMAP_BACKENDS = ("triton", "pytorch")
+
+
+def _resolve_sfa_remap_backend() -> str:
+    backend = ascend_envs.VLLM_ASCEND_SFA_REMAP_BACKEND.lower()
+    if backend not in SFA_REMAP_BACKENDS:
+        raise RuntimeError(
+            f"Invalid {SFA_REMAP_BACKEND_ENV}={backend!r}; expected one of {SFA_REMAP_BACKENDS}."
+        )
+    return backend
 
 
 @dataclass
@@ -844,9 +857,19 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 break
         if self._dcp_index_topk <= 0:
             raise RuntimeError("index_topk must be set in the model config for DCP SFA.")
-        device = self.q_proj.weight.device
-        self._remap_order = torch.arange(self._dcp_index_topk, dtype=torch.float32, device=device)
-        self._remap_invalid_index = torch.tensor(-1.0, dtype=torch.float32, device=device)
+        self._sfa_remap_backend = _resolve_sfa_remap_backend()
+        if self._sfa_remap_backend == "triton":
+            from vllm_ascend.ops.triton.sfa_remap_sparse_indices import (
+                remap_sparse_indices_triton,
+            )
+
+            self._sfa_remap_impl = remap_sparse_indices_triton
+        else:
+            from vllm_ascend.attention.context_parallel.sfa_remap import (
+                remap_sparse_indices_pytorch,
+            )
+
+            self._sfa_remap_impl = remap_sparse_indices_pytorch
 
     @staticmethod
     def _has_prefill(attn_metadata: M) -> bool:
@@ -942,31 +965,15 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
             )
 
-        # Remap the topk indices from the replicated view to the DCP-local KV cache view.
-        # We use float32 for better performance on Ascend.
-        topk_indices_fp32 = topk_indices.to(torch.float32)
-        interleave_size = self._dcp_interleave_size
-        local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)
-        local_owner_base = torch.floor(local_block_indices / self.dcp_size) * self.dcp_size
-        local_owner = local_block_indices - local_owner_base
-        local_owner_mask = (topk_indices_fp32 >= 0) & (local_owner == self.dcp_rank)
-        if interleave_size == 1:
-            remapped_indices_fp32 = torch.floor(topk_indices_fp32 / self.dcp_size)
-        else:
-            local_offsets = topk_indices_fp32 - local_block_indices * interleave_size
-            remapped_indices_fp32 = torch.floor(topk_indices_fp32 / (self.dcp_size * interleave_size))
-            remapped_indices_fp32 = remapped_indices_fp32 * interleave_size + local_offsets
-        remapped_indices = torch.where(
-            local_owner_mask,
-            remapped_indices_fp32,
-            self._remap_invalid_index,
-        ).to(topk_indices.dtype)
-
-        # Compact local indices to the front without changing their top-k order.
-        original_order = self._remap_order[:topk_count].expand_as(topk_indices)
-        pack_keys = original_order + (~local_owner_mask).to(torch.float32) * topk_count
-        _, pack_order = torch.sort(pack_keys, dim=-1)
-        return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
+        contiguous_indices = topk_indices.contiguous()
+        remapped_indices = torch.empty_like(contiguous_indices)
+        return self._sfa_remap_impl(
+            contiguous_indices,
+            remapped_indices,
+            self.dcp_size,
+            self.dcp_rank,
+            self._dcp_interleave_size,
+        )
 
     def _all_to_all_dcp_tensor(
         self,
