@@ -418,6 +418,35 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attenti
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
+at::Tensor npu_fused_sparse_attention_overlap_meta(
+    const at::Tensor &query,
+    const at::Tensor &selection_k_rope,
+    const at::Tensor &selection_kv_cache,
+    const at::Tensor &selection_kv_block_table,
+    const at::Tensor &selection_kv_block_status,
+    const at::Tensor &selection_membership_map,
+    const at::Tensor &selection_topk_indices,
+    const at::Tensor &full_k_rope,
+    const at::Tensor &full_kv_cache,
+    const at::Tensor &full_kv_block_table,
+    const at::Tensor &full_kv_actual_seq,
+    const at::Tensor &full_q_actual_seq,
+    double scale_value,
+    int64_t sparse_block_size,
+    int64_t selection_topk_block_size,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode)
+{
+    // The real op returns the nope-width output (query_nope.sizes), i.e. the
+    // last dim is full_kv_cache's last dim, not query's. Keep the meta in sync
+    // or graph capture allocates/strides the output at the wrong width.
+    auto kv_cache_dim = full_kv_cache.sym_size(full_kv_cache.dim() - 1);
+    auto out_sizes = c10::SymDimVector(query.sym_sizes().begin(), query.sym_sizes().end());
+    out_sizes[query.dim() - 1] = kv_cache_dim;
+    return at::empty_symint(out_sizes, query.options().dtype(query.dtype()));
+}
+
 std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
     const at::Tensor& x,
     int64_t k,
@@ -1547,6 +1576,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
+    // Fused sparse attention overlap
+    ops.impl("npu_fused_sparse_attention_overlap", &vllm_ascend::meta::npu_fused_sparse_attention_overlap_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // Moe_gating_top_k

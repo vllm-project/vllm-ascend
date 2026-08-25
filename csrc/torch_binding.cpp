@@ -41,6 +41,7 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
+#include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
@@ -2578,5 +2579,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_msa_index_score", torch::kPrivateUse1,
              &vllm_ascend::npu_msa_index_score);
+
+    ops.def(
+        "npu_fused_sparse_attention_overlap(Tensor query, Tensor(a!) selection_k_rope, "
+        "Tensor(b!) selection_kv_cache, Tensor(c!) selection_kv_block_table, "
+        "Tensor(d!) selection_kv_block_status, Tensor(e!) selection_membership_map, "
+        "Tensor selection_topk_indices, "
+        "Tensor full_k_rope, Tensor full_kv_cache, Tensor full_kv_block_table, "
+        "Tensor full_kv_actual_seq, Tensor full_q_actual_seq, "
+        "float scale_value, int sparse_block_size, int selection_topk_block_size, *, "
+        "str layout_query='TND', str layout_kv='PA_BSND', int sparse_mode=3) -> Tensor"
+    );
+    ops.impl("npu_fused_sparse_attention_overlap", torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_sparse_attention_overlap);
 }
 #endif

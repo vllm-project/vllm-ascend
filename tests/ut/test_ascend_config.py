@@ -700,6 +700,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 "topk_buffer_size": "256",
                 "dram_size_per_dp_GB": "64",
                 "keep_device_kv_cache": "false",
+                "use_fused_overlap": "true",
             },
         )
 
@@ -707,6 +708,7 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertEqual(config.topk_buffer_size, 256)
         self.assertEqual(config.dram_size_per_dp_GB, 64)
         self.assertFalse(config.keep_device_kv_cache)
+        self.assertTrue(config.use_fused_overlap)
 
     def test_unknown_key_is_rejected_even_when_disabled(self):
         with self.assertRaises(ValueError):

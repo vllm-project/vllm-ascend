@@ -1073,6 +1073,7 @@ class SparseKVOffloadConfig:
     dram_size_per_dp_GB: int = 128
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
+    use_fused_overlap: bool = False
 
     @model_validator(mode="after")
     def _validate_values(self):
