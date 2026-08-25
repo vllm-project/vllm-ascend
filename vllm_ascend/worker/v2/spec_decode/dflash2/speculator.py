@@ -3,8 +3,9 @@
 
 import torch
 from torch import nn
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import tl_rand32
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
@@ -56,14 +57,18 @@ def _selector_walk_kernel_ascend(
             index = tl.min(tl.where(scores == best, offsets, BLOCK_K), axis=0)
         else:
             # Triton Ascend does not support the uint64/float64 path used by
-            # upstream. Token ids and positions fit in int32, and the realized
-            # FP32 proposal logits are retained for lossless verification.
+            # upstream. Request seeds, token ids, and positions use the NPU's
+            # int32 Philox path; realized FP32 logits are kept for verification.
             position = (tl.load(sample_pos_ptr + flat) - 1).to(tl.int32)
-            gumbel_seed = tl.randint(seed, position)
+            gumbel_seed = tl.randint(seed.to(tl.int32), position)
             # Token ids key the noise so the draft and target sample the same
             # candidate from the same request seed and position.
-            uniform = tl.rand(gumbel_seed, candidates.to(tl.int32)).to(tl.float32)
-            noise = -tl.log(-tl.log(uniform + 1e-20) + 1e-20)
+            uniform = tl_rand32(
+                gumbel_seed,
+                candidates.to(tl.int32),
+                includes_zero=False,
+            )
+            noise = -tl.log(-tl.log(1.0 - uniform))
             sampled_scores = tl.where(mask, scores / temperature + noise, float("-inf"))
             best = tl.max(sampled_scores, axis=0)
             index = tl.min(tl.where(sampled_scores == best, offsets, BLOCK_K), axis=0)
@@ -80,9 +85,6 @@ def _selector_walk_kernel_ascend(
 
 class AscendDFlash2Speculator(DFlash2Speculator, AscendDFlashSpeculator):
     """DFlash2 speculator with Ascend attention and sampling support."""
-
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # The V2 runner passes the target model's graph mode here without

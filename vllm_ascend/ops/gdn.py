@@ -37,26 +37,6 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 
-def _resolve_gdn_attn_metadata(
-    attn_metadata: dict[str, AttentionMetadata],
-    prefix: str,
-) -> GDNAttentionMetadata:
-    metadata = attn_metadata.get(prefix)
-    if isinstance(metadata, GDNAttentionMetadata):
-        return metadata
-
-    # Some wrapped language models keep ``language_model.`` in the module
-    # prefix while their KV-cache group uses the unwrapped layer name.
-    unwrapped_prefix = prefix.removeprefix("language_model.")
-    if unwrapped_prefix != prefix:
-        metadata = attn_metadata.get(unwrapped_prefix)
-        if isinstance(metadata, GDNAttentionMetadata):
-            return metadata
-
-    available = ", ".join(sorted(attn_metadata)[:16])
-    raise KeyError(f"No GDN attention metadata for {prefix!r}. Available layer names: [{available}]")
-
-
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
@@ -294,7 +274,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, dict)
-        attn_metadata = _resolve_gdn_attn_metadata(attn_metadata, self.prefix)
+        attn_metadata = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
