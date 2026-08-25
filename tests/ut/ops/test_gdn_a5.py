@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import pytest
 import torch
 
+from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_a5 import (
     A5GDNAdapter,
     A5GDNOperatorDispatcher,
@@ -431,3 +435,55 @@ def test_decode_pipeline_copies_functional_state_once():
     )
 
     torch.testing.assert_close(state, torch.full_like(state, 5))
+
+
+def _fake_gdn_layer():
+    return SimpleNamespace(
+        num_k_heads=2,
+        num_v_heads=4,
+        tp_size=1,
+        head_k_dim=128,
+        head_v_dim=128,
+        prefix="model.layers.0.linear_attn",
+    )
+
+
+def test_a5_routing_constructs_and_caches_one_adapter(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
+    monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
+    layer = _fake_gdn_layer()
+    activation = torch.zeros((1, 128), dtype=torch.bfloat16)
+    state = torch.zeros((2, 4, 128, 128), dtype=torch.float32)
+
+    with (
+        patch("vllm_ascend.ops.gdn.is_950", return_value=True),
+        patch(
+            "vllm_ascend.ops.gdn.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+    ):
+        first = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(layer, activation, state)
+        second = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(layer, activation, state)
+
+    assert isinstance(first, A5GDNAdapter)
+    assert second is first
+
+
+def test_a5_routing_preserves_exact_native_path(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "native")
+    monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
+
+    with (
+        patch("vllm_ascend.ops.gdn.is_950", return_value=True),
+        patch(
+            "vllm_ascend.ops.gdn.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+    ):
+        adapter = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+            _fake_gdn_layer(),
+            torch.zeros((1, 128), dtype=torch.bfloat16),
+            torch.zeros((2, 4, 128, 128), dtype=torch.float32),
+        )
+
+    assert adapter is None
