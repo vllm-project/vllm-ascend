@@ -24,18 +24,8 @@ from vllm.v1.kv_cache_interface import (
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
-_ATTENTION_LAYER_SUFFIX = ".self_attn.attn"
-_MAMBA_LAYER_SUFFIX = ".self_attn"
-
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
-
-
-class _MambaUniformKVCacheSpecs(UniformTypeKVCacheSpecs):
-    """Preserve Mamba-specific worker block-table capacity after grouping."""
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return max(spec.max_num_blocks_per_req(vllm_config, max_len) for spec in self.kv_cache_specs.values())
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -74,40 +64,6 @@ def _ascend_resolve_kv_cache_block_sizes(
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
 
-def _is_kimi_k3_target_attention_layer(layer_name: str, spec: KVCacheSpec) -> bool:
-    return (
-        layer_name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX)
-        and layer_name.endswith(_ATTENTION_LAYER_SUFFIX)
-        and isinstance(spec, FullAttentionSpec)
-        and not spec.non_causal
-        and spec.sliding_window is None
-        and spec.attention_chunk_size is None
-        and not getattr(spec, "non_causal_multi_token_decode", False)
-    )
-
-
-def _is_kimi_k3_dspark_attention_layer(layer_name: str, spec: KVCacheSpec) -> bool:
-    return (
-        layer_name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX)
-        and layer_name.endswith(_ATTENTION_LAYER_SUFFIX)
-        and isinstance(spec, FullAttentionSpec)
-        and not spec.non_causal
-        and spec.sliding_window is None
-        and spec.attention_chunk_size is None
-    )
-
-
-def _is_kimi_k3_mamba_layer(layer_name: str, spec: KVCacheSpec) -> bool:
-    return (
-        layer_name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX)
-        and layer_name.endswith(_MAMBA_LAYER_SUFFIX)
-        and not layer_name.endswith(_ATTENTION_LAYER_SUFFIX)
-        and isinstance(spec, MambaSpec)
-        and spec.mamba_cache_mode == "align"
-        and spec.num_speculative_blocks > 0
-    )
-
-
 def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec] | None:
@@ -126,12 +82,20 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     hybrid grouping.
     """
     target_attention_specs = {
-        name: spec for name, spec in kv_cache_spec.items() if _is_kimi_k3_target_attention_layer(name, spec)
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
     }
     draft_attention_specs = {
-        name: spec for name, spec in kv_cache_spec.items() if _is_kimi_k3_dspark_attention_layer(name, spec)
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if name.startswith(_KIMI_K3_DRAFT_LAYER_PREFIX) and isinstance(spec, FullAttentionSpec)
     }
-    mamba_specs = {name: spec for name, spec in kv_cache_spec.items() if _is_kimi_k3_mamba_layer(name, spec)}
+    mamba_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if name.startswith(_KIMI_K3_TARGET_LAYER_PREFIX) and isinstance(spec, MambaSpec)
+    }
 
     matched_layer_count = len(target_attention_specs) + len(draft_attention_specs) + len(mamba_specs)
     if (
@@ -169,7 +133,7 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     for group_idx in range(mamba_group_count):
         layer_names = mamba_layer_names[group_idx::mamba_group_count]
         group_specs = {name: mamba_specs[name] for name in layer_names}
-        uniform_mamba_spec = _MambaUniformKVCacheSpecs.from_specs(group_specs)
+        uniform_mamba_spec = UniformTypeKVCacheSpecs.from_specs(group_specs)
         assert uniform_mamba_spec is not None
         groups.append(
             KVCacheGroupSpec(

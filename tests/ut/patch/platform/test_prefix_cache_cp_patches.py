@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -77,7 +78,7 @@ def _make_kimi_k3_dspark_kv_cache_specs(
     mamba_layer_count: int = 69,
     draft_uses_mla: bool = False,
 ) -> dict:
-    target_mla_spec = MLAAttentionSpec(
+    target_mla_spec = AscendMLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=576,
@@ -86,7 +87,7 @@ def _make_kimi_k3_dspark_kv_cache_specs(
         cache_dtype_str="auto",
     )
     if draft_uses_mla:
-        draft_attention_spec = MLAAttentionSpec(
+        draft_attention_spec = AscendMLAAttentionSpec(
             block_size=block_size,
             num_kv_heads=1,
             head_size=576,
@@ -190,6 +191,46 @@ def _make_coordinator_for_effective_block_size(
     coordinator.dcp_world_size = dcp_world_size
     coordinator.enable_caching = enable_caching
     return coordinator
+
+
+def test_ascend_mla_page_size_includes_scale_storage() -> None:
+    spec = AscendMLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+    )
+
+    expected_page_size = 16 * (128 * 2 + 2)
+    assert spec.unpadded_page_size_bytes == expected_page_size
+    assert spec.real_page_size_bytes == expected_page_size
+    assert spec.page_size_bytes == expected_page_size
+
+
+def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
+    spec = AscendMLAAttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        cache_dtype_str="fp8_ds_mla",
+        compress_ratio=4,
+        model_version="deepseek_v4",
+        indexes_kv_by_block_stride=True,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+    )
+
+    merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
+
+    assert merged.block_size == spec.block_size
+    assert merged.compress_ratio == spec.compress_ratio
+    assert merged.model_version == spec.model_version
+    assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
+    assert merged.scale_dim == spec.scale_dim
+    assert merged.scale_dtype == spec.scale_dtype
 
 
 @pytest.mark.parametrize(
@@ -361,7 +402,7 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_partial_signature() -> None:
     specs = _make_kimi_k3_dspark_kv_cache_specs()
     draft_layer = "model.layers.93.self_attn.attn"
-    specs[draft_layer] = replace(specs[draft_layer], non_causal=True)
+    specs.pop(draft_layer)
 
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
 
@@ -518,14 +559,10 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
     assert coordinator is sentinel
 
 
-@pytest.mark.parametrize(
-    ("num_prefill_lookahead", "expected"),
-    [(None, 0), (8, 8)],
-)
-def test_get_kv_cache_coordinator_normalizes_prefill_lookahead(
+@pytest.mark.parametrize("num_prefill_lookahead", [0, 8])
+def test_get_kv_cache_coordinator_forwards_prefill_lookahead(
     monkeypatch,
-    num_prefill_lookahead: int | None,
-    expected: int,
+    num_prefill_lookahead: int,
 ) -> None:
     kv_cache_config = _make_hybrid_kv_cache_config(
         full_block_size=16,
@@ -555,7 +592,7 @@ def test_get_kv_cache_coordinator_normalizes_prefill_lookahead(
         num_prefill_lookahead=num_prefill_lookahead,
     )
 
-    assert captured_kwargs["num_prefill_lookahead"] == expected
+    assert captured_kwargs["num_prefill_lookahead"] == num_prefill_lookahead
 
 
 def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> None:
