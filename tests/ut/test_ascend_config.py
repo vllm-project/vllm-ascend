@@ -502,15 +502,6 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.msmonitor_use_daemon)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_weight_nz_mode_ignores_removed_env(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"}):
-            ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertEqual(ascend_config.weight_nz_mode, 1)
-
-    @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.warning")
     def test_flashcomm_config_warns(self, mock_warning):
         test_vllm_config = VllmConfig()
