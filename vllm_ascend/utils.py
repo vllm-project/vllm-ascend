@@ -1082,10 +1082,10 @@ def calculate_dp_buffer_size() -> int:
 # Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
 # and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
 # significantly improve communication performance of MC2 ops dispatch/combine.
-def is_hierarchical_communication_enabled():
+def is_mc2_optimized_communication_enabled():
     return (
         os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
-    ) or get_ascend_config().enable_mc2_hierarchy_comm
+    ) or get_ascend_config().enable_mc2_optimized_comm
 
 
 def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = None) -> bool:
@@ -1189,7 +1189,7 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     computed once in init, and select_moe_comm_method is just config lookups, so
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
-    if is_hierarchical_communication_enabled():
+    if is_mc2_optimized_communication_enabled():
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.

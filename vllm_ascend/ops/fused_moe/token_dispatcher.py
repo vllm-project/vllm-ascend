@@ -50,7 +50,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
-    is_hierarchical_communication_enabled,
+    is_mc2_optimized_communication_enabled,
     should_skip_allreduce_across_dp_group,
 )
 
@@ -124,8 +124,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
-        # When enable hierarchical communication, param `expert_scales` need to be passed in.
-        self.need_expert_scale = is_hierarchical_communication_enabled()
+        # When enable optimized MC2 communication, param `expert_scales` need to be passed in.
+        self.need_expert_scale = is_mc2_optimized_communication_enabled()
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
@@ -148,12 +148,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
 
-        # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
-        self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
+        # NOTE: When enable_mc2_optimized_comm is true, we need pass in `comm_alg` to mc2 op.
+        self.enable_optimized_comm = get_ascend_config().enable_mc2_optimized_comm
 
-        if not self.enable_dispatch_v2 and self.need_comm_alg:
+        if not self.enable_dispatch_v2 and self.enable_optimized_comm:
             raise RuntimeError(
-                "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
+                "PTA and CANN version is too old to support mc2 optimized communication, please upgrade your version."
             )
 
     def refresh_hccl_group(self) -> None:
@@ -232,7 +232,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "expert_scales": topk_weights.to(torch.float32),
                 }
             )
-        if self.need_comm_alg:
+        if self.enable_optimized_comm:
             stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
@@ -336,8 +336,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.need_comm_alg:
-            stage3_kwargs.update({"comm_alg": "hierarchy"})
+        if self.enable_optimized_comm:
+            stage3_kwargs.update({"comm_alg": "fullmesh_v2"})
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2

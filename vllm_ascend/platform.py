@@ -784,9 +784,9 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
+        if ascend_config.enable_mc2_optimized_comm and ascend_config.enable_fused_mc2:
             raise ValueError(
-                "fused mc2 op cannot be used with hierarchy communication."
+                "fused mc2 op cannot be used with optimized MC2 communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
             )
 
