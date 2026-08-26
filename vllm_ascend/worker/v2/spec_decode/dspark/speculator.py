@@ -15,7 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
 from typing import Any, cast
 
 import torch
@@ -28,7 +27,10 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_metadata_wrapper,
+    build_draft_attn_metadata_factory,
+)
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
@@ -81,7 +83,17 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         assert self.input_batch is not None
-        with build_attn_metadata_wrapper():
+        # The draft attention metadata is built through the generic
+        # (Ascend) build_attn_metadata path; the factory forwards the draft
+        # query positions that the DSA metadata builder needs for RoPE.
+        with (
+            build_attn_metadata_wrapper(),
+            build_draft_attn_metadata_factory(
+                self.input_buffers.positions,
+                num_tokens_padded,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+            ),
+        ):
             attn_metadata = self._build_draft_attn_metadata(
                 num_reqs=self.input_batch.num_reqs,
                 num_reqs_padded=num_reqs_padded,
@@ -132,7 +144,13 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         is_profile: bool = False,
     ) -> torch.Tensor:
         self.input_batch = input_batch
-        with build_attn_metadata_wrapper():
+        assert self.input_batch is not None
+        with (
+            build_attn_metadata_wrapper(),
+            build_draft_attn_metadata_factory(
+                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+            ),
+        ):
             return super().propose(
                 input_batch,
                 attn_metadata,

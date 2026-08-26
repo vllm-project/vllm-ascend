@@ -207,9 +207,6 @@ Atlas 800I A2/A3:
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=512
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export TASK_QUEUE_ENABLE=1
 
 vllm serve your_model_path \
     --host <host_ip> \
@@ -226,8 +223,7 @@ vllm serve your_model_path \
     --trust-remote-code \
     --gpu-memory-utilization 0.95 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true}'
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
 ```
 
 !!! note
@@ -328,20 +324,17 @@ local_ip="<your_ip>"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 
 export HCCL_BUFFSIZE=512
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -364,7 +357,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --quantization ascend \
     --no-enable-prefix-caching \
     --enforce-eager \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_fused_mc2": 1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -392,22 +385,18 @@ local_ip="<your_ip>"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export VLLM_TORCH_PROFILER_WITH_STACK=0
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
@@ -428,7 +417,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --quantization ascend \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_fused_mc2": 1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -456,22 +445,18 @@ local_ip="<your_ip>"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export VLLM_TORCH_PROFILER_WITH_STACK=0
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
@@ -492,7 +477,7 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --quantization ascend \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
+    --additional-config '{"enable_fused_mc2": 1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -563,12 +548,12 @@ python load_balance_proxy_server_example.py \
     <decode1_ip> <decode1_ip> <decode1_ip> <decode1_ip> \
   --decoder-ports \
     9123 9124 9125 9126 \
-    9123 9124 9125 9126 \
+    9123 9124 9125 9126
 ```
 
 !!! note
 
-    - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+    - [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — Additional parameter details for vLLM serve commands.
     - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 
 **Service Verification:**
@@ -747,20 +732,17 @@ Single-node PD hybrid deployment optimized for maximum throughput on Atlas 800I 
 ```bash
 export HCCL_IF_IP=<node_ip>
 export GLOO_SOCKET_IFNAME=<ifname>
-export TP_SOCKET_IFNAME=<ifname>
 export HCCL_SOCKET_IFNAME=<ifname>
 
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export TASK_QUEUE_ENABLE=1
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -781,7 +763,7 @@ vllm serve your_model_path \
     --quantization ascend \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+    --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2": 1}'
 ```
 
 <u>Single-node PD Hybrid — Low Latency:</u>
@@ -791,20 +773,17 @@ Single-node PD hybrid deployment optimized for low latency with speculative deco
 ```bash
 export HCCL_IF_IP=<node_ip>
 export GLOO_SOCKET_IFNAME=<ifname>
-export TP_SOCKET_IFNAME=<ifname>
 export HCCL_SOCKET_IFNAME=<ifname>
 
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export TASK_QUEUE_ENABLE=1
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -826,7 +805,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"method": "eagle3", "model":"your_eagle3_model_path", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true}'
+    --additional-config '{"enable_cpu_binding":true}'
 ```
 
 <u>Single-node PD Hybrid — Long Context:</u>
@@ -836,20 +815,17 @@ Single-node PD hybrid deployment optimized for long context with Context Paralle
 ```bash
 export HCCL_IF_IP=<node_ip>
 export GLOO_SOCKET_IFNAME=<ifname>
-export TP_SOCKET_IFNAME=<ifname>
 export HCCL_SOCKET_IFNAME=<ifname>
 
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export TASK_QUEUE_ENABLE=1
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -867,7 +843,7 @@ vllm serve your_model_path \
     --no-enable-prefix-caching \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":131072}}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+    --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2": 1}'
 ```
 
 ### 9.2 Tuning Guidelines
@@ -875,11 +851,11 @@ vllm serve your_model_path \
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3-235B-A22B.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3-235B-A22B.
 
 ### Q: What hardware is required for Qwen3-235B-A22B?
 

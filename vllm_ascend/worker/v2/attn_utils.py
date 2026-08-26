@@ -20,7 +20,7 @@
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -45,7 +45,10 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_sfa_qsfa_packed_head_dim
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    get_sfa_qsfa_packed_head_dim,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
@@ -53,6 +56,9 @@ from vllm_ascend.core.kv_cache_interface import (
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -181,6 +187,7 @@ def build_attn_metadata(
     num_actual_tokens: int | None = None,
     num_input_tokens: int | None = None,
     is_prefilling: torch.Tensor | None = None,
+    pcp_context: "AscendPCPAttentionContext | None" = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
@@ -220,9 +227,10 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
-        # Upstream model states (e.g. MambaHybrid) pass is_prefilling per
-        # request through the extra kwargs; merge instead of passing it twice.
-        common_attn_metadata_extra_kwargs.setdefault("is_prefilling", is_prefilling)
+        common_is_prefilling = common_attn_metadata_extra_kwargs.pop(
+            "is_prefilling",
+            is_prefilling,
+        )
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -238,6 +246,7 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
+            is_prefilling=common_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
             **common_attn_metadata_extra_kwargs,
@@ -260,8 +269,12 @@ def build_attn_metadata(
                     attn_metadata_extra_kwargs.update(
                         num_reqs_actual=num_reqs,
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
-                        block_size=attn_group.kv_cache_spec.block_size,
                     )
+                    if pcp_context is not None:
+                        attn_metadata_extra_kwargs.update(
+                            pcp_context=pcp_context,
+                            pcp_cache_group_idx=i,
+                        )
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
@@ -395,7 +408,7 @@ def _view_dsv4_cache(
 
     k_shape = attn_backend.get_kv_cache_shape(
         num_blocks,
-        kv_cache_spec.block_size,
+        kv_cache_spec.storage_block_size,
         kv_cache_spec.num_kv_heads,
         kv_cache_spec.head_size,
     )
@@ -408,7 +421,7 @@ def _view_dsv4_cache(
         scale_dtype = kv_cache_spec.scale_dtype
         scale_shape = attn_backend.get_kv_cache_shape(
             num_blocks,
-            kv_cache_spec.block_size,
+            kv_cache_spec.storage_block_size,
             kv_cache_spec.num_kv_heads,
             scale_dim,
         )
@@ -417,7 +430,7 @@ def _view_dsv4_cache(
         if get_ascend_device_type() in {AscendDeviceType.A5}:
             full_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
-                kv_cache_spec.block_size,
+                kv_cache_spec.storage_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size + scale_dim * get_dtype_size(scale_dtype),
             )
@@ -804,7 +817,7 @@ def _reshape_kv_cache_v2(
             if total_bytes % kv_cache_spec.page_size_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
-            num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+            num_blocks_per_kv_block = kv_cache_spec.storage_block_size // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
@@ -876,3 +889,26 @@ def build_attn_metadata_wrapper():
         yield
     finally:
         _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
+
+
+@contextmanager
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+
+    The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
+    DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
+    speculator path does not forward them. Must run inside
+    ``build_attn_metadata_wrapper()``.
+    """
+    raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
+
+    def build_attn_metadata(*args, **kwargs):
+        kwargs["positions"] = positions[:pad]
+        kwargs["is_prefilling"] = is_prefilling
+        return raw(*args, **kwargs)
+
+    try:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw  # restore

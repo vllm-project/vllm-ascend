@@ -379,45 +379,49 @@ def test_rfork_fallback_load_config_copy_does_not_mutate_original():
     assert load_config.model_loader_extra_config == original_extra_config
 
 
-def test_rfork_detects_dynamic_eplb_config():
+def test_rfork_detects_dynamic_eplb_config(monkeypatch):
+    # Native Model Runner V2 EPLB is represented by ParallelConfig and does
+    # not require the AscendConfig singleton.
+
+    def fail_singleton_read():
+        raise AssertionError("singleton should not be read")
+
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
+        fail_singleton_read,
+    )
     assert _is_dynamic_eplb_enabled(
         SimpleNamespace(
             parallel_config=SimpleNamespace(enable_eplb=True),
             additional_config=None,
         )
     )
-    assert _is_dynamic_eplb_enabled(
-        SimpleNamespace(
-            parallel_config=SimpleNamespace(enable_eplb=False),
-            additional_config={
-                "eplb_config": {
-                    "dynamic_eplb": True,
-                }
-            },
-        )
+
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_eplb=False),
+        # A conflicting raw value verifies that RFork consumes only the typed
+        # singleton after AscendConfig initialization.
+        additional_config={"eplb_config": {"dynamic_eplb": False}},
     )
-    assert _is_dynamic_eplb_enabled(
-        SimpleNamespace(
-            parallel_config=SimpleNamespace(enable_eplb=False),
-            additional_config={
-                "eplb_config": {
-                    "expert_map_record_path": "/tmp/expert-map.json",
-                }
-            },
-        )
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=True, expert_map_record_path=None)),
     )
-    assert not _is_dynamic_eplb_enabled(
-        SimpleNamespace(
-            parallel_config=SimpleNamespace(enable_eplb=False),
-            additional_config={"eplb_config": {}},
-        )
+    assert _is_dynamic_eplb_enabled(vllm_config)
+
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
+        lambda: SimpleNamespace(
+            eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path="/tmp/expert-map.json")
+        ),
     )
-    assert not _is_dynamic_eplb_enabled(
-        SimpleNamespace(
-            parallel_config=SimpleNamespace(enable_eplb=False),
-            additional_config=None,
-        )
+    assert _is_dynamic_eplb_enabled(vllm_config)
+
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
     )
+    assert not _is_dynamic_eplb_enabled(vllm_config)
 
 
 def test_rfork_dynamic_eplb_uses_default_loader(monkeypatch):
@@ -441,6 +445,10 @@ def test_rfork_dynamic_eplb_uses_default_loader(monkeypatch):
 
     monkeypatch.setattr(loader, "_ensure_rfork_worker", fail_if_rfork_worker_is_created)
     monkeypatch.setattr(model_loader, "get_model", fake_get_model)
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=True, expert_map_record_path=None)),
+    )
 
     model = loader.load_model(vllm_config=vllm_config, model_config=model_config)
 
@@ -549,6 +557,10 @@ def test_rfork_fallback_clears_only_failed_model_state_before_reinit(monkeypatch
     monkeypatch.setattr(loader, "_ensure_rfork_worker", lambda vc, mc: rfork_worker)
     monkeypatch.setattr(model_loader, "get_model", fake_get_model)
     monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
+    )
+    monkeypatch.setattr(
         "vllm_ascend.model_loader.rfork.rfork_loader.initialize_model",
         lambda **kwargs: rfork_model,
     )
@@ -605,6 +617,10 @@ def test_rfork_seed_miss_fallback_preserves_existing_process_global_state(monkey
 
     monkeypatch.setattr(loader, "_ensure_rfork_worker", lambda vc, mc: rfork_worker)
     monkeypatch.setattr(model_loader, "get_model", fake_get_model)
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
+    )
     monkeypatch.setattr(
         "vllm_ascend.model_loader.rfork.rfork_loader.initialize_model",
         lambda **kwargs: pytest.fail("seed-miss fallback must not initialize an RFork model"),

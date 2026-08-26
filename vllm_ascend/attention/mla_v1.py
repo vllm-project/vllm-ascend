@@ -1052,11 +1052,18 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # On KV consumers (decode-only) MLAPO uses the transformed weights built above;
         # the original fused_qkv_a_proj/q_proj weights and quant params are no longer
-        # referenced, so drop them to save memory.
+        # referenced by the MLAPO decode fast path, so drop them to save NPU memory.
+        # However, D nodes have normal local-prefill paths (recompute / fallback /
+        # preempt) that dereference these weights, and freeing them crashes the
+        # worker with UndefinedTensorImpl (issue #11882). When
+        # mlapo_keep_prefill_weights is enabled, skip the free to trade NPU
+        # memory for stability.
+        ascend_config = get_ascend_config()
         if (
             self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
             and self.vllm_config.scheduler_config.max_num_batched_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
+            and not ascend_config.mlapo_keep_prefill_weights
         ):
             self.fused_qkv_a_proj.weight = None  # type: ignore[union-attr]
             self.fused_qkv_a_proj.deq_scale = None  # type: ignore[union-attr]
@@ -1625,15 +1632,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
         )
 
-    def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv):
+    def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata):
         # MLA Preprocess:
         # 1. Perform fused_qkv_a_proj and q_a_layernorm to obtain q_c and kv_no_split
         # or
         #    Perform kv_a_proj_with_mqa to obtain kv_no_split
-        # 2. If need_gather_q_kv, perform all_gather.
-        # 3. Preprocess decode tokens, write kv cache and get:
+        # 2. Preprocess decode tokens, write kv cache and get:
         # decode_ql_nope, decode_q_pe, decode_k_pe, decode_k_nope
-        # 4. Preprocess prefill tokens, write kv cache and get:
+        # 3. Preprocess prefill tokens, write kv cache and get:
         # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
@@ -1644,15 +1650,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 dim=-1,
             )
             q_c = self.q_a_layernorm(q_c)  # type: ignore[misc]
-            # allgather need contiguous data
             kv_no_split = kv_no_split.contiguous()
         else:
             q_c = hidden_states
             kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]  # type: ignore[misc]
-
-        # Process for Flash Comm V1
-        q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(q_c.contiguous(), need_gather_q_kv)
-        kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv_no_split.contiguous(), need_gather_q_kv)
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
@@ -1680,7 +1681,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
         attn_metadata: M,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError("forward_mha is not supported for MLA attention. Use forward() instead.")
@@ -1691,7 +1691,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor],
         attn_metadata: M,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError("forward_mqa is not supported for MLA attention. Use forward() instead.")
@@ -1702,7 +1701,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor],
         attn_metadata: M,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
@@ -1727,15 +1725,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         if (self.fa_quant_layer or self.enable_mlapo) and (
             attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS and attn_metadata.num_prefills == 0
         ):
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                hidden_states.contiguous(), need_gather_q_kv
-            )
             decode_preprocess_res, prefill_preprocess_res = DeviceOperator.mla_preprocess_only_decode(
                 self, hidden_states, kv_cache, attn_metadata
             )
         else:
             decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
-                layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv
+                layer_name, hidden_states, kv_cache, attn_metadata
             )
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding

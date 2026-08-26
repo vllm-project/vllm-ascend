@@ -31,7 +31,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
+from vllm.model_executor.models.interfaces import SupportsEagle3
+from vllm.model_executor.models.utils import (
+    PPMissingLayer,
+    maybe_prefix,
+    process_eagle_weight,
+)
 
 from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2DecoderLayer,
@@ -288,13 +293,6 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         return logits_processor(lm_head, self.norm(hidden_states))
 
-    def compute_confidence(
-        self,
-        hidden_states: torch.Tensor,
-        markov_embed: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.confidence_head(hidden_states, markov_embed)
-
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
             self,
@@ -307,7 +305,7 @@ class DeepseekV4DSparkModel(nn.Module):
 
 
 @support_torch_compile
-class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
+class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, SupportsEagle3):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -360,6 +358,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
             positions=positions,
         )
 
+    def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Full-vocab draft: base logits, no d2t scatter.
+        return self.compute_logits(hidden_states)
+
+    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
+        return draft_ids  # full-vocab: draft ids are target ids
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -378,8 +383,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_bias(markov_embed)
 
-    def confidence_logits(self, hidden_states: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.model.confidence_logits(hidden_states, markov_embed)
+    def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
+        """Per-position acceptance probability for each drafted token."""
+        assert self.model.confidence_head is not None
+        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return self.model.get_draft_kv_cache_layer_names()
@@ -437,6 +444,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
                 if mapped_name is None:
                     continue
                 name = mapped_name
+
+            # Detect whether the checkpoint ships its own embed_tokens / lm_head
+            # for the draft model.
+            process_eagle_weight(self, name)
 
             # Expert scale parameters use Ascend's ``weight_scale`` convention.
             if name.endswith(".scale"):

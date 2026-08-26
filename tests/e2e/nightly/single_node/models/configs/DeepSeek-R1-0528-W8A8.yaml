@@ -34,7 +34,7 @@ _server_cmd: &server_cmd
   - "--speculative-config"
   - '{"num_speculative_tokens": 1, "method": "mtp"}'
   - "--additional-config"
-  - '{"enable_weight_nz_layout": true}'
+  - '{"weight_nz_mode": 1}'
 
 _benchmarks_acc: &benchmarks_acc
   acc:

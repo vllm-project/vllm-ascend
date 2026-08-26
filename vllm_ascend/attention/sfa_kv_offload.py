@@ -260,12 +260,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self._current_layer_name = layer_name
         try:
-            return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output)
+            return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
         finally:
             self._current_layer_name = None
 

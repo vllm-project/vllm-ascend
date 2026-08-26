@@ -212,6 +212,11 @@ jobs:
           uv pip install -r requirements-dev.txt
           uv pip install -e .
 
+      - name: Uninstall Triton for 310P tests
+        if: ${{ inputs.soc_version == '310P' }}
+        run: |
+          pip uninstall -y triton-ascend triton
+
       - name: Install aisbench
         if: ${{ inputs.request_id != '' }}
         shell: bash -l {0}

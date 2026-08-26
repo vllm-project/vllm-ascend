@@ -10,12 +10,14 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.minimax_m3 import (
     MiniMaxM3Attention,
     MiniMaxM3MoE,
     _get_rope_parameters,
     _sparse_attention_layer_ids,
 )
+from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3SwiGLUOAI
 
 
 class _FakeQKVProj(nn.Module):
@@ -77,6 +79,37 @@ def _make_attention() -> MiniMaxM3Attention:
 
 
 class TestMiniMaxM3Modeling(unittest.TestCase):
+    def test_mxfp8_swiglu_uses_small_ops_then_dynamic_quant(self) -> None:
+        activation = MiniMaxM3SwiGLUOAI(
+            alpha=1.702,
+            beta=1.0,
+            limit=7.0,
+            use_mx_quant=True,
+        )
+        gate_up = torch.tensor(
+            [[-2.0, 8.0, -9.0, 3.0]],
+            dtype=torch.bfloat16,
+        )
+        quantized = torch.randn(1, 2)
+        output_scale = torch.randn(1, 1)
+
+        with patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
+            return_value=(quantized, output_scale),
+        ) as dynamic_quant:
+            output, actual_scale = activation(gate_up)
+
+        gate = gate_up[..., :2].clamp(max=7.0)
+        up = gate_up[..., 2:].clamp(min=-7.0, max=7.0)
+        expected_activation = gate * torch.sigmoid(1.702 * gate) * (up + 1.0)
+        actual_activation = dynamic_quant.call_args.args[0]
+        torch.testing.assert_close(actual_activation, expected_activation)
+        self.assertEqual(dynamic_quant.call_args.kwargs["act_quant_type"], torch.float8_e4m3fn)
+        self.assertTrue(dynamic_quant.call_args.kwargs["use_mxfp_quant"])
+        self.assertIs(output, quantized)
+        self.assertIs(actual_scale, output_scale)
+
     def test_moe_passes_swigluoai_config_during_construction(self) -> None:
         config = PretrainedConfig(
             hidden_size=64,

@@ -207,9 +207,9 @@ def test_prepare_spec_decode_drafting_metadata_transitions_to_decode() -> None:
         torch.tensor([1, 1], dtype=torch.int32),
     )
     assert draft_dcp_metadata.max_query_len == 1
-    assert torch.equal(
+    np.testing.assert_array_equal(
         draft_dcp_metadata.num_computed_tokens_of_dcp,
-        local_seq_lens,
+        local_seq_lens.numpy(),
     )
     assert torch.equal(
         draft_dcp_metadata.draft_cp_seq_len,
@@ -275,5 +275,5 @@ def test_update_spec_decode_drafting_metadata_prioritizes_sfa_dcp() -> None:
     manager._get_dcp_local_seq_lens.assert_called_once()
     assert torch.equal(
         manager._get_dcp_local_seq_lens.call_args.args[0],
-        torch.tensor([8, 12], dtype=torch.int32),
+        torch.tensor([9, 13], dtype=torch.int32),
     )

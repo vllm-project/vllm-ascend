@@ -99,9 +99,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
-        block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
+        storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         return AscendMLAAttentionSpec(
-            block_size=block_size,
+            block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
@@ -115,9 +115,16 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+        # Keep these imports lazy to avoid a model-inspection circular import.
+        if self.compress_ratio == 4:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC4Backend
 
-        return AscendDSABackend
+            return AscendDSAC4Backend
+        if self.compress_ratio == 128:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC128Backend
+
+            return AscendDSAC128Backend
+        raise ValueError(f"Unsupported DeepSeek V4 indexer compression ratio: {self.compress_ratio}")
 
 
 @dataclass(frozen=True)
@@ -318,6 +325,42 @@ class DeepseekV4Indexer(nn.Module):
         assert hadamard is not None
         return cache_req_metadata, hadamard
 
+    def update_cache(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        metadata: AscendIndexerMetadata,
+    ) -> None:
+        """Update Indexer caches without projecting queries or selecting TopK."""
+        if hidden_states.shape[0] == 0:
+            return
+
+        state_cache, key_cache, scale_cache, full_cache = self.ops.unpack_dsa_indexer_kv_cache(kv_cache)
+        _, hadamard = self._get_indexer_cache_metadata(metadata)
+        compressor = self.compressor
+        assert compressor is not None
+        key, slot_mapping = compressor(
+            hidden_states=hidden_states,
+            state_cache=state_cache,
+            metadata=metadata.compressor,
+        )
+        if key.shape[0] == 0:
+            return
+        if compressor.rotate:
+            key = rotate_activation(key, hadamard)
+        _, key_scale = self.ops.quantize_key_and_update_cache(
+            key,
+            key_cache,
+            full_cache,
+            slot_mapping,
+        )
+        if key_scale is not None:
+            self.ops.update_scale_cache(
+                key_scale,
+                scale_cache,
+                slot_mapping,
+            )
+
     def _get_cached_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
         if self.topk_indices_buffer is None:
             raise RuntimeError("topk_indices_buffer is required to read cached TopK indices")
@@ -349,6 +392,7 @@ class DeepseekV4Indexer(nn.Module):
         overlap_plan: IndexerOverlapPlan,
         *,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
         cache_metadata, _ = self._get_indexer_cache_metadata(metadata)
@@ -389,9 +433,10 @@ class DeepseekV4Indexer(nn.Module):
                 cos,
                 sin,
                 qr_pertoken_scale,
+                write_cache=write_cache,
             )
 
-        if self.skip_topk or aux_stream is None:
+        if write_cache and (self.skip_topk or aux_stream is None):
             compressed_kv, compress_slot_mapping = overlap_plan.compute_attention_compressed_kv()
             overlap_plan.scatter_attention_compressed_kv(compressed_kv, compress_slot_mapping)
 
@@ -564,6 +609,7 @@ class DeepseekV4Indexer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ):
         (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
             self.ops.unpack_dsa_indexer_kv_cache(kv_cache)
@@ -598,15 +644,18 @@ class DeepseekV4Indexer(nn.Module):
         )
 
         q = rotate_activation(q, hadamard)
-        kv, indexer_slot_mapping = compressor(
-            hidden_states=x,
-            state_cache=indexer_state_cache,
-            metadata=metadata.compressor,
-        )
-        if kv.numel() == 0:
-            kv = None
-        elif compressor.rotate:
-            kv = rotate_activation(kv, hadamard)
+        kv = None
+        indexer_slot_mapping = None
+        if write_cache:
+            kv, indexer_slot_mapping = compressor(
+                hidden_states=x,
+                state_cache=indexer_state_cache,
+                metadata=metadata.compressor,
+            )
+            if kv.numel() == 0:
+                kv = None
+            elif compressor.rotate:
+                kv = rotate_activation(kv, hadamard)
 
         return (
             q,
@@ -627,6 +676,7 @@ class DeepseekV4Indexer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ):
         q, kv, ik, isc, ifc, cache_metadata, indexer_slot_mapping = self._indexer_qkv_prepare(
             x,
@@ -636,17 +686,29 @@ class DeepseekV4Indexer(nn.Module):
             cos,
             sin,
             qr_pertoken_scale,
+            write_cache=write_cache,
         )
 
         weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
 
-        return self.ops.quantize_update_cache_and_select_topk(
+        if write_cache:
+            return self.ops.quantize_update_cache_and_select_topk(
+                q,
+                kv,
+                weights,
+                ik,
+                isc,
+                ifc,
+                indexer_slot_mapping,
+                cache_metadata,
+            )
+
+        q, q_scale = self.ops.quantize_query(q)
+        return self.ops.select_topk(
             q,
-            kv,
             weights,
+            q_scale,
             ik,
             isc,
-            ifc,
-            indexer_slot_mapping,
             cache_metadata,
         )

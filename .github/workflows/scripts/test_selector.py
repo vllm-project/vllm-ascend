@@ -38,9 +38,6 @@ COVERAGE_DENSITY_THRESHOLD = 0.0
 MIN_AFFECTED_LINES = 1
 
 
-# ==================== Configuration ====================
-
-
 def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
     Extract new/modified test files from PR diff.
@@ -62,10 +59,13 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
         return test_files_found
 
     # Pattern to match test file paths: tests/e2e/pull_request/ or tests/ut/ directory
-    # In diff output: +++ b/tests/ut/core/test_xxx.py
+    # In diff output:
+    #   - +++ b/tests/ut/core/test_xxx.py (new/modified test file)
+    #   - rename to tests/ut/attention/test_xxx.py (renamed test file)
     # Test files must be in tests/e2e/pull_request/ or tests/ut/ directory and start with test_
     test_file_pattern = re.compile(
-        r"^\+\+\+ [ab]/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py)", re.MULTILINE
+        r"^(?:\+\+\+ [ab]/|rename to )((?:tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py))",
+        re.MULTILINE,
     )
 
     changed_test_files = set()
@@ -437,7 +437,7 @@ class CodeChangeDetector:
 
     def detect_renames(self, diff_output: str) -> dict[str, str]:
         """
-        Detect file renames in git diff output.
+        Detect file renames in git diff output (product code only, vllm_ascend/).
 
         Args:
             diff_output: diff content
@@ -462,7 +462,9 @@ class CodeChangeDetector:
                     # Remove a/ or b/ prefix if present
                     old_path = current_old_path[2:] if current_old_path.startswith("a/") else current_old_path
                     new_path = current_new_path[2:] if current_new_path.startswith("b/") else current_new_path
-                    renames[old_path] = new_path
+                    # Only record product code renames (vllm_ascend/)
+                    if old_path.startswith(f"{REPO_NAME}/"):
+                        renames[old_path] = new_path
                     current_old_path = None
                     current_new_path = None
 
@@ -1149,6 +1151,14 @@ def main():
 
         print(f"Fetching changes from GitHub PR: {repo}#{pr_num}")
 
+        github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+        def _github_request(url: str) -> urllib.request.Request:
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            if github_token:
+                headers["Authorization"] = f"Bearer {github_token}"
+            return urllib.request.Request(url, headers=headers)
+
         # Create context that does not verify SSL certificates
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
@@ -1162,7 +1172,7 @@ def main():
             print(f"  Attempt {attempt}/{max_retries} to get PR diff via GitHub API...")
             try:
                 pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_num}"
-                req = urllib.request.Request(pr_url, headers={"Accept": "application/vnd.github.v3+json"})
+                req = _github_request(pr_url)
                 with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
                     pr_data = json.loads(response.read().decode())
                     diff_url = pr_data.get("diff_url")
@@ -1171,7 +1181,7 @@ def main():
                     raise Exception("Cannot get diff URL")
 
                 # Download diff (use binary mode to avoid line ending conversion)
-                req = urllib.request.Request(diff_url)
+                req = _github_request(diff_url)
                 with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
                     diff_bytes = response.read()
                     with open(diff_file, "wb") as f:
@@ -1216,8 +1226,10 @@ def main():
             print(f"Parsed {len(changed_files_with_lines)} changed files:")
             for file_path, line_set in changed_files_with_lines.items():
                 print(f"  {file_path}")
+
+            # detect_renames already filters to vllm_ascend/ prefix only (product code renames)
             if renames:
-                print(f"\n=== Detected {len(renames)} Renamed File(s) - Using File-Level Matching ===")
+                print(f"\n=== Detected {len(renames)} Product Code Renamed File(s) - Using File-Level Matching ===")
                 for old_path, new_path in renames.items():
                     print(f"  {old_path} -> {new_path}")
 
