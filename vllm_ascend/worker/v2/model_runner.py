@@ -700,16 +700,12 @@ class NPUModelRunner(GPUModelRunner):
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
 
-        The LM-head collectives span the whole lmhead-TP group, so every rank
-        must feed them the same number of rows: gathered hidden states are
-        padded up to ``_lmhead_tp_max_num_logits()`` before compute_logits
-        and trimmed back before sampling. Unlike V1 (logits_indices padding
-        in ``model_runner_v1.py``), ``logits_indices`` stays real because the
-        V2 sampler gathers penalties inputs by it.
-
-        Only the sample path is aligned: prompt_logprobs requests are not
-        supported with lmhead TP (PromptLogprobsWorker calls compute_logits
-        with per-rank uneven chunk sizes; V1 has the same limitation).
+        The LM-head collectives span the whole group, so every rank must feed
+        compute_logits the same number of rows: pad hidden states up to
+        ``_lmhead_tp_max_num_logits()`` and trim the logits back before
+        sampling. ``logits_indices`` stays real (the V2 sampler gathers
+        penalties by it). prompt_logprobs is not supported with lmhead TP
+        (same as V1).
         """
         if not lmhead_tp_enable():
             return super().sample(hidden_states, input_batch, grammar_output)
@@ -730,9 +726,7 @@ class NPUModelRunner(GPUModelRunner):
         logits = self.model.compute_logits(sample_hidden_states)
         logits = logits[:num_logits]
 
-        # Dispatch tail mirrors GPUModelRunner.sample; a dispatch-tail canary
-        # unit test fails when upstream sample() diverges, flagging that this
-        # copied tail needs a refresh on main2main bumps.
+        # Dispatch tail mirrors GPUModelRunner.sample; refresh it on main bumps.
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -769,17 +763,13 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Override GPUModelRunner._dummy_run for lmhead TP.
+        """Join the LM-head collectives on dummy batches for lmhead TP.
 
-        Idle DP ranks never call sample(), so they would never join the
-        LM-head collectives that span the whole group, and the busy ranks'
-        all_gather would hang. Join the collectives here with zero-indexed
-        rows at the same capacity as sample() (both derive from
-        ``_lmhead_tp_max_num_logits``; a mismatch desyncs the shapes and
-        hangs), mirroring V1's ``need_dummy_logits`` mechanism. Skipped for
-        profiling runs (the profile dummy sampler already calls
-        compute_logits) and non-last PP ranks (they never produce logits).
-        Spec-decode draft-side alignment is not covered here.
+        Idle DP ranks never call sample(), so without this their ranks would
+        be missing from the group collectives and busy ranks would hang.
+        Zero-indexed rows at the same capacity as sample() (both from
+        ``_lmhead_tp_max_num_logits()``; a mismatch hangs). Skipped for
+        profiling and non-last PP ranks. Draft-side alignment is not covered.
         """
         hidden_states, sample_hidden_states = super()._dummy_run(
             num_tokens,
@@ -793,7 +783,7 @@ class NPUModelRunner(GPUModelRunner):
         if lmhead_tp_enable() and not is_profile and hidden_states is not None:
             dummy_indices = torch.zeros(
                 self._lmhead_tp_max_num_logits(),
-                dtype=torch.long,
+                dtype=torch.int64,
                 device=hidden_states.device,
             )
             self.model.compute_logits(hidden_states[dummy_indices])
