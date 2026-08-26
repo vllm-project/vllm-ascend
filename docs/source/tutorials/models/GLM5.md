@@ -1287,6 +1287,11 @@ if __name__ == "__main__":
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
+        # 每个 DP rank 使用独立的 KV 端口与 engine_id,避免端口冲突与 KV 路由混淆
+        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → KV 端口 30200-30203
+        KV_PORT=$((30200 + $4 % 4))
+        ENGINE_ID=$((100 + $4))
+
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_TRANSFER_TIMEOUT=600
         export HCCL_EXEC_TIMEOUT=3600
@@ -1341,8 +1346,8 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
-            "kv_port": "30200",
-            "engine_id": "2",
+            "kv_port": "'"$KV_PORT"'",
+            "engine_id": "'"$ENGINE_ID"'",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -1359,6 +1364,11 @@ if __name__ == "__main__":
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
+        # 每个 DP rank 使用独立的 KV 端口与 engine_id,避免端口冲突与 KV 路由混淆
+        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → KV 端口 30200-30203
+        KV_PORT=$((30200 + $4 % 4))
+        ENGINE_ID=$((100 + $4))
+
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_TRANSFER_TIMEOUT=600
         export HCCL_EXEC_TIMEOUT=3600
@@ -1413,8 +1423,8 @@ if __name__ == "__main__":
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
-            "kv_port": "30200",
-            "engine_id": "2",
+            "kv_port": "'"$KV_PORT"'",
+            "engine_id": "'"$ENGINE_ID"'",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
