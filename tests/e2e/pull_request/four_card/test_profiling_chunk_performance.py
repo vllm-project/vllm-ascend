@@ -55,7 +55,12 @@ def test_profiling_chunk_ttft_performance() -> None:
         enforce_eager=True,
         async_scheduling=False,
         additional_config={
-            "profiling_chunk_config": {"enabled": True, "smooth_factor": 0.9},
+            "scheduler_config": {
+                "profiling_chunk_config": {
+                    "enabled": True,
+                    "smooth_factor": 0.9,
+                },
+            },
             "enable_cpu_binding": False,
         },
         hf_overrides={

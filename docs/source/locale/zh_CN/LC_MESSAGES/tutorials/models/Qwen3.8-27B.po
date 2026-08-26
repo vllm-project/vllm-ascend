@@ -83,19 +83,6 @@ msgid ""
 msgstr ""
 "请参阅[支持的特性](../../user_guide/support_matrix/supported_features.md)获取该模型的支持特性矩阵。"
 
-msgid ""
-"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
-"feature configuration details."
-msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性配置详情。"
-
-msgid ""
-"> **Note**: The support matrix records the maximum verified capability for "
-"this model. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-"
-"batched-tokens` based on your service workload and available KV cache."
-msgstr ""
-"> **注意**：支持矩阵记录了该模型的最大已验证能力。请根据您的服务工作负载和可用的 KV 缓存调整 `--max-model-"
-"len`、`--max-num-seqs` 和 `--max-num-batched-tokens`。"
-
 msgid "## 3 Prerequisites"
 msgstr "## 3 前提条件"
 
@@ -104,15 +91,6 @@ msgstr "### 3.1 模型权重"
 
 msgid "The following model weights are available:"
 msgstr "以下模型权重可用："
-
-msgid ""
-"- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)\n"
-"- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)\n"
-"- `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)"
-msgstr ""
-"- `Qwen3.8-27B`（BF16 版本）：需要 1 个 Ascend950DT 系列（96GB × 8）节点或 1 个 Atlas 800 A3（64GB × 16）节点。[下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)\n"
-"- `Qwen3.8-27B-w8a8`（量化版本）：需要 1 个 Atlas 800 A3（64GB × 16）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)\n"
-"- `Qwen3.8-27B-w8a8-mxfp8`（量化版本）：需要 1 个 Ascend950DT 系列（96GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)"
 
 msgid ""
 "It is recommended to download the model weight to the shared directory of "
@@ -144,15 +122,6 @@ msgstr ""
 "根据您的机器类型选择镜像并在节点上启动 docker 镜像，请参阅[使用 docker](../../installation.md#set-up-"
 "using-docker)。"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
-msgid "Start the docker image on each node."
-msgstr "在每个节点上启动 docker 镜像。"
-
-msgid "=== \"Ascend950DT series\""
-msgstr "=== \"Ascend950DT系列\""
-
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 docker 镜像。"
 
@@ -176,9 +145,6 @@ msgid ""
 " and vLLM-Ascend on each node."
 msgstr "如果要部署多节点服务，请在每个节点上安装相同版本的 vLLM 和 vLLM-Ascend。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -198,14 +164,6 @@ msgstr "- 将模型路径、并行大小和服务端口替换为目标环境中�
 
 msgid "=== \"A3 series\""
 msgstr "=== \"A3 系列\""
-
-msgid ""
-"The following example is for Atlas 800 A3. Quantized versions need "
-"`--quantization ascend`."
-msgstr "以下示例适用于 Atlas 800 A3。量化版本需要 `--quantization ascend`。"
-
-msgid "Key Parameter Descriptions:"
-msgstr "关键参数说明："
 
 msgid ""
 "- `--data-parallel-size 1` and `--tensor-parallel-size 2` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.\n"
@@ -240,11 +198,6 @@ msgstr ""
 
 msgid "=== \"Ascend950DT series\""
 msgstr "=== \"Ascend950DT系列\""
-
-msgid ""
-"The following example is for Ascend950DT series. Quantized versions need "
-"`--quantization ascend`."
-msgstr "以下示例适用于Ascend950DT系列。量化版本需要 `--quantization ascend`。"
 
 msgid "Key Parameter Descriptions:"
 msgstr "关键参数说明："
@@ -308,9 +261,6 @@ msgstr ""
 msgid "## 7 Accuracy Evaluation"
 msgstr "## 7 精度评估"
 
-msgid "Here are two accuracy evaluation methods."
-msgstr "以下是两种精度评估方法。"
-
 msgid "### Using AISBench"
 msgstr "### 使用AISBench"
 
@@ -344,96 +294,184 @@ msgstr "| GPQA Diamond | Qwen3.8-27B-w8a8-mxfp8 | accuracy | gen | 89.39 |"
 msgid "## 8 Performance Evaluation"
 msgstr "## 8 性能评估"
 
-msgid "### 8.1 Install AISBench"
-msgstr "### 8.1 安装AISBench"
-
-msgid ""
-"Run AISBench in a separate environment or container so that the load "
-"generator does not affect the serving processes. Refer to [Using AISBench "
-"for performance "
-"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
-"performance-evaluation)."
-msgstr ""
-"在独立的环境或容器中运行AISBench，以便负载生成器不影响服务进程。请参阅 "
-"[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
-"performance-evaluation)。"
-
-msgid "### 8.2 Performance Service Configuration"
-msgstr "### 8.2 性能服务配置"
-
-msgid ""
-"Use the deployment in Section 5 as the baseline. Change the following values"
-" on the node:"
-msgstr "以第5节中的部署为基线。在节点上更改以下值："
-
-msgid "| Parameter | Standard deployment | Performance test |"
-msgstr "| Parameter | Standard deployment | Performance test |"
-
-msgid "### 8.3 Run the Tests"
-msgstr "### 8.3 运行测试"
-
-msgid ""
-"Run performance evaluation of `Qwen3.8-27B` as an example. Refer to [vLLM "
-"benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details."
-msgstr ""
-"以 `Qwen3.8-27B` 为例运行性能评估。有关更多详细信息，请参阅 "
-"[vLLM基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
-
-msgid ""
-"Record the node count, DP/TP topology, context length, concurrency, "
-"reasoning effort, and weight revision together with the result."
-msgstr "记录节点数、DP/TP拓扑、上下文长度、并发数、推理努力程度和权重修订版本，并与结果一起保存。"
-
-msgid "### 8.4 Enabled Optimizations"
-msgstr "### 8.4 已启用的优化"
-
-msgid "| Feature | Description |"
-msgstr "| Feature | Description |"
-
-msgid ""
-"| Chunked Prefill | Splits long prefill inputs into chunks to reduce per-"
-"step memory peaks. |"
-msgstr "| 分块预填充 | 将较长的预填充输入拆分为多个块，以降低每步的内存峰值。 |"
-
-msgid "| W8A8 | Uses Ascend quantization for the validated checkpoint. |"
-msgstr "| W8A8 | 对已验证的检查点使用昇腾量化。 |"
-
-msgid "| Lazy Safetensors | Avoids prefetching the complete NFS checkpoint. |"
-msgstr "| 惰性安全张量 | 避免预取完整的NFS检查点。 |"
-
-msgid "| MTP | Uses three speculative tokens with the `qwen3_5_mtp` method. |"
-msgstr "| MTP | 使用 `qwen3_5_mtp` 方法生成三个推测性令牌。 |"
-
-msgid "| ACL Graph | Uses `FULL_DECODE_ONLY` replay. |"
-msgstr "| ACL图 | 使用 `FULL_DECODE_ONLY` 重放。 |"
-
-msgid "| CPU Binding | Reduces cross-core scheduling overhead. |"
-msgstr "| CPU绑定 | 减少跨核调度开销。 |"
-
 msgid "## 9 Performance Tuning"
 msgstr "## 9 性能调优"
-
-msgid ""
-"Use the deployment values above as a baseline. Adjust `max-model-len`, `max-"
-"num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization` together "
-"for the target workload."
-msgstr ""
-"以上述部署配置为基准。根据目标工作负载，同时调整 `max-model-len`、`max-num-seqs`、`max-num-batched-"
-"tokens` 和 `gpu-memory-utilization`。"
-
-msgid ""
-"Refer to the [performance tuning "
-"guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
-" and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md)"
-" for additional guidance."
-msgstr ""
-"更多指导，请参阅[性能调优指南](../../developer_guide/performance_and_debug/optimization_and_tuning.md)和[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
 
 msgid ""
-"For common environment, installation, and general parameter issues, refer to"
-" the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get "
+"feature configuration details."
+msgstr "请参阅[功能指南](../../user_guide/feature_guide/index.md)获取功能配置详情。"
+
+msgid ""
+"- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)\n"
+"- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)\n"
+"- `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)"
 msgstr ""
-"有关常见环境、安装和一般参数问题，请参阅[公共常见问题](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+"- `Qwen3.8-27B`（BF16版本）：需要1个Ascend950DT系列（96GB × 8）节点或1个Atlas 800 A3（64GB × 16）节点或1个Atlas 800 A2（64GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)\n"
+"- `Qwen3.8-27B-w8a8`（量化版本）：需要1个Atlas 800 A3（64GB × 16）节点或1个Atlas 800 A2（64GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)\n"
+"- `Qwen3.8-27B-w8a8-mxfp8`（量化版本）：需要1个Ascend950DT系列（96GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)"
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2系列\""
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid "The following example is for Ascend950DT series."
+msgstr "以下示例适用于Ascend950DT系列。"
+
+msgid "=== \"Atlas 800 A3 / Atlas 800 A2\""
+msgstr "=== \"Atlas 800 A3 / Atlas 800 A2\""
+
+msgid "The following example is for Atlas 800 A3 / Atlas 800 A2."
+msgstr "以下示例适用于Atlas 800 A3 / Atlas 800 A2。"
+
+msgid "Here is an accuracy evaluation method."
+msgstr "以下是一种精度评估方法。"
+
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"有关详细信息，请参阅[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+msgid "### Using vLLM Benchmark"
+msgstr "### 使用vLLM基准测试"
+
+msgid "Run performance evaluation of `Qwen3.8-27B-w8a8` as an example."
+msgstr "以`Qwen3.8-27B-w8a8`的性能评估为例。"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr "有关更多详细信息，请参阅[vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid "There are three `vllm bench` subcommands:"
+msgstr "`vllm bench`有三个子命令："
+
+msgid ""
+"- `latency`: Benchmark the latency of a single batch of requests.\n"
+"- `serve`: Benchmark the online serving throughput.\n"
+"- `throughput`: Benchmark offline inference throughput."
+msgstr ""
+"- `latency`：基准测试单批请求的延迟。\n"
+"- `serve`：基准测试在线服务吞吐量。\n"
+"- `throughput`：基准测试离线推理吞吐量。"
+
+msgid "Take the `serve` as an example. Run the code as follows."
+msgstr "以`serve`为例。按如下方式运行代码。"
+
+msgid ""
+"After about several minutes, you can get the performance evaluation result."
+msgstr "大约几分钟后，即可获得性能评估结果。"
+
+msgid "### 9.1 Recommended Configurations"
+msgstr "### 9.1 推荐配置"
+
+msgid ""
+"> **Note**: The current documentation focuses on the rapid adaptation and "
+"validation of the Qwen3.8-27B model on Ascend NPUs. Performance tuning "
+"results have not yet been fully verified. Recommended configurations for "
+"typical scenarios (e.g., long context, low latency, and high throughput) "
+"will be supplemented and updated here once the corresponding validation is "
+"completed. In the meantime, please refer to [Section 9.2](#92-tuning-"
+"guidelines) for general tuning guidance."
+msgstr ""
+"> **注意**：当前文档重点介绍Qwen3.8-27B模型在Ascend "
+"NPU上的快速适配和验证。性能调优结果尚未完全验证。典型场景（如长上下文、低延迟和高吞吐量）的推荐配置将在相应验证完成后在此补充和更新。在此期间，请参阅[第9.2节](#92-tuning-"
+"guidelines)获取通用调优指导。"
+
+msgid "### 9.2 Tuning Guidelines"
+msgstr "### 9.2 调优指南"
+
+msgid "#### 9.2.1 General Tuning Reference"
+msgstr "#### 9.2.1 通用调优参考"
+
+msgid ""
+"Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.\n"
+"Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions."
+msgstr ""
+"请参阅[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。\n"
+"请参阅[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+
+msgid "#### 9.2.2 Model-Specific Optimizations"
+msgstr "#### 9.2.2 模型特定优化"
+
+msgid "##### Optimizations Enabled by Default"
+msgstr "##### 默认启用的优化"
+
+msgid ""
+"The following optimizations are enabled by default and require no additional"
+" configuration:"
+msgstr "以下优化默认启用，无需额外配置："
+
+msgid "| Optimization Technique | Technical Principle | Performance Benefit |"
+msgstr "| 优化技术 | 技术原理 | 性能收益 |"
+
+msgid ""
+"| Chunked Prefill | The vLLM V1 scheduler splits long prefill inputs into "
+"chunks, with each step processing at most `--max-num-batched-tokens` tokens."
+" | Reduces per-step memory peaks, enabling larger batch sizes and higher "
+"throughput. |"
+msgstr ""
+"| 分块预填充 | vLLM V1调度器将长预填充输入拆分为多个块，每一步最多处理`--max-num-batched-tokens`个令牌。 | "
+"降低每步内存峰值，支持更大的批处理大小和更高的吞吐量。 |"
+
+msgid ""
+"| Full Decode ACL Graph | Captures and replays the entire decode graph at "
+"once using `--compilation-config "
+"'{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'`. | Reduces per-step operator "
+"dispatch overhead, stabilizing decode latency. |"
+msgstr ""
+"| 全解码ACL图 | 使用`--compilation-config "
+"'{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'`一次性捕获并重放整个解码图。 | "
+"降低每步算子调度开销，稳定解码延迟。 |"
+
+msgid ""
+"| CPU Binding | Binds worker threads to dedicated CPU cores via "
+"`--additional-config '{\"enable_cpu_binding\":true}'`. | Reduces CPU "
+"scheduling jitter and stabilizes decode latency. |"
+msgstr ""
+"| CPU绑定 | 通过`--additional-config "
+"'{\"enable_cpu_binding\":true}'`将工作线程绑定到专用CPU核心。 | 减少CPU调度抖动，稳定解码延迟。 |"
+
+msgid "##### Optimizations That Require Explicit Enabling"
+msgstr "##### 需要显式启用的优化"
+
+msgid ""
+"| Optimization Technique | Applicable Scenarios | Enablement Method | "
+"Technical Principle | Precautions |"
+msgstr "| 优化技术 | 适用场景 | 启用方法 | 技术原理 | 注意事项 |"
+
+msgid ""
+"| Prefix Cache | Scenarios with repeated prefixes (e.g., shared system "
+"prompts, few-shot examples) | `--enable-prefix-caching` | Reuses cached KV "
+"state for repeated prefixes, avoiding redundant prefill computation. | The "
+"benefit depends on the prefix cache hit rate. |"
+msgstr ""
+"| 前缀缓存 | 具有重复前缀的场景（如共享系统提示、少样本示例） | `--enable-prefix-caching` | "
+"为重复前缀复用缓存的KV状态，避免冗余的预填充计算。 | 收益取决于前缀缓存命中率。 |"
+
+msgid ""
+"| Qwen3.5 MTP Speculative Decoding | Decode-heavy workloads with acceptable "
+"acceptance rate | `--speculative-config "
+"'{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":3}'` | Uses the "
+"built-in MTP draft head to speculate multiple tokens per step and verifies "
+"them in a single forward pass. | Tune the speculative token count for the "
+"target workload; benefit depends on the acceptance rate. |"
+msgstr ""
+"| Qwen3.5 MTP投机解码 | 解码密集型工作负载且接受率可接受 | `--speculative-config "
+"'{\"method\":\"qwen3_5_mtp\",\"num_speculative_tokens\":3}'` | "
+"使用内置的MTP草稿头每步推测多个令牌，并在单次前向传播中验证。 | 根据目标工作负载调整推测令牌数量；收益取决于接受率。 |"
+
+msgid ""
+"For common environment, installation, and general parameter issues, refer to"
+" the [Public "
+"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+msgstr ""
+"对于常见的环境、安装和通用参数问题，请参阅[公共常见问题解答](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"

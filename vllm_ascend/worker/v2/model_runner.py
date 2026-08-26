@@ -21,6 +21,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import torch
+from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.sequence import IntermediateTensors
@@ -49,6 +50,10 @@ from vllm_ascend.ascend_forward_context import (
     select_moe_comm_method,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+)
+from vllm_ascend.core.profiling_chunk_predictor import (
+    _finish_profiling_chunk_timing,
+    _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_potential_max_tokens, vllm_version_is
@@ -94,7 +99,10 @@ class NPUModelRunner(GPUModelRunner):
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+            )
             and not self.model_config.enforce_eager
         )
         load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
@@ -201,22 +209,36 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         context_len: int = 0,
     ):
+        self._cpp_execution_time_ms = None
+        profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
+        execution_start_time = _start_profiling_chunk_timing(
+            profiling_config,
+            scheduler_output,
+        )
+
         if vllm_version_is("0.27.1"):
-            return super().execute_model(
+            output = super().execute_model(
                 scheduler_output,
                 intermediate_tensors=intermediate_tensors,
                 dummy_run=dummy_run,
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 is_profile=is_profile,
             )
-        return super().execute_model(
-            scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            context_len=context_len,
+        else:
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+            )
+
+        self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
+            profiling_config,
+            execution_start_time,
         )
+        return output
 
     @torch.inference_mode()
     def profile_run(self) -> None:

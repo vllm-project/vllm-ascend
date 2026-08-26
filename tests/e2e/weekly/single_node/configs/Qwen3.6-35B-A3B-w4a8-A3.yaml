@@ -13,7 +13,6 @@ test_cases:
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1024"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -43,7 +42,7 @@ test_cases:
       - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
       - "--profiler-config"
       - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
       - "--mm-processor-cache-gb"
@@ -70,7 +69,6 @@ test_cases:
       HCCL_BUFFSIZE: "200"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       VLLM_ASCEND_GDN_FAST_PATH: "1"
       VLLM_ASCEND_GDN_MAX_PADDING_RATIO: "2.0"
       VLLM_ASCEND_GDN_MAX_H_OVERALLOC_RATIO: "2.0"
@@ -106,7 +104,7 @@ test_cases:
       - "--mm-processor-cache-gb"
       - "0"
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
     benchmarks:
       perf:
         case_type: performance
@@ -130,7 +128,6 @@ test_cases:
       HCCL_BUFFSIZE: "1024"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_DISABLE_COMPILE_CACHE: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -160,7 +157,7 @@ test_cases:
       - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
       - "--profiler-config"
       - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
       - "--mm-processor-cache-gb"

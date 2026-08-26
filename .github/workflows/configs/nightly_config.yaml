@@ -401,6 +401,15 @@ a3-560t:
       - name: Qwen3-32B-w8a8sc-310p
         os: linux-aarch64-310p-4
         config_file_path: Qwen3-32B-w8a8sc-310p.yaml
+      - name: Qwen3.6-27B-W8A8
+        os: linux-aarch64-310p-2
+        config_file_path: Qwen3.6-27B-W8A8-310P-300I-DUO.yaml
+      - name: Qwen3.6-35B-A3B-w8a8
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3.6-35B-W8A8-310P-300I-DUO.yaml
+      - name: Qwen3.6-35B-A3B-w8a8-310p-MTP
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3.6-35B-A3B-w8a8-310p-MTP.yaml
 
 a5:
   multi_node:
