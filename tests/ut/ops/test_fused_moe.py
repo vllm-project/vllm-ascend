@@ -941,6 +941,7 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
         shared_experts_module.torch_npu,
         "npu_dynamic_quant",
         MagicMock(return_value=(quantized_input, input_scale)),
+        raising=False,
     )
     monkeypatch.setattr(
         shared_experts_module.torch_npu,
@@ -984,6 +985,7 @@ def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
         shared_experts_module.torch_npu,
         "npu_dynamic_mx_quant",
         MagicMock(return_value=(quantized_input, input_scale)),
+        raising=False,
     )
     monkeypatch.setattr(
         shared_experts_module.torch.ops,

@@ -22,6 +22,7 @@ from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkDecoderLayer,
     AscendK3DSparkForCausalLM,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_ascend_attn_res_matches_canonical_k3_math():
@@ -675,9 +676,12 @@ def test_k3_dspark_load_weights_keeps_per_layer_context_kv(monkeypatch):
     seen_names: list[str] = []
 
     class CapturingLoader:
-        def __init__(self, loaded_model, *, skip_substrs):
+        def __init__(self, loaded_model, **kwargs):
             assert loaded_model is model
-            assert skip_substrs == list(model.checkpoint_skip_substrs)
+            if vllm_version_is("0.27.1"):
+                assert kwargs["skip_substrs"] == list(model.checkpoint_skip_substrs)
+            else:
+                assert kwargs == {}
 
         def load_weights(self, weights, *, mapper):
             assert mapper is model.hf_to_vllm_mapper
@@ -710,9 +714,12 @@ def test_k3_dspark_reuses_modelslim_rotation_loader(monkeypatch):
     seen_weights: list[tuple[str, torch.Tensor]] = []
 
     class CapturingLoader:
-        def __init__(self, loaded_model, *, skip_substrs):
+        def __init__(self, loaded_model, **kwargs):
             assert loaded_model is model
-            assert skip_substrs == list(model.checkpoint_skip_substrs)
+            if vllm_version_is("0.27.1"):
+                assert kwargs["skip_substrs"] == list(model.checkpoint_skip_substrs)
+            else:
+                assert kwargs == {}
 
         def load_weights(self, weights, *, mapper):
             assert mapper is model.hf_to_vllm_mapper

@@ -219,6 +219,8 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=torch.zeros(num_reqs + 1, dtype=torch.int32),
             seq_lens=torch.full((num_reqs,), 128, dtype=torch.int32),
+            _seq_lens_cpu=torch.full((num_reqs,), 128, dtype=torch.int32),
+            seq_lens_cpu=torch.full((num_reqs,), 128, dtype=torch.int32),
             max_seq_len=128,
         )
         proposer.set_inputs_first_pass(

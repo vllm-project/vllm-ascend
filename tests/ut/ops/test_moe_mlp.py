@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch_npu  # noqa: F401  -- registers torch.npu used by the module under test
 from torch.nn import functional as F
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SituAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
@@ -28,6 +28,10 @@ from vllm_ascend.utils import AscendDeviceType
 
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
+
+
+def _custom_op_vllm_config():
+    return SimpleNamespace(compilation_config=CompilationConfig(custom_ops=["none"]))
 
 
 class TestCumsumGroupList(unittest.TestCase):
@@ -596,6 +600,7 @@ class TestQuantApplyMlpSituEplb(_GeluPathBase):
         stream_patch, evt = _patch_npu_stream()
 
         with (
+            patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
             stream_patch,
             patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True) as mock_gmm1,
             patch(
@@ -679,7 +684,7 @@ class TestQuantApplyMlpSituEplb(_GeluPathBase):
         stream_patch, evt = _patch_npu_stream()
 
         with (
-            set_current_vllm_config(VllmConfig()),
+            set_current_vllm_config(_custom_op_vllm_config()),
             stream_patch,
             patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
             patch(
@@ -718,7 +723,7 @@ class TestQuantApplyMlpSituEplb(_GeluPathBase):
         stream_patch, evt = _patch_npu_stream()
 
         with (
-            set_current_vllm_config(VllmConfig()),
+            set_current_vllm_config(_custom_op_vllm_config()),
             stream_patch,
             patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
             patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
