@@ -19,6 +19,7 @@ from vllm_ascend.ops.gdn_a5 import (
     parse_gdn_backend_config,
     run_gdn_decode_pipeline,
     run_gdn_prefill_pipeline,
+    log_solve_tri_debug,
 )
 
 
@@ -32,6 +33,21 @@ SIGNATURE = GDNRuntimeSignature(
     value_dim=128,
     chunk_size=64,
 )
+
+
+def test_log_solve_tri_debug_is_gated_by_environment(monkeypatch):
+    tensor = SimpleNamespace(
+        shape=(1, 2, 64, 64),
+        dtype="float32",
+        device="npu:0",
+        stride=lambda: (8192, 4096, 64, 1),
+        is_contiguous=lambda: True,
+    )
+    with patch("vllm_ascend.ops.gdn_a5.logger.info") as info:
+        monkeypatch.setenv("VLLM_ASCEND_GDN_DEBUG_SOLVE_TRI", "1")
+        log_solve_tri_debug(tensor, output_dtype="float32", layout="bsnd")
+        info.assert_called_once()
+        assert "solve_tri" in info.call_args.args[0]
 
 
 def test_parse_gdn_backend_config_defaults_to_auto_without_overrides():

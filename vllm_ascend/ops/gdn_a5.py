@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Callable, Mapping
@@ -12,6 +13,44 @@ import torch
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+def log_solve_tri_debug(
+    a: Any,
+    *,
+    output_dtype: Any,
+    layout: str,
+    cu_seqlens: Any = None,
+    cu_seqlens_host: Any = None,
+    chunk_indices: Any = None,
+    chunk_indices_host: Any = None,
+    chunk_indices_large_block: Any = None,
+) -> None:
+    """Log solve_tri input metadata when explicitly enabled for debugging."""
+    if os.environ.get("VLLM_ASCEND_GDN_DEBUG_SOLVE_TRI", "0") != "1":
+        return
+
+    def shape(value: Any) -> Any:
+        return None if value is None else tuple(value.shape)
+
+    logger.info(
+        "[GDN A5][solve_tri] input shape=%s dtype=%s device=%s stride=%s "
+        "contiguous=%s output_dtype=%s layout=%s cu_seqlens=%s "
+        "cu_seqlens_host=%s chunk_indices=%s chunk_indices_host=%s "
+        "chunk_indices_large_block=%s",
+        tuple(a.shape),
+        a.dtype,
+        a.device,
+        a.stride(),
+        a.is_contiguous(),
+        output_dtype,
+        layout,
+        shape(cu_seqlens),
+        shape(cu_seqlens_host),
+        shape(chunk_indices),
+        shape(chunk_indices_host),
+        shape(chunk_indices_large_block),
+    )
 
 
 class GDNBackendMode(StrEnum):
@@ -1017,6 +1056,17 @@ class A5GDNAdapter:
                 chunk_indices_large_block,
                 output_dtype,
             ):
+                layout = "bsnd" if cu_seqlens_host is None else "tnd"
+                log_solve_tri_debug(
+                    a,
+                    output_dtype=output_dtype,
+                    layout=layout,
+                    cu_seqlens=cu_seqlens,
+                    cu_seqlens_host=cu_seqlens_host,
+                    chunk_indices=chunk_indices,
+                    chunk_indices_host=chunk_indices_host,
+                    chunk_indices_large_block=chunk_indices_large_block,
+                )
                 del cu_seqlens, chunk_indices, chunk_indices_large_block
                 a = a.to(output_dtype).contiguous()
                 if cu_seqlens_host is None:
