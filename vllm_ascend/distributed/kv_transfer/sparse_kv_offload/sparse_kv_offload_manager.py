@@ -120,6 +120,10 @@ def allocate_kv_offload_topk_profile_buffers(
 
 
 _CPU_CACHE_ALIGNMENT = 2 * 1024 * 1024
+# Worst-case 2 MiB-alignment waste per host layer (see empty_aligned_int8_cpu_tensors):
+# 1x for rounding the raw buffer base address up to the alignment boundary, plus 1x tail
+# padding for each of the two aligned tensors (k_cache_cpu, v_cache_cpu) whose sizes are
+# rounded up to whole alignment chunks.
 _CPU_CACHE_MAX_ALIGNMENT_OVERHEAD_PER_LAYER = 3 * _CPU_CACHE_ALIGNMENT
 _VLLM_NULL_BLOCK_COUNT = 1
 
