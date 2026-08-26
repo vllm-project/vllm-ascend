@@ -1018,18 +1018,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # tokens from an independent NPU buffer. This mirrors upstream vLLM's
         # rejection-correction boundary while preserving step 0 metadata and
         # the model runner's shared seq_lens.
-        if (
-            not self.parallel_drafting
-            and self.num_speculative_tokens > 1
-            and num_rejected_tokens_gpu is not None
-        ):
-            next_step_seq_lens = self.seq_lens_group[1][
-                : common_attn_metadata.seq_lens.shape[0]
-            ]
+        if not self.parallel_drafting and self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
+            next_step_seq_lens = self.seq_lens_group[1][: common_attn_metadata.seq_lens.shape[0]]
             next_step_seq_lens.copy_(common_attn_metadata.seq_lens)
-            next_step_seq_lens[:batch_size].sub_(
-                num_rejected_tokens_gpu[:batch_size]
-            )
+            next_step_seq_lens[:batch_size].sub_(num_rejected_tokens_gpu[:batch_size])
             common_attn_metadata.seq_lens = next_step_seq_lens
 
         if self.uses_mrope:
