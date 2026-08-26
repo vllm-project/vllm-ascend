@@ -484,7 +484,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # may already have been replaced by the quantized tensor from
         # moe_comm_method.prepare() (fp8/fp4), and routing weights must never
         # take a quantized dtype: `topk_weights * mask` in token_dispatch would
-        # fail on Float8 type promotion. Callers pass the pre-quantization dtype.
+        # fail. Callers pass the pre-quantization dtype.
         if activation_dtype is None:
             activation_dtype = hidden_states.dtype
         topk_weights = topk_weights.to(activation_dtype)
