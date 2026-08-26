@@ -212,7 +212,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker Side Methods
     ############################################################
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
-        if not self.use_gva_layerwise or getattr(self, "connector_worker", None) is None:
+        if not self.use_gva_layerwise or self.connector_worker is None:
             return False
         self.connector_worker.set_external_slot_release_waiter(waiter)
         return True
@@ -243,6 +243,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_layer_load()
 
     def save_kv_layer(
@@ -254,6 +255,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             # A load-only consumer does not publish KV.
             return
+        assert self.connector_worker is not None
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
@@ -264,6 +266,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.use_layerwise:
             return
 
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -287,10 +290,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
         if not events:
             return None
-
         ascend_store_kv_events = AscendStoreKVEvents(num_workers=1)
         ascend_store_kv_events.add_events(events)
         return ascend_store_kv_events
