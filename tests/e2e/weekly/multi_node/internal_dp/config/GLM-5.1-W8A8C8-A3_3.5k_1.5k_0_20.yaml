@@ -14,9 +14,6 @@ env_common: &env_common
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   SERVER_PORT: 8077
 
-cluster_hosts:
-  - "141.61.81.131"
-  - "141.61.81.33"
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
 deployment:
