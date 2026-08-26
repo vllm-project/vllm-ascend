@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, ClassVar, NamedTuple, TypeVar
 
 import torch
 import torch_npu
@@ -580,6 +580,8 @@ class AscendSFADCPMetadataBuilder(
     DCPMetadataBuilderMixin,
     AscendSFAMetadataBuilder,
 ):
+    supports_dcp_with_varlen: ClassVar[bool] = True
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -587,7 +589,6 @@ class AscendSFADCPMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
     ):
         metadata_cls = metadata_cls or AscendSFADCPMetadata
         super().__init__(
@@ -596,7 +597,7 @@ class AscendSFADCPMetadataBuilder(
             vllm_config,
             device,
             metadata_cls,
-            supports_dcp_with_varlen,
+            supports_dcp_with_varlen=self.supports_dcp_with_varlen,
         )
         self.cp_kv_cache_interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         assert self.dcp_size > 1, "AscendSFADCPMetadataBuilder requires DCP world size > 1."
@@ -1264,6 +1265,8 @@ class AscendSFADSADCPMetadataBuilder(
 ):
     """Composes DCP's outer KV view with DSA-CP token sharding."""
 
+    supports_dcp_with_varlen: ClassVar[bool] = False
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -1271,7 +1274,6 @@ class AscendSFADSADCPMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[AscendSFAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
     ):
         super().__init__(
             kv_cache_spec,
@@ -1279,7 +1281,6 @@ class AscendSFADSADCPMetadataBuilder(
             vllm_config,
             device,
             metadata_cls or AscendSFADSADCPMetadata,
-            supports_dcp_with_varlen,
         )
 
 

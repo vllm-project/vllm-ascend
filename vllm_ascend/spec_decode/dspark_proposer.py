@@ -243,6 +243,19 @@ class AscendDSparkProposer(AscendDflashProposer):
             device=self.device,
         )
 
+        effective_seq_lens = cad.seq_lens
+        if has_num_rejected:
+            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
+
+        dcp_req_indices = None
+        dcp_query_positions = None
+        if self.dcp_size > 1:
+            dcp_req_indices = torch.arange(batch_size, dtype=torch.int32, device=self.device).repeat_interleave(
+                self.num_query_per_req
+            )
+            query_offsets = torch.arange(self.num_query_per_req, dtype=torch.int32, device=self.device)
+            dcp_query_positions = (effective_seq_lens[:batch_size, None] + query_offsets).reshape(-1)
+
         # Query block: reuse the DFlash inputs kernel logic (host-side ref)
         # per kv-cache-group to fill positions / input_ids / query slot_mapping
         # / token_indices.
@@ -281,14 +294,18 @@ class AscendDSparkProposer(AscendDflashProposer):
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
             )
+            if self.dcp_size > 1:
+                assert self.runner is not None
+                assert dcp_req_indices is not None and dcp_query_positions is not None
+                block_table = self.runner.input_batch.block_table.block_tables[gid]
+                block_table.compute_slot_mapping_draft(dcp_req_indices, dcp_query_positions)
+                # Avoid a D2D copy while the target ACL graph is being captured.
+                # Draft metadata only consumes the active prefix of this buffer.
+                self._per_group_query_slot_mapping_buffers[gid] = block_table.slot_mapping.gpu
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
             self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
         ]
-
-        effective_seq_lens = cad.seq_lens
-        if has_num_rejected:
-            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
 
         cad.query_start_loc = self.arange_dflash[: batch_size + 1] * self.num_query_per_req
         cad.seq_lens = effective_seq_lens + self.num_query_per_req
@@ -324,7 +341,28 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
-        return num_query_total, token_indices_to_sample, cad, None
+        long_seq_args = None
+        assert self.runner is not None
+        dcp_manager = getattr(self.runner, "dcp_manager", None)
+        if dcp_manager is not None:
+            first_pass_inputs = dcp_manager.prepare_spec_decode_first_pass_inputs(
+                input_ids=self.input_ids[:num_query_total],
+                target_positions=self.positions[:num_query_total],
+                target_hidden_states=target_hidden_states,
+                token_indices_to_sample=token_indices_to_sample,
+                common_attn_metadata=cad,
+                long_seq_metadata=long_seq_metadata,
+                req_scheduled_tokens=req_scheduled_tokens,
+                req_ids=self.runner.input_batch.req_ids,
+                logits_indices=self.runner.logits_indices,
+                num_tokens=num_query_total,
+                num_prefill_reqs=num_prefill_reqs,
+                num_decode_reqs=num_decode_reqs,
+                uses_mrope=False,
+            )
+            long_seq_args = first_pass_inputs.long_seq_args
+
+        return num_query_total, token_indices_to_sample, cad, long_seq_args
 
     @torch.inference_mode()
     def dummy_run(

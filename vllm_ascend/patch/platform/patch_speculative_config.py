@@ -1,5 +1,8 @@
 from transformers import DeepseekV2Config, PretrainedConfig
+
+from vllm.config import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -37,6 +40,11 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
     return hf_config
 
 
+def _is_glm5_dspark(draft_model_config: ModelConfig) -> bool:
+    config_dict, _ = SpeculatorsConfig.get_config_dict(draft_model_config.model)
+    return "Glm5DSparkForCausalLM" in (config_dict.get("architectures") or [])
+
+
 def _dspark_post_init(self):
     _orig_post_init(self)
     if self.use_dspark():
@@ -48,6 +56,15 @@ def _dspark_post_init(self):
         # gqa backend dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
+        # glm-5.2 mla backend dspark
+        if (
+            draft_model_config is not None
+            and isinstance(draft_hf_config, SpeculatorsConfig)
+            and _is_glm5_dspark(draft_model_config)
+        ):
+            draft_hf_config.architectures = ["Glm5DSparkForCausalLM"]
+            self.update_arch_()
+            draft_model_config.model_arch_config.is_deepseek_mla = True
 
 
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
