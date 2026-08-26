@@ -15,7 +15,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -23,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.core.kv_cache_interface import make_kv_cache_tensor
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -33,6 +33,24 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import vllm_version_is
+
+
+def _make_dsv4_spec(block_size: int, compress_ratio: int) -> MLAAttentionSpec:
+    """Build a DeepSeek-V4 MLAAttentionSpec across vLLM versions."""
+    kwargs = {}
+    if vllm_version_is("0.27.1"):
+        kwargs["compress_ratio"] = compress_ratio
+    else:
+        kwargs["tokens_per_state"] = compress_ratio
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        model_version="deepseek_v4",
+        **kwargs,
+    )
 
 
 def _make_hybrid_kv_cache_config(
@@ -54,8 +72,8 @@ def _make_hybrid_kv_cache_config(
     return KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[
-            KVCacheTensor(size=full_spec.page_size_bytes * 10, shared_by=["attn"]),
-            KVCacheTensor(size=mamba_spec.page_size_bytes * 10, shared_by=["mamba"]),
+            make_kv_cache_tensor(full_spec.page_size_bytes * 10, ["attn"], full_spec.page_size_bytes),
+            make_kv_cache_tensor(mamba_spec.page_size_bytes * 10, ["mamba"], mamba_spec.page_size_bytes),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=full_spec),
@@ -65,22 +83,8 @@ def _make_hybrid_kv_cache_config(
 
 
 def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
-    c4_spec = MLAAttentionSpec(
-        block_size=128 * 4,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float16,
-        compress_ratio=4,
-        model_version="deepseek_v4",
-    )
-    c128_spec = MLAAttentionSpec(
-        block_size=128 * 128,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float16,
-        compress_ratio=128,
-        model_version="deepseek_v4",
-    )
+    c4_spec = _make_dsv4_spec(128 * 4, 4)
+    c128_spec = _make_dsv4_spec(128 * 128, 128)
     c4_group_spec = UniformTypeKVCacheSpecs.from_specs({"c4_attn": c4_spec})
     c128_group_spec = UniformTypeKVCacheSpecs.from_specs({"c128_attn": c128_spec})
     assert c4_group_spec is not None
@@ -88,8 +92,8 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[
-            KVCacheTensor(size=c4_spec.page_size_bytes * 10, shared_by=["c4_attn"]),
-            KVCacheTensor(size=c128_spec.page_size_bytes * 10, shared_by=["c128_attn"]),
+            make_kv_cache_tensor(c4_spec.page_size_bytes * 10, ["c4_attn"], c4_spec.page_size_bytes),
+            make_kv_cache_tensor(c128_spec.page_size_bytes * 10, ["c128_attn"], c128_spec.page_size_bytes),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["c4_attn"], kv_cache_spec=c4_group_spec),
@@ -156,22 +160,8 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
 
 
 def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
-    c128_spec = MLAAttentionSpec(
-        block_size=128 * 128,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float16,
-        compress_ratio=128,
-        model_version="deepseek_v4",
-    )
-    c4_spec = MLAAttentionSpec(
-        block_size=128 * 4,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float16,
-        compress_ratio=4,
-        model_version="deepseek_v4",
-    )
+    c128_spec = _make_dsv4_spec(128 * 128, 128)
+    c4_spec = _make_dsv4_spec(128 * 4, 4)
     swa_spec = SlidingWindowMLASpec(
         block_size=128,
         num_kv_heads=1,
@@ -494,7 +484,6 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         head_size=512,
         dtype=torch.float32,
         sliding_window=128,  # DeepSeek V4 window
-        compress_ratio=1,
     )
     alignment_tokens = 4096  # lcm_block_size
 

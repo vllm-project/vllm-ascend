@@ -10,7 +10,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    get_kv_cache_tensor_layer_names,
+    make_kv_cache_tensor,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
     build_layerwise_cache_layout,
@@ -18,6 +23,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_full_attention_spec(
@@ -58,11 +64,11 @@ def test_no_reuse_skips_topology_validation():
         dtypes=(torch.int8,),
     )
     original_tensors = [
-        KVCacheTensor(size=16, shared_by=["model.layers.0.self_attn"]),
-        KVCacheTensor(size=16, shared_by=["model.layers.1.self_attn"]),
-        KVCacheTensor(size=16, shared_by=["model.mtp.0.self_attn"]),
+        make_kv_cache_tensor(size=16, layer_names=["model.layers.0.self_attn"], page_size=16),
+        make_kv_cache_tensor(size=16, layer_names=["model.layers.1.self_attn"], page_size=16),
+        make_kv_cache_tensor(size=16, layer_names=["model.mtp.0.self_attn"], page_size=16),
     ]
-    layer_names = [tensor.shared_by[0] for tensor in original_tensors]
+    layer_names = [get_kv_cache_tensor_layer_names(tensor)[0] for tensor in original_tensors]
     kv_cache_config = SimpleNamespace(
         kv_cache_tensors=original_tensors.copy(),
         kv_cache_groups=[
@@ -82,8 +88,11 @@ def test_no_reuse_skips_topology_validation():
 
 
 def test_base_layers_are_merged_into_shared_slots():
-    original_tensors = [KVCacheTensor(size=16, shared_by=[f"model.layers.{layer}.self_attn"]) for layer in range(6)]
-    layer_names = [tensor.shared_by[0] for tensor in original_tensors]
+    original_tensors = [
+        make_kv_cache_tensor(size=16, layer_names=[f"model.layers.{layer}.self_attn"], page_size=16)
+        for layer in range(6)
+    ]
+    layer_names = [get_kv_cache_tensor_layer_names(tensor)[0] for tensor in original_tensors]
     spec = _make_full_attention_spec()
     kv_cache_config = SimpleNamespace(
         kv_cache_tensors=original_tensors,
@@ -100,7 +109,7 @@ def test_base_layers_are_merged_into_shared_slots():
 
     apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(6, 2))
 
-    assert [tensor.shared_by for tensor in kv_cache_config.kv_cache_tensors] == [
+    assert [get_kv_cache_tensor_layer_names(tensor) for tensor in kv_cache_config.kv_cache_tensors] == [
         ["model.layers.0.self_attn"],
         ["model.layers.1.self_attn", "model.layers.3.self_attn", "model.layers.5.self_attn"],
         ["model.layers.2.self_attn", "model.layers.4.self_attn"],
@@ -207,7 +216,9 @@ def test_incompatible_cache_specs_use_separate_slots():
     layer_specs = {layer_name: first_spec for layer_name in layer_names}
     layer_specs[layer_names[2]] = incompatible_spec
     kv_cache_config = SimpleNamespace(
-        kv_cache_tensors=[KVCacheTensor(size=32, shared_by=[layer_name]) for layer_name in layer_names],
+        kv_cache_tensors=[
+            make_kv_cache_tensor(size=32, layer_names=[layer_name], page_size=32) for layer_name in layer_names
+        ],
         kv_cache_groups=[
             SimpleNamespace(
                 layer_names=layer_names,
@@ -221,7 +232,7 @@ def test_incompatible_cache_specs_use_separate_slots():
 
     apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(4, 1))
 
-    assert [tensor.shared_by for tensor in kv_cache_config.kv_cache_tensors] == [
+    assert [get_kv_cache_tensor_layer_names(tensor) for tensor in kv_cache_config.kv_cache_tensors] == [
         [layer_names[0]],
         [layer_names[1], layer_names[3]],
         [layer_names[2]],
@@ -233,7 +244,9 @@ def test_partial_layout_skips_tensor_merge():
         "model.layers.0.self_attn",
         "model.layers.1.self_attn",
     ]
-    original_tensors = [KVCacheTensor(size=16, shared_by=[layer_name]) for layer_name in layer_names]
+    original_tensors = [
+        make_kv_cache_tensor(size=16, layer_names=[layer_name], page_size=16) for layer_name in layer_names
+    ]
     spec = _make_full_attention_spec()
     kv_cache_config = SimpleNamespace(
         kv_cache_tensors=original_tensors.copy(),
@@ -406,8 +419,22 @@ def test_multi_group_sfa_descriptors_are_merged_by_main_component():
     )
     kv_cache_config = SimpleNamespace(
         kv_cache_tensors=[
-            *(KVCacheTensor(size=main_spec.page_size_bytes, shared_by=[name]) for name in main_names),
-            *(KVCacheTensor(size=indexer_spec.page_size_bytes, shared_by=[name]) for name in indexer_names),
+            *(
+                make_kv_cache_tensor(
+                    size=main_spec.page_size_bytes,
+                    layer_names=[name],
+                    page_size=main_spec.page_size_bytes,
+                )
+                for name in main_names
+            ),
+            *(
+                make_kv_cache_tensor(
+                    size=indexer_spec.page_size_bytes,
+                    layer_names=[name],
+                    page_size=indexer_spec.page_size_bytes,
+                )
+                for name in indexer_names
+            ),
         ],
         kv_cache_groups=[
             SimpleNamespace(
@@ -434,7 +461,7 @@ def test_multi_group_sfa_descriptors_are_merged_by_main_component():
 
     # One independent main tensor, one main tensor shared by every reused layer (incl.
     # MTP), and one indexer tensor shared only by the indexer-bearing layers.
-    assert [tensor.shared_by for tensor in kv_cache_config.kv_cache_tensors] == [
+    assert [get_kv_cache_tensor_layer_names(tensor) for tensor in kv_cache_config.kv_cache_tensors] == [
         [main_names[0]],
         [main_names[1], main_names[2], main_names[3], main_names[4]],
         indexer_names,
@@ -480,8 +507,22 @@ def test_component_sharing_merges_main_across_a_and_b_layers():
     indexer_by_layer = {layer: f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in a_layers}
     kv_cache_config = SimpleNamespace(
         kv_cache_tensors=[
-            *(KVCacheTensor(size=main_spec.page_size_bytes, shared_by=[name]) for name in main_by_layer.values()),
-            *(KVCacheTensor(size=indexer_spec.page_size_bytes, shared_by=[name]) for name in indexer_by_layer.values()),
+            *(
+                make_kv_cache_tensor(
+                    size=main_spec.page_size_bytes,
+                    layer_names=[name],
+                    page_size=main_spec.page_size_bytes,
+                )
+                for name in main_by_layer.values()
+            ),
+            *(
+                make_kv_cache_tensor(
+                    size=indexer_spec.page_size_bytes,
+                    layer_names=[name],
+                    page_size=indexer_spec.page_size_bytes,
+                )
+                for name in indexer_by_layer.values()
+            ),
         ],
         kv_cache_groups=[
             SimpleNamespace(
@@ -506,7 +547,7 @@ def test_component_sharing_merges_main_across_a_and_b_layers():
     main_shared_by = []
     indexer_shared_by = []
     for tensor in kv_cache_config.kv_cache_tensors:
-        names = list(tensor.shared_by)
+        names = list(get_kv_cache_tensor_layer_names(tensor))
         if any(".indexer." in name for name in names):
             indexer_shared_by.append(names)
         else:
@@ -550,9 +591,11 @@ def test_packed_cache_tensor_descriptors_are_rejected():
         kv_cache_tensors=[
             KVCacheTensor(
                 size=16,
-                shared_by=[layer_name],
-                offset=8,
-                block_stride=32,
+                **(
+                    dict(shared_by=[layer_name], offset=8, block_stride=32)
+                    if vllm_version_is("0.27.1")
+                    else dict(layers=[layer_name], layer_stride=16, offset=8, block_stride=32)
+                ),
             )
             for layer_name in layer_names
         ],

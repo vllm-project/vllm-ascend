@@ -24,6 +24,7 @@ import torch
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 import vllm_ascend.worker.v2.pcp_manager as pcp_manager_module
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -78,7 +79,7 @@ def _make_local_pcp_batch() -> AscendInputBatch:
     return AscendInputBatch(
         **base_batch.__dict__,
         seq_lens_np=np.array([101, 102], dtype=np.int32),
-        attn_state="global-attn-state",
+        attn_state="global-attn-state",  # type: ignore[arg-type]
     )
 
 
@@ -114,7 +115,7 @@ def _make_global_pcp_batch():
     return AscendInputBatch(
         **base_batch.__dict__,
         seq_lens_np=np.array([18], dtype=np.int32),
-        attn_state="global-attn-state",
+        attn_state="global-attn-state",  # type: ignore[arg-type]
     )
 
 
@@ -237,7 +238,7 @@ def test_npu_model_runner_uses_ascend_pcp_manager() -> None:
 def test_initialize_kv_cache_skips_pcp_binding_when_disabled() -> None:
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.pcp_manager = None
-    runner.model_config = MagicMock(enable_return_routed_experts=False)
+    runner.model_config = MagicMock(enable_return_routed_experts=False)  # type: ignore[assignment]
     kv_cache_config = MagicMock()
 
     with (
@@ -246,4 +247,7 @@ def test_initialize_kv_cache_skips_pcp_binding_when_disabled() -> None:
     ):
         runner.initialize_kv_cache(kv_cache_config)
 
-    initialize_kv_cache.assert_called_once_with(kv_cache_config)
+    if vllm_version_is("0.27.1"):
+        initialize_kv_cache.assert_called_once_with(kv_cache_config)
+    else:
+        initialize_kv_cache.assert_called_once_with(kv_cache_config, is_profiling=False)
