@@ -432,7 +432,6 @@ class TestAscendConfig(TestBase):
         with patch.dict(
             os.environ,
             {
-                "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "MSMONITOR_USE_DAEMON": "1",
                 "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
@@ -441,7 +440,7 @@ class TestAscendConfig(TestBase):
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
-        self.assertEqual(ascend_config.enable_fused_mc2, 1)
+        self.assertEqual(ascend_config.enable_fused_mc2, 0)
         self.assertFalse(ascend_config.enable_mlapo)
         self.assertTrue(ascend_config.msmonitor_use_daemon)
         self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
@@ -487,7 +486,6 @@ class TestAscendConfig(TestBase):
         with patch.dict(
             os.environ,
             {
-                "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
                 "MSMONITOR_USE_DAEMON": "1",
                 "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
