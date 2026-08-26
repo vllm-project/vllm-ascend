@@ -512,6 +512,8 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 ReduceMaxCustom(max, abs, work, num_col_ - input_stride_);
                 AscendC::PipeBarrier<PIPE_V>();
+                SET_FLAG(V, S, EVENT_ID0);
+                WAIT_FLAG(V, S, EVENT_ID0);
                 float scaleOut = max.GetValue(0) / 127;
                 SET_FLAG(S, V, EVENT_ID0);
                 WAIT_FLAG(S, V, EVENT_ID0);
@@ -835,6 +837,8 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
                 ReduceMaxCustom(max, abs, work, num_col_ - input_stride_);
                 AscendC::PipeBarrier<PIPE_V>();
+                SET_FLAG(V, S, EVENT_ID0);
+                WAIT_FLAG(V, S, EVENT_ID0);
                 float scaleOut = max.GetValue(0) / 127;
                 SET_FLAG(S, V, EVENT_ID0);
                 WAIT_FLAG(S, V, EVENT_ID0);
