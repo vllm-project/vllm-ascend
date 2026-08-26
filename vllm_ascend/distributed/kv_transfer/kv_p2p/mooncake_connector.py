@@ -2850,14 +2850,7 @@ class MooncakeConnectorWorker:
             )
 
         def context_parallel_parameters_check():
-            remote_cp = meta.remote_pcp_size * meta.remote_dcp_size
-            local_cp = self.pcp_size * self.dcp_size
-            # Allow Prefill DCP-on / Decode DCP-off (and the reverse): require
-            # one CP size to divide the other, not only remote % local == 0.
-            if remote_cp > 0 and local_cp > 0:
-                assert remote_cp % local_cp == 0 or local_cp % remote_cp == 0, (
-                    f"remote_cp({remote_cp}) and local_cp({local_cp}) must divide each other"
-                )
+            assert (meta.remote_pcp_size * meta.remote_dcp_size) % (self.pcp_size * self.dcp_size) == 0
             if not (self.use_mla or self.use_sparse):
                 p_node_heads_per_rank = math.ceil(self.num_key_value_heads / prefill_tp_size)
                 d_node_heads_per_rank = math.ceil(self.num_key_value_heads / self.tp_size)
@@ -3492,14 +3485,10 @@ class MooncakeConnectorWorker:
 
         remote_cp_size = meta.remote_pcp_size * meta.remote_dcp_size
         local_cp_size = self.pcp_size * self.dcp_size
-        if local_cp_size == 0 or remote_cp_size == 0:
+        if local_cp_size == 0 or remote_cp_size % local_cp_size != 0:
             raise AssertionError(
-                f"SFA replicate-K expects non-zero cp sizes, got remote={remote_cp_size}, local={local_cp_size}."
-            )
-        if remote_cp_size % local_cp_size != 0 and local_cp_size % remote_cp_size != 0:
-            raise AssertionError(
-                f"SFA replicate-K expects remote cp size({remote_cp_size}) and "
-                f"local cp size({local_cp_size}) to divide each other."
+                f"SFA replicate-K expects remote cp size({remote_cp_size}) to be divisible by "
+                f"local cp size({local_cp_size})."
             )
 
         num_prefix_cached_blocks = min(meta.num_computed_tokens // self.block_size, meta.num_prompt_blocks)

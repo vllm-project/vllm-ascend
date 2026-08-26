@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import inspect
 import time
 from collections import defaultdict
 from dataclasses import dataclass, fields
@@ -49,29 +48,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.utils import ConstantList, record_function_or_nullcontext
-
-
-def _call_make_spec_decoding_stats(
-    scheduler,
-    spec_decoding_stats,
-    *,
-    num_draft_tokens,
-    num_accepted_tokens,
-    num_invalid_spec_tokens,
-    request_id,
-):
-    # vLLM 0.26.0 still uses num_draft_tokens; later versions renamed it.
-    params = inspect.signature(scheduler.make_spec_decoding_stats).parameters
-    token_key = "num_physical_draft_tokens" if "num_physical_draft_tokens" in params else "num_draft_tokens"
-    return scheduler.make_spec_decoding_stats(
-        spec_decoding_stats,
-        **{
-            token_key: num_draft_tokens,
-            "num_accepted_tokens": num_accepted_tokens,
-            "num_invalid_spec_tokens": num_invalid_spec_tokens,
-            "request_id": request_id,
-        },
-    )
 
 
 @dataclass
@@ -1052,8 +1028,7 @@ class RecomputeScheduler(Scheduler):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
-                spec_decoding_stats = _call_make_spec_decoding_stats(
-                    self,
+                spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
