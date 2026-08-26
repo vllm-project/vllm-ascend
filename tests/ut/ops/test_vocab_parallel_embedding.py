@@ -246,17 +246,11 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_group = MagicMock()
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
-        self.mock_ascend_config = MagicMock()
-        # enable_reduce_sample must be explicitly False so _get_logits_lmheadtp
-        # reaches the lmhead_all_to_all branch (a MagicMock attribute is truthy
-        # and would silently skip it).
-        self.mock_ascend_config.enable_reduce_sample = False
         self.mock_quant_method = MagicMock()
         # 2 rows so lmhead_all_to_all's equal split (world_size=2) holds.
         self.mock_quant_method.apply = MagicMock(return_value=torch.randn(2, self.vocab_size))
         self.mock_all_to_all_single = MagicMock(side_effect=lambda out, inp, **kwargs: out.copy_(inp))
         self.patches = [
-            patch("vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
             patch(
