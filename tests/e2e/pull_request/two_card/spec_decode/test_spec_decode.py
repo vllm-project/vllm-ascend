@@ -596,6 +596,7 @@ def test_dflash2_acceptance(
 
     with VllmRunner(
         main_model_name,
+        enforce_eager=True,
         max_model_len=2048,
         disable_log_stats=False,
         tensor_parallel_size=2,
