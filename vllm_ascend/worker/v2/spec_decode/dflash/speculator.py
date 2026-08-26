@@ -18,11 +18,12 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
+from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import LmheadTPDraftSamplingMixin
 
 logger = logging.getLogger(__name__)
 
 
-class AscendDFlashSpeculator(DFlashSpeculator):
+class AscendDFlashSpeculator(LmheadTPDraftSamplingMixin, DFlashSpeculator):
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
         num_tokens_padded = num_reqs_padded * self.num_query_per_req
         with build_attn_metadata_wrapper():
@@ -57,6 +58,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)

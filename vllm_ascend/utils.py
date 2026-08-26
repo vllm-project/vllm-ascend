@@ -788,6 +788,15 @@ def lmhead_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size > 0
 
 
+def lmhead_tp_max_num_logits(max_num_reqs: int, logits_rows_per_req: int) -> int:
+    """Row capacity every rank of the lmhead-TP group must agree on.
+
+    Derived purely from config so all ranks compute the identical value;
+    any drift between callers desyncs the LM-head collectives and hangs.
+    """
+    return max_num_reqs * logits_rows_per_req
+
+
 def embedding_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size > 0
 

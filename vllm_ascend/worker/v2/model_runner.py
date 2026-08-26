@@ -56,7 +56,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
+from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits, set_potential_max_tokens, vllm_version_is
 
 if not vllm_version_is("0.27.1"):
     from vllm.v1.worker.gpu.model_runner import BatchReqState
@@ -181,6 +181,15 @@ class NPUModelRunner(GPUModelRunner):
         set_potential_max_tokens(vllm_config)
 
     def sample_tokens(self, grammar_output):
+        if (
+            lmhead_tp_enable()
+            and self.prompt_logprobs_worker is not None
+            and self.prompt_logprobs_worker.uses_prompt_logprobs.any()
+        ):
+            # The prompt-logprobs worker issues a second compute_logits with
+            # unpadded rows that desyncs the LM-head collectives and hangs.
+            raise NotImplementedError("prompt_logprobs is not supported with lmhead TP.")
+
         output = super().sample_tokens(grammar_output)
 
         if self.use_spec_pp and self.is_last_pp_rank:
@@ -233,6 +242,22 @@ class NPUModelRunner(GPUModelRunner):
                 is_profile=is_profile,
                 context_len=context_len,
             )
+
+        if dummy_run and lmhead_tp_enable() and not is_profile and self.is_last_pp_rank:
+            # lmhead TP: idle ranks never call sample(), so they join the
+            # target LM-head collectives here with zero-indexed rows at the
+            # same capacity as sample() (a mismatch desyncs the group shapes
+            # and hangs), mirroring V1's ``need_dummy_logits`` mechanism.
+            # Runs before the parent ``_dummy_run`` replays the speculator
+            # dummy propose, keeping the busy rank's target-then-draft
+            # ordering of the lmhead-TP collectives.
+            assert self.execute_model_state is not None
+            dummy_indices = torch.zeros(
+                self._lmhead_tp_max_num_logits(),
+                dtype=torch.int64,
+                device=self.device,
+            )
+            self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
@@ -695,7 +720,7 @@ class NPUModelRunner(GPUModelRunner):
         value, matching upstream's own logits capacity bound
         (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
         """
-        return self.max_num_reqs * self.decode_query_len
+        return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
@@ -712,13 +737,14 @@ class NPUModelRunner(GPUModelRunner):
 
         num_logits = input_batch.logits_indices.shape[0]
         capacity = self._lmhead_tp_max_num_logits()
-        # A mismatch would desync the LM-head all_gather/all_to_all across the
-        # group and hang the collectives. Fail fast instead.
-        assert num_logits <= capacity, (
-            f"lmhead TP logits rows ({num_logits}) exceed the group-agreed capacity "
-            f"({capacity} = max_num_reqs * decode_query_len); the capacity formula "
-            "no longer matches upstream logits production."
-        )
+        if num_logits > capacity:
+            # A mismatch would desync the LM-head all_gather/all_to_all across
+            # the group and hang the collectives. Fail fast instead.
+            raise ValueError(
+                f"lmhead TP logits rows ({num_logits}) exceed the group-agreed capacity "
+                f"({capacity} = max_num_reqs * decode_query_len); the capacity formula "
+                "no longer matches upstream logits production."
+            )
 
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         if num_logits < capacity:
@@ -752,42 +778,6 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
-
-    def _dummy_run(
-        self,
-        num_tokens: int,
-        *args,
-        skip_attn: bool = False,
-        uniform_decode: bool = False,
-        skip_eplb: bool = False,
-        is_profile: bool = False,
-        **kwargs,
-    ):
-        """Join the LM-head collectives on dummy batches for lmhead TP.
-
-        Idle DP ranks never call sample(), so without this their ranks would
-        be missing from the group collectives and busy ranks would hang.
-        Zero-indexed rows at the same capacity as sample() (both from
-        ``_lmhead_tp_max_num_logits()``; a mismatch hangs). Skipped for
-        profiling and non-last PP ranks. Draft-side alignment is not covered.
-        """
-        hidden_states, sample_hidden_states = super()._dummy_run(
-            num_tokens,
-            *args,
-            skip_attn=skip_attn,
-            uniform_decode=uniform_decode,
-            skip_eplb=skip_eplb,
-            is_profile=is_profile,
-            **kwargs,
-        )
-        if lmhead_tp_enable() and not is_profile and hidden_states is not None:
-            dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
-                dtype=torch.int64,
-                device=hidden_states.device,
-            )
-            self.model.compute_logits(hidden_states[dummy_indices])
-        return hidden_states, sample_hidden_states
 
     def postprocess_sampled(
         self,
