@@ -35,7 +35,7 @@ class AscendKVBlockZeroer310(KVBlockZeroer):
         self._kv_tensors: list[torch.Tensor] = []
         self._logical_page_ratio: int = 1
 
-    def init_meta(
+    def init_meta(  # type: ignore[override]
         self,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[list[int]],

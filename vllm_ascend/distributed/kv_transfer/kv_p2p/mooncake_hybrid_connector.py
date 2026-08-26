@@ -52,6 +52,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_tensor_layer_names
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
 from vllm_ascend.utils import enable_custom_op, is_vl_model
@@ -1629,7 +1630,7 @@ class MooncakeConnectorWorker:
         elif self.use_mamba:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 share_tensor_addr = []
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in get_kv_cache_tensor_layer_names(kv_cache_tensor):
                     kv_cache_tuple = kv_caches[layer_name]
                     if isinstance(kv_cache_tuple, (list, tuple)) is False:
                         kv_cache_tuple = [kv_cache_tuple]
@@ -1654,12 +1655,12 @@ class MooncakeConnectorWorker:
                 for layer_name in group.layer_names:
                     layer_group_idx[layer_name] = i
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-                if not kv_cache_tensor.shared_by:
+                if not get_kv_cache_tensor_layer_names(kv_cache_tensor):
                     continue
                 share_tensor_addr = []
                 share_tensor_stride = []
                 cur_tensor_group_idx = []
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in get_kv_cache_tensor_layer_names(kv_cache_tensor):
                     cur_tensor_group_idx.append(layer_group_idx[layer_name])
                     kv_cache_tuple = kv_caches[layer_name]
                     if not isinstance(kv_cache_tuple, (tuple, list)):
