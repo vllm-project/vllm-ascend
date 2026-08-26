@@ -846,7 +846,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.o_proj = kwargs["o_proj"]
         self.g_proj = kwargs.get("g_proj")
         self.use_output_gate = self.g_proj is not None
-        self.use_mla_rope = kwargs["use_mla_rope"]
+        self.use_mla_rope = kwargs.get("use_mla_rope", True)
         self.vllm_config = get_current_vllm_config()
         self.kv_a_proj_with_mqa = kwargs.get("kv_a_proj_with_mqa")
         self.kv_a_layernorm = kwargs.get("kv_a_layernorm")
