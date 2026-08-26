@@ -37,6 +37,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -113,11 +114,16 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 lora_capture_cases=lora_capture_cases,
                 varlen_decode=varlen_decode,
             )
+            self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
             self.model_runner = model_runner
             self.update_stream = self.model_runner.update_stream
             self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
             if super().needs_capture():
                 set_graph_params(self.capture_sizes)
+
+    def init_breakable_cg_runner(self, model: nn.Module) -> None:
+        if self.breakable_cg_runner is None:
+            self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -205,10 +211,13 @@ class ModelWithContext(nn.Module):
         self.is_draft_model_prefill = is_draft_model_prefill
 
     def forward(self, *args, **kwargs):
+        forward_context = get_forward_context()
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
-        if torch.npu.is_current_stream_capturing():
-            _EXTRA_CTX.capturing = True
+        _EXTRA_CTX.capturing = (
+            torch.npu.is_current_stream_capturing()
+            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
+        )
         if self.is_draft_model:
             _EXTRA_CTX.is_draft_model = True
         if self.is_draft_model_prefill:

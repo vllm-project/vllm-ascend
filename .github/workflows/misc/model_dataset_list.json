@@ -113,6 +113,7 @@
       "Qwen/Qwen3-VL-8B-Instruct",
       "Qwen/Qwen3.5-4B",
       "Qwen/Qwen3.5-27B",
+      "Qwen/Qwen3.8-27B",
       "RedHatAI/Qwen3-32B-speculator.eagle3",
       "RedHatAI/Qwen3-8B-speculator.eagle3",
       "Shanghai_AI_Laboratory/internlm--chat-7b",
@@ -273,6 +274,7 @@
       "Eco-Tech/GLM-5-w4a8",
       "Eco-Tech/GLM-4.7-W8A8-floatmtp",
       "Inferact/MiniMax-M3-EAGLE3",
+      "Inferact/MiniMax-M3-EAGLE3-GQA",
       "MiniMax/MiniMax-M3",
       "MiniMax/MiniMax-M2.5",
       "Eco-Tech/Qwen3.5-27B-w8a8-mtp",
@@ -282,6 +284,7 @@
       "vllm-ascend/MiniMax-M2.5-eagle-model-0318",
       "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp",
       "z-lab/Qwen3-8B-DFlash-b16",
+      "z-lab/Qwen3.8-27B-DFlash2",
       "Eco-Tech/GLM-5.1-w8a8",
       "Eco-Tech/GLM-5.2-w8a8",
       "Eco-Tech/GLM-5.2-w4a8",
@@ -371,6 +374,7 @@
       "vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51",
       "vllm-ascend/GSM8K_prefix99_in203738_bs1_mini",
       "vllm-ascend/GSM8K_prefix99_in203738_bs4_mini",
-      "vllm-ascend/GSM8K_in3500_bs4000_minimax"
+      "vllm-ascend/GSM8K_in3500_bs4000_minimax",
+      "vllm-ascend/GSM8K-in65536-bs16-prefix70-qwen35"
     ]
   }

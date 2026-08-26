@@ -527,7 +527,7 @@ Execute the following commands on each node in sequence. The results must all be
 
     ```bash
      # Check the remote switch ports
-     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
      # Get the link status of the Ethernet ports (UP or DOWN)
      for i in {0..7}; do hccn_tool -i $i -link -g ; done
      # Check the network health status
@@ -544,7 +544,7 @@ Execute the following commands on each node in sequence. The results must all be
 
     ```bash
      # Check the remote switch ports
-     for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
      # Get the link status of the Ethernet ports (UP or DOWN)
      for i in {0..15}; do hccn_tool -i $i -link -g ; done
      # Check the network health status
@@ -561,7 +561,7 @@ Execute the following commands on each node in sequence. The results must all be
 
     ```bash
      # Check the remote switch ports
-     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
      # Get the link status of the Ethernet ports (UP or DOWN)
      for i in {0..7}; do hccn_tool -i $i -link -g ; done
      # Check the network health status

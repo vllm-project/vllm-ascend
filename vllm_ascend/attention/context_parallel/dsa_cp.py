@@ -20,6 +20,7 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -169,7 +170,6 @@ class AscendDSACPLayerMetadata:
 
 
 class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
-    hadamard = None
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -205,31 +205,25 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
         hf_config = self.model_config.hf_config
 
-        if AscendDSACPMetadataBuilder.hadamard is None:
-            if hf_config.model_type == "deepseek_v4":
-                indexer_head_dim = hf_config.index_head_dim
-                try:
-                    from scipy.linalg import hadamard  # type: ignore[import-untyped]
-                except ImportError as e:
-                    raise ImportError(
-                        "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
-                    ) from e
-                log_dim = math.ceil(math.log2(indexer_head_dim))
-                dim_padded = 2**log_dim
-                if self.vllm_config.model_config.enable_sleep_mode:
-                    # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
-                    # sleep/wake does not treat it as KV cache.
-                    from vllm_ascend.device_allocator.camem import CaMemAllocator
-
-                    allocator = CaMemAllocator.get_instance()
-                    with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
-                        AscendDSACPMetadataBuilder.hadamard = torch.tensor(
-                            hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                        ).to(torch.bfloat16)
-                else:
-                    AscendDSACPMetadataBuilder.hadamard = torch.tensor(
-                        hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                    ).to(torch.bfloat16)
+        self.hadamard = None
+        if hf_config.model_type == "deepseek_v4":
+            indexer_head_dim = hf_config.index_head_dim
+            try:
+                from scipy.linalg import hadamard  # type: ignore[import-untyped]
+            except ImportError as e:
+                raise ImportError(
+                    "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
+                ) from e
+            log_dim = math.ceil(math.log2(indexer_head_dim))
+            dim_padded = 2**log_dim
+            self.hadamard = get_or_register_attention_buffer(
+                self.vllm_config,
+                layer_names,
+                "_dsa_cp_hadamard",
+                lambda: torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
+                    torch.bfloat16
+                ),
+            )
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.req_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.req_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
@@ -380,7 +374,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=self.seq_lens,
             cos=cos,
             sin=sin,
-            hadamard=AscendDSACPMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
 
     def build_for_drafting(

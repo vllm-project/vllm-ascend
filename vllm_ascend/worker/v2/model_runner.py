@@ -21,6 +21,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import torch
+from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.sequence import IntermediateTensors
@@ -49,6 +50,10 @@ from vllm_ascend.ascend_forward_context import (
     select_moe_comm_method,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+)
+from vllm_ascend.core.profiling_chunk_predictor import (
+    _finish_profiling_chunk_timing,
+    _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_potential_max_tokens, vllm_version_is
@@ -88,10 +93,16 @@ class NPUModelRunner(GPUModelRunner):
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+        self.use_spec_pp = (
+            self.use_pp and self.speculative_config is not None and self.speculative_config.method == "mtp"
+        )
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                or breakable_cudagraph.is_breakable_cudagraph_enabled()
+            )
             and not self.model_config.enforce_eager
         )
         load_collection_phase = self.ascend_config.eplb_config.load_collection_phase
@@ -115,7 +126,7 @@ class NPUModelRunner(GPUModelRunner):
         # init_speculator will return AscendEagleSpeculator when eagle is used.
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
-        if self.speculative_config is not None:
+        if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
             self.speculator = init_speculator(self.vllm_config, self.device)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
@@ -131,6 +142,13 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
+        if self.use_spec_pp:
+            from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
+                install_spec_pp_token_broadcast,
+            )
+
+            assert self.pp_handler is not None
+            install_spec_pp_token_broadcast(self.pp_handler, self.req_states)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -162,6 +180,15 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
+    def sample_tokens(self, grammar_output):
+        output = super().sample_tokens(grammar_output)
+
+        if self.use_spec_pp and self.is_last_pp_rank:
+            assert self.pp_handler is not None
+            # Wait until propose() has populated this step's draft tokens.
+            self.pp_handler.broadcast_draft_tokens()
+        return output
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
@@ -182,22 +209,36 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         context_len: int = 0,
     ):
+        self._cpp_execution_time_ms = None
+        profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
+        execution_start_time = _start_profiling_chunk_timing(
+            profiling_config,
+            scheduler_output,
+        )
+
         if vllm_version_is("0.27.1"):
-            return super().execute_model(
+            output = super().execute_model(
                 scheduler_output,
                 intermediate_tensors=intermediate_tensors,
                 dummy_run=dummy_run,
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 is_profile=is_profile,
             )
-        return super().execute_model(
-            scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            context_len=context_len,
+        else:
+            output = super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+            )
+
+        self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
+            profiling_config,
+            execution_start_time,
         )
+        return output
 
     @torch.inference_mode()
     def profile_run(self) -> None:

@@ -12,7 +12,7 @@ The `Qwen3.6-35B-A3B` model is first supported in `vllm-ascend:v0.18.0rc1`. Use 
 
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
 ## 3 Prerequisites
 
@@ -347,7 +347,7 @@ The following configurations are validated in specific test environments and are
 
 ### 9.2 Tuning Guidelines
 
-Refer to [public performance tuning documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
+Refer to [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
 
 Recommended tuning order:
 

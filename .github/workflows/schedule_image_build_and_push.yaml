@@ -106,29 +106,30 @@ jobs:
         && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         build_meta:
           - name: A2 Ubuntu
             dockerfile: Dockerfile
-            suffix: ''
-          - name: A2 openeuler
-            dockerfile: Dockerfile.openEuler
-            suffix: 'openeuler'
+            suffix: ''        
           - name: A3 Ubuntu
             dockerfile: Dockerfile.a3
             suffix: 'a3'
-          - name: A3 openEuler
-            dockerfile: Dockerfile.a3.openEuler
-            suffix: 'a3-openeuler'
           - name: 310P Ubuntu
             dockerfile: Dockerfile.310p
             suffix: '310p'
-          - name: 310P openEuler
-            dockerfile: Dockerfile.310p.openEuler
-            suffix: '310p-openeuler'
           - name: A5 Ubuntu
             dockerfile: Dockerfile.a5
             suffix: 'a5'
+          - name: A2 openeuler
+            dockerfile: Dockerfile.openEuler
+            suffix: 'openeuler'
+          - name: A3 openEuler
+            dockerfile: Dockerfile.a3.openEuler
+            suffix: 'a3-openeuler'        
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: '310p-openeuler'
           - name: A5 openEuler
             dockerfile: Dockerfile.a5.openEuler
             suffix: 'a5-openeuler'
@@ -180,29 +181,30 @@ jobs:
         && inputs.branch == 'none' }}
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         build_meta:
           - name: A2 Ubuntu
             dockerfile: Dockerfile
-            suffix: ''
-          - name: A2 openeuler
-            dockerfile: Dockerfile.openEuler
-            suffix: 'openeuler'
+            suffix: ''        
           - name: A3 Ubuntu
             dockerfile: Dockerfile.a3
             suffix: 'a3'
-          - name: A3 openEuler
-            dockerfile: Dockerfile.a3.openEuler
-            suffix: 'a3-openeuler'
           - name: 310P Ubuntu
             dockerfile: Dockerfile.310p
             suffix: '310p'
-          - name: 310P openEuler
-            dockerfile: Dockerfile.310p.openEuler
-            suffix: '310p-openeuler'
           - name: A5 Ubuntu
             dockerfile: Dockerfile.a5
             suffix: 'a5'
+          - name: A2 openeuler
+            dockerfile: Dockerfile.openEuler
+            suffix: 'openeuler'
+          - name: A3 openEuler
+            dockerfile: Dockerfile.a3.openEuler
+            suffix: 'a3-openeuler'        
+          - name: 310P openEuler
+            dockerfile: Dockerfile.310p.openEuler
+            suffix: '310p-openeuler'
           - name: A5 openEuler
             dockerfile: Dockerfile.a5.openEuler
             suffix: 'a5-openeuler'
