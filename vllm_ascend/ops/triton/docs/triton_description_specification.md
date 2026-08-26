@@ -11,9 +11,12 @@
 - **Function**:
 - **Formula**:
 - **Algorithm flow** (processed row by row, independently):
-- **Supported modes**:
+- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950
 
 ## Parameters
+
+> [!NOTE]
+> All parameters are required.
 
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
