@@ -73,7 +73,6 @@ _DYNAMIC_EPLB_BUFFER_SIZE = 100
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
-_ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
 _ATNN_CALCULATION_STREAM = None
@@ -137,8 +136,6 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
 
 def clear_enable_sp():
-    global _ENABLE_SP
-    _ENABLE_SP = None
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_with_o_proj_tp.cache_clear()
     _libc_getenv.cache_clear()
@@ -807,12 +804,7 @@ def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
-def enable_sp_by_pass():
-    return get_ascend_config().enable_sp_by_pass
-
-
 def enable_sp(vllm_config=None) -> bool:
-    global _ENABLE_SP
     if vllm_config is None:
         try:
             from vllm.config import get_current_vllm_config
@@ -821,19 +813,10 @@ def enable_sp(vllm_config=None) -> bool:
         except AssertionError:
             vllm_config = None
 
-    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = additional_config.get("refresh", False) if additional_config else False
+    if vllm_config is None:
+        return False
 
-    if _ENABLE_SP is None or refresh:
-        if additional_config is not None and "enable_flashcomm1" in additional_config:
-            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
-        else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-
-    return bool(_ENABLE_SP)
+    return bool(vllm_config.parallel_config.use_sequence_parallel_moe)
 
 
 # TODO remove it after vllm has this func
@@ -1040,12 +1023,17 @@ def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = No
     """
     try:
         if vllm_config is None:
-            try:
-                from vllm.config import get_current_vllm_config
+            # No caller-provided config: fall back to the upstream runtime
+            # context (non-raising). Previously this used the reach-through
+            # `get_ascend_config().vllm_config` as a second fallback, but
+            # vllm_config is no longer a member of AscendConfig (Plan B).
+            # get_current_vllm_config_or_none returns None outside an engine
+            # context — which is the exact case where the old fallback also
+            # could not supply a usable runtime config, so `vllm_config is None`
+            # below handles it identically.
+            from vllm.config import get_current_vllm_config_or_none
 
-                vllm_config = get_current_vllm_config()
-            except AssertionError:
-                vllm_config = get_ascend_config().vllm_config
+            vllm_config = get_current_vllm_config_or_none()
         if vllm_config is None:
             return False
         kv_cfg = vllm_config.kv_transfer_config
@@ -1323,26 +1311,13 @@ def singleton(cls):
 
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
-    from vllm.config import get_current_vllm_config
+    # Read from the validated AscendConfig singleton instead of bypassing it
+    # via additional_config["enable_dsa_cp"]. This converges the bypass read
+    # (architecture debt #7) onto the canonical get_ascend_config() path, so
+    # the value benefits from @config type validation (bool lax coercion).
+    from vllm_ascend.ascend_config import get_ascend_config
 
-    vllm_config = get_current_vllm_config()
-    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
-    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-        vllm_config.model_config.hf_text_config, "index_topk"
-    )
-    if not has_indexer:
-        return False
-
-    dsa_cp_enable = False
-    additional_config = getattr(vllm_config, "additional_config", None)
-    if additional_config is not None and "enable_dsa_cp" in additional_config:
-        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
-
-    if dsa_cp_enable and not enable_sp():
-        raise ValueError(
-            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
-        )
-    return dsa_cp_enable and enable_sp()
+    return get_ascend_config().enable_dsa_cp
 
 
 @lru_cache(maxsize=1)

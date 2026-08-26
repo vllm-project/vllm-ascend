@@ -224,6 +224,7 @@ nav:
         - tutorials/models/gpt-oss-120b.md
         - tutorials/models/Mixtral-8x7B-Instruct-v0.1.md
         - tutorials/models/Qwen3-ASR-1.7B.md
+        - tutorials/models/Cohere-Transcribe.md
         - tutorials/models/Qwen2.5-Math-RM-72B.md
         - tutorials/models/InternVL3.5.md
         - tutorials/models/Dots3-Note.md
@@ -278,6 +279,7 @@ nav:
         - user_guide/feature_guide/flash_attention.md
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
+        - user_guide/feature_guide/rl.md
     - Deployment Guide:
         - user_guide/deployment_guide/index.md
         - user_guide/deployment_guide/using_volcano_kthena.md

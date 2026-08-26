@@ -23,7 +23,6 @@ Dots3 Note supports the following features on vLLM-Ascend:
 | Model architecture | Dots3 Note MoE + MLA | MoE mixture of experts + multi-head latent attention |
 | Multimodal | audio + vision | Audio / vision encoders, enabled per form (see §5.1) |
 | MTP speculative decoding | ✅ (text-only / audio) | MTP3 + draft eager; disabled for image (Model Runner V1 limitation) |
-| FlashComm1 | ✅ | TP communication optimization under high concurrency (`--additional-config`) |
 | FusedMC2 | ✅ | Fused `dispatch_ffn_combine` / `mega_moe` operators for MoE (`--additional-config`) |
 | Prefix caching | ✅ | `--enable-prefix-caching`, reuses KV for similar prompts |
 
@@ -215,7 +214,7 @@ echo "$ASCEND_RT_VISIBLE_DEVICES"
 
 If the jemalloc path does not exist in the selected image, install it first or change it to the actual path in the image; do not start the service with an invalid `LD_PRELOAD`.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 This chapter starts one service form at a time. For the first deployment, it is recommended to start text-only first to complete the basic pipeline validation, then switch to image or audio according to the test objective.
 
@@ -262,7 +261,7 @@ vllm serve "$MODEL_PATH" \
     --speculative-config \
       '{"method":"mtp","num_speculative_tokens":3,"enforce_eager":true}' \
     --additional-config \
-      '{"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+      '{"enable_fused_mc2":1}' \
     --max-model-len 32768 \
     --gpu-memory-utilization 0.92 \
     --safetensors-load-strategy lazy \
@@ -298,7 +297,7 @@ vllm serve "$MODEL_PATH" \
     --tensor-parallel-size 16 \
     --enable-expert-parallel \
     --additional-config \
-      '{"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+      '{"enable_fused_mc2":1}' \
     --max-model-len 32768 \
     --kv-cache-memory-bytes 2816M \
     --safetensors-load-strategy lazy \
@@ -339,7 +338,7 @@ vllm serve "$MODEL_PATH" \
     --speculative-config \
       '{"method":"mtp","num_speculative_tokens":3,"enforce_eager":true}' \
     --additional-config \
-      '{"enable_flashcomm1":true,"enable_fused_mc2":1}' \
+      '{"enable_fused_mc2":1}' \
     --max-model-len 4096 \
     --kv-cache-memory-bytes 4G \
     --safetensors-load-strategy lazy \
@@ -378,7 +377,7 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 | `--max-num-seqs` | 4 for text-only / audio; 16 for image | Maximum number of concurrent sequences per batch; should match the client concurrency and the memory budget of the corresponding form |
 | `--generation-config` | `vllm` | Generation config source: `vllm` means not loading the model's own generation config and using vLLM defaults |
 | `--compilation-config` | see §5.5.4 | Compilation / graph capture configuration (`VLLM_COMPILE`, `FULL_DECODE_ONLY`, capture sizes) |
-| `--additional-config` | see §5.5.4 | vLLM-Ascend additional configuration (FlashComm1 / FusedMC2) |
+| `--additional-config` | see §5.5.4 | vLLM-Ascend additional configuration (FusedMC2) |
 | `--port` | 8000 | Service listening port |
 
 #### 5.5.2 Modality-Related Parameters
@@ -416,7 +415,6 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 | `--compilation-config.cudagraph_mode` | `FULL_DECODE_ONLY` | ACL graph captures only the decode stage, reducing capture peak memory |
 | `--compilation-config.cudagraph_capture_sizes` | text-only `[16]`; image `[16]`; audio `[4,8,16]` | Graph capture batch sizes; TP16 + sequence parallelism requires multiples of 16, and audio `[4,8]` are automatically removed at startup |
 | `--compilation-config.max_cudagraph_capture_size` | 16 (text-only / audio) | Maximum graph capture batch size, `= max_num_seqs × (1 + num_speculative_tokens) = 4 × 4` |
-| `--additional-config.enable_flashcomm1` | `true` | Enables FlashComm1 communication optimization (effective when TP ≥ 2 and under high concurrency) |
 | `--additional-config.enable_fused_mc2` | `1` | Enables FusedMC2 (fused `dispatch_ffn_combine` / `mega_moe` operators for MoE) |
 
 ### 5.6 Service Verification

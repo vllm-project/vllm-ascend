@@ -19,6 +19,7 @@ from typing import Any
 
 import torch
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -39,6 +40,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         multi_steps_attn_metadata,
         num_tokens,
         is_prefill=None,
+        sampling_metadata: SamplingMetadata | None = None,
     ) -> torch.Tensor:
         AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
         try:
@@ -52,6 +54,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
                 multi_steps_attn_metadata,
                 num_tokens,
                 is_prefill,
+                sampling_metadata,
             )
         finally:
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)

@@ -188,6 +188,47 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], np.array([3, 5], dtype=np.int32))
 
 
+def test_dummy_attention_context_uses_rank_local_identity_view():
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.pcp_world_size = 2
+    manager.pcp_rank = 1
+    manager.device = torch.device("cpu")
+    input_batch = _make_local_pcp_batch()
+    input_batch.is_dummy = True
+    block_tables = (
+        torch.tensor([[1]], dtype=torch.int32),
+        torch.tensor([[2]], dtype=torch.int32),
+    )
+    slot_mappings = torch.arange(
+        len(block_tables) * manager.pcp_world_size * input_batch.num_tokens,
+        dtype=torch.int64,
+    ).view(len(block_tables), -1)
+
+    actual = manager.build_attention_context(
+        input_batch,
+        block_tables,
+        slot_mappings,
+    )
+
+    expected_slot_mappings = slot_mappings.view(
+        len(block_tables),
+        manager.pcp_world_size,
+        input_batch.num_tokens,
+    )[:, manager.pcp_rank]
+    restore_start = manager.pcp_rank * input_batch.num_tokens
+    assert actual.global_batch is input_batch
+    assert actual.global_block_tables is block_tables
+    assert torch.equal(actual.global_slot_mappings, expected_slot_mappings)
+    assert torch.equal(
+        actual.hidden_restore_idx,
+        torch.arange(
+            restore_start,
+            restore_start + input_batch.num_tokens,
+        ),
+    )
+    assert actual.local_num_tokens_after_padding == input_batch.num_tokens
+
+
 def test_npu_model_runner_uses_ascend_pcp_manager() -> None:
     runner = NPUModelRunner.__new__(NPUModelRunner)
     assert runner.pcp_manager_cls is AscendPCPManager

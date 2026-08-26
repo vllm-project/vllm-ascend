@@ -18,9 +18,6 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: detect_po_changes.py\n"
 
-msgid "# GLM-5/GLM-5.1"
-msgstr "# GLM-5/GLM-5.1"
-
 msgid "## 1 Introduction"
 msgstr "## 1 引言"
 
@@ -60,18 +57,6 @@ msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性
 
 msgid "## 2 Supported Features"
 msgstr "## 2 支持的特性"
-
-msgid ""
-"Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the "
-"model's supported feature matrix."
-msgstr ""
-"请参考[支持的特性](../../user_guide/support_matrix/supported_models.md)获取模型支持的特性矩阵。"
-
-msgid ""
-"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
-" feature's configuration."
-msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
 
 msgid "## 3 Prerequisites"
 msgstr "## 3 前提条件"
@@ -126,9 +111,6 @@ msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"
 " on each node."
 msgstr "如果要部署多节点环境，需要在每个节点上进行环境设置。"
-
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
 
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
@@ -382,15 +364,6 @@ msgstr ""
 msgid "**Key environment variables:**"
 msgstr "**关键环境变量：**"
 
-msgid ""
-"- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: Enables FlashComm optimization to reduce communication overhead (mainly benefits the prefill path). With FlashComm enabled, `layer_sharding` cannot include `o_proj`.\n"
-"- `VLLM_ASCEND_ENABLE_MLAPO=1`: Enables the MLA preprocess fusion operator (MlaPreprocessOperation). Enabled by default for w8a8 models — significantly improves Decode performance but consumes more NPU memory; set `VLLM_ASCEND_ENABLE_MLAPO=0` if memory is a priority. Recommended for w8a8; w4a8 may not benefit.\n"
-"- `VLLM_ASCEND_BALANCE_SCHEDULING=1`: Enables balance scheduling to improve output throughput and reduce TPOT in the v1 scheduler."
-msgstr ""
-"- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`：启用 FlashComm 优化以减少通信开销（主要有利于 prefill 路径）。启用 FlashComm 后，`layer_sharding` 不能包含 `o_proj`。\n"
-"- `VLLM_ASCEND_ENABLE_MLAPO=1`：启用 MLA 预处理融合算子（MlaPreprocessOperation）。对于 w8a8 模型默认启用——显著提升 Decode 性能但消耗更多 NPU 内存；如果内存优先，请设置 `VLLM_ASCEND_ENABLE_MLAPO=0`。推荐用于 w8a8；w4a8 可能无法受益。\n"
-"- `VLLM_ASCEND_BALANCE_SCHEDULING=1`：启用平衡调度以提升 v1 调度器的输出吞吐量并降低 TPOT。"
-
 msgid "**Performance tuning notes for single-node:**"
 msgstr "**单节点性能调优说明：**"
 
@@ -553,14 +526,6 @@ msgid "#### 9.1.1 Table 1: Scenario Overview"
 msgstr "#### 9.1.1 表 1：场景概述"
 
 msgid ""
-"> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
-"node = 1 Atlas 800 A3 server (64G × 16 NPUs) or 1 Atlas 800 A2 server (64G ×"
-" 8 NPUs)."
-msgstr ""
-"> `*NPU 总数`表示所有节点上使用的 NPU 总数。1 个节点 = 1 台 Atlas 800 A3 服务器（64G × 16 NPU）或 1 台"
-" Atlas 800 A2 服务器（64G × 8 NPU）。"
-
-msgid ""
 "|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|"
 msgstr "|场景|部署模式|*NPU 总数|权重版本|关键考虑因素|"
 
@@ -712,12 +677,6 @@ msgstr ""
 "|`VLLM_ASCEND_ENABLE_MLAPO`|1 (w8a8)|1 "
 "(w8a8)|0或1|在w8a8模型上启用MLA融合。可提高解码性能，但会消耗更多NPU内存。若长上下文场景内存不足，请禁用。|"
 
-msgid ""
-"|`VLLM_ASCEND_ENABLE_FLASHCOMM1`|1|1|1|Communication optimization. "
-"Recommended in all scenarios unless layer_sharding includes o_proj.|"
-msgstr ""
-"|`VLLM_ASCEND_ENABLE_FLASHCOMM1`|1|1|1|通信优化。除非layer_sharding包含o_proj，否则建议在所有场景中启用。|"
-
 msgid "### 9.2 Tuning Guidelines"
 msgstr "### 9.2 调优指南"
 
@@ -729,15 +688,48 @@ msgstr ""
 "有关常规性能调优方法，请参阅[公开性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
 msgid ""
-"For detailed feature descriptions and configuration options, refer to the "
-"[Feature Guide](../../user_guide/support_matrix/feature_matrix.md)."
-msgstr ""
-"有关详细的功能说明和配置选项，请参阅[功能指南](../../user_guide/support_matrix/feature_matrix.md)。"
-
-msgid ""
 "For environment variable descriptions and constraints, refer to "
 "[envs.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/vllm_ascend/envs.py)."
 msgstr ""
 "有关环境变量的说明和约束，请参阅[envs.py](https://github.com/vllm-project/vllm-"
 "ascend/blob/main/vllm_ascend/envs.py)。"
+
+msgid "# GLM-5 & GLM-5.1"
+msgstr "# GLM-5 与 GLM-5.1"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参阅[支持特性列表](../../user_guide/support_matrix/supported_models.md)获取模型的支持特性矩阵。"
+
+msgid ""
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid ""
+"- `VLLM_ASCEND_ENABLE_MLAPO=1`: Enables the MLA preprocess fusion operator (MlaPreprocessOperation). Enabled by default for w8a8 models — significantly improves Decode performance but consumes more NPU memory; set `VLLM_ASCEND_ENABLE_MLAPO=0` if memory is a priority. Recommended for w8a8; w4a8 may not benefit.\n"
+"- `VLLM_ASCEND_BALANCE_SCHEDULING=1`: Enables balance scheduling to improve output throughput and reduce TPOT in the v1 scheduler."
+msgstr ""
+"- `VLLM_ASCEND_ENABLE_MLAPO=1`：启用MLA预处理融合算子（MlaPreprocessOperation）。对于w8a8模型默认启用——显著提升Decode性能但消耗更多NPU内存；如果内存优先，请设置`VLLM_ASCEND_ENABLE_MLAPO=0`。推荐用于w8a8；w4a8可能无收益。\n"
+"- `VLLM_ASCEND_BALANCE_SCHEDULING=1`：启用均衡调度以提升输出吞吐量并降低v1调度器中的TPOT。"
+
+msgid ""
+"> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64GB × 16 NPUs) or 1 Atlas 800 A2 server (64GB"
+" × 8 NPUs)."
+msgstr ""
+"> `*NPU总数`表示所有节点上使用的NPU总数。1个节点 = 1台Atlas 800 A3服务器（64GB × 16个NPU）或1台Atlas "
+"800 A2服务器（64GB × 8个NPU）。"
+
+msgid ""
+"For detailed feature descriptions and configuration options, refer to the "
+"[Feature Matrix](../../user_guide/support_matrix/feature_matrix.md)."
+msgstr ""
+"有关详细的特性描述和配置选项，请参阅[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)。"

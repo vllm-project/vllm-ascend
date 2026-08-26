@@ -20,7 +20,7 @@ current model (Qwen3.8-2.4T-A95B) is first supported in this version.
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md)
 to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature
 configuration details.
 
 :::{note}
@@ -47,7 +47,7 @@ This guide includes the following validated A3 deployment configuration:
 
 | Platform | Deployment | Topology |
 | --- | --- | --- |
-| 4 × Atlas 800 A3 (64G × 16) | Mixed Prefill/Decode deployment | DP4/TP16/EP64 |
+| 4 × Atlas 800 A3 (64GB × 16) | Mixed Prefill/Decode deployment | DP4/TP16/EP64 |
 
 The checkpoint and tokenizer directories must be available at the same paths
 on all serving nodes. The W8A8 deployment uses the lazy Safetensors strategy to
@@ -121,11 +121,11 @@ You can also build and install `vllm-ascend` from source. Refer to
 If you want to deploy a multi-node service, install the same version of vLLM
 and vLLM-Ascend on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Atlas 800 A3 Multi-Node Deployment
 
-The validated mixed deployment uses four Atlas 800 A3 (64G × 16) nodes. Data
+The validated mixed deployment uses four Atlas 800 A3 (64GB × 16) nodes. Data
 parallelism spans the four nodes, each node runs one DP rank, and tensor
 parallelism uses all 16 NPUs in the node. The resulting topology is
 DP4/TP16/EP64.
@@ -171,7 +171,6 @@ export HCCL_INTRA_ROCE_ENABLE=0
 export OMP_PROC_BIND=false
 export OPENBLAS_NUM_THREADS=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
 vllm serve $MODEL_PATH \
@@ -195,7 +194,7 @@ vllm serve $MODEL_PATH \
     --gpu-memory-utilization 0.85 \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":false,"enable_fused_mc2":1}'
+    --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
 ```
 
 ::::
@@ -232,7 +231,6 @@ export HCCL_INTRA_ROCE_ENABLE=0
 export OMP_PROC_BIND=false
 export OPENBLAS_NUM_THREADS=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
 vllm serve $MODEL_PATH \
@@ -258,7 +256,7 @@ vllm serve $MODEL_PATH \
     --gpu-memory-utilization 0.85 \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":1}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":false,"enable_fused_mc2":1}'
+    --additional-config '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
 ```
 
 ::::
@@ -292,7 +290,7 @@ Key deployment parameters:
 | `--enable-prefix-caching` | Enables automatic prefix caching. |
 | `--speculative-config` | Enables one Qwen3.5 MTP speculative token. |
 | `--compilation-config` | Uses `FULL_DECODE_ONLY` ACL Graph replay. |
-| `--additional-config` | Enables CPU binding and Fused MC2 while disabling FlashComm1. |
+| `--additional-config` | Enables CPU binding and Fused MC2. |
 
 If a worker exits immediately, confirm that Node 0 is already running,
 `--data-parallel-address` resolves to Node 0, all nodes use the same RPC port,
@@ -306,7 +304,7 @@ a proxy forwards requests between them.
 
 The current validated configuration covers mixed Prefill/Decode deployment.
 The following PD topology is based on the Kimi-K3 reference and has not been
-validated with Qwen3.8: 16 Atlas 800 A3 (64G × 16) nodes, with eight Prefill
+validated with Qwen3.8: 16 Atlas 800 A3 (64GB × 16) nodes, with eight Prefill
 nodes and eight Decode nodes. Both sides use DP8/TP16/PP1.
 
 Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for
@@ -469,7 +467,6 @@ reasoning effort, and weight revision together with the result.
 | MTP | Uses one speculative token with the `qwen3_5_mtp` method. |
 | ACL Graph | Uses `FULL_DECODE_ONLY` replay. |
 | Fused MC2 | Enabled through the environment and additional configuration. |
-| FlashComm1 | Disabled in the validated configuration. |
 | CPU Binding | Reduces cross-core scheduling overhead. |
 
 ## 9 Performance Tuning
@@ -479,14 +476,14 @@ Use the deployment values above as a baseline. Adjust `max-model-len`,
 for the target workload.
 
 Refer to the
-[performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
-and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for
+[Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
+and the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for
 additional guidance.
 
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, refer to
-the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
 - **Q: Which inputs are supported by the open-weight model?**
 
