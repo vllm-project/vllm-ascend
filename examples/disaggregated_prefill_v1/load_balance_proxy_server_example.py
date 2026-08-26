@@ -121,7 +121,6 @@ import ipaddress
 import json
 import logging
 import os
-import sys
 import tempfile
 import threading
 import time
@@ -815,6 +814,50 @@ def auth_headers(request_id: str) -> dict[str, str]:
     }
 
 
+class DecodeUpstreamError(Exception):
+    """Raised when the decode backend returns 4xx/5xx.
+
+    Carries the upstream status code and response body so the proxy can forward
+    the original backend error (e.g. vLLM's ``maximum context length`` message)
+    to the client instead of dropping it into an empty 200 response.
+    """
+
+    def __init__(self, status_code: int, body: bytes):
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"upstream decode returned {status_code}")
+
+
+def build_error_payload(exc: Exception) -> tuple[int, dict]:
+    """Extract ``(http_status, error_obj)`` from an exception.
+
+    Prefers the upstream backend's original error payload verbatim when it
+    matches the standard ``{"error": {...}}`` shape (preserving ``param`` /
+    ``code`` / ``type``); otherwise falls back through two layers of parsing to
+    a synthesized payload so the client always receives an actionable message.
+    """
+    if isinstance(exc, DecodeUpstreamError):
+        status = exc.status_code
+        body = exc.body.decode("utf-8", errors="replace")
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            data = {}
+        # 1. Standard OpenAI/vLLM shape -> return verbatim (preserves all fields).
+        if isinstance(data, dict) and isinstance(data.get("error"), dict):
+            return status, data
+        # 2. Flat {"message": ...} -> wrap into the standard shape.
+        if isinstance(data, dict) and "message" in data:
+            return status, {"error": {"message": data["message"], "type": "upstream_error", "code": status}}
+        # 3. Fallback to the raw body (truncated) so the client sees something.
+        message = body[:1000] or f"Decoder returned HTTP {status}"
+        return status, {"error": {"message": message, "type": "upstream_error", "code": status}}
+    # Non-upstream exception (proxy-side fault): 502 Bad Gateway.
+    status = 502
+    message = str(exc) or exc.__class__.__name__
+    return status, {"error": {"message": message, "type": "proxy_error", "code": status}}
+
+
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
     payload["kv_transfer_params"] = {
@@ -832,6 +875,145 @@ def build_prefill_request(req_data: dict) -> dict:
         payload["max_completion_tokens"] = 1
     payload.pop("stream_options", None)
     return payload
+
+
+def _encode_error_body(error_obj: dict, stream_flag: bool) -> bytes:
+    """Encode an error payload forwarded inside an already-started stream."""
+    if stream_flag:
+        return f"data: {json.dumps(error_obj, ensure_ascii=False)}\n\n".encode() + b"data: [DONE]\n\n"
+    return (json.dumps(error_obj, ensure_ascii=False) + "\n").encode()
+
+
+def _parse_stream_chunk(chunk: bytes) -> tuple[str, Any, bool]:
+    """Decode one decoder chunk into ``(action, chunk_json, is_sse)``.
+
+    ``action`` is ``"ok"`` for a parsed chunk, ``"raw"`` when the chunk must be
+    yielded verbatim (a multi-byte character or JSON object split across
+    network chunks), or ``"skip"`` for empty chunks.
+    """
+    try:
+        chunk_str = chunk.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        logger.debug("Skipping chunk: %s", chunk)
+        return "raw", None, False
+    if not chunk_str:
+        return "skip", None, False
+    is_sse = chunk_str.startswith("data: ")
+    if is_sse:
+        chunk_str = chunk_str[len("data: ") :]
+    try:
+        chunk_json = json.loads(chunk_str)
+    except json.JSONDecodeError:
+        logger.debug("Skipping chunk: %s", chunk_str)
+        return "raw", None, False
+    return "ok", chunk_json, is_sse
+
+
+def _apply_recompute(
+    *,
+    req_data: dict,
+    messages: Any,
+    chat_flag: bool,
+    origin_prompt: str,
+    generated_token: str,
+    origin_max_tokens: int,
+    completion_tokens: int,
+    retry_count: int,
+) -> int:
+    """Rewrite the request for a recompute retry; return the new request length."""
+    if chat_flag:
+        messages[0]["content"] = origin_prompt + generated_token
+    else:
+        req_data["prompt"] = origin_prompt + generated_token
+    req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+    return len(json.dumps(req_data).encode("utf-8"))
+
+
+def _prepare_request_context(req_data: dict) -> tuple[bool, bool, Any, Any, int]:
+    """Extract (stream_flag, chat_flag, messages, origin_prompt, origin_max_tokens)."""
+    stream_flag = bool(req_data.get("stream", False))
+    chat_flag = "messages" in req_data
+    messages = req_data["messages"] if chat_flag else None
+    if "prompt" in req_data:
+        origin_prompt = req_data["prompt"]
+    elif chat_flag:
+        origin_prompt = messages[0].get("content", "")
+    else:
+        origin_prompt = ""
+    return stream_flag, chat_flag, messages, origin_prompt, req_data.get("max_tokens", 16)
+
+
+def _upstream_error_response(upstream: httpx.Response) -> Response:
+    """Build a verbatim error Response carrying the upstream status code."""
+    content_type = upstream.headers.get("content-type")
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers={"content-type": content_type} if content_type else None,
+    )
+
+
+def _decode_unavailable_response(api: str, exc: Exception) -> JSONResponse:
+    """502 response for a decode backend connection failure (retries exhausted)."""
+    return JSONResponse(
+        status_code=502,
+        content={
+            "error": {
+                "message": f"Decode backend request to {api} failed: {exc}",
+                "type": "upstream_error",
+                "code": "decode_backend_unavailable",
+            }
+        },
+    )
+
+
+def _late_decode_error_body(response: httpx.Response, instance_info: Any, stream_flag: bool) -> bytes:
+    """Log and encode a late decode error forwarded inside the already-started stream."""
+    logger.error(
+        "Decoder %s:%s returned status %s after response started for request %s",
+        instance_info.decoder_host,
+        instance_info.decoder_port,
+        response.status_code,
+        instance_info.request_id,
+    )
+    _, error_obj = build_error_payload(DecodeUpstreamError(response.status_code, response.content))
+    return _encode_error_body(error_obj, stream_flag)
+
+
+async def _open_decoder_stream(
+    runtime: Any,
+    instance_info: Any,
+    api: str,
+    req_data: dict,
+    args: argparse.Namespace,
+):
+    """Open a decode stream response; see open_stream_service_response_with_retry."""
+    decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
+    return await open_stream_service_response_with_retry(
+        decoder_client,
+        api,
+        req_data,
+        request_id=instance_info.request_id,
+        max_retries=args.max_retries,
+        base_delay=args.retry_delay,
+    )
+
+
+async def _iter_raw_decoder_chunks(chunk_iterator: Any, first_chunk: bytes):
+    """Replay the pre-read first chunk, then stream the rest of the decoder body."""
+    if first_chunk:
+        yield first_chunk
+    async for chunk in chunk_iterator:
+        yield chunk
+
+
+async def _iter_parsed_decoder_chunks(chunk_iterator: Any, first_chunk: bytes):
+    """Yield (chunk, chunk_json, is_sse); chunk_json is None for raw passthrough chunks."""
+    async for chunk in _iter_raw_decoder_chunks(chunk_iterator, first_chunk):
+        action, chunk_json, is_sse = _parse_stream_chunk(chunk)
+        if action == "skip":
+            continue
+        yield chunk, chunk_json, is_sse
 
 
 async def send_request_to_service(
@@ -861,44 +1043,82 @@ async def send_request_to_service(
         await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
 
 
-async def stream_service_response(
+async def _open_decode_response_once(
+    client: httpx.AsyncClient,
+    endpoint: str,
+    req_data: dict,
+    headers: dict[str, str],
+) -> tuple[httpx.Response, Any, bytes]:
+    """One attempt: send the request and open the decode response (no retry policy).
+
+    A non-2xx response is returned as-is with its body buffered so the caller
+    can forward it verbatim; on success the first chunk is pre-read to surface
+    connection-level failures early. The response is closed if anything fails
+    after it was opened.
+    """
+    request = client.build_request("POST", endpoint, json=req_data, headers=headers)
+    response = await client.send(request, stream=True)
+    try:
+        if not response.is_success:
+            # Buffer the error body so callers can forward it verbatim.
+            await response.aread()
+            return response, response.aiter_bytes().__aiter__(), b""
+        # Success: pre-read the first chunk to surface connection errors early.
+        chunk_iterator = response.aiter_bytes().__aiter__()
+        try:
+            first_chunk = await anext(chunk_iterator)
+        except StopAsyncIteration:
+            first_chunk = b""
+        return response, chunk_iterator, first_chunk
+    except BaseException:
+        await response.aclose()
+        raise
+
+
+async def open_stream_service_response_with_retry(
     client: httpx.AsyncClient,
     endpoint: str,
     req_data: dict,
     request_id: str,
     max_retries: int = 3,
     base_delay: float = 0.2,
-):
+) -> tuple[httpx.Response, Any, bytes]:
+    """Open the decode stream response (with retry) *before* consuming it.
+
+    Returns ``(response, chunk_iterator, first_chunk)`` so the caller can
+    inspect ``response.status_code`` and forward a real upstream error status
+    to the client before the ASGI response head is committed. The first chunk is
+    pre-read so that connection-level failures surface here (within retry
+    budget) instead of after ``StreamingResponse`` has started.
+    """
     headers = auth_headers(request_id)
-    max_attempts = max(1, max_retries)
-    for attempt in range(1, max_attempts + 1):
-        first_chunk_sent = False
+    # max(1, max_retries) 保证至少一次尝试：max_retries=0 时 range(1,1) 为空会跳过整个循环，
+    # 直接抛 RuntimeError 而不发任何请求（原 main 用 max(1, max_retries) 保证至少一次）。
+    for attempt in range(1, max(1, max_retries) + 1):
         try:
-            async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
-                response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    first_chunk_sent = True
-                    yield chunk
-                return
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 400 or attempt == max_attempts:
+            response, chunk_iterator, first_chunk = await _open_decode_response_once(
+                client, endpoint, req_data, headers
+            )
+            # 5xx is transient -> retry; 4xx is deterministic -> return immediately.
+            if not response.is_success and response.status_code >= 500 and attempt < max_retries:
+                logger.warning(
+                    "Attempt %s failed for streaming %s with status %s",
+                    attempt,
+                    endpoint,
+                    response.status_code,
+                )
+                await response.aclose()
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+                continue
+            return response, chunk_iterator, first_chunk
+        except Exception as exc:  # covers httpx.RequestError (its subclass)
+            if attempt < max_retries:
+                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            else:
+                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
                 raise
-            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-        except httpx.RequestError as exc:
-            if first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
-            if attempt == max_attempts:
-                raise
-            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-        except Exception as exc:
-            if first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", exc)
-                return
-            if attempt == max_attempts:
-                raise
-            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+    raise RuntimeError(f"All {max_retries} attempts failed for streaming {endpoint}.")
 
 
 async def _abort_prefill_selection(
@@ -993,6 +1213,230 @@ async def reassign_instances(
     return await assign_instances(api, req_data, request_length, is_initial_request=False)
 
 
+async def _open_decoder_stream_or_early_response(
+    runtime: WorkerRuntime,
+    args: argparse.Namespace,
+    api: str,
+    req_data: dict,
+    instance_info: InstanceInfo,
+) -> tuple[httpx.Response, Any, bytes] | Response:
+    """Open the decode response BEFORE the ASGI response head is committed.
+
+    Returns the opened ``(response, chunk_iterator, first_chunk)`` stream on
+    success, or an error ``Response`` when the decode backend failed up front:
+    a 502 for connection failures (retries exhausted) or the backend's initial
+    4xx/5xx status and body forwarded verbatim. Resources are released before
+    an error response is returned; cancellation is re-raised after cleanup.
+    """
+    try:
+        decoder_stream = await _open_decoder_stream(runtime, instance_info, api, req_data, args)
+    except asyncio.CancelledError:
+        await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+        raise
+    except httpx.RequestError as exc:
+        await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+        return _decode_unavailable_response(api, exc)
+
+    response = decoder_stream[0]
+    if not response.is_success:
+        error_response = _upstream_error_response(response)
+        await response.aclose()
+        await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+        return error_response
+    return decoder_stream
+
+
+class _DecodeStreamSession:
+    """Per-request state for forwarding decoder chunks to the client.
+
+    Replaces the former nested ``generate_stream`` closure: its ``nonlocal``
+    state (current instance assignment, prefill-KV release flag, recompute
+    retry bookkeeping, accumulated tokens) lives here as attributes so each
+    step of the forwarding loop is a small method.
+    """
+
+    def __init__(
+        self,
+        runtime: WorkerRuntime,
+        args: argparse.Namespace,
+        api: str,
+        req_data: dict,
+        instance_info: InstanceInfo,
+        decoder_stream: tuple[httpx.Response, Any, bytes] | None,
+    ) -> None:
+        self._runtime = runtime
+        self._args = args
+        self._api = api
+        self._req_data = req_data
+        self.instance_info = instance_info
+        # Pre-opened by the caller so initial decode 4xx/5xx surface before
+        # the ASGI response head is committed; cleared once consumed so the
+        # recompute loop re-opens a fresh response.
+        self._decoder_stream = decoder_stream
+        (
+            self.stream_flag,
+            self._chat_flag,
+            self._messages,
+            self._origin_prompt,
+            self._origin_max_tokens,
+        ) = _prepare_request_context(req_data)
+        self.generated_token = ""
+        self.completion_tokens = 0
+        self.retry_count = 0
+        self.retry = False
+        self.released_kv = False
+        # 非流式响应中途错误的保护：一旦已向客户端转发过 body，后续 late error
+        # 不能再追加（会与非流式的单一 JSON 拼成非法 JSON），见 chunks() 中的判断。
+        self._body_emitted = False
+        self.reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
+
+    async def release_prefill_kv_once(self) -> None:
+        """Release the prefill-side KV cache exactly once per assignment."""
+        if not self.released_kv:
+            await self._runtime.schedule(
+                "release_prefill_kv", self.instance_info.prefiller_key, self.instance_info.prefiller_score
+            )
+            self.released_kv = True
+
+    async def _open_stream(self) -> tuple[httpx.Response, Any, bytes]:
+        return await _open_decoder_stream(self._runtime, self.instance_info, self._api, self._req_data, self._args)
+
+    async def chunks(self):
+        """Yield the client-visible chunks; the body of the former generate_stream."""
+        try:
+            self.retry = True
+            while self.retry:
+                self.retry = False
+                if self._decoder_stream is None:
+                    self._decoder_stream = await self._open_stream()
+                response, chunk_iterator, first_chunk = self._decoder_stream
+                self._decoder_stream = None
+                if not response.is_success:
+                    # The ASGI response head is already committed here, so a
+                    # late decode error is forwarded inside the stream body
+                    # instead of leaving an empty 200.
+                    #
+                    # 非流式保护：若本轮 recompute 前已向客户端转发过 body（上一轮 200
+                    # 的完整 JSON 已发出），再追加 error JSON 会拼成非法 JSON。此时放弃
+                    # error body 以保证已发 JSON 有效（流式无此问题，SSE 是独立事件）。
+                    if not self.stream_flag and self._body_emitted:
+                        logger.warning(
+                            "Late decode error after non-streaming body already sent for "
+                            "request %s; dropping error body to avoid corrupting the client "
+                            "response",
+                            self.instance_info.request_id,
+                        )
+                        await response.aclose()
+                        return
+                    yield _late_decode_error_body(response, self.instance_info, self.stream_flag)
+                    await response.aclose()
+                    return
+                async for chunk in self._forward_response(response, chunk_iterator, first_chunk):
+                    self._body_emitted = True
+                    yield chunk
+                if self.retry:
+                    await self._prepare_recompute_retry()
+        except asyncio.CancelledError:
+            logger.warning(
+                "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
+                self.instance_info.decoder_host,
+                self.instance_info.decoder_port,
+                self.instance_info.request_id,
+            )
+            raise
+        except Exception as exc:
+            logger.error(
+                "Error during streaming from decoder %s:%s: %s while handling request %s; forwarding error to client",
+                self.instance_info.decoder_host,
+                self.instance_info.decoder_port,
+                exc,
+                self.instance_info.request_id,
+            )
+            _, error_obj = build_error_payload(exc)
+            yield _encode_error_body(error_obj, self.stream_flag)
+        finally:
+            await _finish_instance(self._runtime, self.instance_info, release_prefill_kv=not self.released_kv)
+            self.released_kv = True
+
+    async def _forward_response(self, response: httpx.Response, chunk_iterator: Any, first_chunk: bytes):
+        """Yield client chunks from one opened decoder response.
+
+        Returns early after a ``recomputed`` stop reason (``self.retry`` set);
+        ``chunks`` then rewrites the request and re-opens a new response.
+        """
+        try:
+            async for chunk, chunk_json, is_sse in _iter_parsed_decoder_chunks(chunk_iterator, first_chunk):
+                if not self.released_kv and chunk:
+                    await self.release_prefill_kv_once()
+                if chunk_json is None:  # raw passthrough (split multibyte / JSON)
+                    yield chunk
+                    continue
+                rendered = self._render_chunk(chunk, chunk_json, is_sse)
+                if rendered is not None:
+                    yield rendered
+                if self.retry:
+                    return
+        finally:
+            await response.aclose()
+
+    def _render_chunk(self, chunk: bytes, chunk_json: dict, is_sse: bool) -> bytes | None:
+        """Turn one parsed decoder chunk into the client chunk to forward.
+
+        Returns ``None`` when the chunk must be suppressed: a ``recomputed``
+        stop reason is retried with a rewritten prompt instead of forwarded.
+        """
+        choices = chunk_json.get("choices", [])
+        if not choices or not self.stream_flag:
+            if update_cached_tokens_in_chunk(chunk_json, self.reported_prefiller_cached_tokens):
+                chunk = encode_response_chunk(chunk_json, is_sse)
+                if not choices:
+                    return chunk
+
+        self._accumulate(choices[0], chunk_json)
+        if self.retry:
+            return None
+        if self.retry_count > 0 and not self.stream_flag:
+            # Non-streaming retry: patch the full accumulated text into this chunk.
+            choice = choices[0]
+            if self._chat_flag:
+                choice["message"]["content"] = self.generated_token
+            else:
+                choice["text"] = self.generated_token
+            chunk = encode_response_chunk(chunk_json, is_sse)
+        return chunk
+
+    def _accumulate(self, choice: dict, chunk_json: dict) -> None:
+        """Track generated text and completion tokens; flag recompute retries."""
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+        content = delta.get("content") or message.get("content") or choice.get("text") or ""
+        self.generated_token += content
+        usage = chunk_json.get("usage", {})
+        self.completion_tokens = (
+            (self.completion_tokens + 1)
+            if self.stream_flag
+            else (self.completion_tokens + usage.get("completion_tokens", 0))
+        )
+        if choice.get("stop_reason") == "recomputed":
+            self.retry = True
+            self.retry_count += 1
+
+    async def _prepare_recompute_retry(self) -> None:
+        """Rewrite the request with the generated text and re-select instances."""
+        tmp_request_length = _apply_recompute(
+            req_data=self._req_data,
+            messages=self._messages,
+            chat_flag=self._chat_flag,
+            origin_prompt=self._origin_prompt,
+            generated_token=self.generated_token,
+            origin_max_tokens=self._origin_max_tokens,
+            completion_tokens=self.completion_tokens,
+            retry_count=self.retry_count,
+        )
+        self.instance_info = await reassign_instances(self._api, self._req_data, tmp_request_length, self.instance_info)
+        self.released_kv = False
+
+
 async def handle_completions_impl(api: str, request: Request):
     runtime = get_runtime()
     args = get_global_args()
@@ -1002,136 +1446,25 @@ async def handle_completions_impl(api: str, request: Request):
         req_body = await request.body()
         request_length = len(req_body)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
-        stream_flag = bool(req_data.get("stream", False))
-        chat_flag = "messages" in req_data
 
-        if "prompt" in req_data:
-            origin_prompt = req_data["prompt"]
-        elif chat_flag:
-            messages = req_data["messages"]
-            origin_prompt = messages[0].get("content", "")
-        else:
-            origin_prompt = ""
-        origin_max_tokens = req_data.get("max_tokens", 16)
+        # Open the decode response BEFORE creating the StreamingResponse so
+        # that initial decode 4xx/5xx can be returned with the real upstream
+        # status code and body, instead of being swallowed into an empty 200.
+        opened = await _open_decoder_stream_or_early_response(runtime, args, api, req_data, instance_info)
+        if isinstance(opened, Response):
+            request_released = True
+            return opened
+        decoder_stream = opened
 
-        async def generate_stream():
-            nonlocal instance_info
-            nonlocal request_released
-            generated_token = ""
-            released_kv = False
-            retry_count = 0
-            retry = True
-            completion_tokens = 0
-            reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
-
-            async def release_prefill_kv_once() -> None:
-                nonlocal released_kv
-                if not released_kv:
-                    await runtime.schedule(
-                        "release_prefill_kv", instance_info.prefiller_key, instance_info.prefiller_score
-                    )
-                    released_kv = True
-
-            try:
-                while retry:
-                    retry = False
-                    decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
-                    async for chunk in stream_service_response(
-                        decoder_client,
-                        api,
-                        req_data,
-                        request_id=instance_info.request_id,
-                        max_retries=args.max_retries,
-                        base_delay=args.retry_delay,
-                    ):
-                        if not released_kv and chunk:
-                            await release_prefill_kv_once()
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
-                            continue
-                        if not chunk_str:
-                            continue
-                        is_sse = chunk_str.startswith("data: ")
-                        if is_sse:
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
-                        choices = chunk_json.get("choices", [])
-                        if not choices or not stream_flag:
-                            if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                chunk = encode_response_chunk(chunk_json, is_sse)
-                                if not choices:
-                                    yield chunk
-                                    continue
-
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        message = choice.get("message") or {}
-                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                        generated_token += content
-
-                        stop_reason = choice.get("stop_reason")
-                        usage = chunk_json.get("usage", {})
-                        completion_tokens = (
-                            (completion_tokens + 1)
-                            if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens", 0))
-                        )
-                        if stop_reason == "recomputed":
-                            retry = True
-                            retry_count += 1
-                            if chat_flag:
-                                messages[0]["content"] = origin_prompt + generated_token
-                            else:
-                                req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
-                            tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
-                            released_kv = False
-                            break
-                        if retry_count > 0 and not stream_flag:
-                            if chat_flag:
-                                choice["message"]["content"] = generated_token
-                            else:
-                                choice["text"] = generated_token
-                            chunk = encode_response_chunk(chunk_json, is_sse)
-                        yield chunk
-            except asyncio.CancelledError:
-                logger.warning(
-                    "Streaming from decoder %s:%s was cancelled; releasing request %s resources",
-                    instance_info.decoder_host,
-                    instance_info.decoder_port,
-                    instance_info.request_id,
-                )
-                raise
-            except Exception as exc:
-                logger.error(
-                    "Error during streaming from decoder %s:%s: %s while handling request %s; releasing prefiller KV",
-                    instance_info.decoder_host,
-                    instance_info.decoder_port,
-                    exc,
-                    instance_info.request_id,
-                )
-            finally:
-                await _finish_instance(runtime, instance_info, release_prefill_kv=not released_kv)
-                released_kv = True
-                request_released = True
-
-        media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
-        return StreamingResponse(generate_stream(), media_type=media_type)
+        session = _DecodeStreamSession(runtime, args, api, req_data, instance_info, decoder_stream)
+        media_type = "text/event-stream; charset=utf-8" if session.stream_flag else "application/json"
+        return StreamingResponse(
+            session.chunks(),
+            status_code=decoder_stream[0].status_code,
+            media_type=media_type,
+        )
     except Exception as e:
-        import traceback
-
-        exc_info = sys.exc_info()
-        print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
-        print("".join(traceback.format_exception(*exc_info)))
+        logger.exception("Error occurred in disagg prefill proxy server - %s endpoint", api)
         if not request_released and "instance_info" in locals():
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
