@@ -168,6 +168,10 @@ def test_mtp_rewrite_invalidates_membership_slot_map():
 
 
 def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
+    """
+    Test that the fused overlap external plan receives the raw topk indices and the full selection state,
+    and that the fused op receives the correct inputs.
+    """
     impl = _make_fused_overlap_impl()
     ql_nope = torch.arange(12, dtype=torch.float32).reshape(2, 2, 3)
     q_pe = torch.ones((2, 2, 1), dtype=torch.float32)

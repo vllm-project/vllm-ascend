@@ -22,6 +22,14 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 
 
+def _make_sparse_kv_ops():
+    return SimpleNamespace(
+        sparse_kv_warmup_lru_resident_threads=MagicMock(return_value=8),
+        sparse_kv_lru_resident_compact_with_plan_stable_rows=MagicMock(),
+        sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows=MagicMock(),
+    )
+
+
 def _make_plan_manager():
     manager = SparseKVOffloadManager.__new__(SparseKVOffloadManager)
     manager.use_fused_overlap = True
@@ -75,10 +83,6 @@ def _make_plan_manager():
     manager.lru_miss_tokens_ptrs = [241 + layer for layer in range(5)]
     manager.lru_miss_slots_ptrs = [251 + layer for layer in range(5)]
     manager.tp_group = MagicMock()
-    manager.sparse_kv_offload_cpp = SimpleNamespace(
-        lru_resident_compact_with_plan_stable_rows=MagicMock(),
-        enqueue_lru_resident_compact_with_plan_stable_rows=MagicMock(),
-    )
     return manager
 
 
@@ -87,13 +91,12 @@ def test_external_lru_planner_thread_warmup_runs_on_tp0():
     manager.use_fused_overlap = True
     manager.tp_rank = 0
     manager.lru_workspace_threads = 8
-    manager.sparse_kv_offload_cpp = SimpleNamespace(
-        warmup_lru_resident_threads=MagicMock(return_value=8),
-    )
+    sparse_kv_ops = _make_sparse_kv_ops()
 
-    assert manager._warmup_external_lru_planner_threads() == 8
+    with patch.object(manager_module, "_sparse_kv_ops", return_value=sparse_kv_ops):
+        assert manager._warmup_external_lru_planner_threads() == 8
 
-    manager.sparse_kv_offload_cpp.warmup_lru_resident_threads.assert_called_once_with(8)
+    sparse_kv_ops.sparse_kv_warmup_lru_resident_threads.assert_called_once_with(8)
 
 
 @pytest.mark.parametrize(
@@ -108,13 +111,12 @@ def test_external_lru_planner_thread_warmup_is_gated(
     manager.use_fused_overlap = use_fused_overlap
     manager.tp_rank = tp_rank
     manager.lru_workspace_threads = 8
-    manager.sparse_kv_offload_cpp = SimpleNamespace(
-        warmup_lru_resident_threads=MagicMock(),
-    )
+    sparse_kv_ops = _make_sparse_kv_ops()
 
-    assert manager._warmup_external_lru_planner_threads() == 0
+    with patch.object(manager_module, "_sparse_kv_ops", return_value=sparse_kv_ops):
+        assert manager._warmup_external_lru_planner_threads() == 0
 
-    manager.sparse_kv_offload_cpp.warmup_lru_resident_threads.assert_not_called()
+    sparse_kv_ops.sparse_kv_warmup_lru_resident_threads.assert_not_called()
 
 
 def test_mapped_membership_allocation_initializes_external_plan_control():
@@ -159,6 +161,7 @@ def test_mapped_membership_allocation_initializes_external_plan_control():
 
 def test_external_lru_plan_is_reused_by_three_skip_layers_and_replanned_at_owner():
     manager = _make_plan_manager()
+    sparse_kv_ops = _make_sparse_kv_ops()
     membership = torch.full(
         (4, FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT),
         -1,
@@ -178,25 +181,27 @@ def test_external_lru_plan_is_reused_by_three_skip_layers_and_replanned_at_owner
         selection_membership_map=membership,
         capturing=False,
     )
-    assert manager.prepare_fused_overlap_external_plan(layer_name="layer.0", skip_topk=False, **common_args)
-    for layer_id in range(1, 4):
-        assert manager.prepare_fused_overlap_external_plan(
-            layer_name=f"layer.{layer_id}", skip_topk=True, **common_args
-        )
+    with patch.object(manager_module, "_sparse_kv_ops", return_value=sparse_kv_ops):
+        assert manager.prepare_fused_overlap_external_plan(layer_name="layer.0", skip_topk=False, **common_args)
+        for layer_id in range(1, 4):
+            assert manager.prepare_fused_overlap_external_plan(
+                layer_name=f"layer.{layer_id}", skip_topk=True, **common_args
+            )
 
-    planner = manager.sparse_kv_offload_cpp.lru_resident_compact_with_plan_stable_rows
-    assert planner.call_count == 1
-    manager.tp_group.broadcast.assert_called_once_with(manager.fused_plan_metadata_npu, src=0)
-    assert manager.fused_overlap_plan_owner_layer_id == 0
+        planner = sparse_kv_ops.sparse_kv_lru_resident_compact_with_plan_stable_rows
+        assert planner.call_count == 1
+        manager.tp_group.broadcast.assert_called_once_with(manager.fused_plan_metadata_npu, src=0)
+        assert manager.fused_overlap_plan_owner_layer_id == 0
 
-    assert manager.prepare_fused_overlap_external_plan(layer_name="layer.4", skip_topk=False, **common_args)
-    assert planner.call_count == 2
-    assert planner.call_args_list[-1].args[4] == manager.lru_slot_to_token_ptrs[4]
-    assert manager.fused_overlap_plan_owner_layer_id == 4
+        assert manager.prepare_fused_overlap_external_plan(layer_name="layer.4", skip_topk=False, **common_args)
+        assert planner.call_count == 2
+        assert planner.call_args_list[-1].args[4] == manager.lru_slot_to_token_ptrs[4]
+        assert manager.fused_overlap_plan_owner_layer_id == 4
 
 
 def test_eager_external_plan_copies_inputs_and_preserves_cpp_argument_order():
     manager = _make_plan_manager()
+    sparse_kv_ops = _make_sparse_kv_ops()
     membership = torch.full(
         (4, FSA_SELECTION_MEMBERSHIP_STORAGE_INT16_COUNT),
         -1,
@@ -207,23 +212,24 @@ def test_eager_external_plan_copies_inputs_and_preserves_cpp_argument_order():
     stable_prefix_lens = torch.tensor([10, 20], dtype=torch.int32)
     visible_seq_lens = torch.tensor([11, 21], dtype=torch.int32)
 
-    assert manager.prepare_fused_overlap_external_plan(
-        layer_name="layer.0",
-        num_tokens=2,
-        topk_indices_npu=topk,
-        req_ids_npu=req_ids,
-        stable_prefix_lens_npu=stable_prefix_lens,
-        visible_seq_lens_npu=visible_seq_lens,
-        selection_membership_map=membership,
-        capturing=False,
-    )
+    with patch.object(manager_module, "_sparse_kv_ops", return_value=sparse_kv_ops):
+        assert manager.prepare_fused_overlap_external_plan(
+            layer_name="layer.0",
+            num_tokens=2,
+            topk_indices_npu=topk,
+            req_ids_npu=req_ids,
+            stable_prefix_lens_npu=stable_prefix_lens,
+            visible_seq_lens_npu=visible_seq_lens,
+            selection_membership_map=membership,
+            capturing=False,
+        )
 
     torch.testing.assert_close(manager.lru_topk_indices_cpu[:2], topk)
     torch.testing.assert_close(manager.lru_req_ids_cpu[:2], req_ids)
     torch.testing.assert_close(manager.lru_stable_prefix_lens_cpu[:2], stable_prefix_lens)
     torch.testing.assert_close(manager.lru_visible_seq_lens_cpu[:2], visible_seq_lens)
     plan_start = FSA_SELECTION_MEMBERSHIP_CONTROL_OFFSET_INT16_CNT - manager.topk
-    planner = manager.sparse_kv_offload_cpp.lru_resident_compact_with_plan_stable_rows
+    planner = sparse_kv_ops.sparse_kv_lru_resident_compact_with_plan_stable_rows
     planner.assert_called_once_with(
         manager.lru_req_ids_ptr,
         manager.lru_last_req_ids_ptrs[0],
@@ -257,6 +263,7 @@ def test_eager_external_plan_copies_inputs_and_preserves_cpp_argument_order():
 
 def test_capture_external_plan_and_current_kv_use_separate_side_streams():
     manager = _make_plan_manager()
+    sparse_kv_ops = _make_sparse_kv_ops()
     manager.current_kv_save_stream = MagicMock()
     manager.fused_plan_stream = MagicMock()
     current_stream = MagicMock()
@@ -280,6 +287,7 @@ def test_capture_external_plan_and_current_kv_use_separate_side_streams():
             "stream",
             side_effect=lambda _: nullcontext(),
         ),
+        patch.object(manager_module, "_sparse_kv_ops", return_value=sparse_kv_ops),
     ):
         manager.offload_new_kv(
             layer_name="layer.0",
@@ -308,7 +316,7 @@ def test_capture_external_plan_and_current_kv_use_separate_side_streams():
     assert current_stream.record_event.call_count == 2
     manager.current_kv_save_stream.wait_event.assert_called_once_with(input_event)
     manager.fused_plan_stream.wait_event.assert_called_once_with(input_event)
-    manager.sparse_kv_offload_cpp.enqueue_lru_resident_compact_with_plan_stable_rows.assert_called_once()
+    sparse_kv_ops.sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows.assert_called_once()
     manager.tp_group.broadcast.assert_called_once_with(manager.fused_plan_metadata_npu, src=0)
     current_stream.wait_stream.assert_called_once_with(manager.current_kv_save_stream)
     assert manager.current_kv_by_layer[0][0].numel() == 1

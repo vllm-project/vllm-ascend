@@ -1,5 +1,4 @@
 import contextlib
-import os
 import typing
 from dataclasses import dataclass
 from zlib import adler32
@@ -29,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
@@ -68,10 +68,37 @@ FSA_SELECTION_MEMBERSHIP_REQUIRER_COLUMNS = (
 
 
 _SUBSCRIBED_COMPUTE_STREAMS: set[object] = set()
+_SPARSE_KV_OFFLOAD_OPS = None
+_SPARSE_KV_OFFLOAD_OP_NAMES = (
+    "sparse_kv_warmup_lru_resident_threads",
+    "sparse_kv_lru_resident_compact",
+    "sparse_kv_lru_resident_compact_with_plan_stable_rows",
+    "sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows",
+    "sparse_kv_compute_lru_resident_addrs",
+    "sparse_kv_restore_bfloat16_tensor",
+    "sparse_kv_restore_int16_tensor",
+)
 
 
 def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
+
+
+def _sparse_kv_ops():
+    global _SPARSE_KV_OFFLOAD_OPS
+    if _SPARSE_KV_OFFLOAD_OPS is not None:
+        return _SPARSE_KV_OFFLOAD_OPS
+    if not enable_custom_op():
+        raise RuntimeError("Sparse KV offload requires custom ops to be enabled.")
+
+    missing_ops = [name for name in _SPARSE_KV_OFFLOAD_OP_NAMES if not hasattr(torch.ops._C_ascend, name)]
+    if missing_ops:
+        raise RuntimeError(
+            "Sparse KV offload requires _C_ascend sparse KV ops, "
+            f"missing={missing_ops}. Rebuild vllm_ascend_C with Atlas A3 support."
+        )
+    _SPARSE_KV_OFFLOAD_OPS = torch.ops._C_ascend
+    return _SPARSE_KV_OFFLOAD_OPS
 
 
 def allocate_kv_offload_topk_buffer_pair(
@@ -493,7 +520,7 @@ class SparseKVOffloadManager:
         )
         self._npu_runtime = torch_npu.npu
 
-        self._build_cpp()
+        _sparse_kv_ops()
 
         dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30))
         planned_pool_size_bytes = get_sparse_kv_offload_cpu_pool_size_bytes(kv_cache_config)
@@ -523,48 +550,10 @@ class SparseKVOffloadManager:
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
-    def _build_cpp(self):
-        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
-        ascend_home = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
-        npu_include_path = os.path.join(ascend_home, "include")
-        npu_lib_path = os.path.join(ascend_home, "lib64")
-        if not os.path.exists(npu_lib_path):
-            npu_lib_path = os.path.join(ascend_home, "lib")
-        torch_npu_path = os.path.dirname(torch_npu.__file__)
-        torch_npu_include = os.path.join(torch_npu_path, "include")
-        torch_npu_lib_path = os.path.join(torch_npu_path, "lib")
-        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
-        os.environ["CXX"] = "clang++"
-        os.environ["CC"] = "clang"
-        abs_path = os.path.dirname(os.path.abspath(__file__))
-        src_path = os.path.join(abs_path, "sparse_kv_offload.cpp")
-        logger.info_once(f"Sparse KV offload build cpp utils from src: {src_path}")
-        self.sparse_kv_offload_cpp = torch.utils.cpp_extension.load(
-            name="sparse_kv_offload",
-            sources=[src_path],
-            extra_cflags=[
-                "-O3",
-                "-std=c++20",
-                "-fopenmp",
-                "-march=armv8.2-a+sve+fp16+bf16",
-                "-fPIC",
-                f"-I{npu_include_path}",
-                f"-I{torch_npu_include}",
-            ],
-            extra_ldflags=[
-                "-fopenmp",
-                f"-L{npu_lib_path}",
-                "-lascendcl",
-                f"-L{torch_npu_lib_path}",
-                "-ltorch_npu",
-            ],
-            verbose=True,
-        )
-
     def _warmup_external_lru_planner_threads(self) -> int:
         if not (self.use_fused_overlap and self.tp_rank == 0):
             return 0
-        warmed_threads = self.sparse_kv_offload_cpp.warmup_lru_resident_threads(self.lru_workspace_threads)
+        warmed_threads = _sparse_kv_ops().sparse_kv_warmup_lru_resident_threads(self.lru_workspace_threads)
         logger.info(
             "Warmed external LRU planner OpenMP team with %s threads",
             warmed_threads,
@@ -622,7 +611,7 @@ class SparseKVOffloadManager:
         return layer_id
 
     def _restore_bfloat16_tensor(self, ptr: int, shape: list[int]) -> torch.Tensor:
-        view = self.sparse_kv_offload_cpp.restore_bfloat16_tensor(ptr, shape)
+        view = _sparse_kv_ops().sparse_kv_restore_bfloat16_tensor(ptr, shape)
         if int(view.data_ptr()) != int(ptr):
             raise RuntimeError(
                 "restore_bfloat16_tensor returned a tensor with unexpected data_ptr: "
@@ -639,7 +628,7 @@ class SparseKVOffloadManager:
         return view
 
     def _restore_int16_tensor(self, ptr: int, shape: list[int]) -> torch.Tensor:
-        view = self.sparse_kv_offload_cpp.restore_int16_tensor(ptr, shape)
+        view = _sparse_kv_ops().sparse_kv_restore_int16_tensor(ptr, shape)
         if int(view.data_ptr()) != int(ptr):
             raise RuntimeError(
                 "restore_int16_tensor returned a tensor with an unexpected data_ptr: "
@@ -1393,10 +1382,11 @@ class SparseKVOffloadManager:
             return True
 
         def run_planner(enqueue: bool) -> None:
+            sparse_kv_ops = _sparse_kv_ops()
             planner = (
-                self.sparse_kv_offload_cpp.enqueue_lru_resident_compact_with_plan_stable_rows
+                sparse_kv_ops.sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows
                 if enqueue
-                else self.sparse_kv_offload_cpp.lru_resident_compact_with_plan_stable_rows
+                else sparse_kv_ops.sparse_kv_lru_resident_compact_with_plan_stable_rows
             )
             planner(
                 self.lru_req_ids_ptr,
@@ -1601,7 +1591,8 @@ class SparseKVOffloadManager:
             num_tokens_buffer,
             layer_id,
         ) = args
-        self.sparse_kv_offload_cpp.lru_resident_compact(
+        sparse_kv_ops = _sparse_kv_ops()
+        sparse_kv_ops.sparse_kv_lru_resident_compact(
             lru_req_ids_ptr,
             lru_last_req_ids_ptr,
             lru_topk_indices_ptr,
@@ -1624,7 +1615,7 @@ class SparseKVOffloadManager:
             self.lru_workspace_threads,
             self.lru_workspace_threads,
         )
-        self.sparse_kv_offload_cpp.compute_lru_resident_addrs(
+        sparse_kv_ops.sparse_kv_compute_lru_resident_addrs(
             miss_count,
             miss_tokens,
             miss_slots,
@@ -1655,6 +1646,8 @@ def init_sparse_kv_offload_manager(
 ):
     global _SPARSE_KV_OFFLOAD_MANAGER
     if _SPARSE_KV_OFFLOAD_MANAGER is None:
+        if get_ascend_device_type() != AscendDeviceType.A3:
+            raise RuntimeError("Sparse KV offload is only support on A3")
         _SPARSE_KV_OFFLOAD_MANAGER = SparseKVOffloadManager(
             vllm_config,
             kv_cache_config,
