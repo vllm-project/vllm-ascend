@@ -107,10 +107,6 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
-#      - name: GLM-5.2-w8a8c8-128k-1k-90-50-PD
-#        config_file_path: GLM-5.2-W8A8C8-128k-1k-90-50-PD.yaml
-#        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
-#        size: 4
 
   double_node:
     test_config:
