@@ -33,8 +33,10 @@
 ## Test Cases
 
 > [!NOTE]
+> **Test Case Instructions**
 > - Single-operator accuracy test cases should be placed under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton`.
 > - For inference scenarios, use the actual shapes and other parameters adopted by the model as single-operator test cases, rather than arbitrarily constructed ones.
+> - Accuracy comparison results should use a unified precision tolerance based on the operator type and data type; example cases will be provided later.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_apply_top_k_top_p_triton.py
