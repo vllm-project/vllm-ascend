@@ -602,6 +602,23 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
+# ** 19a. File: platform/patch_shm_broadcast.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue`
+#    Why:
+#       vLLM 0.26.0 local readers can wait indefinitely after a best-effort ZMQ
+#       notification is lost. A caller exception can also leave a read slot
+#       unreleased and block the writer.
+#    How:
+#       Replace `timeout_ms` and `acquire_read` with the implementations from the
+#       upstream fix. Idle waits are capped at five seconds, and read-slot cleanup
+#       runs in a `finally` block.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/45224
+#       https://github.com/vllm-project/vllm-ascend/pull/14181
+#    Future Plan:
+#       Remove this patch when the supported vLLM release includes PR #45224.
+#
 # ** 20. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
