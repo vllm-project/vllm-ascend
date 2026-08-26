@@ -39,7 +39,7 @@
 > - Accuracy comparison results should use a unified precision tolerance based on the operator type and data type; example cases will be provided later.
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_apply_top_k_top_p_triton.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_qkvzba_split_reshape_cat.py
 ```
 
 ## Example

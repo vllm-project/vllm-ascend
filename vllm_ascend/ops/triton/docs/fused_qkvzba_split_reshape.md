@@ -4,11 +4,11 @@
 
 - **Function**: Splits and re-arranges the fused QKVZ and BA projections of the GDN (Gated Delta Network) linear attention into type-contiguous layouts. It replaces the host-side `split` + `reshape`/`cat` chain in the `gqa_interleaved_layout=True` path with a single fused Triton kernel.
 - **Formula**: Pure data movement (load/store only, no arithmetic):
-  - Input `mixed_qkvz`: `[num_tokens, num_heads_qk * (Q + K + V + Z)]`, where each head block is `[Q(head_qk), K(head_qk), V(v_heads_per_qk * head_v), Z(v_heads_per_qk * head_v)]` and `v_heads_per_qk = num_heads_v // num_heads_qk`
-  - Input `mixed_ba`: `[num_tokens, num_heads_qk * (B + A)]`, where each head block is `[B(v_heads_per_qk), A(v_heads_per_qk)]`
-  - Output `mixed_qkv`: `[num_tokens, Q_all | K_all | V_all]` (concatenated by type, `Q_all = K_all = num_heads_qk * head_qk`, `V_all = num_heads_v * head_v`)
-  - Output `z`: `[num_tokens, num_heads_v, head_v]`
-  - Output `b`, `a`: `[num_tokens, num_heads_v]`
+    - Input `mixed_qkvz`: `[num_tokens, num_heads_qk * (Q + K + V + Z)]`, where each head block is `[Q(head_qk), K(head_qk), V(v_heads_per_qk * head_v), Z(v_heads_per_qk * head_v)]` and `v_heads_per_qk = num_heads_v // num_heads_qk`
+    - Input `mixed_ba`: `[num_tokens, num_heads_qk * (B + A)]`, where each head block is `[B(v_heads_per_qk), A(v_heads_per_qk)]`
+    - Output `mixed_qkv`: `[num_tokens, Q_all | K_all | V_all]` (concatenated by type, `Q_all = K_all = num_heads_qk * head_qk`, `V_all = num_heads_v * head_v`)
+    - Output `z`: `[num_tokens, num_heads_v, head_v]`
+    - Output `b`, `a`: `[num_tokens, num_heads_v]`
 - **Algorithm flow** (processed row by row, independently):
   1. Compute grid: `grid_size = min(num_vectorcore, total_rows)` vector cores, each processing `rows_per_vec = ceil(total_rows / grid_size)` rows.
   2. Tile rows: `rows_per_iter` rows per tile, derived from the UB (unified buffer) budget (`ub_size`, `elements_per_row`) and capped by `MAX_ROWS_PER_ITER`, to keep each load/store block within the UB.
