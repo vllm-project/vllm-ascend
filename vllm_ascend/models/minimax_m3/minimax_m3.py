@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only MiniMaxM3 model."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableSequence, Sequence
 from itertools import islice
 from typing import Any
 
@@ -598,14 +598,10 @@ class MiniMaxM3MoE(nn.Module):
         self.enable_eplb = parallel_config.enable_eplb
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = eplb_config.num_redundant_experts
-        self.n_physical_experts = (
-            self.n_logical_experts + self.n_redundant_experts
-        )
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
+        self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
 
         if self.tp_size > config.num_local_experts:
             raise ValueError(
@@ -1252,7 +1248,7 @@ class MiniMaxM3SparseForCausalLM(
         return hidden_states
 
     def _set_moe_parameters(self) -> None:
-        self.expert_weights = []
+        self.expert_weights: MutableSequence[Sequence[torch.Tensor]] = []
         self.num_expert_groups = 1
         self.moe_layers = []
         self.moe_mlp_layers: list[MiniMaxM3MoE] = []

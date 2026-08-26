@@ -247,9 +247,7 @@ class MiniMaxM3SparseForConditionalGeneration(
         self.num_moe_layers = language_model.num_moe_layers
         self.num_logical_experts = language_model.num_logical_experts
         self.num_physical_experts = language_model.num_physical_experts
-        self.num_local_physical_experts = (
-            language_model.num_local_physical_experts
-        )
+        self.num_local_physical_experts = language_model.num_local_physical_experts
         self.num_routed_experts = language_model.num_routed_experts
         self.num_shared_experts = language_model.num_shared_experts
         self.num_redundant_experts = language_model.num_redundant_experts
