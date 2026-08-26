@@ -441,6 +441,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         router_logits: torch.Tensor,
         enable_force_load_balance: bool,
         input_ids: torch.Tensor | None = None,
+        activation_dtype: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.router is None:
             raise RuntimeError("AscendRoutedExperts requires a router for expert selection.")
@@ -479,7 +480,15 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             topk_ids = torch.cat([topk_ids, shared_expert_ids], dim=1)
             topk_weights = torch.cat([topk_weights, shared_expert_weights], dim=1)
 
-        topk_weights = topk_weights.to(hidden_states.dtype)
+        # Align routing weights with the model activation dtype. `hidden_states`
+        # may already have been replaced by the quantized tensor from
+        # moe_comm_method.prepare() (fp8/fp4), and routing weights must never
+        # take a quantized dtype: `topk_weights * mask` in token_dispatch would
+        # fail on Float8 type promotion. Callers pass the pre-quantization dtype.
+        if activation_dtype is None:
+            activation_dtype = hidden_states.dtype
+        topk_weights = topk_weights.to(activation_dtype)
+        
         # This is a naive implementation for experts load balance so as to
         # avoid accumulating too much tokens on a single rank. It is only
         # activated when doing profile runs.
@@ -514,6 +523,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if lora_context is not None:
             sync_lora_context(self.quant_method, lora_context)
 
+        # prepare() may hand back a quantized hidden_states; remember the
+        # activation dtype that routing weights have to match.
+        activation_dtype = hidden_states.dtype
+
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -533,6 +546,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             router_logits=router_logits,
             enable_force_load_balance=enable_force_load_balance,
             input_ids=input_ids,
+            activation_dtype=activation_dtype,
         )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
