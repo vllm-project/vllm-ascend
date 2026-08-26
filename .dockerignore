@@ -16,13 +16,17 @@
 .gemini/
 .idea/
 .vscode/
-*.md
 AGENTS.md
 CLAUDE.md
 CODE_OF_CONDUCT.md
 CONTRIBUTING.md
 DCO
 codecov.yml
+
+# 其他 markdown（README.md 要保留，setup.py 引用它做 long_description）
+docs/*.md
+examples/*.md
+benchmarks/*.md
 
 # 文档 / 示例 / 测试 / 基准（构建和运行都不需要）
 docs/
