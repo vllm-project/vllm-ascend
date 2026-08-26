@@ -634,8 +634,11 @@ def _allocate_kv_cache(
         assert isinstance(example_spec, AttentionSpec)
 
         if isinstance(example_spec, AscendSFAIndexerCacheSpec):
-            raw_cache: tuple[torch.Tensor, ...]
             num_blocks = kv_cache_tensor.size // example_spec.page_size_bytes
+            if not vllm_version_is("0.27.1"):
+                # vLLM #51718 packs all group layers into one tensor;
+                # kv_cache_config.num_blocks is the per-layer block count.
+                num_blocks = kv_cache_config.num_blocks
 
             k_tensor_size = (
                 num_blocks
@@ -654,33 +657,61 @@ def _allocate_kv_cache(
                     * example_spec.scale_dim
                     * get_dtype_size(example_spec.scale_dtype)
                 )
-                k_tensor, scale_tensor = _allocate_sparse_c8_indexer_tensors(
-                    dsa_k_tensor_size=k_tensor_size,
-                    dsa_k_scale_tensor_size=scale_tensor_size,
-                    alignment=alignment,
-                    scale_dtype=example_spec.scale_dtype,
-                    device=device,
-                )
-                raw_cache = (k_tensor, scale_tensor)
             else:
-                k_tensor = _allocate_int8_cache_tensor(
-                    k_tensor_size,
-                    alignment,
-                    device,
-                )
-                raw_cache = (k_tensor,)
+                scale_tensor_size = None
 
-            for layer_name_inner in shared_names:
-                kv_cache_raw_tensors[layer_name_inner] = raw_cache
+            if vllm_version_is("0.27.1"):
+                # v0.27.1 `shared_by` aliases the same physical blocks.
+                if scale_tensor_size is not None:
+                    kv_cache_raw_tensors[shared_names[0]] = _allocate_sparse_c8_indexer_tensors(
+                        dsa_k_tensor_size=k_tensor_size,
+                        dsa_k_scale_tensor_size=scale_tensor_size,
+                        alignment=alignment,
+                        scale_dtype=example_spec.scale_dtype,
+                        device=device,
+                    )
+                else:
+                    kv_cache_raw_tensors[shared_names[0]] = (
+                        _allocate_int8_cache_tensor(k_tensor_size, alignment, device),
+                    )
+                for layer_name_inner in shared_names[1:]:
+                    kv_cache_raw_tensors[layer_name_inner] = kv_cache_raw_tensors[shared_names[0]]
+            else:
+                # main: every layer owns its own region.
+                for layer_name_inner in shared_names:
+                    if scale_tensor_size is not None:
+                        kv_cache_raw_tensors[layer_name_inner] = _allocate_sparse_c8_indexer_tensors(
+                            dsa_k_tensor_size=k_tensor_size,
+                            dsa_k_scale_tensor_size=scale_tensor_size,
+                            alignment=alignment,
+                            scale_dtype=example_spec.scale_dtype,
+                            device=device,
+                        )
+                    else:
+                        kv_cache_raw_tensors[layer_name_inner] = (
+                            _allocate_int8_cache_tensor(k_tensor_size, alignment, device),
+                        )
 
             continue
 
+        # vLLM #51718 packs all group layers into one tensor on main; each layer
+        # owns a page_size * num_blocks region (the per-layer size v0.27.1 stored
+        # directly on the tensor).
+        kv_cache_tensor_size = (
+            kv_cache_tensor.size
+            if vllm_version_is("0.27.1")
+            else kv_cache_config.num_blocks * example_spec.page_size_bytes
+        )
         # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
         if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
-            k_size = kv_cache_tensor.size
-            k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
-            for layer_name in shared_names:
-                kv_cache_raw_tensors[layer_name] = k_tensor
+            k_size = kv_cache_tensor_size
+            if vllm_version_is("0.27.1"):
+                k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
+                for layer_name in shared_names:
+                    kv_cache_raw_tensors[layer_name] = k_tensor
+            else:
+                for layer_name in shared_names:
+                    kv_cache_raw_tensors[layer_name] = _allocate_int8_cache_tensor(k_size, alignment, device)
         else:
             k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
             if enable_fa_quant(vllm_config):
@@ -689,12 +720,18 @@ def _allocate_kv_cache(
                 )
             else:
                 k_factor, v_factor = calc_split_factor([k_dim, v_dim])
-            k_size = int(kv_cache_tensor.size // k_factor)
-            v_size = int(kv_cache_tensor.size // v_factor)
-            k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
-            v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
-            for layer_name in shared_names:
-                kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+            k_size = int(kv_cache_tensor_size // k_factor)
+            v_size = int(kv_cache_tensor_size // v_factor)
+            if vllm_version_is("0.27.1"):
+                k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
+                v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
+                for layer_name in shared_names:
+                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+            else:
+                for layer_name in shared_names:
+                    k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
+                    v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
+                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
