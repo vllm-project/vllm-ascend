@@ -1032,10 +1032,10 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_mega_moe_max_tokens_int_lax(self, mock_fix):
-        # int string "131072" coerces to 131072 (fixes str-vs-int silent failure).
+        # int string "65536" coerces to 65536 (fixes str-vs-int silent failure).
         vc = VllmConfig()
-        vc.additional_config = {"mega_moe_max_tokens": "131072"}
-        self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 131072)
+        vc.additional_config = {"mega_moe_max_tokens": "65536"}
+        self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 65536)
 
     @_clean_up
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
