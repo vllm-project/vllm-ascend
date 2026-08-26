@@ -141,26 +141,16 @@ jobs:
           fi
           echo "fresh=$fresh" >> "$GITHUB_OUTPUT"
 
-      - name: Build env from scratch
+      - name: Install system deps
         if: steps.env-check.outputs.fresh != 'true'
         run: |
           set -euxo pipefail
-          # The ascend checkout is reset by actions/checkout below; wipe the
+          # The ascend checkout below resets the workspace repo; wipe the
           # parts checkout never touches (venv + vllm checkout + marker).
           rm -rf "$GITHUB_WORKSPACE/vllm-empty" \
                  "$GITHUB_WORKSPACE/.venv" \
                  "$GITHUB_WORKSPACE/.ready" \
                  "$GITHUB_WORKSPACE"/main2main-e2e-round-*
-          # Pre-create the workspace repo so the ascend checkout below
-          # (clean: false) treats the directory as an existing repository
-          # instead of wiping it: actions/checkout deletes the workspace
-          # contents when it finds no .git, and git-cleans untracked files
-          # (the .venv built above) when clean defaults to true.
-          git init "$GITHUB_WORKSPACE"
-          git -C "$GITHUB_WORKSPACE" config user.name "main2main-e2e"
-          git -C "$GITHUB_WORKSPACE" config user.email "main2main-e2e@users.noreply.github.com"
-          git -C "$GITHUB_WORKSPACE" remote add origin "https://github.com/${GITHUB_REPOSITORY}"
-          git -C "$GITHUB_WORKSPACE" commit --allow-empty -m "workspace init"
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
@@ -168,11 +158,24 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uv
-          # --system-site-packages: the CANN container's system python holds
-          # torch/torch_npu; the venv only layers the project deps on top.
-          uv venv --system-site-packages "$GITHUB_WORKSPACE/.venv" \
-            || python3 -m venv --system-site-packages "$GITHUB_WORKSPACE/.venv"
-          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install --upgrade uv || true
+
+      # Checkout the ascend repo FIRST: actions/checkout deletes the
+      # workspace contents when it finds no .git, so anything created before
+      # this checkout (the .venv) would be wiped.  Pre-creating the repo with
+      # git init was tried instead, but the k8s container implementation
+      # drops the freshly created .git within the step (git config right
+      # after git init: "fatal: not in a git directory") — the
+      # checkout-created .git is reliable.
+      - name: Checkout vllm-project/vllm-ascend repo
+        if: steps.env-check.outputs.fresh != 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.base_ref }}
+          fetch-depth: 0
+          submodules: recursive
+          # Keep untracked leftovers (main2main_flow, results dirs) across
+          # rebuilds; tracked files are still reset to base_ref.
+          clean: false
 
       - name: Checkout vllm-project/vllm repo
         if: steps.env-check.outputs.fresh != 'true'
@@ -182,6 +185,17 @@ jobs:
           ref: ${{ inputs.vllm }}
           path: ./vllm-empty
 
+      - name: Create workspace venv
+        if: steps.env-check.outputs.fresh != 'true'
+        run: |
+          set -euxo pipefail
+          # --system-site-packages: the CANN container's system python holds
+          # torch/torch_npu; the venv only layers the project deps on top.
+          # Built after both checkouts so nothing can wipe it.
+          uv venv --system-site-packages "$GITHUB_WORKSPACE/.venv" \
+            || python3 -m venv --system-site-packages "$GITHUB_WORKSPACE/.venv"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install --upgrade uv || true
+
       - name: Install vllm-project/vllm from source
         if: steps.env-check.outputs.fresh != 'true'
         working-directory: ./vllm-empty
@@ -189,17 +203,6 @@ jobs:
           source "$GITHUB_WORKSPACE/.venv/bin/activate"
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        if: steps.env-check.outputs.fresh != 'true'
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.base_ref }}
-          fetch-depth: 0
-          submodules: recursive
-          # Keep the workspace .venv / vllm-empty built above: the default
-          # clean would git-clean them as untracked files.
-          clean: false
 
       - name: Get csrc hash
         id: get_csrc_hash
