@@ -356,7 +356,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 if (
                     tensor_name in ("w13_scale_bias", "w2_scale_bias")
                     and get_ascend_config().enable_fused_mc2 == 1
-                    and _MEGA_MOE_SUPPORTED
                 ):
                     expert_list = [expert.to(torch.float32) for expert in expert_list]
                 setattr(layer, f"{tensor_name}_list", expert_list)

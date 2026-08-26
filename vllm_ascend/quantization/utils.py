@@ -49,9 +49,9 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
         return 0
 
     if vllm_config is None:
-        from vllm_ascend.ascend_config import get_ascend_config
+        from vllm.config import get_current_vllm_config
 
-        vllm_config = get_ascend_config().vllm_config
+        vllm_config = get_current_vllm_config()
 
     model_config = vllm_config.model_config
     architectures = getattr(model_config, "architectures", None) or ()

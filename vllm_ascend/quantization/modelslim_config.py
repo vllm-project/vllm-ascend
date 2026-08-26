@@ -123,7 +123,20 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     },
+    "qwen3_5_text": {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    },
     "qwen3_5_moe": {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "qwen3_5_moe_text": {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -622,6 +635,7 @@ class AscendModelSlimConfig(QuantizationConfig):
     def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Upstream use staticmethod, but we need to use instance attribute"""
         suffix_map = {}
+        regex_map = {}
         if self.enable_c8_quant:
             suffix_map.update(
                 {
@@ -632,26 +646,28 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if self.enable_fa_quant:
-            suffix_map.update(
+            # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
+            # mapping, we use regex mapping.
+            regex_map.update(
                 {
-                    ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
-                    ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
-                    ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
-                    ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
-                    ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
-                    ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_q\.scale$"): ".mla_attn.mla_attn.fa_q.scale",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_k\.scale$"): ".mla_attn.mla_attn.fa_k.scale",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_v\.scale$"): ".mla_attn.mla_attn.fa_v.scale",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_q\.offset$"): ".mla_attn.mla_attn.fa_q.offset",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_k\.offset$"): ".mla_attn.mla_attn.fa_k.offset",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_v\.offset$"): ".mla_attn.mla_attn.fa_v.offset",
                 }
             )
         if self.enable_indexer_quant:
-            suffix_map.update(
+            regex_map.update(
                 {
-                    ".indexer.q_rot": ".mla_attn.mla_attn.indexer.q_rot",
-                    ".indexer.k_rot": ".mla_attn.mla_attn.indexer.k_rot",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.indexer\.q_rot$"): ".mla_attn.mla_attn.indexer.q_rot",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.indexer\.k_rot$"): ".mla_attn.mla_attn.indexer.k_rot",
                 }
             )
-        if not suffix_map:
+        if not suffix_map and not regex_map:
             return QuantizationConfig.get_cache_scale_mapper()
-        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map, orig_to_new_regex=regex_map)
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:

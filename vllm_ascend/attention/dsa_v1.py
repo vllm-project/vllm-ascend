@@ -21,6 +21,8 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    enable_pcp,
+    get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -90,10 +92,18 @@ class AscendDSABackend(AttentionBackend):
     def get_builder_cls():
         from vllm_ascend.utils import enable_dsa_cp
 
-        if enable_dsa_cp():
+        use_dsa_cp = enable_dsa_cp()
+        use_pcp = enable_pcp()
+        if use_dsa_cp and use_pcp:
+            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 
             return AscendDSACPMetadataBuilder
+        if use_pcp:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
+
+            return AscendDSAPCPMetadataBuilder
         return AscendDSAMetadataBuilder
 
     @staticmethod
@@ -114,10 +124,18 @@ class AscendDSABackend(AttentionBackend):
     def get_impl_cls() -> type[AttentionImplBase[Any]]:
         from vllm_ascend.utils import enable_dsa_cp
 
-        if enable_dsa_cp():
+        use_dsa_cp = enable_dsa_cp()
+        use_pcp = enable_pcp()
+        if use_dsa_cp and use_pcp:
+            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+        if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 
             return AscendDSACPImpl
+        if use_pcp:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
+
+            return AscendDSAPCPImpl
         return AscendDSAImpl
 
     @staticmethod
@@ -312,7 +330,6 @@ def build_dspark_swa_indices(
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
-    hadamard = None
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -374,7 +391,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
-        self._init_hadamard()
+        self.hadamard = None
+        self._init_hadamard(layer_names)
         self.start_pos_prefill: torch.Tensor = torch.zeros(
             scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
         )
@@ -392,10 +410,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
 
-    def _init_hadamard(self) -> None:
-        if AscendDSAMetadataBuilder.hadamard is not None:
-            return
-
+    def _init_hadamard(self, layer_names: list[str]) -> None:
         hf_config = self.model_config.hf_config
         if hf_config.model_type != "deepseek_v4":
             return
@@ -407,20 +422,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             raise ImportError("Please install scipy") from e
         log_dim = math.ceil(math.log2(indexer_head_dim))
         dim_padded = 2**log_dim
-        if self.vllm_config.model_config.enable_sleep_mode:
-            # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
-            # sleep/wake does not treat it as KV cache.
-            from vllm_ascend.device_allocator.camem import CaMemAllocator
-
-            allocator = CaMemAllocator.get_instance()
-            with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
-                AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
-        else:
-            AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-            ).to(torch.bfloat16)
+        self.hadamard = get_or_register_attention_buffer(
+            self.vllm_config,
+            layer_names,
+            "_dsa_hadamard",
+            lambda: torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
+                torch.bfloat16
+            ),
+        )
 
     @classmethod
     def get_cudagraph_support(
@@ -573,7 +582,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_prefills=self.num_prefills,
             attn_state=common_attn_metadata.attn_state,
             req_metadata=req_metadata,
-            hadamard=AscendDSAMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
 
     def _build_sas_metadata(
@@ -704,7 +713,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.block_table[: self.num_decodes],
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
-                self.block_size,
+                self.storage_block_size,
                 query_start_loc[: self.num_decodes + 1],
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
@@ -1181,27 +1190,42 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             output[...] = self.wo_b(o_proj_input)
         return output
 
+    def _prepare_caches_before_attention(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: DSAMetadataDict,
+    ) -> bool:
+        """Prepare cache updates and report whether local writes can be skipped."""
+        return False
+
+    def _get_o_proj_input_shape(
+        self,
+        attn_metadata: DSAMetadataDict | None,
+    ) -> tuple[int, int, int]:
+        return (
+            _EXTRA_CTX.num_tokens,
+            self.n_local_heads,
+            self.head_dim,
+        )
+
     def forward(
         self,
         layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor, ...] | None,
         attn_metadata: DSAMetadataDict,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         output_padded = output
-        o_proj_input_shape = (
-            _EXTRA_CTX.num_tokens,
-            self.n_local_heads,
-            self.head_dim,
-        )
+        o_proj_input_shape = self._get_o_proj_input_shape(attn_metadata)
         if attn_metadata is None:
             # Profiling run: run o_proj on zero input so HCCL collectives are
             # captured by the ACL graph.  Non-OTP just zeros the output.
             if oproj_tp_enable():
-                o_proj_input = torch.zeros(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+                o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
                 self._forward_o_proj(o_proj_input, output)
             else:
                 output.fill_(0)
@@ -1212,38 +1236,55 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             common_attn_metadata = layer_metadata.swa
         actual_tokens = common_attn_metadata.num_actual_tokens
 
-        # Process for Flash Comm V1
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
-
-        o_proj_input = torch.empty(o_proj_input_shape, dtype=hidden_states.dtype, device=hidden_states.device)
+        o_proj_input = hidden_states.new_zeros(o_proj_input_shape)
         assert kv_cache is not None, "kv_cache tensor tuple must be provided."
         wait_for_kv_layer_from_connector(layer_name)
+        cache_is_prepared = self._prepare_caches_before_attention(
+            layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+        )
+        if actual_tokens == 0:
+            output.zero_()
+            notify_kv_cache_written(layer_name)
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+            return output
+
         req_metadata = _require_req_metadata(common_attn_metadata)
         o_proj_input[:actual_tokens] = self._forward_attention(
             layer_name,
             hidden_states[:actual_tokens],
             kv_cache,
             layer_metadata,
+            cache_is_prepared,
         )
         cos = req_metadata.cos[layer_name]
         sin = req_metadata.sin[layer_name]
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
-            o_proj_input.unsqueeze(1),
-            cos,
-            -sin,
+            o_proj_input[:actual_tokens].unsqueeze(1),
+            cos[:actual_tokens],
+            -sin[:actual_tokens],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
         # o
         self._forward_o_proj(o_proj_input, output)
-
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output_padded
 
-    def _mla_prolog_single_stream(self, hidden_states, cos, sin, swa_kv_cache, slot_mapping):
+    def _mla_prolog_single_stream(
+        self,
+        hidden_states,
+        cos,
+        sin,
+        swa_kv_cache,
+        slot_mapping,
+        write_swa_cache=True,
+    ):
         """Run the MLA prolog on the current stream."""
         share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
         if share_hs_quant:
@@ -1287,35 +1328,36 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         )
 
         # win kv & tok_dis
-        if share_hs_quant:
-            kv = torch_npu.npu_quant_matmul(
-                hs_int8,
-                self.wkv.weight,
-                self.wkv.weight_scale,
-                pertoken_scale=hs_pertoken_scale,
-                bias=self.wkv.bias,
-                output_dtype=hidden_states.dtype,
+        if write_swa_cache:
+            if share_hs_quant:
+                kv = torch_npu.npu_quant_matmul(
+                    hs_int8,
+                    self.wkv.weight,
+                    self.wkv.weight_scale,
+                    pertoken_scale=hs_pertoken_scale,
+                    bias=self.wkv.bias,
+                    output_dtype=hidden_states.dtype,
+                )
+            else:
+                kv = self.wkv(hidden_states)
+            kv = self.kv_norm(kv)
+            assert self.rope_head_dim is not None
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
             )
-        else:
-            kv = self.wkv(hidden_states)
-        kv = self.kv_norm(kv)
-        assert self.rope_head_dim is not None
-        kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-
-        # swa exec kv
-        DeviceOperator.dsa_kv_compress_scatter(
-            swa_kv_cache,
-            kv,
-            slot_mapping,
-        )
+            # swa exec kv
+            DeviceOperator.dsa_kv_compress_scatter(
+                swa_kv_cache,
+                kv,
+                slot_mapping,
+            )
 
         return q, qr, qr_pertoken_scale
 
@@ -1416,7 +1458,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         return q, qr, qr_pertoken_scale
 
-    def _update_compressed_caches_and_select_topk(
+    def _maybe_update_compressed_caches_and_select_topk(
         self,
         layer_name: str,
         hidden_states: torch.Tensor,
@@ -1426,6 +1468,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         qr_pertoken_scale: torch.Tensor | None,
         compress_kv_cache: torch.Tensor,
         state_cache: torch.Tensor,
+        write_cache: bool = True,
     ) -> torch.Tensor | None:
         """Update compressed caches and return Indexer top-k indices."""
         compressor = self.compressor
@@ -1467,8 +1510,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 overlap_plan=overlap_plan,
                 layer_name=layer_name,
                 qr_pertoken_scale=qr_pertoken_scale,
+                write_cache=write_cache,
             )
 
+        if not write_cache:
+            return None
         compressed_kv, compress_slot_mapping = compressor(
             hidden_states=hidden_states,
             state_cache=state_cache,
@@ -1488,7 +1534,13 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         layer_metadata: AscendDSALayerMetadata,
+        cache_is_prepared: bool = False,
     ) -> torch.Tensor:
+        # DSA PCP sets cache_is_prepared after global cache updates and forces
+        # single-stream attention because there is no local KV update to overlap.
+        if cache_is_prepared and self.multistream_dsv4_dsa_overlap:
+            raise RuntimeError("Prepared DSA caches require single-stream attention.")
+
         (
             compress_kv_cache,
             swa_kv_cache,
@@ -1530,6 +1582,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 sin,
                 swa_kv_cache,
                 swa_req_metadata.slot_mapping,
+                write_swa_cache=not cache_is_prepared,
             )
 
         compress_topk_idxs = None
@@ -1537,7 +1590,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if self.compress_ratio > 1:
             compressor_metadata = layer_metadata.compressor
             assert compressor_metadata is not None
-            compress_topk_idxs = self._update_compressed_caches_and_select_topk(
+            compress_topk_idxs = self._maybe_update_compressed_caches_and_select_topk(
                 layer_name=layer_name,
                 hidden_states=hidden_states,
                 qr=qr,
@@ -1546,6 +1599,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 qr_pertoken_scale=qr_pertoken_scale,
                 compress_kv_cache=compress_kv_cache,
                 state_cache=state_cache,
+                write_cache=not cache_is_prepared,
             )
 
         notify_kv_cache_written(layer_name)

@@ -263,8 +263,6 @@ class FusedMC2CommImpl(MoECommMethod):
         self.mega_moe_symm_buffer = None
         if get_ascend_config().enable_fused_mc2 == 1:
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
-        else:
-            self.expert_token_nums = None
 
         self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
         self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha

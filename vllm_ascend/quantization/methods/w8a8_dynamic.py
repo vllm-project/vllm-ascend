@@ -252,8 +252,8 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w1_scale = [scale.reshape(-1) for scale in layer.fused_w1_scale_list]
                 w2_scale = [scale.reshape(-1) for scale in layer.fused_w2_scale_list]
             else:
-                w1_scale = layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list
-                w2_scale = layer.fused_w2_scale_list if fused_scale_flag else layer.w2_weight_scale_list
+                w1_scale = layer.w13_weight_scale_fp32_list
+                w2_scale = layer.w2_weight_scale_list
             w1_scale_bias = None
             w2_scale_bias = None
 
@@ -267,9 +267,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         else:
             w1 = [layer.w13_weight]
-            w1_scale = [layer.fused_w1_scale] if fused_scale_flag else [layer.w13_weight_scale_fp32]
+            w1_scale = [layer.w13_weight_scale_fp32]
             w2 = [layer.w2_weight]
-            w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
+            w2_scale = [layer.w2_weight_scale]
             w1_scale_bias = None
             w2_scale_bias = None
 

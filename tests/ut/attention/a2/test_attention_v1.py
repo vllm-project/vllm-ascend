@@ -805,9 +805,10 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_EXTRA_CTX.sinks = False
         mock_EXTRA_CTX.is_draft_model = False
 
-        param: list[MagicMock | None] = [MagicMock()] * 21
-        param[16] = None
-        param[20] = None
+        param: list[MagicMock | None] = [MagicMock()] * 22
+        param[16] = None  # sliding_window
+        param[17] = None  # c8_k_aq_scale
+        param[21] = None  # layer_name
 
         mock_get_graph_params.return_value.attn_params = {1: [tuple(param)] * 3}
         mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}
@@ -838,7 +839,7 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch("torch_npu._npu_paged_attention_get_workspace", return_value=MagicMock())
     @patch("vllm_ascend.attention.attention_v1.get_graph_params")
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
-    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
     @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
     @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
     def test_update_graph_params_handles_captured_paged_attention_params(

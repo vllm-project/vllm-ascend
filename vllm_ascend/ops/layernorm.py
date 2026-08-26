@@ -40,9 +40,8 @@ class AscendRMSNorm(RMSNorm):
         self.bias_loaded = False
 
         # quantization with anti_method m4 will generate none-zero norm bias
-        if vllm_config.quant_config is not None and any(
-            "norm.bias" in name for name in vllm_config.quant_config.quant_description
-        ):
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
+        if any("norm.bias" in name for name in quant_description):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
             self.bias.weight_loader = self._bias_weight_loader
 
@@ -68,7 +67,6 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
@@ -95,7 +93,6 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon

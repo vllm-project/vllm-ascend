@@ -29,9 +29,6 @@ msgstr ""
 "`o_proj_full_*` 张量是仅用于预填充/混合全收集执行的可重用通信缓冲区。\n"
 "它们绝不能成为 TP 权重的第二个持久化副本。"
 
-msgid "# Decode Context Parallel (DCP)"
-msgstr "# 解码上下文并行（DCP）"
-
 msgid ""
 "Decode Context Parallel shards the KV cache along the sequence dimension "
 "across devices in a Tensor Parallel (TP) group. It eliminates redundant KV-"
@@ -168,11 +165,6 @@ msgstr ""
 " == tensor_parallel_size`。"
 
 msgid ""
-"For a GLM-5.2 DSA-CP deployment, enable FlashComm1 and DSA-CP and keep the CP\n"
-"interleave size equal to the KV-cache block size:"
-msgstr "对于GLM-5.2 DSA-CP部署，启用FlashComm1和DSA-CP，并保持CP交错大小等于KV缓存块大小："
-
-msgid ""
 "The replicated indexer increases indexer-cache memory in proportion to the\n"
 "DCP world size; the SFA KV cache itself remains sharded."
 msgstr "复制索引器会按DCP世界大小的比例增加索引器缓存内存；SFA KV缓存本身保持分片。"
@@ -226,3 +218,16 @@ msgstr ""
 "- MLA DCP后端：`vllm_ascend/attention/context_parallel/mla_cp.py`\n"
 "- SFA DCP后端：`vllm_ascend/attention/context_parallel/sfa_cp.py`\n"
 "- DSA-CP后端：`vllm_ascend/attention/context_parallel/dsa_cp.py`"
+
+msgid "# Context Parallel"
+msgstr "# 上下文并行"
+
+msgid ""
+"The context parallel features include Decode Context Parallel (DCP) and DSA-"
+"CP."
+msgstr "上下文并行功能包括解码上下文并行（DCP）和DSA-CP。"
+
+msgid ""
+"For a GLM-5.2 DSA-CP deployment, enable sequence parallelism and DSA-CP and keep the CP\n"
+"interleave size equal to the KV-cache block size:"
+msgstr "对于GLM-5.2 DSA-CP部署，启用序列并行和DSA-CP，并保持CP交错大小等于KV缓存块大小："
