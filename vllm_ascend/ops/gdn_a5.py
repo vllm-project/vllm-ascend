@@ -41,11 +41,19 @@ def log_solve_tri_debug(
         except TypeError:
             return type(value).__name__
 
+    def values(value: Any) -> Any:
+        if value is None:
+            return None
+        if hasattr(value, "detach"):
+            return value.detach().cpu().tolist()
+        return value
+
     logger.info(
         "[GDN A5][solve_tri] input shape=%s dtype=%s device=%s stride=%s "
         "contiguous=%s output_dtype=%s layout=%s cu_seqlens=%s "
         "cu_seqlens_host=%s chunk_indices=%s chunk_indices_host=%s "
-        "chunk_indices_large_block=%s",
+        "chunk_indices_large_block=%s cu_seqlens_host_values=%s "
+        "chunk_indices_host_values=%s chunk_indices_large_block_values=%s",
         tuple(a.shape),
         a.dtype,
         a.device,
@@ -58,6 +66,9 @@ def log_solve_tri_debug(
         shape(chunk_indices),
         shape(chunk_indices_host),
         shape(chunk_indices_large_block),
+        values(cu_seqlens_host),
+        values(chunk_indices_host),
+        values(chunk_indices_large_block),
     )
 
 
@@ -1079,6 +1090,16 @@ class A5GDNAdapter:
                 a = a.to(output_dtype).contiguous()
                 if cu_seqlens_host is None:
                     return raw(a, layout="bsnd")
+                if os.environ.get("VLLM_ASCEND_GDN_DEBUG_SOLVE_TRI", "0") == "1":
+                    logger.info(
+                        "[GDN A5][solve_tri] FLA input after squeeze "
+                        "shape=%s dtype=%s device=%s stride=%s contiguous=%s",
+                        tuple(a.squeeze(0).shape),
+                        a.squeeze(0).dtype,
+                        a.squeeze(0).device,
+                        a.squeeze(0).stride(),
+                        a.squeeze(0).is_contiguous(),
+                    )
                 return raw(
                     a.squeeze(0),
                     cu_seqlens=cu_seqlens_host,

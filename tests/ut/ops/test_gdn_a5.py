@@ -50,9 +50,11 @@ def test_log_solve_tri_debug_is_gated_by_environment(monkeypatch):
             output_dtype="float32",
             layout="tnd",
             cu_seqlens_host=[0, 64],
+            chunk_indices_host=[0, 0],
         )
         info.assert_called_once()
         assert "solve_tri" in info.call_args.args[0]
+        assert "cu_seqlens_host_values=%s" in info.call_args.args[0]
 
 
 def test_parse_gdn_backend_config_defaults_to_auto_without_overrides():
