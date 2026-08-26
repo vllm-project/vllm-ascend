@@ -23,6 +23,8 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ops.fused_moe.a3_mega_moe import A3MegaMoEBackend, is_a3_mega_moe_enabled
+from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -35,10 +37,9 @@ from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
     PrepareAndFinalizeWithAllGather,
-    PrepareAndFinalizeWithMegaMoE,
     PrepareAndFinalizeWithMC2,
+    PrepareAndFinalizeWithMegaMoE,
 )
-from vllm_ascend.ops.fused_moe.mega_moe import MegaMoEBackend
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     MoETokenDispatcher,
     TokenDispatcherWithAll2AllV,
@@ -60,7 +61,10 @@ def setup_moe_comm_method(moe_config):
         _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
         _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        if is_a3_mega_moe_enabled():
+            _MoECommMethods[MoECommType.FUSED_MC2] = A3MegaMoECommImpl(moe_config)
+        else:
+            _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
     else:
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
@@ -373,4 +377,30 @@ class FusedMC2CommImpl(MoECommMethod):
             raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
         return FusedExpertsResult(
             routed_out=out, expert_tokens=expert_tokens, swiglu_limit=fused_experts_input.swiglu_limit
+        )
+
+
+class A3MegaMoECommImpl(MoECommMethod):
+    """A3 MegaMoE implementation isolated from the legacy and A5 backends."""
+
+    def __init__(self, moe_config):
+        super().__init__(moe_config)
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        self._mega_moe_backend = A3MegaMoEBackend(moe_config, self.token_dispatcher)
+
+    def pad_and_split_input_ids(self, input_ids):
+        return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
+
+    def _get_token_dispatcher(self):
+        return TokenDispatcherWithMC2()
+
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithMC2(self.moe_config)
+
+    def fused_experts(self, fused_experts_input: MoEFusedExpertsInput):
+        output, expert_tokens = self._mega_moe_backend.fused_experts(fused_experts_input)
+        return FusedExpertsResult(
+            routed_out=output,
+            expert_tokens=expert_tokens,
+            swiglu_limit=fused_experts_input.swiglu_limit,
         )

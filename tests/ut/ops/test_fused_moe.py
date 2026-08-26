@@ -408,6 +408,29 @@ class TestAscendUnquantizedFusedMoEMethod:
             assert maybe_trans_nz.call_count == 2
             format_cast.assert_not_called()
 
+    def test_process_weights_after_loading_builds_a3_mega_moe_nd_lists(self, monkeypatch):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
+        method.use_a3_mega_moe = True
+        layer = self._build_layer()
+        original_w13 = layer.w13_weight.detach().clone()
+        original_w2 = layer.w2_weight.detach().clone()
+        format_cast = MagicMock()
+        maybe_trans_nz = MagicMock()
+        monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
+        monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", maybe_trans_nz)
+
+        method.process_weights_after_loading(layer)
+
+        assert len(layer.a3_mega_moe_w13_weight_list) == original_w13.shape[0]
+        assert len(layer.a3_mega_moe_w2_weight_list) == original_w2.shape[0]
+        torch.testing.assert_close(layer.a3_mega_moe_w13_weight_list[0], original_w13[0].transpose(0, 1))
+        torch.testing.assert_close(layer.a3_mega_moe_w2_weight_list[0], original_w2[0].transpose(0, 1))
+        assert all(weight.is_contiguous() for weight in layer.a3_mega_moe_w13_weight_list)
+        assert all(weight.is_contiguous() for weight in layer.a3_mega_moe_w2_weight_list)
+        format_cast.assert_not_called()
+        maybe_trans_nz.assert_not_called()
+
     @pytest.mark.parametrize("moe_comm_type", [MoECommType.MC2, MoECommType.FUSED_MC2])
     def test_apply_builds_fused_experts_input(self, monkeypatch, moe_comm_type):
         method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)

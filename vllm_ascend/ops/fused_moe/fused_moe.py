@@ -34,16 +34,17 @@ from vllm.model_executor.layers.fused_moe.layer import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, cache_a5_moe_quant_type
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
+from vllm_ascend.ops.fused_moe.a3_mega_moe import is_a3_mega_moe_enabled
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     maybe_trans_nz,
@@ -100,6 +101,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
+        self.use_a3_mega_moe = is_a3_mega_moe_enabled()
 
     @property
     def is_monolithic(self) -> bool:
@@ -132,7 +134,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # ND format (or other formats), remove this specific 'if' check and the forced
         # npu_format_cast. At that point, the operator should be able to handle weights
         # in their native format without explicit casting here.
-        if get_ascend_config().enable_fused_mc2:
+        if getattr(self, "use_a3_mega_moe", False):
+            layer.a3_mega_moe_w13_weight_list = [weight.contiguous() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.a3_mega_moe_w2_weight_list = [weight.contiguous() for weight in layer.w2_weight.data.unbind(dim=0)]
+        elif get_ascend_config().enable_fused_mc2:
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         else:
@@ -233,12 +238,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
         # or None for scales in non-quantized scenarios.
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            w1 = [layer.w13_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2 = [layer.w2_weight]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            if getattr(self, "use_a3_mega_moe", False):
+                w1 = layer.a3_mega_moe_w13_weight_list
+                w1_scale = None
+                w2 = layer.a3_mega_moe_w2_weight_list
+                w2_scale = None
+                w1_scale_bias = None
+                w2_scale_bias = None
+            else:
+                w1 = [layer.w13_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2 = [layer.w2_weight]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
             w1 = layer.w13_weight
             w1_scale = None
@@ -813,9 +826,7 @@ else:
                 gate = self.gate
                 assert gate is not None
                 before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = DeviceOperator.compute_gate_logits(
-                    hidden_states, gate.weight, gate.weight_fp32
-                )
+                router_logits = DeviceOperator.compute_gate_logits(hidden_states, gate.weight, gate.weight_fp32)
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
                 before_routed_experts = torch.npu.current_stream().record_event()

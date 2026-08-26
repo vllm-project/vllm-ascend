@@ -27,6 +27,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.flash_common3_context import get_flash_common3_context
+from vllm_ascend.ops.fused_moe.a3_mega_moe import is_a3_mega_moe_enabled
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_dsa_cp, maybe_trans_nz
@@ -182,6 +183,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
+        self.use_a3_mega_moe = is_a3_mega_moe_enabled(vllm_config)
 
         try:
             device_group = get_mc2_group().device_group
@@ -320,7 +322,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         fused_scale_flag = (
             _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 1
         )
-        if self.dynamic_eplb:
+        if fused_scale_flag and self.use_a3_mega_moe:
+            w1 = layer.a3_mega_moe_w13_weight_list
+            w1_scale = layer.a3_mega_moe_fused_w1_scale_list
+            w2 = layer.a3_mega_moe_w2_weight_list
+            w2_scale = layer.a3_mega_moe_fused_w2_scale_list
+        elif self.dynamic_eplb:
             w1 = layer.w13_weight_list
             w1_scale = layer.fused_w1_scale_list if fused_scale_flag else layer.w13_weight_scale_fp32_list
             w2 = layer.w2_weight_list
@@ -331,8 +338,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2 = [layer.w2_weight]
             w2_scale = [layer.fused_w2_scale] if fused_scale_flag else [layer.w2_weight_scale]
 
-        w1_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
-        w2_scale_bias = [torch.tensor([], dtype=torch.float32)] if fused_scale_flag else None
+        use_legacy_fused_scales = fused_scale_flag and not self.use_a3_mega_moe
+        w1_scale_bias = [torch.tensor([], dtype=torch.float32)] if use_legacy_fused_scales else None
+        w2_scale_bias = [torch.tensor([], dtype=torch.float32)] if use_legacy_fused_scales else None
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -378,6 +386,16 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         if get_ascend_config().enable_fused_mc2 == 1:
             layer.fused_w1_scale = scale_from_float_to_int64(layer.w13_weight_scale.data)
             layer.fused_w2_scale = scale_from_float_to_int64(layer.w2_weight_scale.data)
+
+        if self.use_a3_mega_moe:
+            layer.a3_mega_moe_w13_weight_list = list(layer.w13_weight.data.unbind(dim=0))
+            layer.a3_mega_moe_w2_weight_list = list(layer.w2_weight.data.unbind(dim=0))
+            layer.a3_mega_moe_fused_w1_scale_list = list(
+                layer.fused_w1_scale.view(layer.w13_weight.shape[0], -1).data.unbind(dim=0)
+            )
+            layer.a3_mega_moe_fused_w2_scale_list = list(
+                layer.fused_w2_scale.view(layer.w2_weight.shape[0], -1).data.unbind(dim=0)
+            )
 
         if self.dynamic_eplb:
             layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
