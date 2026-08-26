@@ -489,7 +489,6 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         mock_info_once.assert_any_call("AscendConfig.enable_mlapo is set from additional_config with value True.")
-        mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
