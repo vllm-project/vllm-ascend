@@ -1196,22 +1196,19 @@ class KVPoolWorker:
                     )
                     hit_full_blocks = pool_hit_tokens // effective_block_size
                     save_start_block = max(save_start_block, hit_full_blocks)
-                candidate_keys = [
-                    self._make_layerwise_gva_key(
-                        group_id,
-                        block_hash_to_str(group_block_hashes[block_idx]),
-                    )
-                    for block_idx in range(
-                        save_start_block,
-                        min(save_end_block, len(group_block_hashes)),
-                    )
+                scan_start = save_start_block
+                scan_end = min(save_end_block, len(group_block_hashes))
+                # Build each block key exactly once; the candidate refresh,
+                # the cached-prefix skip and the allocation loop below all
+                # reuse it.
+                block_keys = [
+                    self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
+                    for block_idx in range(scan_start, scan_end)
                 ]
-                self._refresh_allocated_gvas(candidate_keys)
+                self._refresh_allocated_gvas(block_keys)
                 # Skip blocks that are still present and readable in MemCache.
                 while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = self._make_layerwise_gva_key(
-                        group_id, block_hash_to_str(group_block_hashes[save_start_block])
-                    )
+                    key = block_keys[save_start_block - scan_start]
                     if key in self._allocated_gvas:
                         save_start_block += 1
                     else:
@@ -1220,8 +1217,8 @@ class KVPoolWorker:
                 block_gvas: list[int] = []
                 new_keys: list[str] = []
                 new_positions: list[int] = []
-                for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
-                    key = self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
+                for blk_idx in range(save_start_block, scan_end):
+                    key = block_keys[blk_idx - scan_start]
                     cached = self._allocated_gvas.get(key)
                     if cached is not None:
                         block_gvas.append(cached)
