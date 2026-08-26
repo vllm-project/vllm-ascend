@@ -32,9 +32,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_gva_layerwise_config,
     get_layerwise_kv_cache_specs,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
-    AscendStoreKVConnectorStats,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
@@ -53,6 +50,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_tp_mismatch_info,
     normalize_block_ids_by_group,
     uses_hybrid_kv_cache,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
 )
 
 

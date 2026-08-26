@@ -359,9 +359,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         self.assertIs(result, mock_worker_cls.return_value.get_stats.return_value)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
-    def test_get_kv_connector_stats_scheduler_role_prefers_scheduler(
-        self, mock_scheduler_cls
-    ):
+    def test_get_kv_connector_stats_scheduler_role_prefers_scheduler(self, mock_scheduler_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 

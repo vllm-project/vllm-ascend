@@ -55,9 +55,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_layerwise_kv_cache_specs,
     get_layerwise_physical_layer_index,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
-    AscendStoreKVConnectorStats,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     AscendStoreKVConnectorWorkerMetadata,
@@ -78,6 +75,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_cache_families,
     infer_tp_mismatch_info,
     uses_hybrid_kv_cache,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
 )
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
@@ -947,9 +947,7 @@ class KVPoolWorker:
                 key_list_c[:3],
             )
             ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
-            num_failed_keys = (
-                sum(1 for r in ret if r != 0) if ret is not None else len(key_list_c)
-            )
+            num_failed_keys = sum(1 for r in ret if r != 0) if ret is not None else len(key_list_c)
             self._record_load_finished(
                 request.req_id,
                 len(key_list_c),
@@ -1043,9 +1041,7 @@ class KVPoolWorker:
             if start_time is None or num_keys <= 0:
                 continue
             with self._kv_stats_lock:
-                self._kv_stats.record_load(
-                    end_time - start_time, num_keys, path="layerwise"
-                )
+                self._kv_stats.record_load(end_time - start_time, num_keys, path="layerwise")
         self._layerwise_load_keys.clear()
         # Drain leftovers (e.g. requests preempted mid-layerwise) so the
         # next step starts from a clean slate.
@@ -2045,9 +2041,7 @@ class KVPoolWorker:
             keys_c[:3],
         )
         ret = self.m_store.get(keys_c, addrs_c, sizes_c)
-        num_failed_keys = (
-            sum(1 for r in ret if r != 0) if ret is not None else len(keys_c)
-        )
+        num_failed_keys = sum(1 for r in ret if r != 0) if ret is not None else len(keys_c)
         if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(block_ids_c, ret)
             with self._invalid_block_ids_lock:

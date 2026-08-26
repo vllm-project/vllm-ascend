@@ -34,11 +34,11 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendStoreKVConnectorWorkerMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
     AscendStorePromMetrics,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendStoreKVConnectorWorkerMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     get_zmq_rpc_path_lookup,
@@ -315,9 +315,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.get_stats()
 
     @classmethod
-    def build_kv_connector_stats(
-        cls, data: dict[str, Any] | None = None
-    ) -> KVConnectorStats | None:
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats | None:
         return AscendStoreKVConnectorStats(data=data or {})
 
     @classmethod
@@ -328,9 +326,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
-        return AscendStorePromMetrics(
-            vllm_config, metric_types, labelnames, per_engine_labelvalues
-        )
+        return AscendStorePromMetrics(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 
 
 class LookupKeyServer:
