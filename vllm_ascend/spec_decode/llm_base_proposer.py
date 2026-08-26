@@ -193,16 +193,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # GLM DSpark has its own graph-safe query-block path: context K/V is
         # prepared eagerly and only the fixed-shape block forward is captured.
         # Keep the conservative fallback for the other GLM draft methods.
-        # if _is_glm_model(self.vllm_config.model_config) and self.method != "dspark":
-        #     if self.use_cuda_graph:
-        #         logger.warning(
-        #             "GLM series models with speculative decoding currently do "
-        #             "not support graph mode. The draft model has been "
-        #             "automatically switched to eager mode "
-        #             "(enforce_eager=true). Graph mode support for GLM "
-        #             "speculative decoding will be added in a future release. "
-        #         )
-        #     self.use_cuda_graph = False
+        if _is_glm_model(self.vllm_config.model_config) and self.method not in ("dspark", "mtp"):
+            if self.use_cuda_graph:
+                logger.warning(
+                    "GLM series models with speculative decoding currently do "
+                    "not support graph mode. The draft model has been "
+                    "automatically switched to eager mode "
+                    "(enforce_eager=true). Graph mode support for GLM "
+                    "speculative decoding will be added in a future release. "
+                )
+            self.use_cuda_graph = False
 
         # TODO: Remove it when the bug of fx-graph is solved
         self.maybe_eager_context: AbstractContextManager[Any] = nullcontext()
