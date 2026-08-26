@@ -80,7 +80,7 @@ MAX_REDUCED_CAPTURE_SIZES = 4
 
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
-        "Qwen2MoeForCausalLM",
+        "Qwen3ForCausalLM",
     }
 )
 
