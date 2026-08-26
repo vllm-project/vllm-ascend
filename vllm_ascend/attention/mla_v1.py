@@ -743,7 +743,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.q_proj = kwargs["q_proj"] if self.q_lora_rank is None else kwargs["q_b_proj"]
         self.kv_b_proj = kwargs["kv_b_proj"]
         self.o_proj = kwargs["o_proj"]
-        self.g_proj = kwargs["g_proj"]
+        self.g_proj = kwargs.get("g_proj")
         self.use_output_gate = self.g_proj is not None
         self.use_mla_rope = kwargs["use_mla_rope"]
         self.vllm_config = get_current_vllm_config()
@@ -773,6 +773,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.head_padding = self.num_heads_padded - self.num_heads
         self.mlapo_num_heads = self.num_heads
         self.mlapo_weight_quant_mode = 3
+        self._mlapo_uses_native_weights = False
 
     @staticmethod
     def update_graph_params(
