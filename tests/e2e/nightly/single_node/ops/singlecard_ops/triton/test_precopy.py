@@ -21,7 +21,13 @@ def _build_states(num_blocks, device, conv_dim_first):
 
 
 def _build_meta(convs, ssms, device, conv_dim_first):
-    base, block_stride, elem_size, inner_size, conv_width, row_count, row_stride = [], [], [], [], [], [], []
+    base: list[int] = []
+    block_stride: list[int] = []
+    elem_size: list[int] = []
+    inner_size: list[int] = []
+    conv_width: list[int] = []
+    row_count: list[int] = []
+    row_stride: list[int] = []
     for conv, ssm in zip(convs, ssms):
         base.extend((conv.data_ptr(), ssm.data_ptr()))
         block_stride.extend((conv.stride(0) * conv.element_size(), ssm.stride(0) * ssm.element_size()))
