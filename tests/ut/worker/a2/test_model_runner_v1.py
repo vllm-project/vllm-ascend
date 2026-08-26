@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
@@ -171,15 +172,24 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
-    def test_mla_rope_modes_use_separate_metadata_groups(self, mock_get_layers):
+    def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):
         class FakeBuilder:
             def __init__(self, _spec, layer_names, _config, _device):
                 self.layer_names = layer_names
 
-        class FakeBackend:
+        class FakeMLABackend(AscendMLABackend):
             @classmethod
             def full_cls_name(cls):
-                return "test.FakeBackend"
+                return "test.FakeMLABackend"
+
+            @classmethod
+            def get_builder_cls(cls):
+                return FakeBuilder
+
+        class FakeCacheBackend:
+            @classmethod
+            def full_cls_name(cls):
+                return "test.FakeCacheBackend"
 
             @classmethod
             def get_builder_cls(cls):
@@ -192,15 +202,17 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         target_layer = "language_model.model.layers.0.self_attn.attn"
         draft_layer = "model.layers.0.self_attn.attn"
+        cache_layer = "language_model.model.layers.0.self_attn.indexer.k_cache"
+        target_attn = MagicMock(spec=MLAAttention)
+        target_attn.impl = SimpleNamespace(use_mla_rope=False)
+        target_attn.get_attn_backend.return_value = FakeMLABackend
+        draft_attn = MagicMock(spec=MLAAttention)
+        draft_attn.impl = SimpleNamespace(use_mla_rope=True)
+        draft_attn.get_attn_backend.return_value = FakeMLABackend
         mock_get_layers.return_value = {
-            target_layer: SimpleNamespace(
-                impl=SimpleNamespace(use_mla_rope=False),
-                get_attn_backend=lambda: FakeBackend,
-            ),
-            draft_layer: SimpleNamespace(
-                impl=SimpleNamespace(use_mla_rope=True),
-                get_attn_backend=lambda: FakeBackend,
-            ),
+            target_layer: target_attn,
+            draft_layer: draft_attn,
+            cache_layer: SimpleNamespace(get_attn_backend=lambda: FakeCacheBackend),
         }
         specs = {
             target_layer: AscendMLAAttentionSpec(
@@ -215,6 +227,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 head_size=576,
                 dtype=torch.bfloat16,
             ),
+            cache_layer: AscendMLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            ),
         }
         group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
         self.assertIsNotNone(group_spec)
@@ -224,7 +242,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             kv_cache_tensors=[],
             kv_cache_groups=[
                 KVCacheGroupSpec(
-                    layer_names=[target_layer, draft_layer],
+                    layer_names=[target_layer, draft_layer, cache_layer],
                     kv_cache_spec=group_spec,
                 )
             ],
@@ -235,7 +253,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(len(runner.attn_groups), 1)
         self.assertEqual(
             {tuple(group.layer_names) for group in runner.attn_groups[0]},
-            {(target_layer,), (draft_layer,)},
+            {(target_layer,), (draft_layer,), (cache_layer,)},
         )
 
     def test_explicit_capture_sizes_must_align_spec_decode_and_sp(self):

@@ -4638,12 +4638,13 @@ class NPUModelRunner(GPUModelRunner):
             # they are cached correctly, there will be different objects per
             # layer.
             for layer_name in kv_cache_group_spec.layer_names:
+                layer = layers[layer_name]
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
                 # Prefer the backend declared by the layer itself. Some
                 # indexer-cache layers require their own metadata builder.
-                attn_backend = layers[layer_name].get_attn_backend()
+                attn_backend = layer.get_attn_backend()
                 if (
                     isinstance(layer_kv_cache_spec, AscendSFAIndexerCacheSpec)
                     and not backend_supports_kernel_block_size(
@@ -4656,8 +4657,8 @@ class NPUModelRunner(GPUModelRunner):
                     attn_backend = AscendSFAIndexerBackend
                 full_cls_name = attn_backend.full_cls_name()
                 use_mla_rope = (
-                    getattr(layers[layer_name].impl, "use_mla_rope", None)
-                    if isinstance(layer_kv_cache_spec, AscendMLAAttentionSpec)
+                    layer.impl.use_mla_rope
+                    if issubclass(attn_backend, AscendMLABackend)
                     else None
                 )
                 key = (full_cls_name, layer_kv_cache_spec, use_mla_rope)
