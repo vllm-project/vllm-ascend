@@ -25,7 +25,10 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import init_vllm_registered_model, maybe_prefix
-from vllm_ascend.quantization.methods import AscendW4A4MXFP4DynamicLinearMethod
+from vllm_ascend.quantization.methods import (
+    AscendW4A4MXFP4DynamicLinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+)
 
 
 def _ascend_gemma4_vision_patch_embedder_forward(
@@ -84,9 +87,16 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
                 quant_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            quant_method = self.vision_tower.patch_embedder.input_proj.quant_method
+            linear_method = self.vision_tower.patch_embedder.input_proj.quant_method
+            quant_method = getattr(linear_method, "quant_method", linear_method)
 
-            if isinstance(quant_method, AscendW4A4MXFP4DynamicLinearMethod):
+            if isinstance(
+                quant_method,
+                (
+                    AscendW4A4MXFP4DynamicLinearMethod,
+                    AscendW8A8MXFP8DynamicLinearMethod,
+                ),
+            ):
                 _patch_gemma4_vision_patch_embedder(
                     self.vision_tower.patch_embedder,
                     self.model_dtype,

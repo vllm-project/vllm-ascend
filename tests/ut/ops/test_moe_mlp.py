@@ -906,7 +906,6 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
                 return_value=(requantized, requant_scale),
             ) as mock_dynamic_quant,
             patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 2)),
-            patch(f"{MOE_MLP}.ensure_mxfp8_moe_available"),
             patch(f"{MOE_MLP}.dispose_tensor"),
         ):
             quant_apply_mlp(**kwargs)
