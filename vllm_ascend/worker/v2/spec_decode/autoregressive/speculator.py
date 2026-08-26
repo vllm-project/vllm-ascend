@@ -447,7 +447,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         attn_meta = next(iter(attn_metadata.values()))
         num_reqs_padded = attn_meta.seq_lens_cpu.shape[0]
-        seq_lens_cpu = self._get_seq_lens_cpu()[:num_reqs_padded]
+        seq_lens_cpu = self._get_seq_lens_cpu(num_reqs_padded)
         if num_reqs is None:
             num_reqs = num_reqs_padded
         next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
@@ -472,11 +472,18 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         next_seqs_cpu[num_reqs:].fill_(0)
         return next_seqs_cpu
 
-    def _get_seq_lens_cpu(self) -> torch.Tensor:
-        """Get seq_lens_cpu from input_batch."""
-        assert self.input_batch is not None
-        seq_lens_cpu = torch.from_numpy(self.input_batch.seq_lens_np)
-        return seq_lens_cpu
+    def _get_seq_lens_cpu(self, num_reqs_padded: int) -> torch.Tensor:
+        """Return the target sequence lengths for the padded graph batch.
+
+        ``input_batch.seq_lens_np`` can contain only the active requests.
+        During full-graph capture the draft batch can be padded to a larger
+        graph batch, so using that compact view produces a tensor that is too
+        short for ``num_reqs_padded``. The target input buffer owns the same
+        sequence lengths and retains the storage required by the padded graph
+        batch.
+        """
+        assert isinstance(self.target_input_buffers, AscendInputBuffers)
+        return self.target_input_buffers.seq_lens_cpu[:num_reqs_padded]
 
 
 # TODO Remove this patch when cann fix the gather bug.
