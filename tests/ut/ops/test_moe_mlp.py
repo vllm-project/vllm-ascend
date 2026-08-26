@@ -31,7 +31,7 @@ MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
 
 
 def _custom_op_vllm_config():
-    return SimpleNamespace(compilation_config=CompilationConfig(custom_ops=["none"]))
+    return SimpleNamespace(compilation_config=CompilationConfig(custom_ops=["all"]))
 
 
 class TestCumsumGroupList(unittest.TestCase):
