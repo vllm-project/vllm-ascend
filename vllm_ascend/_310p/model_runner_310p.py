@@ -744,9 +744,12 @@ class NPUModelRunner310(NPUModelRunner):
                     cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(cache_spec, MambaSpec)
                     # vLLM #51718 packs all group layers into one tensor on main;
-                    # each layer owns an equal share of `kv_cache_tensor.size`.
+                    # MambaSpec.page_size_bytes is per-layer, so num_blocks times
+                    # it is the per-layer byte count (matching v0.27.1's size).
                     per_layer_size = (
-                        kv_cache_tensor.size if vllm_version_is("0.27.1") else kv_cache_tensor.size // len(shared_names)
+                        kv_cache_tensor.size
+                        if vllm_version_is("0.27.1")
+                        else kv_cache_config.num_blocks * cache_spec.page_size_bytes
                     )
                     assert per_layer_size % cache_spec.page_size_bytes == 0
                     num_blocks = per_layer_size // cache_spec.page_size_bytes
