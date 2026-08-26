@@ -504,6 +504,43 @@ def test_ascend_mamba_manager_does_not_overcount_non_align_cache() -> None:
     assert num_blocks == 2
 
 
+def test_ascend_mamba_manager_preserves_optional_main_model_tokens() -> None:
+    """Keep compatibility with callers using the historical method shape."""
+    block_size = 16
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    block_pool = BlockPool(
+        10,
+        True,
+        block_size,
+        False,
+        MagicMock(),
+    )
+    manager = AscendMambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=1,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        scheduler_block_size=block_size,
+    )
+
+    num_blocks = manager.get_num_blocks_to_allocate(
+        request_id="request",
+        num_tokens=block_size,
+        new_computed_blocks=(),
+        total_computed_tokens=0,
+        num_local_computed_tokens=block_size,
+    )
+
+    assert num_blocks == 1
+
+
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
     """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
     (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``
