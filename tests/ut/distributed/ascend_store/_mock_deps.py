@@ -177,7 +177,7 @@ class _MockKVConnectorPromMetrics:
 
 
 _MockPromMetric = type("PromMetric", (), {})
-_MockPromMetricT = TypeVar("PromMetricT")
+_MockPromMetricT = TypeVar("_MockPromMetricT")
 
 _metrics_mod: Any = (
     sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.metrics"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
