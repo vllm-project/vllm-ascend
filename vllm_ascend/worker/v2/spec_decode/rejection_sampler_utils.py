@@ -18,7 +18,7 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
-from vllm.triton_utils import tl, tldevice, triton
+from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_cumulative_log_p_kernel,
     _compute_global_logprobs_and_logsumexp,
@@ -63,9 +63,9 @@ def _npu_gumbel_block_argmax(
     #      offset does not overflow int32 at large token counts.
     #   2. pos is cast to int32: triton-ascend's philox (umulhi) only
     #      supports int32/uint32 operands.
-    #   3. Noise is always fp32 tl.rand clamped away from zero (equivalent
-    #      to upstream tl_rand32 includes_zero=False); fp64 (tl_rand64) is
-    #      unsupported on NPU and guarded at the host level.
+    #   3. Noise uses the same fp32 eps-clamped tl.rand formula as
+    #      gumbel.py::_gumbel_sample_kernel (tldevice.log1p and fp64
+    #      tl_rand64 are unavailable on triton-ascend).
     #   4. Plain scalar loads instead of upstream's mask=is_valid_req
     #      masked loads: req_state_idx is always valid in the rejection
     #      sampler path and 0-d masked loads are unverified on
@@ -104,14 +104,14 @@ def _npu_gumbel_block_argmax(
         # supports int32/uint32). Position values fit in int32 in practice.
         pos = tl.load(pos_ptr + token_idx).to(tl.int32)
         gumbel_seed = tl.randint(seed, pos)
-        # NPU: tl.rand (fp32) clamped away from zero, matching upstream
-        # tl_rand32(includes_zero=False). Draw the large-noise tail (which
-        # decides the argmax winner) from u -> 0, where fp32 has fine
-        # resolution, instead of u -> 1 (see upstream gumbel.py for the
-        # full log1p rationale).
-        u = tl.rand(gumbel_seed, block).to(tl.float32)
-        u = tl.maximum(u, 4.6566127342e-10)
-        gumbel_noise = -tl.log(-tldevice.log1p(-u))
+        # NPU: tldevice.log1p (CUDA libdevice extern) is not usable on
+        # triton-ascend — the AST frontend infers a NoneType return for the
+        # call. Use the same eps-clamped fp32 formula as
+        # gumbel.py::_gumbel_sample_kernel instead (equivalent Gumbel
+        # distribution; slightly coarser resolution in the large-noise tail
+        # that decides the argmax winner).
+        r = tl.rand(gumbel_seed, block).to(tl.float32)
+        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
 
@@ -226,9 +226,14 @@ def _resample_kernel(
         # The more numerically stable form is:
         #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
         ratio = tl.exp(draft_log_probs - target_log_probs)
+        # NPU: upstream uses tldevice.log1p(-ratio) here, but the CUDA
+        # libdevice extern is not usable on triton-ascend. tl.log(1.0 - ratio)
+        # is still exact where it matters: by the Sterbenz lemma,
+        # 1.0 - ratio is exactly representable in fp32 for ratio in [0.5, 1),
+        # so no catastrophic cancellation occurs.
         residual_logits = tl.where(
             ratio < 1.0,
-            target_log_probs + tldevice.log1p(-ratio),
+            target_log_probs + tl.log(1.0 - ratio),
             float("-inf"),
         ).to(tl.float32)
     else:
