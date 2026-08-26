@@ -269,6 +269,10 @@ def test_vllm_0271_builder_uses_ascend_pcp_manager() -> None:
         ),
     )
     original_pcp_manager_cls = pcp_module.PCPManager
+    block_tables = SimpleNamespace(
+        input_block_tables=(torch.zeros((4, 1), dtype=torch.int32),),
+        num_kv_cache_groups=1,
+    )
 
     with (
         patch.object(
@@ -277,7 +281,6 @@ def test_vllm_0271_builder_uses_ascend_pcp_manager() -> None:
             return_value=SimpleNamespace(rank_in_group=0),
         ),
         patch.object(original_pcp_manager_cls, "validate_config") as upstream_validate_config,
-        patch.object(AscendPCPManager, "__init__", return_value=None) as init_manager,
         _use_ascend_pcp_manager_for_vllm_0271(),
     ):
         manager = pcp_module.maybe_build_pcp_manager(
@@ -285,7 +288,7 @@ def test_vllm_0271_builder_uses_ascend_pcp_manager() -> None:
             torch.device("cpu"),
             False,
             object(),
-            object(),
+            block_tables,
         )
 
     assert type(manager) is AscendPCPManager
@@ -297,4 +300,3 @@ def test_vllm_0271_builder_uses_ascend_pcp_manager() -> None:
     assert validated_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
     assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
     assert supports_mm_inputs is False
-    init_manager.assert_called_once()
