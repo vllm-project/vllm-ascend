@@ -35,6 +35,48 @@ _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
 
 
+def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    """Centralized CANN MegaMoe eligibility for the fused MC2 path.
+
+    Model-config support (hidden size / moe_intermediate_size / quant type) is
+    enforced by AscendConfig, which disables ``enable_fused_mc2`` when MegaMoe
+    is unsupported for the model. The runtime checks here cover the remaining
+    deployment constraints: A3 device, expert parallelism, EP group size and
+    no LoRA.
+    """
+    return (
+        _MEGA_MOE_SUPPORTED
+        and get_ascend_device_type() == AscendDeviceType.A3
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_moe_model(vllm_config)
+        and vllm_config.parallel_config.enable_expert_parallel
+        and 1 < get_ep_group().world_size <= 64
+        and getattr(vllm_config, "lora_config", None) is None
+    )
+
+
+def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is None:
+        return False
+
+    is_decode_bench = getattr(kv_transfer_config, "kv_connector", None) == "DecodeBenchConnector"
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    is_kv_consumer = (
+        kv_role == "kv_consumer"
+        if kv_role is not None
+        else bool(
+            getattr(kv_transfer_config, "is_kv_consumer", False)
+            and not getattr(kv_transfer_config, "is_kv_producer", False)
+        )
+    )
+    if not (is_decode_bench or is_kv_consumer):
+        return False
+
+    scheduler_config = getattr(get_ascend_config(), "scheduler_config", None)
+    return not bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
+
+
 @contextmanager
 def override_mrv2_in_profile_run(enabled: bool):
     """Override MRv2's extra profile-run marker for one forward path.
@@ -100,6 +142,8 @@ def set_ascend_forward_context(
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+        forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
@@ -177,7 +221,12 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
-    if get_ascend_config().enable_prefill_mc2:
+
+    ascend_config = get_ascend_config()
+    use_mega_moe = use_cann_megamoe(vllm_config)
+    is_decode_only_node = _is_decode_only_node(vllm_config)
+
+    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not is_decode_only_node):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -188,8 +237,8 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
-    if get_ascend_config().enable_fused_mc2:
-        if _MEGA_MOE_SUPPORTED:
+    if ascend_config.enable_fused_mc2:
+        if use_mega_moe:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
@@ -350,6 +399,8 @@ class _ExtraForwardContextProxy:
         "capturing",
         "moe_comm_type",
         "moe_comm_method",
+        "use_mega_moe",
+        "is_decode_only_node",
         "mmrs_fusion",
         "num_tokens",
         "padded_length",
