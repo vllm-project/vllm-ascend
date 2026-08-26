@@ -178,8 +178,9 @@ jobs:
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
       # External E2E on the A2/A3/310P runners (select_tests.py ready-all
-      # selection, identical to PR CI).  The flow dispatches the prep + exec
-      # workflows against HEAD_FORK; MAIN2MAIN_E2E_PREP_RUN_ID is filled by
+      # selection, identical to PR CI).  The flow dispatches main2main-e2e.yaml
+      # against HEAD_FORK — round=prep only builds the runner envs, exec
+      # rounds (round=N) run the tests; MAIN2MAIN_E2E_PREP_RUN_ID is filled by
       # the "Pre-start E2E runner envs" step so the flow reuses that run.
       MAIN2MAIN_E2E_MODE: cumulative
       MAIN2MAIN_E2E_REPO: vllm-ascend-ci/vllm-ascend
@@ -273,13 +274,14 @@ jobs:
             VLLM_COMMIT=$(git -C vllm-upstream rev-parse HEAD)
           fi
           echo "Pre-starting main2main E2E env prep for vllm=${VLLM_COMMIT} (A2/A3/310P)..."
-          gh workflow run main2main-e2e-prep.yaml \
+          gh workflow run main2main-e2e.yaml \
             --repo "${HEAD_FORK}" \
             --ref main \
-            -f "vllm=${VLLM_COMMIT}" -f "base_ref=main"
+            -f "vllm=${VLLM_COMMIT}" -f "base_ref=main" -f "round=prep" \
+            -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}"
           for i in $(seq 1 12); do
             RUN_ID=$(gh run list --repo "${HEAD_FORK}" \
-              --workflow main2main-e2e-prep.yaml \
+              --workflow main2main-e2e.yaml \
               --event workflow_dispatch --limit 1 \
               --json databaseId --jq '.[0].databaseId // empty' \
               2>/dev/null || true)
@@ -397,8 +399,8 @@ jobs:
 
       # CPU-runner install mirrors PR CI's cpu group (COMPILE_CUSTOM_KERNELS=0,
       # no csrc build — the GPU runners own kernel compilation via the
-      # main2main-e2e-prep workflow).  vllm-ascend must still be importable
-      # for the final quality gate's CPU-UT batch.
+      # main2main-e2e workflow's prepare job).  vllm-ascend must still be
+      # importable for the final quality gate's CPU-UT batch.
       - name: Install vllm-ascend no device
         working-directory: ${{ github.workspace }}
         env:
