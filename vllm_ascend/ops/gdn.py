@@ -91,14 +91,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         return cls._fused_chunk_available
 
     @classmethod
-    def _can_use_fused_chunk(cls, query: torch.Tensor) -> bool:
+    def _can_use_fused_chunk(cls, query: torch.Tensor | None) -> bool:
         """Whether the fused operator is available for the input dtype.
 
         The current ACLNN implementation accepts BF16 query/key/value tensors
         only. The probe intentionally uses BF16, so checking only its result
         would incorrectly enable the fused path for FP16 inputs.
         """
-        return query.dtype == torch.bfloat16 and cls._probe_fused_chunk()
+        return query is not None and query.dtype == torch.bfloat16 and cls._probe_fused_chunk()
 
     @staticmethod
     def _chunk_gated_delta_rule_fused(
