@@ -491,6 +491,8 @@ vllm bench serve \
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Serve](https://docs.vllm.ai/en/stable/cli/serve/), [vLLM Features](https://docs.vllm.ai/en/stable/features) and [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) for key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -512,12 +514,6 @@ vllm bench serve \
 | High Throughput | 1 (A3) | 1   | 37364         | 100          | Off       | Off | -            |
 | Low Latency     | 2 (A3) | 4   | 37364         | 100          | Off       | On  | -            |
 | Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | YaRN         |
-
-Key Parameter Descriptions:
-
-- `max-num-seqs`: Maximum concurrent requests per instance. Set to 100 in High Throughput and Low Latency; lowered to 14 in Long Context, since long sequences consume much more KV cache memory per request, requiring reduced concurrency to avoid OOM.
-- `FUSED_MC2`: A MoE-specific fused dispatch/combine communication optimization; kept Off in all three scenarios (High Throughput, Low Latency, Long Context) for Qwen3-30B-A3B.
-- `hf-overrides`: Overrides the model's HuggingFace config. Only set to YaRN (RoPE scaling) in Long Context to extend the maximum supported position length for a max-model-len of 131072; unset (-) in High Throughput and Low Latency.
 
 > For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-single-node-online-deployment)
 
@@ -620,11 +616,6 @@ vllm serve your_model_path \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}' \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'
 ```
-
-Key Parameter Descriptions:
-
-- YaRN RoPE scaling via `hf-overrides` extends the maximum position length to support a 131072 context.
-- `max-num-seqs` is sharply lowered to 14 (vs. 100 in High Throughput/Low Latency) to avoid OOM from the large per-request memory footprint of long sequences.
 
 !!! tip
 

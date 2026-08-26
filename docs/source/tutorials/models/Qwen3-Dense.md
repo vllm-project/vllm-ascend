@@ -496,6 +496,8 @@ After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Features](https://docs.vllm.ai/en/stable/features), [vLLM Ascend Additional Configuration](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html), [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) and [vLLM Ascend Feature Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide) for detailed key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -517,10 +519,6 @@ After several minutes, you will get the performance evaluation result.
 | High Throughput | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
-
-Key Parameter Descriptions:
-
-- `FUSED_MC2`: a MoE-specific fused dispatch/combine communication optimization, not applicable to Qwen3-Dense (a dense, non-MoE architecture), so it is kept Off in all three scenarios.
 
 >For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment)
 
@@ -549,12 +547,6 @@ vllm serve your_model_path \
     --gpu-memory-utilization 0.9
 ```
 
-Key Parameter Descriptions:
-
-- `cudagraph_capture_sizes` matches the mid-to-large batch-size distribution under high concurrency to minimize padding.
-- `weight_prefetch_config` overlaps weight loading with compute to boost throughput.
-- `pa_shape_list` covers the medium-concurrency range where FIA underperforms, forcing a switch to the PA operator.
-
 <u>Long Context Configuration:</u>
 
 ```bash
@@ -581,11 +573,6 @@ vllm serve your_model_path \
     --quantization ascend
 ```
 
-Key Parameter Descriptions:
-
-- YaRN RoPE scaling via `hf-overrides` extends the maximum position length to support a 135k context.
-- `speculative-config (eagle3)` verifies multiple tokens per step to offset the high per-token decode latency of long sequences.
-
 <u>Low Latency Configuration:</u>
 
 ```bash
@@ -609,12 +596,6 @@ vllm serve your_model_path \
     --block-size 128 \
     --gpu-memory-utilization 0.9
 ```
-
-Key Parameter Descriptions:
-
-- `cudagraph_capture_sizes` adds finer-grained small sizes to reduce padding at small batch sizes typical of low-concurrency interactive traffic.
-- `speculative-config` sets `enforce_eager` to avoid extra warm-up/capture latency.
-- `weight_prefetch`/`flashcomm1`/`pa_shape_list` are left unset because these optimizations require sufficient concurrency to offset their own overhead, which low-latency traffic doesn't provide.
 
 ### 9.2 Tuning Guidelines
 
