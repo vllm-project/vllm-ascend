@@ -20,6 +20,20 @@ from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
+class TestNPUModelRunnerSequenceParallelPadding(unittest.TestCase):
+    def test_dsa_cp_pads_scheduled_tokens_to_tp_size(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(tensor_parallel_size=8),
+        )
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=False),
+            patch("vllm_ascend.worker.model_runner_v1.enable_dsa_cp", return_value=True),
+        ):
+            self.assertEqual(runner._pad_for_sequence_parallelism(9), 16)
+
+
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
