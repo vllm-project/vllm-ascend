@@ -186,16 +186,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # the target model's graph-mode setting untouched.
         # TODO(lilinsiman): Remove this code segment after future versions of the GLM
         # series models support graph input for speculative inference.
-        if _is_glm_model(self.vllm_config.model_config):
-            if self.use_cuda_graph:
-                logger.warning(
-                    "GLM series models with speculative decoding currently do "
-                    "not support graph mode. The draft model has been "
-                    "automatically switched to eager mode "
-                    "(enforce_eager=true). Graph mode support for GLM "
-                    "speculative decoding will be added in a future release. "
-                )
-            self.use_cuda_graph = False
+        # GLM DSpark has its own graph-safe query-block path: context K/V is
+        # prepared eagerly and only the fixed-shape block forward is captured.
+        # Keep the conservative fallback for the other GLM draft methods.
+        # if _is_glm_model(self.vllm_config.model_config) and self.method != "dspark":
+        #     if self.use_cuda_graph:
+        #         logger.warning(
+        #             "GLM series models with speculative decoding currently do "
+        #             "not support graph mode. The draft model has been "
+        #             "automatically switched to eager mode "
+        #             "(enforce_eager=true). Graph mode support for GLM "
+        #             "speculative decoding will be added in a future release. "
+        #         )
+        #     self.use_cuda_graph = False
 
         # NOTE: _enable_probabilistic_draft_probs is set by the upstream
         # SpecDecodeBaseProposer.__init__.
@@ -861,14 +864,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
-            num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
-                self.query_start_loc,
-                num_input_tokens,
-                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
-                common_attn_metadata.num_reqs,
-                aclgraph_runtime_mode,
-                batch_descriptor.num_reqs,
-            )
+            if self.method == "dspark":
+                graph_num_reqs = (
+                    batch_descriptor.num_reqs
+                    if batch_descriptor.num_reqs is not None
+                    else common_attn_metadata.num_reqs
+                )
+                num_reqs_padded = self.pad_query_start_loc_for_graph(
+                    self.query_start_loc,
+                    num_input_tokens,
+                    common_attn_metadata.num_reqs,
+                    graph_num_reqs,
+                )
+            else:
+                num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                    self.query_start_loc,
+                    num_input_tokens,
+                    (
+                        batch_descriptor.num_reqs
+                        if batch_descriptor.num_reqs is not None
+                        else common_attn_metadata.num_reqs
+                    ),
+                    common_attn_metadata.num_reqs,
+                    aclgraph_runtime_mode,
+                    batch_descriptor.num_reqs,
+                )
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
@@ -876,7 +896,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            if self.method == "dflash":
+            if self.method in ("dflash", "dspark"):
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
@@ -942,6 +962,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
             common_attn_metadata, num_input_tokens, num_tokens
         )
+        if self.method == "dspark":
+            graph_key = attn_metadata_i.actual_seq_lengths_q[-1]
+            assert graph_key == num_input_tokens, (
+                f"DSpark runtime metadata graph key {graph_key} does not match "
+                f"dispatched query size {num_input_tokens}."
+            )
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -1013,6 +1039,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        # DSpark context K/V has a step-dependent shape, so it must execute
+        # eagerly outside the captured query-block graph. The persistent
+        # context slot-mapping buffers prepared by set_inputs_first_pass keep
+        # the eager cache write and graph replay connected to the same cache.
+        if self.method == "dspark":
+            self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -1052,6 +1085,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        if self.method == "dspark":
+            assert draft_token_ids.ndim == 2
+            assert draft_token_ids.shape[0] >= batch_size, (
+                f"DSpark graph returned {draft_token_ids.shape[0]} request rows "
+                f"for a real batch of {batch_size}."
+            )
+            assert draft_token_ids.shape[1] == self.num_speculative_tokens
         return draft_token_ids
 
     def _sample_draft_from_logits(
@@ -1134,9 +1174,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_positions = self._get_positions(num_input_tokens)
         model_kwargs = {"input_ids": model_input_ids, "positions": model_positions, "inputs_embeds": inputs_embeds}
 
-        if self.method in ("dflash", "dspark"):
+        if self.method == "dflash":
             self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
-        else:
+        elif self.method != "dspark":
             if self.pass_hidden_states_to_model:
                 model_hidden_states = self.hidden_states[:num_input_tokens]
                 model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
@@ -2173,6 +2213,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
         assert len(self.draft_attn_groups) > 0
+        if self.method == "dspark" and draft_attn_metadatas:
+            first_layer = self.draft_attn_groups[0].layer_names[0]
+            graph_key = draft_attn_metadatas[0][first_layer].actual_seq_lengths_q[-1]
+            assert graph_key == num_tokens, (
+                f"DSpark graph update key {graph_key} does not match "
+                f"captured query size {num_tokens}."
+            )
         attn_backend = self.draft_attn_groups[0].backend
         update_full_graph_params(
             attn_backend,
