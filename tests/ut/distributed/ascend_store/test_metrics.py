@@ -361,6 +361,54 @@ class TestKVPoolWorkerLoadTiming(unittest.TestCase):
         self.assertEqual(records[0]["num_keys"], 3)  # 2 full + 1 partial
         self.assertEqual(records[0]["path"], "layerwise")
 
+    def test_layerwise_duration_uses_event_set_time(self):
+        """Layerwise end time must be the transfer-thread event set time.
+
+        The load threads record their completion timestamp when they set
+        the per-layer event. The metric must use that timestamp (the max
+        across layers) instead of the compute-side wait return time, so a
+        long compute tail after the load already finished does not stretch
+        the sample.
+        """
+        worker = self._make_worker()
+
+        block_range = MagicMock()
+        block_range.request.req_id = "req-lw"
+        block_range.start_block = 0
+        block_range.end_block = 3
+        block_range.partial_block_index = None
+        task = MagicMock()
+        task.block_ranges = [block_range]
+        worker.layer_load_tasks = [[task]]
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            _TimedLayerLoadEvent,
+        )
+
+        events = [_TimedLayerLoadEvent() for _ in range(2)]
+        worker.layer_load_finished_events = events
+
+        worker._record_layerwise_load_started()
+        # Layer 1's transfer finishes first ...
+        time.sleep(0.02)
+        events[1].set()
+        # ... then layer 0's transfer finishes later (max wins) ...
+        time.sleep(0.03)
+        events[0].set()
+        # ... and compute keeps running long after the loads finished.
+        time.sleep(0.2)
+        worker._record_layerwise_load_finished()
+
+        stats = worker.get_stats()
+        self.assertIsNotNone(stats)
+        record = stats.data["load"][0]
+        # Duration must reflect the latest event set time (~0.05s), not
+        # the wait-return time (~0.25s) and not layer 1 alone (~0.02s).
+        self.assertGreaterEqual(record["duration_seconds"], 0.05)
+        self.assertLess(record["duration_seconds"], 0.15)
+        self.assertEqual(record["num_keys"], 3)
+        self.assertEqual(record["path"], "layerwise")
+
 
 class TestKVPoolSchedulerDelayedRelease(unittest.TestCase):
     """Verify the delayed-release gauge snapshot on KVPoolScheduler."""
