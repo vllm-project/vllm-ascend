@@ -681,16 +681,6 @@
     - CMakeLists.txt
   tests:
     - tests/ut/
-
-# Examples
-- name: examples
-  optional: false
-  source_file_dependencies:
-    - examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
-    - tests/ut/examples
-  tests:
-    - tests/ut/examples
-
 # Single File
 - name: dependency_documentation
   optional: true
