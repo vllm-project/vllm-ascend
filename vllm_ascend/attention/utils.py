@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -20,6 +21,41 @@ from vllm_ascend.utils import (
 )
 
 SFA_QSFA_TILE_SIZE = 128
+
+
+def get_or_register_attention_buffer(
+    vllm_config: VllmConfig,
+    layer_names: list[str],
+    name: str,
+    factory: Callable[[], torch.Tensor],
+) -> torch.Tensor:
+    """Return a shared non-persistent buffer owned by attention modules."""
+    # TODO: Revisit this after torch_npu supports traversing mem-pool
+    # allocations during sleep/wake. The buffer could then be allocated from
+    # the appropriate mem-pool for CaMem to manage its device-memory lifetime.
+    static_forward_context = vllm_config.compilation_config.static_forward_context
+    modules = []
+    for layer_name in layer_names:
+        module = static_forward_context.get(layer_name)
+        if not isinstance(module, torch.nn.Module):
+            raise ValueError(f"Attention layer {layer_name!r} is not a registered torch.nn.Module")
+        modules.append(module)
+
+    if not modules:
+        raise ValueError("At least one attention layer is required to own the buffer")
+
+    buffer = next((getattr(module, name) for module in modules if hasattr(module, name)), None)
+    if buffer is None:
+        buffer = factory()
+
+    for module in modules:
+        existing = getattr(module, name, None)
+        if existing is None:
+            module.register_buffer(name, buffer, persistent=False)
+        elif existing is not buffer:
+            raise ValueError(f"Attention buffer {name!r} is already registered with a different tensor")
+
+    return buffer
 
 
 def build_valid_topk_mask(
@@ -190,6 +226,12 @@ def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size
 def enable_dcp():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.decode_context_parallel_size > 1
+
+
+@lru_cache(maxsize=1)
+def enable_pcp():
+    parallel_config = get_current_vllm_config().parallel_config
+    return parallel_config.prefill_context_parallel_size > 1
 
 
 @dataclass

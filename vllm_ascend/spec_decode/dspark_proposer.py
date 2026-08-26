@@ -13,10 +13,9 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
+from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -35,15 +34,7 @@ class AscendDSparkProposer(AscendDflashProposer):
     ):
         super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
-        if vllm_config.speculative_config.draft_sample_method == "probabilistic":
-            raise ValueError(
-                "DSpark probabilistic draft sampling is not supported on the v1 "
-                "model runner; use greedy (the default) instead."
-            )
-        if vllm_version_is("0.26.0"):
-            self.sample_from_anchor = not getattr(self.draft_model_config.hf_config, "dspark_bonus_anchor", False)
-        else:
-            self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
+        self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
         else:
@@ -119,7 +110,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
 
-    def _compute_confidence_logits(
+    def _compute_confidence(
         self,
         last_hidden_states: torch.Tensor,
         draft_token_ids: torch.Tensor,
@@ -133,10 +124,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         # The confidence head concatenates both inputs, so their dtypes must
         # match; it upcasts to float32 internally.
         flat_markov = markov_embs.reshape(num_tokens, markov_embs.shape[-1]).to(flat_hidden.dtype)
-        conf_raw = self.model.confidence_logits(flat_hidden, flat_markov)
-        confidence_logits = self._dspark_confidence_logits_buffer[:num_reqs]
-        confidence_logits.copy_(conf_raw.reshape(num_reqs, self.num_speculative_tokens))
-        return confidence_logits
+        conf_raw = self.model.compute_confidence(flat_hidden, flat_markov)
+        confidence = self._dspark_confidence_logits_buffer[:num_reqs]
+        confidence.copy_(conf_raw.reshape(num_reqs, self.num_speculative_tokens))
+        return confidence
 
     def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
         # Find draft layers (attention layers added by draft model)
@@ -273,7 +264,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             if gid_block_table is None:
                 continue
             kv_block_size = int(attn_group.kv_cache_spec.block_size)
-            copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
+            copy_and_expand_dflash_and_dspark_inputs_kernel[
+                (_compute_num_programs(self._dflash_num_context, num_query_total),)
+            ](
                 # Inputs
                 next_token_ids_ptr=next_token_ids,
                 target_positions_ptr=target_positions,

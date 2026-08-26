@@ -19,7 +19,7 @@
 
 For each accuracy/performance benchmark entry:
   1. Read a preset JSON template
-  2. Patch nested testcase_info fields (preserve base_info)
+  2. Patch nested testcase_info fields (and base_info.test_version)
   3. Write a new JSON file
   4. Upload via tools/upload_to_openlibing.py
 
@@ -79,6 +79,11 @@ def resolve_testcase_name(config_yaml_path: str | None = None, fallback: str = "
     return name
 
 
+def resolve_test_version() -> str:
+    """Return nightly/weekly matrix branch (e.g. main, releases-v0.23.0)."""
+    return os.getenv("VLLM_ASCEND_BRANCH", "").strip()
+
+
 def _extract_dataset_name(case_config: dict[str, Any]) -> str:
     dataset_path = str(case_config.get("dataset_path", "") or "")
     if dataset_path.startswith(_DATASET_PREFIX):
@@ -108,23 +113,30 @@ def merge_postprocess_payload(
     result: Any,
     *,
     testcase_name: str,
+    case_key: str,
     suite_name: str | None = None,
 ) -> dict[str, Any]:
     """Deep-copy preset and patch nested fields per the preset JSON schema."""
     payload = copy.deepcopy(preset)
+
+    test_version = resolve_test_version()
+    if test_version:
+        payload["base_info"]["test_version"] = test_version
+
     testcase_info = payload.setdefault("testcase_info", {})
     if not isinstance(testcase_info, dict):
         testcase_info = {}
         payload["testcase_info"] = testcase_info
 
     testcase_info["featureFullName"] = suite_name or resolve_suite_name()
-    testcase_info["Testcase_Name"] = testcase_name
 
     test_env = testcase_info.get("testEnv")
     if not isinstance(test_env, dict):
         test_env = {}
         testcase_info["testEnv"] = test_env
 
+    test_env["case_key"] = case_key
+    test_env["yaml_name"] = testcase_name
     test_env["request_rate"] = case_config.get("request_rate", 0)
     if "max_out_len" in case_config:
         test_env["output_len"] = case_config["max_out_len"]
@@ -185,14 +197,13 @@ def _run_postprocess_script(script_path: Path, output_path: Path) -> None:
     except OSError as exc:
         print(f"Warning: Failed to run postprocess script {script_path}: {exc}")
         return
+    # upload_to_openlibing uses logging (stderr); always forward both streams
     if completed.stdout:
         print(completed.stdout.rstrip())
+    if completed.stderr:
+        print(completed.stderr.rstrip())
     if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip()
-        print(
-            f"Warning: Postprocess script exited with code {completed.returncode} "
-            f"for {output_path}" + (f": {stderr}" if stderr else "")
-        )
+        print(f"Warning: Postprocess script exited with code {completed.returncode} for {output_path}")
 
 
 def postprocess_one_benchmark(
@@ -220,6 +231,7 @@ def postprocess_one_benchmark(
         case_config,
         result,
         testcase_name=resolved_name,
+        case_key=case_key,
     )
 
     safe_job = _safe_name(job_name or "benchmark")
