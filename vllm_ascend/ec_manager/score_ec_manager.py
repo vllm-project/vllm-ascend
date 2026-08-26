@@ -161,8 +161,13 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
 
         # TODO: there may be more kinds of compute ways
         # Coefficients used to estimate the compute cost of encoder embeddings
+        mt = getattr(vllm_config.model_config.hf_config, "model_type", None)
         self.alpha = 4 * self.hidden_size + 5 * self.attn_heads
-        self.beta = self.hidden_size * (8 * self.hidden_size + 6 * self.feedforward + 14)
+        if mt == "qwen3_5":
+            self.beta = self.hidden_size * (8 * self.hidden_size + 4 * self.feedforward + 10)
+        else:
+            self.beta = self.hidden_size * (8 * self.hidden_size + 6 * self.feedforward + 14)
+        self.num_vision_layers = 27 if mt == "qwen3_5" else 32
 
     def score(self, ent: CacheEntry, *, include_clock: bool = True) -> float:
         """Score an entry, including clock only for NPU residency."""
@@ -348,13 +353,13 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         Notes:
         - The input parameter uses seq_len as an approximation of embedding size
         - The current formula is a rough theoretical estimate based on the vision encoder
-        - recomputation_cost = 32 * s * (alpha * s + beta)
+        - recomputation_cost = num_vision_layers * s * (alpha * s + beta)
         - storage_cost is proportional to s
         - Therefore, recomputation_cost / storage_cost =
-          32 * (alpha * s + beta), with s cancelled out
+          num_vision_layers * (alpha * s + beta), with s cancelled out
         """
 
-        recomputation_cost_per_storage_slot = 32 * (self.alpha * seq_len + self.beta)
+        recomputation_cost_per_storage_slot = self.num_vision_layers * (self.alpha * seq_len + self.beta)
         return recomputation_cost_per_storage_slot / self.hardware_flops
 
     def allocate(self, request: Request, input_id: int) -> None:
