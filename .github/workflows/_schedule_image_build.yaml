@@ -21,7 +21,7 @@ on:
         description: 'swr repository for temp images'
         required: false
         type: string
-        default: 'swr.cn-north-12.myhuaweicloud.com/modelfoundry/buildkit-test'    
+        default: 'swr.cn-north-12.myhuaweicloud.com/atlas-ci/vllm-atlas-temp'    
       suffix:
         description: 'The tag subfix to use'
         required: true
