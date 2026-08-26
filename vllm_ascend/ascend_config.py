@@ -472,7 +472,6 @@ class AscendConfig:
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
-    enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
     enable_force_eplb: bool = False
@@ -815,33 +814,6 @@ class AscendConfig:
         # mega_moe_max_tokens range
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
-
-        # Enable optimized reduce sampling scheme. Preserve the safeguards
-        # added on main while consuming the already-validated typed field.
-        if self.enable_reduce_sample:
-            logger.warning_once("enable_reduce_sample is an experimental feature. Use with caution.")
-            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
-                raise ValueError(
-                    "enable_reduce_sample is incompatible with "
-                    "finegrained_tp_config.lmhead_tensor_parallel_size. "
-                    "Please disable one of them."
-                )
-            if (
-                self.enable_pcp_embedding_lmhead_weight_sharding
-                and vc.parallel_config.prefill_context_parallel_size > 1
-            ):
-                raise ValueError(
-                    "enable_reduce_sample is incompatible with "
-                    "enable_pcp_embedding_lmhead_weight_sharding when PCP is enabled. "
-                    "Please disable one of them."
-                )
-            kv_transfer_config = getattr(vc, "kv_transfer_config", None)
-            kv_role = getattr(kv_transfer_config, "kv_role", None)
-            if kv_role == "kv_producer":
-                raise ValueError(
-                    "enable_reduce_sample is not supported on PD-disaggregated "
-                    "scenarios. Please disable enable_reduce_sample."
-                )
 
         # mix_placement mutex
         self._check_mix_placement()
