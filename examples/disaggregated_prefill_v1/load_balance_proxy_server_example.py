@@ -872,12 +872,12 @@ async def stream_service_response(
     headers = auth_headers(request_id)
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
-        stream_started = False
+        first_chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
-                stream_started = True
                 async for chunk in response.aiter_bytes():
+                    first_chunk_sent = True
                     yield chunk
                 return
         except httpx.HTTPStatusError as exc:
@@ -885,14 +885,14 @@ async def stream_service_response(
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except httpx.RequestError as exc:
-            if stream_started:
+            if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
             if attempt == max_attempts:
                 raise
             logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
         except Exception as exc:
-            if stream_started:
+            if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
             if attempt == max_attempts:
