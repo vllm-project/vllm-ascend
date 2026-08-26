@@ -50,6 +50,7 @@ from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_
 from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_tensor_layer_names
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
@@ -668,11 +669,12 @@ class NPUModelRunner310(NPUModelRunner):
         self,
         attention_backends,
         kv_cache_groups,
+        is_profiling: bool = False,
     ) -> None:
         # 910B does not need this branch because runner/dispatcher query_len are
         # naturally consistent there. 310P ngram needs temporary alignment.
         with self.temporary_modify_uniform_decode_query_len():
-            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
+            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups, is_profiling=is_profiling)
 
     def _init_kv_zero_meta(self) -> None:
         """310P uses torch zeroing because Triton is not available."""
@@ -738,8 +740,9 @@ class NPUModelRunner310(NPUModelRunner):
                 layer_kv_cache_spec[layer_name] = group_kv_cache_spec.kv_cache_spec
         # Allocate kv cache buffers according to the kv_cache_config and kv_cache_spec
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
+            shared_layer_names = get_kv_cache_tensor_layer_names(kv_cache_tensor)
+            for idx in range(len(shared_layer_names)):
+                layer_name = shared_layer_names[idx]
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 if "linear_attn" in layer_name and layer_name not in kv_cache:
@@ -758,7 +761,7 @@ class NPUModelRunner310(NPUModelRunner):
                         tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layer_names:
                         if "linear_attn" in layer_name_inner:
                             kv_cache[layer_name_inner] = state_tensors
                 elif "attn" in layer_name and layer_name not in kv_cache:
@@ -795,7 +798,7 @@ class NPUModelRunner310(NPUModelRunner):
                     v_cache = torch_npu.empty_with_format(
                         size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
                     )
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layer_names:
                         # shared the kvcache between the self_attn specs in the same group
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             kv_cache[layer_name_inner] = (k_cache, v_cache)

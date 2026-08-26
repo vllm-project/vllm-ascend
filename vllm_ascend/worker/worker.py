@@ -84,6 +84,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -179,6 +180,11 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        if not vllm_version_is("0.27.1") and getattr(self.vllm_config, "is_mm_encoder_only", False):
+            # Upstream moved the V2 encoder-only path into MMEncoderModelRunner,
+            # which vllm-ascend does not implement; keep the V1 runner, which
+            # still handles encoder-only instances.
+            self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -290,6 +296,9 @@ class NPUWorker(WorkerBase):
         if cleanup_enabled:
             self.sleep_wakeup_manager.wakeup(tags)
 
+        if not vllm_version_is("0.27.1"):
+            self.synchronize_device()
+
     def _check_weight_transfer_engine(self) -> None:
         if self.weight_transfer_engine is None:
             raise RuntimeError(
@@ -327,7 +336,7 @@ class NPUWorker(WorkerBase):
         self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
 
-    def update_weights(self, update_info: dict) -> None:
+    def update_weights(self, update_info: dict | list[dict]) -> None:
         """Receive a chunk of weights from the trainer and load them in place."""
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -336,8 +345,15 @@ class NPUWorker(WorkerBase):
         if not self._weight_update_active:
             raise RuntimeError("start_weight_update must be called before update_weights.")
 
+        if isinstance(update_info, list):
+            # A list indexed by global worker rank across data parallel replicas.
+            parallel_config = self.vllm_config.parallel_config
+            local_update_info = update_info[parallel_config.data_parallel_rank * parallel_config.world_size + self.rank]
+        else:
+            local_update_info = update_info
+
         try:
-            self.weight_transfer_engine.update_weights(update_info)
+            self.weight_transfer_engine.update_weights(local_update_info)
         except BaseException:
             self._weight_update_active = False
             raise

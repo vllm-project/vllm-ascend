@@ -14,6 +14,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_tensor_layer_names, make_kv_cache_tensor
+
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
 _PREFETCH_LAYERS = "layerwise_prefetch_layers"
 _INDEPENDENT_LAYERS = "layerwise_independent_layers"
@@ -299,7 +301,7 @@ def apply_layerwise_kv_cache_plan(
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return
-    if any(len(tensor.shared_by) != 1 or tensor.offset != 0 or tensor.block_stride != 0 for tensor in old_tensors):
+    if any(len(get_kv_cache_tensor_layer_names(tensor)) != 1 or tensor.offset != 0 for tensor in old_tensors):
         raise NotImplementedError(
             "Layerwise KV cache reuse does not support pre-shared or packed KV cache tensor descriptors."
         )
@@ -318,7 +320,7 @@ def apply_layerwise_kv_cache_plan(
             actual_layers - base_layers,
         )
 
-    tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
+    tensors_by_name = {get_kv_cache_tensor_layer_names(tensor)[0]: tensor for tensor in old_tensors}
 
     def _merge_specs(named_specs: list[NamedKVCacheSpec]) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
@@ -332,9 +334,10 @@ def apply_layerwise_kv_cache_plan(
                 "Layers sharing layerwise KV buffers must have identical cache specs for every named cache spec."
             )
         new_tensors.append(
-            KVCacheTensor(
-                shared_by=shared_by,
+            make_kv_cache_tensor(
                 size=cache_tensors[0].size,
+                layer_names=shared_by,
+                page_size=reference_spec.page_size_bytes,
             )
         )
 

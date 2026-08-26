@@ -54,6 +54,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_tensor_layer_names
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -1373,7 +1374,7 @@ class MooncakeLayerwiseConnectorWorker:
         use_mamba, use_attn = False, False
         conv_total_padding_size = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in get_kv_cache_tensor_layer_names(kv_cache_tensor):
                 layer_kv_cache_spec = self.kv_cache_specs[layer2group_ids[layer_name]]
                 if isinstance(layer_kv_cache_spec, MambaSpec):
                     use_mamba = True
@@ -1445,7 +1446,7 @@ class MooncakeLayerwiseConnectorWorker:
         if self.use_attn_mamba_hybrid:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 tensor_addrs = []
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in get_kv_cache_tensor_layer_names(kv_cache_tensor):
                     tensor_addrs.extend(self.layer_metadata[layer_name].kv_caches_base_addr)
                     if "mtp" in layer_name:
                         tensor_addrs.append(min(tensor_addrs) - conv_total_padding_size)
