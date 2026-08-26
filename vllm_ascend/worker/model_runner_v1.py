@@ -2670,9 +2670,7 @@ class NPUModelRunner(GPUModelRunner):
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        # Native MoE SP and DSA-CP shard tokens at different boundaries, but
-        # both require equal token counts on every TP rank.
-        if enable_sp(self.vllm_config) or enable_dsa_cp():
+        if enable_sp(self.vllm_config):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 

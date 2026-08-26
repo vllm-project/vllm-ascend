@@ -505,10 +505,13 @@ class TestNPUPlatform(TestBase):
         vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
 
     def test_setup_compile_backend_aligns_tp_token_layout_capture_sizes(self):
+        # NOTE: since 366f0089b ("temp option for disable sp"), only upstream
+        # sequence parallelism triggers TP-aligned capture sizes; shared-expert
+        # DP and DSA-CP no longer do.
         cases = [
             (True, False, False, True),
-            (False, True, False, True),
-            (False, False, True, True),
+            (False, True, False, False),
+            (False, False, True, False),
             (False, False, False, False),
         ]
         for upstream_sp, enable_shared_expert_dp, enable_dsa_cp, should_align in cases:
