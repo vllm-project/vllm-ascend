@@ -8,12 +8,6 @@
 # or external_dp/config directory.
 
 a2:
-  single_node:
-    test_config:
-      # YAML-driven tests
-      - name: Qwen3.8-27B-w8a8-A2
-        os: linux-aarch64-a2b3-2
-        config_file_path: Qwen3.8-27B-w8a8-A2.yaml
   accuracy:
     # Content migrated from
     nightly:
@@ -355,9 +349,6 @@ a3:
       - name: Qwen3.5-397B-Memcache-perf
         os: linux-aarch64-a3-16
         config_file_path: Qwen3.5-397B-Memcache-perf.yaml
-      - name: Qwen3.8-27B-w8a8-A3
-        os: linux-aarch64-a3-2
-        config_file_path: Qwen3.8-27B-w8a8-A3.yaml
 310p:
   single_node:
     test_config:
