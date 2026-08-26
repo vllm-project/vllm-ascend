@@ -1,3 +1,4 @@
+import os
 import queue
 import threading
 from collections import defaultdict
@@ -24,6 +25,17 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 # isort: on
 
 
+def _get_max_put_requests() -> int:
+    try:
+        from vllm_ascend import envs as ascend_envs
+
+        value = ascend_envs.VLLM_ASCEND_KV_POOL_PUT_REQUESTS
+    except ImportError:
+        # Keep lightweight unit-test dependency shims compatible with this module.
+        value = os.getenv("VLLM_ASCEND_KV_POOL_PUT_REQUESTS", "10")
+    return max(int(value), 0)
+
+
 class KVTransferThread(threading.Thread):
     def __init__(
         self,
@@ -48,6 +60,9 @@ class KVTransferThread(threading.Thread):
         self.executor = ThreadPoolExecutor(max_workers=32)
         self.finished_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
+        self.max_put_requests = _get_max_put_requests()
+        self.put_request_count = 0
+        self.put_request_ids: set[str] = set()
         self.kv_events: list[BlockStored] = []
 
     def _get_block_size(self, kv_cache_group_id: int = 0) -> int:
@@ -56,6 +71,17 @@ class KVTransferThread(threading.Thread):
                 return self.block_size[0]
             return self.block_size[kv_cache_group_id]
         return self.block_size
+
+    def _reserve_stored_request(self, req_id: str) -> bool:
+        """Reserve one of the configured request slots for KV-store writes."""
+        with self.done_task_lock:
+            if req_id in self.put_request_ids:
+                return True
+            if self.put_request_count >= self.max_put_requests:
+                return False
+            self.put_request_ids.add(req_id)
+            self.put_request_count += 1
+            return True
 
     def add_request(
         self,
@@ -345,9 +371,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
 
-    def add_stored_request(self, req_id: str):
+    def add_stored_request(self, req_id: str) -> bool:
+        if not self._reserve_stored_request(req_id):
+            logger.debug("KV store put request limit reached; skipping request %s", req_id)
+            return False
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
+        return True
 
     def dec_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -777,9 +807,13 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self.done_task_lock = threading.Lock()
         self.layerwise_event_lock = threading.Lock()
 
-    def add_stored_request(self, req_id: str):
+    def add_stored_request(self, req_id: str) -> bool:
+        if not self._reserve_stored_request(req_id):
+            logger.debug("KV store put request limit reached; skipping request %s", req_id)
+            return False
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
+        return True
 
     def dec_stored_request(self, req_id: str):
         with self.done_task_lock:

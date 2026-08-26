@@ -867,9 +867,11 @@ def auth_headers(request_id: str) -> dict[str, str]:
 
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
+    original_max_tokens = payload.get("max_tokens", payload.get("max_completion_tokens", 16))
     payload["kv_transfer_params"] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
+        "original_max_tokens": original_max_tokens,
         "remote_engine_id": None,
         "remote_block_ids": None,
         "remote_host": None,

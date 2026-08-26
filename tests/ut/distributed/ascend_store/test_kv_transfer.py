@@ -255,6 +255,16 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 0)
 
+    def test_put_request_limit_reserves_unique_requests(self):
+        t, _ = self._make_thread()
+        t.max_put_requests = 2
+
+        self.assertTrue(t.add_stored_request("r1"))
+        self.assertTrue(t.add_stored_request("r1"))
+        self.assertTrue(t.add_stored_request("r2"))
+        self.assertFalse(t.add_stored_request("r3"))
+        self.assertEqual(t.put_request_count, 2)
+
     def test_handle_request_with_kv_event(self):
         t, store = self._make_thread([0], enable_kv_event=True)
         req = ReqMeta(
