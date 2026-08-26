@@ -29,6 +29,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.lora.dsa import (
+    DSALoRARoutingInput,
     apply_grouped_dsa_lora,
     forward_with_dsa_lora,
     get_dsa_lora_context,
@@ -1659,7 +1660,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         o_proj_input: torch.Tensor,
         output: torch.Tensor,
-        token_lora_indices: torch.Tensor | None = None,
+        token_lora_indices: DSALoRARoutingInput | None = None,
     ) -> torch.Tensor:
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
@@ -1850,16 +1851,25 @@ class AscendDSAImpl(DSAAttentionImpl):
         decode_lora_indices = None
         o_proj_lora_indices = None
         if dsa_lora_context is not None:
-            actual_lora_indices = dsa_lora_context.punica_wrapper.get_token_lora_indices(actual_tokens)
+            punica_wrapper = dsa_lora_context.punica_wrapper
+            actual_lora_indices = punica_wrapper.get_token_lora_indices(actual_tokens)
             decode_lora_indices = actual_lora_indices[:decode_tokens]
-            prefill_lora_indices = actual_lora_indices[decode_tokens:actual_tokens]
-            o_proj_lora_indices = torch.full(
-                (o_proj_input_shape[0],),
-                -1,
-                dtype=torch.long,
-                device=hidden_states.device,
+            prefill_tokens = actual_tokens - decode_tokens
+            if has_prefill:
+                prefill_lora_indices = punica_wrapper.get_dsa_lora_routing(
+                    decode_tokens,
+                    prefill_tokens,
+                    prefer_grouped_matmul=True,
+                )
+            else:
+                prefill_lora_indices = actual_lora_indices[decode_tokens:actual_tokens]
+            o_proj_lora_indices = punica_wrapper.get_dsa_lora_routing(
+                0,
+                actual_tokens,
+                num_rows=o_proj_input_shape[0],
+                prefer_grouped_matmul=has_prefill,
+                group_multiplier=self.n_local_groups,
             )
-            o_proj_lora_indices[:actual_tokens].copy_(actual_lora_indices)
 
         # Process for Flash Comm V1
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
@@ -1924,7 +1934,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         sin,
         swa_kv_cache,
         slot_mapping,
-        token_lora_indices=None,
+        token_lora_indices: DSALoRARoutingInput | None = None,
         is_prefill=False,
     ):
         """3-block multi-stream: 3-stage CV parallel + serial tail
@@ -2048,7 +2058,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        token_lora_indices: torch.Tensor | None = None,
+        token_lora_indices: DSALoRARoutingInput | None = None,
     ):
         compress_common_attn_metadata = None
         (compress_kv_cache, swa_kv_cache, state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
@@ -2367,7 +2377,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        token_lora_indices: torch.Tensor | None = None,
+        token_lora_indices: DSALoRARoutingInput | None = None,
     ):
         assert attn_metadata[0].decode is not None
         compress_common_attn_metadata = None

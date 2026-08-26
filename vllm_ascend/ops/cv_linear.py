@@ -5,6 +5,7 @@ import torch
 import torch_npu
 
 from vllm_ascend.lora.dsa import (
+    DSALoRARoutingInput,
     LoRAIntermediate,
     apply_prepared_dsa_lora,
     has_dsa_lora,
@@ -163,7 +164,7 @@ class CVLinearWrapperWithLoRA(CVLinearWrapper):
     def prepare(
         self,
         x: torch.Tensor,
-        token_lora_indices: torch.Tensor | None = None,
+        token_lora_indices: DSALoRARoutingInput | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, LoRAIntermediate | None]:
         quantized_x, pertoken_scale = self.quantize(x)
         lora_intermediate = prepare_dsa_lora(
