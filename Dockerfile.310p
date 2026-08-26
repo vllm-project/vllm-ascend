@@ -21,16 +21,26 @@ ARG BASE_OS="ubuntu22.04"
 FROM ${CANN_QUAY_URL}:${CANN_VERSION}-310p-${BASE_OS}-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
+ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
+ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+ARG APTMIRROR=""
+ARG GIT_PROXY=""
+ARG PIP_TRUSTED_HOST=""
 
 WORKDIR /workspace
 
-RUN apt-get update -y && \
+RUN if [ -n "$APTMIRROR" ]; then \
+        sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
+    fi && \
+    apt-get update -y && \
     apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 pciutils && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
 # Install modelscope (for fast download) and ray (for multinode)
 RUN pip config set global.index-url ${PIP_INDEX_URL} && \
+    if [ -n "$PIP_TRUSTED_HOST" ]; then pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi && \
     python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
 
@@ -43,10 +53,11 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       git -C /vllm-workspace/vllm fetch --depth 1 $VLLM_REPO "$VLLM_COMMIT" && \
       git -C /vllm-workspace/vllm checkout FETCH_HEAD; \
     else \
+      if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
@@ -59,10 +70,10 @@ ENV SOC_VERSION=$SOC_VERSION \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
-RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
+RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton-ascend triton && \
     python3 -m pip cache purge
 
