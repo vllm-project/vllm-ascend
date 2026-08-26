@@ -12,6 +12,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
@@ -27,6 +28,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.distributed.utils import all_gather_async
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
@@ -1206,35 +1208,121 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         )
         self._o_proj_tp_weight_switch_enabled = True
 
-    def _maybe_all_gather_o_proj_full_weight(
+    @staticmethod
+    def _check_dynamic_quant(layer: torch.nn.Module) -> bool:
+        return get_ascend_device_type() in {AscendDeviceType.A5} and hasattr(layer, "weight_scale")
+
+    @staticmethod
+    def _all_gather_tp_weight_parts(
+        state: TPWeightSwitchState,
+        group: Any,
+        *,
+        weight_parts: bool,
+    ) -> list[torch.distributed.Work]:
+        handles = []
+        for attr_name, part in state.gather_parts.items():
+            if (attr_name == "weight") != weight_parts:
+                continue
+            _, handle = all_gather_async(
+                part.gather_input,
+                group,
+                output=part.gather_output,
+            )
+            if handle is not None:
+                handles.append(handle)
+        return handles
+
+    def _maybe_all_gather_wo_a_weight(
         self,
         enabled: bool,
-    ) -> None:
+    ) -> list[torch.distributed.Work]:
         if not enabled:
-            return
+            return []
         self._enable_o_proj_tp_full_weight_switch()
-        self.wo_a_tp_weight_method.all_gather_tp_weight(
+        return self._all_gather_tp_weight_parts(
             self.wo_a_tp_weight_state,
             self.tp_group,
-        )
-        self.wo_b_tp_weight_method.all_gather_tp_weight(
-            self.wo_b_tp_weight_state,
-            self.tp_group,
+            weight_parts=True,
         )
 
-    def _switch_o_proj_to_full_weight(self) -> None:
-        self.wo_a_tp_weight_method.wait_tp_weight_all_gather(self.wo_a_tp_weight_state)
-        self.wo_b_tp_weight_method.wait_tp_weight_all_gather(self.wo_b_tp_weight_state)
+    def _maybe_all_gather_wo_b_weight(
+        self,
+        enabled: bool,
+    ) -> list[torch.distributed.Work]:
+        if not enabled:
+            return []
+        self._enable_o_proj_tp_full_weight_switch()
+        return self._all_gather_tp_weight_parts(
+            self.wo_b_tp_weight_state,
+            self.tp_group,
+            weight_parts=True,
+        )
+
+    def _maybe_all_gather_o_proj_scales(
+        self,
+        enabled: bool,
+    ) -> tuple[list[torch.distributed.Work], list[torch.distributed.Work]]:
+        if not enabled:
+            return [], []
+        self._enable_o_proj_tp_full_weight_switch()
+        wo_a_handles = self._all_gather_tp_weight_parts(
+            self.wo_a_tp_weight_state,
+            self.tp_group,
+            weight_parts=False,
+        )
+        wo_b_handles = self._all_gather_tp_weight_parts(
+            self.wo_b_tp_weight_state,
+            self.tp_group,
+            weight_parts=False,
+        )
+        return wo_a_handles, wo_b_handles
+
+    @staticmethod
+    def _wait_o_proj_handles(handles: list[torch.distributed.Work]) -> None:
+        for handle in handles:
+            handle.wait()
+
+    def _switch_wo_a_to_full_weight(self, handles: list[torch.distributed.Work]) -> None:
+        self._wait_o_proj_handles(handles)
         self.wo_a_tp_weight_method.switch_tp_weight(
             self.wo_a,
             self.wo_a_tp_weight_state,
             use_full_weight=True,
         )
+
+    def _switch_wo_b_to_full_weight(self, handles: list[torch.distributed.Work]) -> None:
+        self._wait_o_proj_handles(handles)
         self.wo_b_tp_weight_method.switch_tp_weight(
             self.wo_b,
             self.wo_b_tp_weight_state,
             use_full_weight=True,
         )
+
+    def _maybe_all_gather_activation_async(
+        self,
+        hidden_states_local: torch.Tensor,
+        enabled: bool,
+    ) -> tuple[torch.Tensor, torch.distributed.Work | None]:
+        if not enabled or self.tp_size == 1:
+            return hidden_states_local, None
+        hidden_states, handle = all_gather_async(
+            hidden_states_local.contiguous(),
+            self.tp_group,
+        )
+        return hidden_states, handle
+
+    @staticmethod
+    def _finish_activation_all_gather(
+        hidden_states: torch.Tensor,
+        handle: torch.distributed.Work | None,
+    ) -> torch.Tensor:
+        if handle is None:
+            return hidden_states
+        handle.wait()
+        pad_size = _EXTRA_CTX.pad_size
+        if pad_size > 0:
+            hidden_states = hidden_states[:-pad_size]
+        return hidden_states
 
     def _switch_o_proj_to_tp_weight(self) -> None:
         self.wo_a_tp_weight_method.switch_tp_weight(
@@ -1315,7 +1403,12 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 AscendAttentionState.SpecDecoding,
             }
         )
-        local_attn_output = self._forward(
+        (
+            local_attn_output,
+            wo_a_weight_handles,
+            wo_a_scale_handles,
+            wo_b_scale_handles,
+        ) = self._forward(
             layer_name,
             hidden_states,
             kv_cache,
@@ -1332,17 +1425,21 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         num_tokens = o_proj_input.shape[0]
 
         # o
-        if full_gather_wo_a_enabled:
-            self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
             if get_ascend_device_type() in {AscendDeviceType.A5}:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
                 if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
+                    if full_gather_wo_a_enabled:
+                        self._switch_wo_a_to_full_weight(wo_a_weight_handles + wo_a_scale_handles)
+                        wo_b_weight_handles = self._maybe_all_gather_wo_b_weight(True)
                     o = torch.bmm(o.transpose(0, 1), self._get_batched_wo_a_weight(o_proj_groups)).transpose(0, 1)
                 else:
                     o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
+                    if full_gather_wo_a_enabled:
+                        self._switch_wo_a_to_full_weight(wo_a_weight_handles + wo_a_scale_handles)
+                        wo_b_weight_handles = self._maybe_all_gather_wo_b_weight(True)
                     o = torch_npu.npu_transpose_quant_batchmatmul(
                         o,
                         self._get_batched_wo_a_weight(o_proj_groups),
@@ -1355,10 +1452,15 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                         perm_x2=(0, 1, 2),
                         perm_y=(1, 0, 2),
                     )
+                if full_gather_wo_a_enabled:
+                    self._switch_wo_b_to_full_weight(wo_b_weight_handles + wo_b_scale_handles)
                 o = o.reshape(num_tokens, -1)
                 output[...] = self._apply_wo_b(o, full_gather_wo_a_enabled)
             else:
                 o_proj_input = o_proj_input.view(num_tokens, o_proj_groups, -1)
+                if full_gather_wo_a_enabled:
+                    self._switch_wo_a_to_full_weight(wo_a_weight_handles + wo_a_scale_handles)
+                    wo_b_weight_handles = self._maybe_all_gather_wo_b_weight(True)
                 if olora_tp_enable():
                     o_proj_input = self.wo_a(o_proj_input)
                 else:
@@ -1374,6 +1476,8 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                         perm_y=(1, 0, 2),
                         batch_split_factor=1,
                     )
+                if full_gather_wo_a_enabled:
+                    self._switch_wo_b_to_full_weight(wo_b_weight_handles + wo_b_scale_handles)
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
                 output[...] = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
         finally:
@@ -1405,8 +1509,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             (swa_metadata,) = attn_metadata
         common_attn_metadata = attn_metadata[0]
 
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
@@ -1420,14 +1522,16 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         local_seq_lengths_key = cp_metadata.local_seq_lens
         has_prefill = common_attn_metadata.num_prefills > 0
         swa_req_metadata = swa_metadata.req_metadata
-        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
-
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
         ):
             q_a = self.wq_a(hidden_states_local)
             qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
+            )
+            hidden_states, activation_ag_handle = self._maybe_all_gather_activation_async(
+                hidden_states_local,
+                need_gather_q_kv,
             )
             if getattr(self.wq_b, "_chunk_size", 0):
                 bias = self.wq_b.bias
@@ -1466,8 +1570,18 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 )
         else:
             qr_local = self.q_norm(self.wq_a(hidden_states_local))
+            hidden_states, activation_ag_handle = self._maybe_all_gather_activation_async(
+                hidden_states_local,
+                need_gather_q_kv,
+            )
             q = self.wq_b(qr_local)
             qr_pertoken_scale_local = None
+
+        hidden_states = self._finish_activation_all_gather(
+            hidden_states,
+            activation_ag_handle,
+        )
+        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
 
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
 
@@ -1480,9 +1594,16 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
-
-        kv = self.wkv(hidden_states_cache)
+        if full_gather_wo_a_enabled and self._check_dynamic_quant(self.wkv):
+            kv, kv_scale = torch_npu.npu_dynamic_mx_quant(
+                hidden_states_cache,
+                dst_type=torch.float8_e4m3fn,
+            )
+            wo_a_weight_handles = self._maybe_all_gather_wo_a_weight(True)
+            kv = self.wkv.quant_method.apply(self.wkv, (kv, kv_scale), bias=None)
+        else:
+            wo_a_weight_handles = self._maybe_all_gather_wo_a_weight(full_gather_wo_a_enabled)
+            kv = self.wkv(hidden_states_cache)
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
@@ -1549,6 +1670,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
+        wo_a_scale_handles, wo_b_scale_handles = self._maybe_all_gather_o_proj_scales(full_gather_wo_a_enabled)
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
@@ -1614,7 +1736,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
-        return attn_output
+        return attn_output, wo_a_weight_handles, wo_a_scale_handles, wo_b_scale_handles
 
     def _restore_tp_head_layout(
         self,

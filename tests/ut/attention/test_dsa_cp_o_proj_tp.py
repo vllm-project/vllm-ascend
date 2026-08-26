@@ -4,7 +4,7 @@ import sys
 import unittest
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -85,27 +85,33 @@ class TestAscendDSACPOProjTPParams(unittest.TestCase):
         self.assertIs(impl.wo_a_tp_weight_state, wo_a_state)
         self.assertIs(impl.wo_b_tp_weight_state, wo_b_state)
 
-    def test_maybe_all_gather_honors_enable_flag_for_both_layers(self):
+    def test_maybe_all_gather_schedules_weights_and_scales_separately(self):
         impl = self._make_impl()
         impl._enable_o_proj_tp_full_weight_switch()
-        impl.wo_a_tp_weight_method.all_gather_tp_weight = MagicMock()
-        impl.wo_b_tp_weight_method.all_gather_tp_weight = MagicMock()
+        handle = MagicMock()
+        with patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.all_gather_async",
+            return_value=(None, handle),
+        ) as mock_all_gather:
+            self.assertEqual(impl._maybe_all_gather_wo_a_weight(False), [])
+            self.assertEqual(impl._maybe_all_gather_wo_b_weight(False), [])
+            self.assertEqual(impl._maybe_all_gather_o_proj_scales(False), ([], []))
+            mock_all_gather.assert_not_called()
 
-        impl._maybe_all_gather_o_proj_full_weight(False)
+            wo_a_weight_handles = impl._maybe_all_gather_wo_a_weight(True)
+            wo_a_scale_handles, wo_b_scale_handles = impl._maybe_all_gather_o_proj_scales(True)
+            wo_b_weight_handles = impl._maybe_all_gather_wo_b_weight(True)
 
-        impl.wo_a_tp_weight_method.all_gather_tp_weight.assert_not_called()
-        impl.wo_b_tp_weight_method.all_gather_tp_weight.assert_not_called()
-
-        impl._maybe_all_gather_o_proj_full_weight(True)
-
-        impl.wo_a_tp_weight_method.all_gather_tp_weight.assert_called_once_with(
-            impl.wo_a_tp_weight_state,
-            impl.tp_group,
-        )
-        impl.wo_b_tp_weight_method.all_gather_tp_weight.assert_called_once_with(
-            impl.wo_b_tp_weight_state,
-            impl.tp_group,
-        )
+        self.assertEqual(wo_a_weight_handles, [handle])
+        self.assertEqual(wo_a_scale_handles, [handle])
+        self.assertEqual(wo_b_scale_handles, [handle])
+        self.assertEqual(wo_b_weight_handles, [handle])
+        self.assertEqual(mock_all_gather.call_count, 4)
+        gathered_outputs = [call.kwargs["output"] for call in mock_all_gather.call_args_list]
+        self.assertIs(gathered_outputs[0], impl.wo_a_tp_weight_state.gather_parts["weight"].gather_output)
+        self.assertIs(gathered_outputs[1], impl.wo_a_tp_weight_state.gather_parts["weight_scale"].gather_output)
+        self.assertIs(gathered_outputs[2], impl.wo_b_tp_weight_state.gather_parts["weight_scale"].gather_output)
+        self.assertIs(gathered_outputs[3], impl.wo_b_tp_weight_state.gather_parts["weight"].gather_output)
 
     def test_switch_o_proj_between_full_and_tp_storage(self):
         impl = self._make_impl()
@@ -116,12 +122,44 @@ class TestAscendDSACPOProjTPParams(unittest.TestCase):
             impl.wo_b_tp_weight_state.gather_parts["weight"].full_tensor.data_ptr(),
         )
 
-        impl._switch_o_proj_to_full_weight()
+        wo_a_handle = MagicMock()
+        wo_b_handle = MagicMock()
+        impl._switch_wo_a_to_full_weight([wo_a_handle])
+        impl._switch_wo_b_to_full_weight([wo_b_handle])
 
         self.assertEqual(impl.wo_a.weight.data_ptr(), full_ptrs[0])
         self.assertEqual(impl.wo_b.weight.data_ptr(), full_ptrs[1])
+        wo_a_handle.wait.assert_called_once_with()
+        wo_b_handle.wait.assert_called_once_with()
 
         impl._switch_o_proj_to_tp_weight()
 
         self.assertEqual(impl.wo_a.weight.data_ptr(), tp_ptrs[0])
         self.assertEqual(impl.wo_b.weight.data_ptr(), tp_ptrs[1])
+
+    def test_activation_all_gather_is_async_and_unpads_after_wait(self):
+        impl = self._make_impl()
+        hidden_states_local = torch.randn(2, 4)
+        gathered = torch.randn(4, 4)
+        handle = MagicMock()
+
+        with patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.all_gather_async",
+            return_value=(gathered, handle),
+        ) as mock_all_gather:
+            output, output_handle = impl._maybe_all_gather_activation_async(hidden_states_local, True)
+
+        self.assertIs(output, gathered)
+        self.assertIs(output_handle, handle)
+        mock_all_gather.assert_called_once()
+        self.assertTrue(mock_all_gather.call_args.args[0].is_contiguous())
+        self.assertIs(mock_all_gather.call_args.args[1], impl.tp_group)
+
+        with patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp._EXTRA_CTX",
+            SimpleNamespace(pad_size=1),
+        ):
+            output = impl._finish_activation_all_gather(output, output_handle)
+
+        handle.wait.assert_called_once_with()
+        self.assertEqual(tuple(output.shape), (3, 4))
