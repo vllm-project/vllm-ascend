@@ -18,7 +18,6 @@
 import torch
 from transformers import AutoModel
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
@@ -26,8 +25,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import init_vllm_registered_model, maybe_prefix
-
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.quantization.methods import AscendW4A4MXFP4DynamicLinearMethod
 
 
 def _ascend_gemma4_vision_patch_embedder_forward(
@@ -54,39 +52,6 @@ def _patch_gemma4_vision_patch_embedder(
     )
 
 
-def _get_tower_quant_config(
-    vllm_config: VllmConfig,
-    tower_config,
-    *,
-    enable_ascend: bool = False,
-) -> QuantizationConfig | None:
-    """Select quantization for Gemma4 multimodal towers.
-
-    When explicitly enabled for the vision tower, ModelSlim MXFP4 supports
-    the Gemma4 ViT dimensions, including its 4304 intermediate size. Other
-    towers and backends retain vLLM's divisibility guard.
-    """
-    quant_config = vllm_config.quant_config
-    unrestricted_quant_methods = {
-        "bitsandbytes",
-        "torchao",
-        "compressed-tensors",
-    }
-    if quant_config and quant_config.get_name() in unrestricted_quant_methods:
-        return quant_config
-    if enable_ascend and _is_ascend_mxfp4_quant(quant_config):
-        return quant_config
-
-    quantizable = tower_config.hidden_size % 64 == 0 and tower_config.intermediate_size % 64 == 0
-    return quant_config if quantizable else None
-
-
-def _is_ascend_mxfp4_quant(quant_config: QuantizationConfig | None) -> bool:
-    if quant_config is None or quant_config.get_name() != ASCEND_QUANTIZATION_METHOD:
-        return False
-    quant_description = getattr(quant_config, "quant_description", {})
-    return any(value == "W4A4_MXFP4" for value in quant_description.values())
-
 
 class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
     """Gemma4 multimodal model with ModelSlim quantization for its towers."""
@@ -105,34 +70,23 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.multimodal_config = multimodal_config
         self.model_dtype = vllm_config.model_config.dtype
         self.vllm_config = vllm_config
-        vision_tower_quant = _get_tower_quant_config(
-            vllm_config,
-            config.vision_config,
-            enable_ascend=True,
-        )
-        audio_tower_quant = (
-            _get_tower_quant_config(
-                vllm_config,
-                config.audio_config,
-            )
-            if config.audio_config is not None
-            else None
-        )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
-                quant_config=vision_tower_quant,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "embed_vision"),
             )
             recursive_replace_linear(
                 self.vision_tower,
-                vision_tower_quant,
+                quant_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            if _is_ascend_mxfp4_quant(vision_tower_quant):
+            quant_method = self.vision_tower.patch_embedder.input_proj.quant_method
+
+            if isinstance(quant_method, AscendW4A4MXFP4DynamicLinearMethod):
                 _patch_gemma4_vision_patch_embedder(
                     self.vision_tower.patch_embedder,
                     self.model_dtype,
@@ -145,12 +99,12 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
                 self.embed_audio = Gemma4MultimodalEmbedder(
                     config.audio_config,
                     config.text_config,
-                    quant_config=audio_tower_quant,
+                    quant_config=quant_config,
                     prefix=maybe_prefix(prefix, "embed_audio"),
                 )
                 recursive_replace_linear(
                     self.audio_tower,
-                    audio_tower_quant,
+                    quant_config,
                     prefix=maybe_prefix(prefix, "audio_tower"),
                 )
         else:
