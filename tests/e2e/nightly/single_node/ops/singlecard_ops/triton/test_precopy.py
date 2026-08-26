@@ -33,9 +33,13 @@ def _build_meta(convs, ssms, device, conv_dim_first):
     tensor = lambda values, dtype: torch.tensor(values, dtype=dtype, device=device)
     state_count = NUM_LAYERS * 2
     return (
-        tensor(base, torch.int64), tensor(block_stride, torch.int64), tensor(elem_size, torch.int32),
-        tensor(inner_size, torch.int64), tensor(conv_width, torch.int32),
-        torch.zeros(state_count, dtype=torch.int32, device=device), tensor(row_count, torch.int32),
+        tensor(base, torch.int64),
+        tensor(block_stride, torch.int64),
+        tensor(elem_size, torch.int32),
+        tensor(inner_size, torch.int64),
+        tensor(conv_width, torch.int32),
+        torch.zeros(state_count, dtype=torch.int32, device=device),
+        tensor(row_count, torch.int32),
         tensor(row_stride, torch.int64),
     )
 
@@ -72,7 +76,9 @@ def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, temporal_til
     dst_col = torch.tensor([0, 1, 0, 0], dtype=torch.int32, device=device)
     bias = torch.tensor([0, 0, 1, 2], dtype=torch.int32, device=device)
     convs, ssms = _build_states(num_blocks, device, conv_dim_first)
-    conv_ref, ssm_ref = _reference(convs, ssms, block_table.cpu(), src_col.cpu(), dst_col.cpu(), bias.cpu(), conv_dim_first)
+    conv_ref, ssm_ref = _reference(
+        convs, ssms, block_table.cpu(), src_col.cpu(), dst_col.cpu(), bias.cpu(), conv_dim_first
+    )
     base, block_stride, elem_size, inner_size, conv_width, group, row_count, row_stride = _build_meta(
         convs, ssms, device, conv_dim_first
     )
@@ -80,10 +86,25 @@ def test_precopy_matches_reference(conv_dim_first, has_idx_mapping, temporal_til
     idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
     grid = (num_reqs, NUM_LAYERS * 2, temporal_tiles)
     precopy_mamba_align_fused_kernel[grid](
-        dst_col, src_col, bias, block_table_ptrs, block_table.stride(0), base, block_stride, elem_size,
-        inner_size, conv_width, group, row_count, row_stride, idx_mapping if has_idx_mapping else None,
-        num_reqs, COPY_BLOCK_SIZE=128, CONV_STATE_DIM_FIRST=conv_dim_first,
-        HAS_IDX_MAPPING=has_idx_mapping, TEMPORAL_TILES=temporal_tiles,
+        dst_col,
+        src_col,
+        bias,
+        block_table_ptrs,
+        block_table.stride(0),
+        base,
+        block_stride,
+        elem_size,
+        inner_size,
+        conv_width,
+        group,
+        row_count,
+        row_stride,
+        idx_mapping if has_idx_mapping else None,
+        num_reqs,
+        COPY_BLOCK_SIZE=128,
+        CONV_STATE_DIM_FIRST=conv_dim_first,
+        HAS_IDX_MAPPING=has_idx_mapping,
+        TEMPORAL_TILES=temporal_tiles,
     )
     torch.accelerator.synchronize()
     for layer in range(NUM_LAYERS):

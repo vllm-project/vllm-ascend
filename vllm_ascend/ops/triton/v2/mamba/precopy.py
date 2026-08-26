@@ -67,7 +67,6 @@ def _copy_mamba_state_block(
                 tl.store(row_dst + offset + offsets, data, mask=mask)
         return
 
-
     if is_conv_state:
         if tile_idx > 0:
             return
