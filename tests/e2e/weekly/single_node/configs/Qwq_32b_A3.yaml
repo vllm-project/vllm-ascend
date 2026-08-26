@@ -64,8 +64,6 @@ test_cases:
       - "--max-num-batched-tokens"
       - "32768"
       - "--enforce-eager"
-      - "--additional-config"
-      - '{"ascend_scheduler_config":{"enabled":false}}'
   - name: "Qwq_32B_gsm8k_Accuracy_A3"
     model: "Qwen/QwQ-32B"
     envs:

@@ -875,8 +875,8 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     # Fused MC2 and hierarchy communication are mutually exclusive.
     if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
         raise ValueError(
-            "fused mc2 op cannot be used with hierarchy communication."
-            "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."
+            "fused mc2 op cannot be used with hierarchy communication. "
+            "Please set additional_config.enable_fused_mc2 to 0."
         )
 
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
@@ -1240,7 +1240,6 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
 
     cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
     use_sparse = model_uses_sfa_sparse(model_config)
-    sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
@@ -1252,12 +1251,7 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
             "needs to be equal if PCP or DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if (
-        use_sparse
-        and cp_size > 1
-        and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size
-        and not sfa_dcp_replicated_indexer
-    ):
+    if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
         logger.warning_once(
             "The current SFA context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"

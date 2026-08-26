@@ -306,7 +306,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --enforce-eager \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
     --additional-config '{"enable_cpu_binding":true,
-                        "VLLM_ASCEND_ENABLE_FUSED_MC2":1}' \
+                        "enable_fused_mc2":1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -365,7 +365,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
     --additional-config '{"enable_cpu_binding":true,
-                        "VLLM_ASCEND_ENABLE_FUSED_MC2":1}' \
+                        "enable_fused_mc2":1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
