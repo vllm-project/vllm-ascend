@@ -307,6 +307,7 @@
     - tests/ut/models/test_deepseek_v4_compressor.py
     - tests/ut/models/test_deepseek_v4_indexer.py
     - tests/ut/models/test_deepseek_v4_moe.py
+    - tests/ut/models/test_dots3_note.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: models_minimax_m3

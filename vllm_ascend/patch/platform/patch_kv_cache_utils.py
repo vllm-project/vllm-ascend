@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_get_kv_cache_groups_uniform_groups = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -97,11 +98,14 @@ def _get_kv_cache_groups_uniform_groups(
     Generate the KV cache groups from the grouped specs.
     """
     assert len(grouped_specs) > 0 and all(isinstance(spec, UniformTypeKVCacheSpecs) for spec in grouped_specs)
-    # For now, we restrict the first grouped_spec to be UniformTypeKVCacheSpecs
-    # containing only MLAAttentionSpec.
+    if len(grouped_specs) < 2 or all(
+        isinstance(spec, SlidingWindowMLASpec) for spec in grouped_specs[1].kv_cache_specs.values()
+    ):
+        return _orig_get_kv_cache_groups_uniform_groups(grouped_specs)
+
+    # DeepSeek V4 has two full-MLA groups with different logical block sizes.
     full_mla_spec = grouped_specs[0]
     full_mla_c128_spec = grouped_specs[1]
-
     assert all(isinstance(spec, MLAAttentionSpec) for spec in full_mla_spec.kv_cache_specs.values())
     full_mla_group = KVCacheGroupSpec(
         layer_names=list(full_mla_spec.kv_cache_specs.keys()),
@@ -125,9 +129,7 @@ def _get_kv_cache_groups_uniform_groups(
     # Round up to the nearest multiple of `num_layer_tuples` (i.e., padding)
     num_layer_tuples_per_group = [round_up(x, num_layer_tuples) for x in num_layer_tuples_per_group]
 
-    # TODO(cmq): this is not general enough
     swa_mla_specs = grouped_specs[2:]
-
     assert all(
         isinstance(spec, SlidingWindowMLASpec) for group in swa_mla_specs for spec in group.kv_cache_specs.values()
     )
@@ -187,21 +189,22 @@ def _get_kv_cache_config_deepseek_v4(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> tuple[int, list[KVCacheTensor]]:
-    """DeepseekV4 KV cache tensor layout planning.
+    """Ascend mixed-MLA KV cache tensor layout planning.
 
-    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
-    every layer's page_size matches one of the full-MLA bucket sizes.
+    Every group must use UniformTypeKVCacheSpecs. Each distinct physical page
+    size keeps its own bucket.
 
     For each group, bucket its layers by page_size_bytes and place each
     layer at tuple_idx = position-within-bucket. Emit one KVCacheTensor
     per (tuple_idx, bucket) whose shared_by is the union of per-group
     layers at that slot.
     """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(full_mla_spec.get_page_sizes())
+    assert kv_cache_groups
+    page_size_set = set()
+    for group in kv_cache_groups:
+        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        page_size_set.update(group.kv_cache_spec.get_page_sizes())
+    page_sizes = sorted(page_size_set)
     layer_tuple_page_bytes = sum(page_sizes)
 
     # Pre-bucket each group's layers by page_size (registration order within
