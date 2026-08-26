@@ -269,8 +269,11 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
                 shared_layers={},
                 device=_device,
             )
+            # `_reshape_kv_cache_v2` expects the flat attention-group list,
+            # matching upstream v0.27.1 `init_kv_cache`, which flattens
+            # `attn_groups` before reshaping.
             return attn_utils._reshape_kv_cache_v2(
-                attn_groups=[[attn_group]],
+                attn_groups=[attn_group],
                 kv_cache_raw_tensors=raw_tensors,
                 cache_dtype=cache_config.cache_dtype,
                 kernel_block_sizes=_kernel_block_sizes,
