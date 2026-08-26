@@ -77,8 +77,8 @@ test_cases:
         "num_speculative_tokens": 3}'
     benchmarks:
       <<: *benchmarks_perf
-# =======Eagle3 Speculative Reasoning Step Test_04 step=5===============
-  - name: "kimi25_w4a8_static_m6_step_5"
+# =======Eagle3 Speculative Reasoning Step Test_04 step=7===============
+  - name: "kimi25_w4a8_static_m6_step_7"
     model: "/mnt/weight/kimi25_w4a8_static_m6"
     envs:
       <<: *envs
