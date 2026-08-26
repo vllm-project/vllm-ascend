@@ -98,6 +98,7 @@ def test_runner_310_installs_specialized_comm():
     runner = _build_runner()
     moe_config = MagicMock()
     runner.moe_config = moe_config
+    runner.gate = None
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
     runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True)
     comm_method = object()

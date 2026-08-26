@@ -22,6 +22,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_pcp,
+    get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -329,7 +330,6 @@ def build_dspark_swa_indices(
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
-    hadamard = None
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -391,7 +391,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
-        self._init_hadamard()
+        self.hadamard = None
+        self._init_hadamard(layer_names)
         self.start_pos_prefill: torch.Tensor = torch.zeros(
             scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
         )
@@ -409,10 +410,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
 
-    def _init_hadamard(self) -> None:
-        if AscendDSAMetadataBuilder.hadamard is not None:
-            return
-
+    def _init_hadamard(self, layer_names: list[str]) -> None:
         hf_config = self.model_config.hf_config
         if hf_config.model_type != "deepseek_v4":
             return
@@ -424,20 +422,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             raise ImportError("Please install scipy") from e
         log_dim = math.ceil(math.log2(indexer_head_dim))
         dim_padded = 2**log_dim
-        if self.vllm_config.model_config.enable_sleep_mode:
-            # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
-            # sleep/wake does not treat it as KV cache.
-            from vllm_ascend.device_allocator.camem import CaMemAllocator
-
-            allocator = CaMemAllocator.get_instance()
-            with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
-                AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                    hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                ).to(torch.bfloat16)
-        else:
-            AscendDSAMetadataBuilder.hadamard = torch.tensor(
-                hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-            ).to(torch.bfloat16)
+        self.hadamard = get_or_register_attention_buffer(
+            self.vllm_config,
+            layer_names,
+            "_dsa_hadamard",
+            lambda: torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device).to(
+                torch.bfloat16
+            ),
+        )
 
     @classmethod
     def get_cudagraph_support(
@@ -590,7 +582,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_prefills=self.num_prefills,
             attn_state=common_attn_metadata.attn_state,
             req_metadata=req_metadata,
-            hadamard=AscendDSAMetadataBuilder.hadamard,
+            hadamard=self.hadamard,
         )
 
     def _build_sas_metadata(

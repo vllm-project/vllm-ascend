@@ -3,6 +3,7 @@ from typing import Any
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ops.triton.spec_decode.utils import dflash2_greedy_selector_walk_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
@@ -78,7 +79,13 @@ class AscendDflash2Proposer(AscendDflashProposer):
         self.model.has_own_lm_head = False
         super()._maybe_share_lm_head(model)
 
-    def compute_draft_token_ids(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_draft_token_ids(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # DFlash2 always drafts greedily: probabilistic sampling is rejected in
+        # __init__, so draft probs are never produced here.
         num_sample = hidden_states.shape[0]
         num_steps = self.num_speculative_tokens
         if num_sample % num_steps != 0:
@@ -97,4 +104,4 @@ class AscendDflash2Proposer(AscendDflashProposer):
             hidden,
             anchor_token_ids,
         )
-        return greedy_select_path(candidate_ids, scores).reshape(-1)
+        return greedy_select_path(candidate_ids, scores).reshape(-1), None

@@ -138,6 +138,7 @@
   source_file_dependencies:
     - vllm_ascend/compilation/__init__.py
     - vllm_ascend/compilation/acl_graph.py
+    - vllm_ascend/compilation/breakable_aclgraph.py
   tests:
     - tests/ut/compilation
     - tests/ut/test_platform.py
