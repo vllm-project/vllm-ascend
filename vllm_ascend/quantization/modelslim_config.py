@@ -635,8 +635,9 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         This method is called by vLLM to apply the model-specific weight mapper
         to the quantization configuration. It directly uses the forward mapping
-        (HF -> vLLM) to transform keys in quant_description from HF format to
-        vLLM format.
+        (HF -> vLLM) to transform layer keys in quant_description from HF format
+        to vLLM format. Checkpoint-level metadata under ``optional`` does not
+        name model parameters and must retain its schema.
 
         Args:
             hf_to_vllm_mapper: The WeightsMapper instance provided by vLLM
@@ -649,7 +650,15 @@ class AscendModelSlimConfig(QuantizationConfig):
         self._mapper_applied = True
 
         if self.quant_description:
-            self.quant_description = hf_to_vllm_mapper.apply_dict(self.quant_description)
+            optional_metadata = self.quant_description.get("optional")
+            layer_descriptions = {
+                name: description
+                for name, description in self.quant_description.items()
+                if name != "optional"
+            }
+            self.quant_description = hf_to_vllm_mapper.apply_dict(layer_descriptions)
+            if optional_metadata is not None:
+                self.quant_description["optional"] = optional_metadata
             self._add_kvcache_quant_metadata()
             logger.info("Applied hf_to_vllm_mapper to quant_description keys")
 

@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -8,8 +10,10 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tests.ut.base import TestBase
+from vllm_ascend.models.llama_eagle3 import get_rotation_path
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
@@ -519,6 +523,36 @@ class TestApplyVllmMapper(TestBase):
 
         self.assertEqual(config.quant_description, {"new_key.weight": "INT8"})
         mock_mapper.apply_dict.assert_called_once_with({"old_key.weight": "INT8"})
+
+    def test_apply_mapper_preserves_optional_metadata(self):
+        optional_metadata = {
+            "quarot": {
+                "rotation_map": {
+                    "global_rotation": "optional/quarot.safetensors",
+                }
+            }
+        }
+        config = AscendModelSlimConfig(
+            {
+                "context_proj.weight": "W8A8",
+                "optional": optional_metadata,
+            }
+        )
+        draft_mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+
+        config.apply_vllm_mapper(draft_mapper)
+
+        self.assertEqual(config.quant_description["model.context_proj.weight"], "W8A8")
+        self.assertEqual(config.quant_description["optional"], optional_metadata)
+        self.assertNotIn("model.optional", config.quant_description)
+        vllm_config = SimpleNamespace(
+            quant_config=config,
+            model_config=SimpleNamespace(model="/target"),
+        )
+        self.assertEqual(
+            get_rotation_path(vllm_config),
+            Path("/target/optional/quarot.safetensors"),
+        )
 
 
 class TestQuantPrefixMapper(TestBase):
