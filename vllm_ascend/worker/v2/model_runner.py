@@ -66,6 +66,7 @@ from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import (
     is_pd_decode_recompute_scheduler_enabled,
     lmhead_tp_enable,
+    lmhead_tp_max_num_logits,
     set_potential_max_tokens,
 )
 from vllm_ascend.worker.utils import disable_compilation
@@ -86,6 +87,7 @@ from vllm_ascend.worker.v2.pp_utils import (
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
+from vllm_ascend.worker.v2.spec_decode.lmhead_tp_utils import _lmhead_tp_configured
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
     prepare_v41_dummy_ring_state,
@@ -272,6 +274,15 @@ class NPUModelRunner(GPUModelRunner):
         self.execute_model_state = state
 
     def sample_tokens(self, grammar_output):
+        if (
+            _lmhead_tp_configured()
+            and self.prompt_logprobs_worker is not None
+            and self.prompt_logprobs_worker.uses_prompt_logprobs.any()
+        ):
+            # The prompt-logprobs worker issues a second compute_logits with
+            # unpadded rows that desyncs the LM-head collectives and hangs.
+            raise NotImplementedError("prompt_logprobs is not supported with lmhead TP.")
+
         pcp_manager = self.pcp_manager
         if pcp_manager is not None and not self.is_last_pp_rank and self.execute_model_state is not None:
             assert isinstance(pcp_manager, AscendPCPManager)
@@ -387,6 +398,23 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
+
+        if dummy_run and _lmhead_tp_configured() and not is_profile and self.is_last_pp_rank:
+            # lmhead TP: idle ranks never call sample(); join the target
+            # LM-head collectives here with zero-indexed rows at the sample()
+            # capacity (V1: ``need_dummy_logits``). Must run before the parent
+            # ``_dummy_run`` replays the speculator dummy propose, to keep the
+            # busy rank's target-then-draft ordering.
+            if self.execute_model_state is None:
+                raise RuntimeError(
+                    "lmhead TP dummy join expects execute_model_state published by the upstream dummy execute_model."
+                )
+            dummy_indices = torch.zeros(
+                self._lmhead_tp_max_num_logits(),
+                dtype=torch.int64,
+                device=self.device,
+            )
+            self.model.compute_logits(self.execute_model_state.hidden_states[dummy_indices])
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
@@ -706,13 +734,12 @@ class NPUModelRunner(GPUModelRunner):
         return block_tables, slot_mappings
 
     def _lmhead_tp_max_num_logits(self) -> int:
-        """Logits row capacity shared by every rank of the lmhead-TP group.
+        """Logits row capacity every rank of the lmhead-TP group agrees on.
 
-        Derived purely from global config so all ranks compute the identical
-        value, matching upstream's own logits capacity bound
-        (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
+        Config-derived (``max_num_reqs * decode_query_len``); cross-rank
+        drift desyncs the collectives and hangs.
         """
-        return self.max_num_reqs * self.decode_query_len
+        return lmhead_tp_max_num_logits(self.max_num_reqs, self.decode_query_len)
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
@@ -729,13 +756,14 @@ class NPUModelRunner(GPUModelRunner):
 
         num_logits = input_batch.logits_indices.shape[0]
         capacity = self._lmhead_tp_max_num_logits()
-        # A mismatch would desync the LM-head all_gather/all_to_all across the
-        # group and hang the collectives. Fail fast instead.
-        assert num_logits <= capacity, (
-            f"lmhead TP logits rows ({num_logits}) exceed the group-agreed capacity "
-            f"({capacity} = max_num_reqs * decode_query_len); the capacity formula "
-            "no longer matches upstream logits production."
-        )
+        if num_logits > capacity:
+            # A mismatch would desync the LM-head all_gather/all_to_all across
+            # the group and hang the collectives. Fail fast instead.
+            raise ValueError(
+                f"lmhead TP logits rows ({num_logits}) exceed the group-agreed capacity "
+                f"({capacity} = max_num_reqs * decode_query_len); the capacity formula "
+                "no longer matches upstream logits production."
+            )
 
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         if num_logits < capacity:
@@ -797,7 +825,25 @@ class NPUModelRunner(GPUModelRunner):
         is_profile: bool = False,
         **kwargs,
     ):
-        """Join LM-head TP before stepping EPLB on an idle DP rank."""
+        """Balanced dummy routing for adaptive-verification cost profiling.
+
+        Adaptive verification profiles eager tail sizes after graph capture;
+        route the dummy run the way the initial memory profile does, so a
+        synthetic router hotspot cannot exhaust one EP rank during startup.
+
+        EPLB is stepped by the ``step_eplb_after`` decorator once this override
+        returns (the parent's own step is skipped via ``skip_eplb=True``), so an
+        idle rank advances EPLB only after joining the target LM-head
+        collectives -- the same order as a busy rank, which samples and then
+        advances EPLB (#17233).
+
+        The lmhead TP dummy join deliberately does NOT live here: idle ranks
+        join the target LM-head collectives at the tail of ``execute_model``,
+        ahead of the speculator dummy propose that the parent ``_dummy_run``
+        replays, keeping the busy rank's target-then-draft ordering. Joining
+        after ``super()._dummy_run`` (as #14668 did) issues the target
+        collectives after the draft ones and deadlocks the group.
+        """
         skip_ring = bool(kwargs.pop("skip_gdn_state_update", False))
         # Adaptive verification profiles eager tail sizes after graph capture.
         # Use balanced dummy routing, as the initial memory profile does, so a
@@ -811,7 +857,7 @@ class NPUModelRunner(GPUModelRunner):
             )
         load_balance_ctx = override_mrv2_in_profile_run(True) if profile_adaptive_tail else nullcontext()
         with self._cap_parallel_draft_dummy_reqs(uniform_decode), skip_ring_state_update(skip_ring), load_balance_ctx:
-            hidden_states, sample_hidden_states = super()._dummy_run(
+            return super()._dummy_run(
                 num_tokens,
                 *args,
                 skip_attn=skip_attn,
@@ -821,14 +867,6 @@ class NPUModelRunner(GPUModelRunner):
                 is_profile=is_profile,
                 **kwargs,
             )
-        if lmhead_tp_enable() and not is_profile and hidden_states is not None:
-            dummy_indices = torch.zeros(
-                self._lmhead_tp_max_num_logits(),
-                dtype=torch.int64,
-                device=hidden_states.device,
-            )
-            self.model.compute_logits(hidden_states[dummy_indices])
-        return hidden_states, sample_hidden_states
 
     def postprocess_sampled(
         self,
