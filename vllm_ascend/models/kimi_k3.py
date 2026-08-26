@@ -259,6 +259,7 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         non_causal_multi_token_decode: bool = False,
+        disable_mlapo: bool = False,
     ) -> None:
         upstream_config = copy(config)
         upstream_config.mla_use_output_gate = use_output_gate
@@ -276,6 +277,9 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
             quant_config=quant_config,
             prefix=prefix,
         )
+        attention_layer = self._attention_layer
+        if disable_mlapo:
+            attention_layer.impl.enable_mlapo = False
         if not use_rope and not non_causal_multi_token_decode:
             return
 
@@ -303,7 +307,6 @@ class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
         # registered MLA wrapper, including all projections and weight loaders.
         # Configure that existing Ascend attention layer for DSpark instead of
         # constructing and registering a second wrapper with the same prefix.
-        attention_layer = self._attention_layer
         attention_layer.scale = self.scaling
         attention_layer.non_causal_multi_token_decode = non_causal_multi_token_decode
         attention_layer.impl.scale = float(self.scaling)

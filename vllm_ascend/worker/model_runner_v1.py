@@ -4608,6 +4608,7 @@ class NPUModelRunner(GPUModelRunner):
         class AttentionGroupKey(NamedTuple):
             attn_backend: type[AttentionBackend]
             kv_cache_spec: KVCacheSpec
+            use_mla_rope: bool | None
 
         def get_attn_backends_for_group(
             kv_cache_group_spec: KVCacheGroupSpec,
@@ -4654,8 +4655,17 @@ class NPUModelRunner(GPUModelRunner):
 
                     attn_backend = AscendSFAIndexerBackend
                 full_cls_name = attn_backend.full_cls_name()
-                key = (full_cls_name, layer_kv_cache_spec)
-                attn_backends[key] = AttentionGroupKey(attn_backend, layer_kv_cache_spec)
+                use_mla_rope = (
+                    getattr(layers[layer_name].impl, "use_mla_rope", None)
+                    if isinstance(layer_kv_cache_spec, AscendMLAAttentionSpec)
+                    else None
+                )
+                key = (full_cls_name, layer_kv_cache_spec, use_mla_rope)
+                attn_backends[key] = AttentionGroupKey(
+                    attn_backend,
+                    layer_kv_cache_spec,
+                    use_mla_rope,
+                )
                 attn_backend_layers[key].append(layer_name)
             return (
                 {attn_backends[k]: v for k, v in attn_backend_layers.items()},
@@ -4663,10 +4673,13 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         def create_attn_groups(
-            attn_backends_map: dict[AttentionBackend, list[str]], kv_cache_group_id: int
+            attn_backends_map: dict[AttentionGroupKey, list[str]],
+            kv_cache_group_id: int,
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
-            for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
+            for group_key, layer_names in attn_backends_map.items():
+                attn_backend = group_key.attn_backend
+                kv_cache_spec = group_key.kv_cache_spec
                 attn_metadata_builders = []
                 attn_metadata_builders.append(
                     attn_backend.get_builder_cls()(
@@ -4865,12 +4878,34 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
+            tensor_parallel_size = self.parallel_config.tensor_parallel_size
+            resolver_tensor_parallel_size = tensor_parallel_size
+            if (
+                self.compilation_config.pass_config.enable_sp
+                and self.uniform_decode_query_len > 1
+                and tensor_parallel_size > 1
+            ):
+                graph_alignment = math.lcm(
+                    self.uniform_decode_query_len,
+                    tensor_parallel_size,
+                )
+                capture_sizes = self.compilation_config.cudagraph_capture_sizes
+                # vLLM 0.27 has no path for explicit capture sizes that are
+                # already aligned to both speculative steps and SP. Skip its
+                # redundant TP adjustment only for that exact case.
+                if (
+                    graph_alignment
+                    > max(self.uniform_decode_query_len, tensor_parallel_size)
+                    and capture_sizes
+                    and all(size % graph_alignment == 0 for size in capture_sizes)
+                ):
+                    resolver_tensor_parallel_size = 1
             cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                 min_cg_support=min_cg_support,
                 min_cg_attn_backend=min_cg_attn_backend,
                 uniform_decode_query_len=self.uniform_decode_query_len,
                 use_v2_model_runner=False,
-                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                tensor_parallel_size=resolver_tensor_parallel_size,
                 kv_cache_config=self.kv_cache_config,
                 max_num_reqs=self.max_num_reqs,
             )

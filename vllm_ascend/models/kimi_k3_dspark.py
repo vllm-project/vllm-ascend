@@ -49,6 +49,13 @@ from vllm_ascend.models.qwen3_dspark import (
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 
 
+def _uses_causal_draft_attention(config) -> bool:
+    dflash_config = getattr(config, "dflash_config", None)
+    if isinstance(dflash_config, dict) and "causal" in dflash_config:
+        return bool(dflash_config["causal"])
+    return bool(getattr(config, "full_attention_causal", False))
+
+
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
     def __init__(
         self,
@@ -82,7 +89,8 @@ class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
             cache_config=vllm_config.cache_config,
             quant_config=quant_config,
             prefix=f"{layer_prefix}.self_attn",
-            non_causal_multi_token_decode=True,
+            non_causal_multi_token_decode=not _uses_causal_draft_attention(config),
+            disable_mlapo=True,
         )
         self.mlp = KimiMLP(
             hidden_size=config.hidden_size,
@@ -264,6 +272,10 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
 
+    def get_draft_attn_causal(self) -> list[bool]:
+        causal = _uses_causal_draft_attention(self.config)
+        return [causal] * len(self.model.layers)
+
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
@@ -275,7 +287,10 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         quantization-aware per-layer projections, so use vLLM's public loader
         interface without creating that extra packed parameter.
         """
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_substrs=list(self.checkpoint_skip_substrs),
+        )
         rotation_weight = None
         if self.rotation_path is not None:
             rotation_weight = get_rotation_matrix(self.rotation_path)

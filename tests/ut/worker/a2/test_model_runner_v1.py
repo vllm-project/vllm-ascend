@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
@@ -11,7 +12,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
-    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -134,7 +134,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.may_reinitialize_input_batch = MagicMock(side_effect=reinitialize_input_batch)
         runner.initialize_kv_cache_tensors = MagicMock(return_value={})
 
-        runner.initialize_kv_cache(SimpleNamespace(kv_cache_groups=[]))
+        runner.initialize_kv_cache(
+            KVCacheConfig(
+                num_blocks=0,
+                kv_cache_tensors=[],
+                kv_cache_groups=[],
+            )
+        )
 
         drafter.initialize_attn_backend.assert_called_once()
         self.assertEqual(
@@ -164,52 +170,102 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache_raw.numel(), kv_cache_spec.page_size_bytes)
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
 
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
-    def test_draft_mla_uses_separate_target_kv_cache_group(
-        self,
-        mock_get_layers,
-        _mock_has_ec_transfer,
-    ):
-        runner = self._build_runner()
-        runner.block_size = 16
-        runner.shared_kv_cache_layers = {}
+    def test_mla_rope_modes_use_separate_metadata_groups(self, mock_get_layers):
+        class FakeBuilder:
+            def __init__(self, _spec, layer_names, _config, _device):
+                self.layer_names = layer_names
 
-        draft_attn = MLAAttention.__new__(MLAAttention)
-        torch.nn.Module.__init__(draft_attn)
-        draft_attn.impl = SimpleNamespace(fa_quant_layer=False)
-        draft_attn.get_kv_cache_spec = MagicMock(
-            return_value=MLAAttentionSpec(
+        class FakeBackend:
+            @classmethod
+            def full_cls_name(cls):
+                return "test.FakeBackend"
+
+            @classmethod
+            def get_builder_cls(cls):
+                return FakeBuilder
+
+        runner = self._build_runner()
+        runner.attn_groups = []
+        runner._check_and_update_cudagraph_mode = MagicMock()
+        runner.calculate_reorder_batch_threshold = MagicMock()
+
+        target_layer = "language_model.model.layers.0.self_attn.attn"
+        draft_layer = "model.layers.0.self_attn.attn"
+        mock_get_layers.return_value = {
+            target_layer: SimpleNamespace(
+                impl=SimpleNamespace(use_mla_rope=False),
+                get_attn_backend=lambda: FakeBackend,
+            ),
+            draft_layer: SimpleNamespace(
+                impl=SimpleNamespace(use_mla_rope=True),
+                get_attn_backend=lambda: FakeBackend,
+            ),
+        }
+        specs = {
+            target_layer: AscendMLAAttentionSpec(
                 block_size=16,
                 num_kv_heads=1,
                 head_size=576,
                 dtype=torch.bfloat16,
-                non_causal_multi_token_decode=True,
-            )
+            ),
+            draft_layer: AscendMLAAttentionSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+            ),
+        }
+        group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+        self.assertIsNotNone(group_spec)
+        assert group_spec is not None
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[target_layer, draft_layer],
+                    kv_cache_spec=group_spec,
+                )
+            ],
         )
-        mock_get_layers.return_value = {"draft.self_attn": draft_attn}
 
-        draft_spec = runner.get_kv_cache_spec()["draft.self_attn"]
-        target_spec = AscendMLAAttentionSpec(
-            block_size=16,
-            num_kv_heads=1,
-            head_size=576,
-            dtype=torch.bfloat16,
+        runner.initialize_attn_backend(kv_cache_config)
+
+        self.assertEqual(len(runner.attn_groups), 1)
+        self.assertEqual(
+            {tuple(group.layer_names) for group in runner.attn_groups[0]},
+            {(target_layer,), (draft_layer,)},
         )
 
-        self.assertTrue(draft_spec.non_causal_multi_token_decode)
-        uniform_spec = UniformTypeKVCacheSpecs.from_specs(
-            {
-                "target.self_attn": target_spec,
-                "draft.self_attn": draft_spec,
-            }
-        )
-        self.assertIsNone(uniform_spec)
-        with self.assertRaisesRegex(
-            AssertionError,
-            "Causal target layers and non-causal multi-token draft layers",
-        ):
-            AscendMLAAttentionSpec.merge([target_spec, draft_spec])
+    def test_explicit_capture_sizes_must_align_spec_decode_and_sp(self):
+        for capture_sizes, expected_tp_size in (([48, 96], 1), ([16, 32], 16)):
+            with self.subTest(capture_sizes=capture_sizes):
+                runner = self._build_runner()
+                compilation_config = SimpleNamespace(
+                    pass_config=SimpleNamespace(enable_sp=True),
+                    cudagraph_capture_sizes=capture_sizes,
+                    resolve_cudagraph_mode_and_sizes=MagicMock(return_value=CUDAGraphMode.FULL_DECODE_ONLY),
+                )
+                runner.compilation_config = compilation_config
+                runner.vllm_config.compilation_config = compilation_config
+                runner.parallel_config = SimpleNamespace(tensor_parallel_size=16)
+                runner.uniform_decode_query_len = 6
+                runner.kv_cache_config = SimpleNamespace()
+                runner.max_num_reqs = 16
+                runner.cudagraph_dispatcher = MagicMock()
+                runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+                runner.speculative_config = None
+                runner.drafter = None
+                runner.use_aclgraph = False
+
+                runner._check_and_update_cudagraph_mode([], [])
+
+                call_kwargs = compilation_config.resolve_cudagraph_mode_and_sizes.call_args.kwargs
+                self.assertEqual(
+                    call_kwargs["tensor_parallel_size"],
+                    expected_tp_size,
+                )
 
     def test_sparse_c8_indexer_reuses_raw_cache_from_shared_descriptor(self):
         runner = self._build_runner()
