@@ -456,9 +456,12 @@ class K3DSparkModel(nn.Module):
         return [layer.self_attn.attn.layer_name for layer in self.layers]
 
     def get_draft_attn_causal(self) -> list[bool]:
-        # K3 MLA drafts verify the speculative block bidirectionally. Keep the
-        # per-layer contract aligned with get_draft_kv_cache_layer_names().
-        return [False] * len(self.layers)
+        # Older checkpoints omit the flag and use bidirectional attention.
+        causal = getattr(self.config, "full_attention_causal", False)
+        dflash_config = getattr(self.config, "dflash_config", None)
+        if dflash_config is not None:
+            causal = dflash_config.get("causal", causal)
+        return [bool(causal)] * len(self.layers)
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.markov_head.embed(token_ids)
