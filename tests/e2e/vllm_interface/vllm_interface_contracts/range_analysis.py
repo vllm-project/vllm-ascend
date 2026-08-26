@@ -360,6 +360,8 @@ def _bound_signature(
         return None
     positional_only = result[1]
     positional_or_keyword = result[2]
+    if not isinstance(positional_only, list) or not isinstance(positional_or_keyword, list):
+        return None
     if positional_only:
         positional_only.pop(0)
     elif positional_or_keyword:
@@ -403,7 +405,7 @@ def _signature_delta(
 ) -> dict[str, object] | None:
     old_parameters = _signature_parameters(old_signature)
     new_parameters = _signature_parameters(new_signature)
-    if old_parameters is None or new_parameters is None:
+    if old_parameters is None or new_parameters is None or old_signature is None or new_signature is None:
         return None
     old_by_name = {str(item["name"]): item for item in old_parameters}
     new_by_name = {str(item["name"]): item for item in new_parameters}
@@ -1235,7 +1237,7 @@ class GitSnapshot:
             descriptor=descriptor,
             access_kind=effective_access_kind,
         )
-        contract = infer_return_contract(node, resolver=self._return_resolver(file_name))
+        return_contract = infer_return_contract(node, resolver=self._return_resolver(file_name))
         return SourceEndpoint(
             file=file_name,
             owner=owner,
@@ -1250,7 +1252,7 @@ class GitSnapshot:
                 invocation_kind,
             ),
             analysis_fingerprint=resolved.fingerprint,
-            return_contract=contract.as_dict() if contract is not None else None,
+            return_contract=return_contract.as_dict() if return_contract is not None else None,
         )
 
     def expression_endpoint(self, expression: str) -> SourceEndpoint | None:
@@ -1739,8 +1741,11 @@ def _registered_oot_overrides(
                     and isinstance(node.iter.func.value, ast.Name)
                 ):
                     continue
-                key_name = node.target.elts[0].id
-                value_name = node.target.elts[1].id
+                key_target, value_target = node.target.elts
+                if not isinstance(key_target, ast.Name) or not isinstance(value_target, ast.Name):
+                    continue
+                key_name = key_target.id
+                value_name = value_target.id
                 registry_name = node.iter.func.value.id
                 for call in (
                     child for statement in node.body for child in ast.walk(statement) if isinstance(child, ast.Call)
@@ -1758,11 +1763,13 @@ def _registered_oot_overrides(
                     ):
                         continue
                     keywords = {keyword.arg: keyword.value for keyword in call.keywords if keyword.arg is not None}
+                    name_keyword = keywords.get("name")
+                    class_keyword = keywords.get("_decorated_op_cls")
                     if (
-                        isinstance(keywords.get("name"), ast.Name)
-                        and keywords["name"].id == key_name
-                        and isinstance(keywords.get("_decorated_op_cls"), ast.Name)
-                        and keywords["_decorated_op_cls"].id == value_name
+                        isinstance(name_keyword, ast.Name)
+                        and name_keyword.id == key_name
+                        and isinstance(class_keyword, ast.Name)
+                        and class_keyword.id == value_name
                     ):
                         registered_dicts.add(registry_name)
                         registration_lines[registry_name] = call.lineno
@@ -1813,7 +1820,7 @@ def _registered_oot_overrides(
                         continue
                     evidence = {
                         "file": module_info.file,
-                        "line": getattr(value, "lineno", node.lineno),
+                        "line": getattr(value, "lineno", getattr(node, "lineno", 0)),
                         "scope": f"{module_info.name}.{function.name}",
                         "registry": target_name,
                         "registration_line": registration_lines[target_name],

@@ -33,11 +33,12 @@ from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from .analysis_plans import VLLM_INTERFACE_PLAN, AnalysisPlan
 
 GENERATOR_VERSION = "0.43.0"
+_TRY_STAR_TYPE: Any = getattr(ast, "TryStar", ())
 DESCRIPTOR_KINDS = frozenset(
     {
         "ordinary",
@@ -445,9 +446,9 @@ def _scope_flow_statement(
     state = _clone_scope_binding_state(incoming)
 
     if isinstance(node, ast.If):
-        exits: list[_ScopeFlowExit] = []
+        if_exits: list[_ScopeFlowExit] = []
         if _scope_expression_may_raise(node.test):
-            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+            if_exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
         condition = _main_condition_value(node.test, tag_guard_names)
         branches: list[Sequence[ast.stmt]]
         if condition is True:
@@ -456,7 +457,7 @@ def _scope_flow_statement(
             branches = [node.orelse]
         else:
             branches = [node.body, node.orelse]
-        normal: list[dict[str, tuple[_ScopeBinding, ...]]] = []
+        if_normal: list[dict[str, tuple[_ScopeBinding, ...]]] = []
         for statements in branches:
             branch = _scope_binding_flow(
                 statements,
@@ -465,16 +466,17 @@ def _scope_flow_statement(
                 loop_body=loop_body,
                 active_exception=active_exception,
             )
-            normal.extend(branch.normal)
-            exits.extend(branch.exits)
-        return _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+            if_normal.extend(branch.normal)
+            if_exits.extend(branch.exits)
+        return _compact_scope_flow(_ScopeFlowResult(normal=if_normal, exits=if_exits))
 
-    if isinstance(node, ast.TryStar):
+    if isinstance(node, _TRY_STAR_TYPE):
         # ExceptionGroup routing differs from ordinary try/except.  Preserve
         # every explicit path conservatively until a dedicated model exists.
+        try_star_node: Any = node
         paths = [
             _scope_binding_flow(
-                node.body,
+                try_star_node.body,
                 tag_guard_names,
                 state,
                 loop_body=loop_body,
@@ -488,26 +490,26 @@ def _scope_flow_statement(
                     loop_body=loop_body,
                     active_exception=None,
                 )
-                for handler in node.handlers
+                for handler in try_star_node.handlers
             ),
         ]
-        normal = [candidate for path in paths for candidate in path.normal]
-        exits = [candidate for path in paths for candidate in path.exits]
-        if node.orelse:
+        try_star_normal = [candidate for path in paths for candidate in path.normal]
+        try_star_exits = [candidate for path in paths for candidate in path.exits]
+        if try_star_node.orelse:
             else_flow = _scope_binding_flow(
-                node.orelse,
+                try_star_node.orelse,
                 tag_guard_names,
-                _merge_scope_binding_states(normal) or state,
+                _merge_scope_binding_states(try_star_normal) or state,
                 loop_body=loop_body,
                 active_exception=active_exception,
             )
-            normal.extend(else_flow.normal)
-            exits.extend(else_flow.exits)
-        result = _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
-        if node.finalbody:
+            try_star_normal.extend(else_flow.normal)
+            try_star_exits.extend(else_flow.exits)
+        result = _compact_scope_flow(_ScopeFlowResult(normal=try_star_normal, exits=try_star_exits))
+        if try_star_node.finalbody:
             return _apply_scope_finally(
                 result,
-                node.finalbody,
+                try_star_node.finalbody,
                 tag_guard_names,
                 loop_body=loop_body,
             )
@@ -521,8 +523,8 @@ def _scope_flow_statement(
             loop_body=loop_body,
             active_exception=active_exception,
         )
-        normal: list[dict[str, tuple[_ScopeBinding, ...]]] = []
-        exits: list[_ScopeFlowExit] = [candidate for candidate in body.exits if candidate.kind != "raise"]
+        try_normal: list[dict[str, tuple[_ScopeBinding, ...]]] = []
+        try_exits: list[_ScopeFlowExit] = [candidate for candidate in body.exits if candidate.kind != "raise"]
 
         for body_state in body.normal:
             else_flow = _scope_binding_flow(
@@ -532,8 +534,8 @@ def _scope_flow_statement(
                 loop_body=loop_body,
                 active_exception=active_exception,
             )
-            normal.extend(else_flow.normal)
-            exits.extend(else_flow.exits)
+            try_normal.extend(else_flow.normal)
+            try_exits.extend(else_flow.exits)
 
         pending = [candidate for candidate in body.exits if candidate.kind == "raise"]
         for handler in node.handlers:
@@ -553,13 +555,13 @@ def _scope_flow_statement(
                     )
                     _unbind_handler_name(handler_flow.normal, handler.name)
                     _unbind_handler_name_from_exits(handler_flow.exits, handler.name)
-                    normal.extend(handler_flow.normal)
-                    exits.extend(handler_flow.exits)
+                    try_normal.extend(handler_flow.normal)
+                    try_exits.extend(handler_flow.exits)
                 if match in {_HANDLER_NEVER, _HANDLER_MAYBE}:
                     next_pending.append(raised)
             pending = next_pending
-        exits.extend(pending)
-        result = _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+        try_exits.extend(pending)
+        result = _compact_scope_flow(_ScopeFlowResult(normal=try_normal, exits=try_exits))
         if node.finalbody:
             result = _apply_scope_finally(
                 result,
@@ -570,9 +572,9 @@ def _scope_flow_statement(
         return result
 
     if isinstance(node, (ast.With, ast.AsyncWith)):
-        exits: list[_ScopeFlowExit] = []
+        with_exits: list[_ScopeFlowExit] = []
         if any(_scope_expression_may_raise(item.context_expr) for item in node.items):
-            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+            with_exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
         for item in node.items:
             if item.optional_vars is not None:
                 _bind_scope_names(
@@ -587,13 +589,13 @@ def _scope_flow_statement(
             loop_body=loop_body,
             active_exception=active_exception,
         )
-        return _compact_scope_flow(_ScopeFlowResult(normal=body.normal, exits=[*exits, *body.exits]))
+        return _compact_scope_flow(_ScopeFlowResult(normal=body.normal, exits=[*with_exits, *body.exits]))
 
     if isinstance(node, (ast.AsyncFor, ast.For, ast.While)):
-        exits: list[_ScopeFlowExit] = []
+        loop_exits: list[_ScopeFlowExit] = []
         test = node.iter if isinstance(node, (ast.AsyncFor, ast.For)) else node.test
         if _scope_expression_may_raise(test):
-            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+            loop_exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
         body_state = _clone_scope_binding_state(state)
         if isinstance(node, (ast.AsyncFor, ast.For)):
             _bind_scope_names(
@@ -608,11 +610,11 @@ def _scope_flow_statement(
             loop_body=True,
             active_exception=active_exception,
         )
-        normal = [state, *body.normal]
-        exits.extend(candidate for candidate in body.exits if candidate.kind not in {"break", "continue"})
-        normal.extend(candidate.state for candidate in body.exits if candidate.kind in {"break", "continue"})
+        loop_normal = [state, *body.normal]
+        loop_exits.extend(candidate for candidate in body.exits if candidate.kind not in {"break", "continue"})
+        loop_normal.extend(candidate.state for candidate in body.exits if candidate.kind in {"break", "continue"})
         if node.orelse:
-            merged = _merge_scope_binding_states(normal)
+            merged = _merge_scope_binding_states(loop_normal)
             if merged is not None:
                 else_flow = _scope_binding_flow(
                     node.orelse,
@@ -621,15 +623,15 @@ def _scope_flow_statement(
                     loop_body=loop_body,
                     active_exception=active_exception,
                 )
-                normal.extend(else_flow.normal)
-                exits.extend(else_flow.exits)
-        return _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+                loop_normal.extend(else_flow.normal)
+                loop_exits.extend(else_flow.exits)
+        return _compact_scope_flow(_ScopeFlowResult(normal=loop_normal, exits=loop_exits))
 
     if isinstance(node, ast.Match):
-        exits: list[_ScopeFlowExit] = []
+        match_exits: list[_ScopeFlowExit] = []
         if _scope_expression_may_raise(node.subject):
-            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
-        normal = [state]
+            match_exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+        match_normal = [state]
         for case in node.cases:
             branch = _scope_binding_flow(
                 case.body,
@@ -638,12 +640,12 @@ def _scope_flow_statement(
                 loop_body=loop_body,
                 active_exception=active_exception,
             )
-            normal.extend(branch.normal)
-            exits.extend(branch.exits)
-        return _compact_scope_flow(_ScopeFlowResult(normal=normal, exits=exits))
+            match_normal.extend(branch.normal)
+            match_exits.extend(branch.exits)
+        return _compact_scope_flow(_ScopeFlowResult(normal=match_normal, exits=match_exits))
 
     implicit_raise = _scope_simple_statement_may_raise(node)
-    exits = [_ScopeFlowExit("raise", _clone_scope_binding_state(state))] if implicit_raise else []
+    statement_exits = [_ScopeFlowExit("raise", _clone_scope_binding_state(state))] if implicit_raise else []
 
     if isinstance(node, ast.Raise):
         exception_name = active_exception if node.exc is None else _scope_exception_name(node.exc, state)
@@ -657,11 +659,11 @@ def _scope_flow_statement(
 
     if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
         if _scope_function_header_may_raise(node):
-            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+            statement_exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
         state[node.name] = (_scope_binding("function", node),)
     elif isinstance(node, ast.ClassDef):
         if _scope_class_header_may_raise(node):
-            exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
+            statement_exits.append(_ScopeFlowExit("raise", _clone_scope_binding_state(state)))
         class_flow = _scope_binding_flow(
             node.body,
             tag_guard_names,
@@ -669,7 +671,7 @@ def _scope_flow_statement(
             loop_body=False,
             active_exception=None,
         )
-        exits.extend(
+        statement_exits.extend(
             _ScopeFlowExit(
                 kind=candidate.kind,
                 state=_clone_scope_binding_state(state),
@@ -679,7 +681,7 @@ def _scope_flow_statement(
             if candidate.kind == "raise"
         )
         if not class_flow.normal:
-            return _compact_scope_flow(_ScopeFlowResult(exits=exits))
+            return _compact_scope_flow(_ScopeFlowResult(exits=statement_exits))
         state[node.name] = (_scope_binding("class", node),)
     elif isinstance(node, ast.Import):
         _bind_scope_names(
@@ -740,7 +742,7 @@ def _scope_flow_statement(
             _UNBOUND_SCOPE_BINDING,
         )
 
-    return _compact_scope_flow(_ScopeFlowResult(normal=[state], exits=exits))
+    return _compact_scope_flow(_ScopeFlowResult(normal=[state], exits=statement_exits))
 
 
 def _scope_binding_flow(
@@ -1275,7 +1277,12 @@ def _tag_guard_names(statements: Sequence[ast.stmt]) -> set[str]:
     for node in statements:
         if isinstance(node, ast.Assign) and _is_exact_tag_check(node.value):
             names.update(target.id for target in node.targets if isinstance(target, ast.Name))
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and _is_exact_tag_check(node.value):
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+            and _is_exact_tag_check(node.value)
+        ):
             names.add(node.target.id)
     return names
 
@@ -1552,7 +1559,9 @@ def _scope_must_bound_names(
 ) -> set[str]:
     """Return names present after every normally completing active-main path."""
 
-    initial = {name: (_scope_binding("value", ast.Pass()),) for name in incoming or ()}
+    initial: dict[str, tuple[_ScopeBinding, ...]] = {
+        name: (_scope_binding("value", ast.Pass()),) for name in incoming or ()
+    }
     final = _scope_final_binding_state(
         statements,
         tag_guard_names,
@@ -1653,11 +1662,11 @@ def _main_ast_walk(tree: ast.AST) -> Iterable[ast.AST]:
                 branches = node.orelse
             else:
                 branches = (*node.body, *node.orelse)
-            for child in branches:
-                yield from walk(child)
+            for branch_child in branches:
+                yield from walk(branch_child)
             return
-        for child in ast.iter_child_nodes(node):
-            yield from walk(child)
+        for ast_child in ast.iter_child_nodes(node):
+            yield from walk(ast_child)
 
     yield from walk(tree)
 
@@ -1716,7 +1725,10 @@ class StaticDecoratorTransform:
     wrapper_name: str
 
 
-def _one_json_value(values: Iterable[object]) -> tuple[object, bool]:
+_T = TypeVar("_T")
+
+
+def _one_json_value(values: Iterable[_T]) -> tuple[_T | None, bool]:
     keyed = {json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")): value for value in values}
     if len(keyed) == 1:
         return next(iter(keyed.values())), True
@@ -1800,7 +1812,11 @@ def _inspect_signature(
         return None
     positional_only, positional_or_keyword = signature[1], signature[2]
     vararg, keyword_only, kwarg = signature[3], signature[4], signature[5]
-    if not all(isinstance(items, list) for items in (positional_only, positional_or_keyword, keyword_only)):
+    if (
+        not isinstance(positional_only, list)
+        or not isinstance(positional_or_keyword, list)
+        or not isinstance(keyword_only, list)
+    ):
         return None
 
     parameters: list[inspect.Parameter] = []
@@ -1843,9 +1859,9 @@ def _inspect_signature(
 def _signature_call_witnesses(
     signature: list[object],
 ) -> list[tuple[list[object], dict[str, object]]]:
-    positional_only = signature[1]
-    positional_or_keyword = signature[2]
-    keyword_only = signature[4]
+    positional_only = cast(list[tuple[str, bool]], signature[1])
+    positional_or_keyword = cast(list[tuple[str, bool]], signature[2])
+    keyword_only = cast(list[tuple[str, bool]], signature[4])
     marker = {item[0]: object() for items in (positional_only, positional_or_keyword, keyword_only) for item in items}
 
     witnesses: list[tuple[list[object], dict[str, object]]] = []
@@ -1898,14 +1914,18 @@ def _accepts_signature_contract(
         except TypeError:
             return False
 
-    upstream_positional = [*upstream_signature[1], *upstream_signature[2]]
-    installed_positional = [*installed_signature[1], *installed_signature[2]]
+    upstream_positional_only = cast(list[tuple[str, bool]], upstream_signature[1])
+    upstream_positional_or_keyword = cast(list[tuple[str, bool]], upstream_signature[2])
+    installed_positional_only = cast(list[tuple[str, bool]], installed_signature[1])
+    installed_positional_or_keyword = cast(list[tuple[str, bool]], installed_signature[2])
+    upstream_positional = [*upstream_positional_only, *upstream_positional_or_keyword]
+    installed_positional = [*installed_positional_only, *installed_positional_or_keyword]
     for index, upstream_parameter in enumerate(upstream_positional):
         if index >= len(installed_positional):
             break
         installed_parameter = installed_positional[index]
-        upstream_is_positional_or_keyword = index >= len(upstream_signature[1])
-        installed_is_positional_only = index < len(installed_signature[1])
+        upstream_is_positional_or_keyword = index >= len(upstream_positional_only)
+        installed_is_positional_only = index < len(installed_positional_only)
         if upstream_is_positional_or_keyword and (
             installed_is_positional_only or upstream_parameter[0] != installed_parameter[0]
         ):
@@ -1952,7 +1972,12 @@ class CallableInfo:
     ) -> tuple[list[object] | None, list[object] | None, list[object] | None] | None:
         if self.property_accessor_nodes is None:
             return None
-        return tuple(_jsonable_signature(node) for node in self.property_accessor_nodes)
+        getter, setter, deleter = self.property_accessor_nodes
+        return (
+            _jsonable_signature(getter),
+            _jsonable_signature(setter),
+            _jsonable_signature(deleter),
+        )
 
 
 @dataclass(frozen=True)
@@ -2228,7 +2253,7 @@ class RepositoryIndex:
             "_descriptor_variants_by_node",
             "_decorator_references_by_node",
         ):
-            serialized = state.pop(f"__serialized{name}")
+            serialized = cast(list[tuple[ast.AST, object]], state.pop(f"__serialized{name}"))
             state[name] = {id(node): value for node, value in serialized}
         self.__dict__.update(state)
 
@@ -2366,6 +2391,7 @@ class RepositoryIndex:
                         int,
                         tuple[ast.AST | None, ast.AST | None, ast.AST | None],
                     ] = {}
+                    current_class_node = cast(ast.ClassDef, node)
 
                     def module_reference_resolver(
                         expression: ast.AST,
@@ -2387,7 +2413,7 @@ class RepositoryIndex:
                     def class_reference_resolver(
                         expression: ast.AST,
                         line: int,
-                        class_node: ast.ClassDef = node,
+                        class_node: ast.ClassDef = current_class_node,
                         active_tag_guards: set[str] = tag_guard_names,
                         current_class: str = qualified_name,
                         module_fallback: Callable[[ast.AST], set[str | None]] = module_reference_resolver,
@@ -2423,7 +2449,7 @@ class RepositoryIndex:
                     def callable_node_for_expression(
                         expression_node: ast.AST,
                         line: int,
-                        class_node: ast.ClassDef = node,
+                        class_node: ast.ClassDef = current_class_node,
                         active_tag_guards: set[str] = tag_guard_names,
                         current_module: str = module,
                         current_imports: dict[str, str] = imports,
@@ -2520,16 +2546,20 @@ class RepositoryIndex:
                                 function_line,
                             ),
                         }
+
+                        def function_reference_resolver(
+                            expression: ast.AST,
+                            current_line: int = function_line,
+                        ) -> set[str | None]:
+                            return class_reference_resolver(expression, current_line)
+
                         variants_for_node = _definition_descriptor_kinds(
                             function_node,
                             imports=imports,
                             shadowed_names=class_shadowed_names,
                             known_properties=known_properties,
                             ordinary_decorators=self.ordinary_descriptor_decorators,
-                            reference_resolver=lambda expression, line=function_line: class_reference_resolver(
-                                expression,
-                                line,
-                            ),
+                            reference_resolver=function_reference_resolver,
                         )
                         descriptor_kind = variants_for_node[0] if len(variants_for_node) == 1 else "unknown"
                         descriptor_kinds[id(function_node)] = descriptor_kind
@@ -2538,10 +2568,7 @@ class RepositoryIndex:
                         self._descriptor_variants_by_node[id(function_node)] = variants_for_node
                         self._decorator_references_by_node[id(function_node)] = _decorator_reference_tuple(
                             function_node,
-                            lambda expression, line=function_line: class_reference_resolver(
-                                expression,
-                                line,
-                            ),
+                            function_reference_resolver,
                         )
 
                         accessor_kind: str | None = None
@@ -2606,7 +2633,7 @@ class RepositoryIndex:
                         node,
                         tag_guard_names,
                     )
-                    info = ClassInfo(
+                    class_info = ClassInfo(
                         qualified_name=qualified_name,
                         module=module,
                         file=relative_file,
@@ -2616,10 +2643,10 @@ class RepositoryIndex:
                         methods={name: candidates[0] for name, candidates in method_variants.items()},
                         method_variants=method_variants,
                     )
-                    self.class_variants[qualified_name].append(info)
+                    self.class_variants[qualified_name].append(class_info)
                     self._class_variant_bindings[qualified_name].append(class_final_bindings)
-                    classes[node.name] = info
-                    self.classes[qualified_name] = info
+                    classes[node.name] = class_info
+                    self.classes[qualified_name] = class_info
                     if class_is_unconditional:
                         self.unconditional_exports.add(qualified_name)
                         self.unconditional_symbols.add(qualified_name)
@@ -2653,7 +2680,7 @@ class RepositoryIndex:
                                 name=target.id,
                                 node=class_value,
                             )
-                    for method_name, method_node in info.methods.items():
+                    for method_name, method_node in class_info.methods.items():
                         method_qualified_name = f"{qualified_name}.{method_name}"
                         variants = tuple(
                             CallableInfo(
@@ -2685,7 +2712,7 @@ class RepositoryIndex:
                                     else None
                                 ),
                             )
-                            for candidate in info.method_variants.get(method_name, (method_node,))
+                            for candidate in class_info.method_variants.get(method_name, (method_node,))
                         )
                         self.callable_variants[method_qualified_name] = variants
                         self.callables[method_qualified_name] = variants[0]
@@ -2711,7 +2738,7 @@ class RepositoryIndex:
                         is_package=is_package,
                     )
                     self._decorator_references_by_node[id(node)] = decorator_references
-                    info = CallableInfo(
+                    function_info = CallableInfo(
                         qualified_name=qualified_name,
                         module=module,
                         file=relative_file,
@@ -2729,9 +2756,9 @@ class RepositoryIndex:
                         ),
                         decorator_references=decorator_references,
                     )
-                    functions[node.name] = info
-                    self._descriptor_kinds_by_node[id(node)] = info.descriptor_kind
-                    self.callables[qualified_name] = info
+                    functions[node.name] = function_info
+                    self._descriptor_kinds_by_node[id(node)] = function_info.descriptor_kind
+                    self.callables[qualified_name] = function_info
                     if unconditional or node.name in module_must_names:
                         self.unconditional_exports.add(qualified_name)
                         self.unconditional_symbols.add(qualified_name)
@@ -2797,39 +2824,39 @@ class RepositoryIndex:
                     self.unconditional_exports.add(qualified_name)
                     self.unconditional_symbols.add(qualified_name)
 
-            for node in _main_ast_walk(tree):
-                if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            for walked_node in _main_ast_walk(tree):
+                if not isinstance(walked_node, (ast.AsyncFunctionDef, ast.FunctionDef)):
                     continue
-                qualified_name = f"{module}.{node.name}"
+                qualified_name = f"{module}.{walked_node.name}"
                 decorator_references = _scope_decorator_reference_tuple(
-                    node,
+                    walked_node,
                     statements=tree.body,
                     tag_guard_names=tag_guard_names,
                     module=module,
                     is_package=is_package,
                 )
                 self._decorator_references_by_node.setdefault(
-                    id(node),
+                    id(walked_node),
                     decorator_references,
                 )
-                loose_functions[node.name].append(
+                loose_functions[walked_node.name].append(
                     CallableInfo(
                         qualified_name=qualified_name,
                         module=module,
                         file=relative_file,
                         owner=None,
-                        name=node.name,
-                        node=node,
+                        name=walked_node.name,
+                        node=walked_node,
                         descriptor_kind=_definition_descriptor_kind(
-                            node,
+                            walked_node,
                             imports=imports,
                             shadowed_names=_scope_bound_names_before(
                                 tree.body,
-                                getattr(node, "lineno", 0),
+                                getattr(walked_node, "lineno", 0),
                             ),
                             ordinary_decorators=self.ordinary_descriptor_decorators,
                         ),
-                        decorator_references=self._decorator_references_by_node[id(node)],
+                        decorator_references=self._decorator_references_by_node[id(walked_node)],
                     )
                 )
 
@@ -2861,10 +2888,10 @@ class RepositoryIndex:
                 star_imports=tuple(star_imports),
             )
             self.modules[module] = module_info
-            for local_name, target in imports.items():
-                self.aliases[f"{module}.{local_name}"] = target
-            for export_name, target in typed_lazy_exports.items():
-                self.aliases[f"{module}.{export_name}"] = target
+            for local_name, imported_target in imports.items():
+                self.aliases[f"{module}.{local_name}"] = imported_target
+            for export_name, lazy_target in typed_lazy_exports.items():
+                self.aliases[f"{module}.{export_name}"] = lazy_target
                 self.typed_instance_aliases.add(f"{module}.{export_name}")
 
         if self._finalize_after_parse:
@@ -3332,7 +3359,8 @@ class RepositoryIndex:
                 ):
                     continue
 
-                source_variants = source.descriptor_variants or (source.descriptor_kind,)
+                source_variants: tuple[str | None, ...] = source.descriptor_variants or (source.descriptor_kind,)
+                installed_variants: tuple[str | None, ...]
                 if kind in {"classmethod", "property", "staticmethod"}:
                     installed_variants = (kind,)
                 elif source.owner is None:
@@ -3351,7 +3379,7 @@ class RepositoryIndex:
                         )
                     )
                 descriptor_kind = installed_variants[0] if len(installed_variants) == 1 else "unknown"
-                property_nodes = None
+                property_nodes: tuple[ast.AST | None, ast.AST | None, ast.AST | None] | None = None
                 if descriptor_kind == "property":
                     property_nodes = (source.node, None, None) if kind == "property" else source.property_accessor_nodes
                 variants.append(
@@ -3389,8 +3417,11 @@ class RepositoryIndex:
                 for candidate in variants
             }
             variants = [unique[key] for key in sorted(unique)]
-            class_info.methods.setdefault(member_name, variants[0].node)
-            class_info.method_variants[member_name] = tuple(candidate.node for candidate in variants)
+            variant_nodes = tuple(candidate.node for candidate in variants if candidate.node is not None)
+            if not variant_nodes:
+                continue
+            class_info.methods.setdefault(member_name, variant_nodes[0])
+            class_info.method_variants[member_name] = variant_nodes
             self.callables[qualified_name] = variants[0]
             self.callable_variants[qualified_name] = tuple(variants)
             if (
@@ -3568,11 +3599,13 @@ class RepositoryIndex:
             )
         source_class = self.find_class(target)
         if source_class is not None:
-            return replace(
-                binding,
-                kind="class",
-                node=self.find_callable(source_class.qualified_name).node,
-            )
+            class_callable = self.find_callable(source_class.qualified_name)
+            if class_callable is not None:
+                return replace(
+                    binding,
+                    kind="class",
+                    node=class_callable.node,
+                )
         return binding
 
     def find_final_callable_variants(
@@ -3874,8 +3907,12 @@ class InterfaceBoundaryGenerator:
                         ),
                     )
                 ),
-                **merged_descriptor_kinds,
-                **merged_signature_contracts,
+                upstream_descriptor_kind=merged_descriptor_kinds["upstream_descriptor_kind"],
+                downstream_descriptor_kind=merged_descriptor_kinds["downstream_descriptor_kind"],
+                installed_descriptor_kind=merged_descriptor_kinds["installed_descriptor_kind"],
+                upstream_signature_contract=merged_signature_contracts["upstream_signature_contract"],
+                downstream_signature_contract=merged_signature_contracts["downstream_signature_contract"],
+                installed_signature_contract=merged_signature_contracts["installed_signature_contract"],
                 override_paths=override_paths,
             )
             deduplicated[key] = merged_relation
@@ -4031,7 +4068,7 @@ class InterfaceBoundaryGenerator:
                     provenance.append(f"{label}:unresolved_kernel_heuristics")
                 else:
                     runtime_entry_signature = transformed_signature
-                    provenance.append(f"{label}:generated={','.join(generated_names)}")
+                    provenance.append(f"{label}:generated={','.join(generated_names or ())}")
                 continue
             if reference in _STDLIB_WRAPS_SIGNATURE_DECORATORS and not isinstance(decorator, ast.Call):
                 runtime_entry_signature = ["sync", [], [], "args", [], "kwargs"]
@@ -4202,9 +4239,9 @@ class InterfaceBoundaryGenerator:
         """Resolve a direct decorator that returns one local wrapper."""
 
         decorator = self._callable_info(reference)
-        node = decorator.node if decorator is not None else None
-        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+        if decorator is None or not isinstance(decorator.node, (ast.AsyncFunctionDef, ast.FunctionDef)):
             return None
+        node = decorator.node
         if node.decorator_list or node.args.vararg is not None or node.args.kwarg is not None:
             return None
         positional = [*node.args.posonlyargs, *node.args.args]
@@ -4398,7 +4435,7 @@ class InterfaceBoundaryGenerator:
 
         sequences = [list(result.owners) for result in base_results]
         sequences.append(bases.copy())
-        result = [qualified_name]
+        linearized_owners = [qualified_name]
         while any(sequences):
             sequences = [sequence for sequence in sequences if sequence]
             candidate = next(
@@ -4407,19 +4444,19 @@ class InterfaceBoundaryGenerator:
             )
             if candidate is None:
                 incomplete_result = MroResult(
-                    owners=tuple(result),
+                    owners=tuple(linearized_owners),
                     complete=False,
                     reason=f"invalid or ambiguous MRO at {qualified_name}",
                 )
                 self._mro_cache[qualified_name] = incomplete_result
                 return incomplete_result
-            result.append(candidate)
+            linearized_owners.append(candidate)
             for sequence in sequences:
                 if sequence and sequence[0] == candidate:
                     sequence.pop(0)
 
         complete_result = MroResult(
-            owners=tuple(result),
+            owners=tuple(linearized_owners),
             complete=True,
         )
         self._mro_cache[qualified_name] = complete_result
@@ -4522,6 +4559,7 @@ class InterfaceBoundaryGenerator:
         """
 
         cache_key = (effective_owner, method_name)
+        result: tuple[tuple[str, tuple[str, ...]], ...]
         if effective_owner in seen:
             return ()
         if cache_key in self._override_root_path_cache:
@@ -4652,6 +4690,22 @@ class InterfaceBoundaryGenerator:
             override_paths=(override_path,),
         )
         self.relations.append(relation)
+
+    @staticmethod
+    def _definitely_non_callable(node: ast.AST | None) -> bool:
+        """Recognize literal values that cannot participate in method lookup."""
+
+        return isinstance(
+            node,
+            (
+                ast.Constant,
+                ast.Dict,
+                ast.JoinedStr,
+                ast.List,
+                ast.Set,
+                ast.Tuple,
+            ),
+        )
 
     def _effective_method_resolution(
         self,

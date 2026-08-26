@@ -161,7 +161,13 @@ def call_shape(node: ast.Call) -> CallShape:
         ):
             # A dict literal resolves duplicate keys before ``**`` expansion;
             # duplicates across separate expansions still remain visible.
-            keyword_names.extend(dict.fromkeys(str(key.value) for key in keyword.value.keys))
+            keyword_names.extend(
+                dict.fromkeys(
+                    key.value
+                    for key in keyword.value.keys
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                )
+            )
         else:
             dynamic_kwargs = True
     return CallShape(
@@ -362,7 +368,16 @@ def _expression_shapes(
     if isinstance(node, ast.Dict) and all(
         isinstance(key, ast.Constant) and isinstance(key.value, str) for key in node.keys
     ):
-        return (ReturnShape("mapping", keys=tuple(sorted(str(key.value) for key in node.keys))),)
+        return (
+            ReturnShape(
+                "mapping",
+                keys=tuple(
+                    sorted(
+                        key.value for key in node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    )
+                ),
+            ),
+        )
     if isinstance(node, ast.Constant):
         return (ReturnShape("scalar", type_ref=f"builtins.{type(node.value).__name__}"),)
     if isinstance(node, ast.Name) and node.id not in seen_names:
@@ -1164,7 +1179,7 @@ class DirectCallDetector:
         node: ast.Call,
         function: ast.AsyncFunctionDef | ast.FunctionDef | None,
         module_info: ModuleInfo,
-    ) -> tuple[str, str, str, str] | None:
+    ) -> tuple[str, str, str, str, str | None, str] | None:
         if function is None or not isinstance(node.func, ast.Attribute) or not isinstance(node.func.value, ast.Name):
             return None
         root = node.func.value.id
@@ -1185,7 +1200,7 @@ class DirectCallDetector:
         if resolved is None:
             return None
         target = f"{resolved}.{node.func.attr}"
-        return (target, "instance", resolved, node.func.attr)
+        return (target, "instance", resolved, node.func.attr, None, "new_exact")
 
     def _resolve_in_scope(
         self,
@@ -1226,7 +1241,7 @@ class DirectCallDetector:
         node: ast.Call,
         function: ast.AsyncFunctionDef | ast.FunctionDef | None,
         module_info: ModuleInfo,
-    ) -> tuple[str, str, str, str] | None:
+    ) -> tuple[str, str, str, str, str | None, str] | None:
         if not isinstance(node.func, ast.Attribute):
             return None
         annotation_reference: str | None = None
@@ -1242,7 +1257,7 @@ class DirectCallDetector:
             # This remains a candidate receiver path, not proof that the
             # symbol is a class.  Old/new endpoint resolution must each prove
             # the class and inherited member independently.
-            return (f"{reference}.{node.func.attr}", "instance", reference, node.func.attr)
+            return (f"{reference}.{node.func.attr}", "instance", reference, node.func.attr, None, "new_exact")
         if function is not None and isinstance(node.func.value, ast.Name):
             root = node.func.value.id
             binding = self._constructed_instance_bindings(function, module_info).get(root)
@@ -1284,7 +1299,7 @@ class DirectCallDetector:
                     )
                 if reference is None:
                     return None
-                return (f"{reference}.{node.func.attr}", "instance", reference, node.func.attr)
+                return (f"{reference}.{node.func.attr}", "instance", reference, node.func.attr, None, "new_exact")
         if annotation_reference is None:
             return None
         try:
@@ -1299,7 +1314,7 @@ class DirectCallDetector:
         if reference is None:
             return None
         target = f"{reference}.{node.func.attr}"
-        return (target, "instance", reference, node.func.attr)
+        return (target, "instance", reference, node.func.attr, None, "new_exact")
 
     def _resolved_access_kind(
         self,
@@ -1349,7 +1364,7 @@ class DirectCallDetector:
                     callable_node = node.func.value
                 function_node = _nearest(node, parents, (ast.FunctionDef, ast.AsyncFunctionDef))
                 function = function_node if isinstance(function_node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
-                special = None
+                special: tuple[str, str, str, str, str | None, str] | None = None
                 if invocation_kind == "python_call":
                     special = self._self_or_super_target(node, parents, module_info.name)
                     special = special or self._annotated_instance_target(node, function, module_info)
@@ -1373,13 +1388,17 @@ class DirectCallDetector:
                 )
                 if special is None and may_be_constructed:
                     special = self._constructed_instance_target(node, function, module_info)
+                receiver_type: str | None
+                member: str | None
+                lookup_root: str | None
+                access_kind: str
                 if special is not None:
                     targets = {special[0]}
                     access_kind = special[1]
                     receiver_type = special[2]
                     member = special[3]
-                    lookup_root = special[4] if len(special) > 4 else None
-                    resolution_basis = special[5] if len(special) > 5 else "new_exact"
+                    lookup_root = special[4]
+                    resolution_basis = special[5]
                 else:
                     if root not in candidate_roots:
                         continue
@@ -1394,14 +1413,15 @@ class DirectCallDetector:
                     if invocation_kind == _TRITON_KERNEL_PROTOCOL and not self._triton_launch_target(resolved):
                         continue
                     targets = {resolved}
-                    access_kind = self._resolved_access_kind(
+                    resolved_access_kind = self._resolved_access_kind(
                         node,
                         resolved,
                         function,
                         module_info,
                     )
-                    if access_kind is None:
+                    if resolved_access_kind is None:
                         continue
+                    access_kind = resolved_access_kind
                     receiver_type = None
                     member = callable_node.attr if isinstance(callable_node, ast.Attribute) else None
                     lookup_root = None

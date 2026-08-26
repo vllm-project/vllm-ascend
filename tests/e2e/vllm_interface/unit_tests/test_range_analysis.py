@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from tests.e2e.vllm_interface.vllm_interface_contracts import cli as cli_module
 from tests.e2e.vllm_interface.vllm_interface_contracts.generator import (
@@ -65,7 +66,7 @@ def _run(
     old_sha: str,
     new_sha: str,
     ascend_sha: str,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return analyze_range(
         vllm_root=vllm_root,
         ascend_root=ascend_root,

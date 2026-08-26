@@ -337,6 +337,21 @@ def test_same_line_receiver_rebinding_is_not_verified(tmp_path: Path) -> None:
     assert not [item for item in calls if item.callee == "self.run"]
 
 
+def test_non_callable_member_blocks_upstream_method_fallback(tmp_path: Path) -> None:
+    calls = _direct_calls(
+        tmp_path,
+        (
+            "from vllm.api import Base\n\n"
+            "class Child(Base):\n"
+            "    run = None\n"
+            "    def use(self):\n"
+            "        return self.run(1)\n"
+        ),
+        "class Base:\n    def run(self, value): return value\n",
+    )
+    assert not [item for item in calls if item.callee == "self.run"]
+
+
 def test_same_line_constructed_receiver_is_verified(tmp_path: Path) -> None:
     calls = _direct_calls(
         tmp_path,
