@@ -76,6 +76,7 @@ private:
     GM_ADDR outGM_;
     GM_ADDR gmExpertTokenNums_;
     GM_ADDR workspaceGM_;
+    GM_ADDR mc2InitTiling_;
 
     GM_ADDR moeInitRoutingQuantV2Scale = nullptr;
     GM_ADDR moeInitRoutingQuantV2Offset = nullptr;
@@ -154,6 +155,7 @@ __aicore__ inline void DispatchFFNCombineW4A8<TemplateMMA2ACFunc>::Init(GM_ADDR 
     maxOutputSize = tilingData.dispatchFFNCombineW4A8Info.maxOutputSize;
     listLen = tilingData.dispatchFFNCombineW4A8Info.listLen;
     swigluLimit = tilingData.dispatchFFNCombineW4A8Info.swigluLimit;
+    mc2InitTiling_ = reinterpret_cast<GM_ADDR>(&(tiling->mc2InitTiling));
 
     m0 = tilingData.cocTiling.m0;
     k0 = tilingData.cocTiling.k0;
@@ -281,7 +283,7 @@ __aicore__ inline void DispatchFFNCombineW4A8<TemplateMMA2ACFunc>::Process()
         outGM_, layoutD1, layoutD2,
         expertIdGM_, moeInitRoutingQuantV2Scale, moeInitRoutingQuantV2Offset,
         expertTokensBeforeCapacity, probs_,
-        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData, swigluLimit};
+        workspaceGM_, gmExpertTokenNums_, ubMoveNum, xActiveMaskGM_, moeInitRoutingQuantV2TilingData, swigluLimit, nullptr, mc2InitTiling_};
     //Call kernel
     MatmulKernel kernel(params);
     kernel(params);
