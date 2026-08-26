@@ -133,9 +133,9 @@ class TestTokenDispatcherWithMC2(TestBase):
         )
         self.ascend_soc_version_patch.start()
 
-        # Mock get_ascend_config() and is_hierarchical_communication_enabled()
+        # Mock get_ascend_config() and is_mc2_optimized_communication_enabled()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_mc2_hierarchy_comm = False
+        mock_ascend_config.enable_mc2_optimized_comm = False
         mock_ascend_config.eplb_config = MagicMock()
         mock_ascend_config.eplb_config.dynamic_eplb = False
         self.ascend_config_patch = patch(
@@ -144,10 +144,10 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.ascend_config_patch.start()
         self.ascend_config_utils_patch = patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config)
         self.ascend_config_utils_patch.start()
-        self.hier_comm_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.is_hierarchical_communication_enabled", return_value=False
+        self.optimized_comm_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.is_mc2_optimized_communication_enabled", return_value=False
         )
-        self.hier_comm_patch.start()
+        self.optimized_comm_patch.start()
         self.skip_allreduce_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.should_skip_allreduce_across_dp_group", return_value=False
         )
@@ -165,7 +165,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.ascend_soc_version_patch.stop()
         self.ascend_config_patch.stop()
         self.ascend_config_utils_patch.stop()
-        self.hier_comm_patch.stop()
+        self.optimized_comm_patch.stop()
         self.skip_allreduce_patch.stop()
 
     def test_init(self):
@@ -341,8 +341,10 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.dispatcher.need_extra_args = True
         self.dispatcher.enable_dispatch_v2 = True
         self.dispatcher.moe_expert_num = len(expert_map)
+        self.dispatcher.enable_optimized_comm = True
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
         self.assertIn("tp_send_counts", kwargs)
+        self.assertEqual(kwargs["comm_alg"], "fullmesh_v2")
 
     def test_get_dispatch_mc2_kwargs_with_mxfp8_quant(self):
         hidden_states = torch.randn(10, 128)

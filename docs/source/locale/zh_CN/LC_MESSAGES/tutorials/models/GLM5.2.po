@@ -929,10 +929,10 @@ msgstr "支持的MC2通信模式取决于专家并行（EP）通信域是否跨�
 
 msgid ""
 "- If the EP communication domain is contained within a physical node, no change to the existing configuration is required. Fused MC2 remains supported.\n"
-"    - If the EP communication domain spans physical nodes, Fused MC2 is not supported. Hierarchical MC2 communication over RoCE is required and must be enabled by adding `\"enable_mc2_hierarchy_comm\": true` to `--additional-config`."
+"    - If the EP communication domain spans physical nodes, Fused MC2 is not supported. Optimized MC2 communication is required (hierarchy for dispatch and fullmesh_v2 for combine) and must be enabled by adding `\"enable_mc2_optimized_comm\": true` to `--additional-config`."
 msgstr ""
 "- 如果EP通信域包含在单个物理节点内，则无需更改现有配置，仍支持Fused MC2。\n"
-"    - 如果EP通信域跨越物理节点，则不支持Fused MC2。需要通过RoCE进行分层MC2通信，并且必须通过在`--additional-config`中添加`\"enable_mc2_hierarchy_comm\": true`来启用。"
+"    - 如果EP通信域跨越物理节点，则不支持Fused MC2。必须启用优化MC2通信（dispatch使用hierarchy，combine使用fullmesh_v2），并在`--additional-config`中添加`\"enable_mc2_optimized_comm\": true`。"
 
 msgid "**Example**"
 msgstr "**示例**"
@@ -960,11 +960,11 @@ msgid "Apply the following Fused MC2 setting on every node:"
 msgstr "在每个节点上应用以下Fused MC2设置："
 
 msgid ""
-"Merge `\"enable_mc2_hierarchy_comm\": true` into the existing `--additional-"
+"Merge `\"enable_mc2_optimized_comm\": true` into the existing `--additional-"
 "config` JSON object. The following pattern uses `...` to represent the "
 "existing fields:"
 msgstr ""
-"将`\"enable_mc2_hierarchy_comm\": true`合并到现有的`--additional-config` "
+"将`\"enable_mc2_optimized_comm\": true`合并到现有的`--additional-config` "
 "JSON对象中。以下模式使用`...`表示现有字段："
 
 msgid ""

@@ -239,7 +239,7 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
-    enable_mc2_hierarchy_comm: bool = False
+    enable_mc2_optimized_comm: bool = False
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     draft_window_size: int | None = None
@@ -501,7 +501,7 @@ class AscendConfig:
             and vc.compilation_config.pass_config.enable_sp
         )
 
-        self._validate_mc2_hierarchy_comm(vc)
+        self._validate_mc2_optimized_comm(vc)
 
         # mega_moe_max_tokens range
         if self.mega_moe_max_tokens <= 0:
@@ -532,8 +532,8 @@ class AscendConfig:
         self._validate_sparse_c8_kv_offload_compatibility()
         return self
 
-    def _validate_mc2_hierarchy_comm(self, vllm_config: VllmConfig) -> None:
-        if not self.enable_mc2_hierarchy_comm:
+    def _validate_mc2_optimized_comm(self, vllm_config: VllmConfig) -> None:
+        if not self.enable_mc2_optimized_comm:
             return
 
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
@@ -541,7 +541,7 @@ class AscendConfig:
         device_type = get_ascend_device_type()
         if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
             raise NotImplementedError(
-                f"enable_mc2_hierarchy_comm is only supported on A2 and A3, but got {device_type.name}."
+                f"enable_mc2_optimized_comm is only supported on A2 and A3, but got {device_type.name}."
             )
 
         num_logical_experts = vllm_config.model_config.get_num_experts()
@@ -549,7 +549,7 @@ class AscendConfig:
         num_experts = num_logical_experts + num_redundant_experts
         if num_experts > 512:
             raise ValueError(
-                "enable_mc2_hierarchy_comm supports at most 512 experts, "
+                "enable_mc2_optimized_comm supports at most 512 experts, "
                 f"but got {num_experts} experts "
                 f"({num_logical_experts} logical experts + {num_redundant_experts} EPLB redundant experts)."
             )
