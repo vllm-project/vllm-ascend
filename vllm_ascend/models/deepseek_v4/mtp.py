@@ -118,16 +118,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         previous_hidden_states = previous_hidden_states.view(-1, self.hc_mult, self.config.hidden_size)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
-        if self.use_v2_model_runner:
-            # The Ascend unquantized linear graph path currently models GEMM
-            # as a 2-D operation. Preserve the V1 path and only flatten the HC
-            # axis for the V2 model runner before restoring the original shape.
-            projected_hidden_states = self.h_proj(previous_hidden_states.flatten(0, 1)).view_as(
-                previous_hidden_states
-            )
-        else:
-            projected_hidden_states = self.h_proj(previous_hidden_states)
-        hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + projected_hidden_states
+        hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + self.h_proj(previous_hidden_states)
 
         hidden_states, residual = self.mtp_block(
             positions=positions,

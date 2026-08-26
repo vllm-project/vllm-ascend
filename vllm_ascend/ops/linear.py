@@ -61,8 +61,7 @@ def unquantized_gemm_fake(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    output_shape = (x.shape[0], weight.shape[0])
-    return torch.empty(output_shape, dtype=x.dtype, device=x.device)
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
 
 direct_register_custom_op(
