@@ -19,7 +19,7 @@ msgstr ""
 "Generated-By: detect_po_changes.py\n"
 
 msgid "# feature_matrix"
-msgstr "# 功能矩阵"
+msgstr "# 特性矩阵"
 
 msgid ""
 "The table below shows mutually exclusive features and the support on Ascend "

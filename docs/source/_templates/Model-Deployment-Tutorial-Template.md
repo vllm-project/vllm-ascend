@@ -47,7 +47,7 @@ This section introduces the features supported by the model, including supported
 
 **Example 2: Reference Citation**
 
-Please refer to the [Supported Features List](../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Please refer to the [Supported Models](../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
 Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for feature configuration information.
 
@@ -179,11 +179,11 @@ Expected Result: Omitted (fill in according to actual output).
 
 **Content Writing Requirements:** Introduce standardized methods and tools for evaluating model output quality (accuracy). Two accuracy evaluation methods are provided below as examples; alternatively, provide direct links to existing documentation.
 
-### Using AISBench
+### 7.1 Using AISBench
 
 For details, please refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md).
 
-### Using Language Model Evaluation Harness
+### 7.2 Using Language Model Evaluation Harness
 
 Using the `gsm8k` dataset as an example test dataset, run the accuracy evaluation for `DeepSeek-V3.2-W8A8` in online mode.
 
@@ -214,7 +214,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
 
-#### Table 1: Scenario Overview
+**Table 1: Scenario Overview**
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 | ---------- | ---------------- | ------------- | ---------------- | ------------------------ |
@@ -224,7 +224,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
-#### Table 2: Detailed Node Configuration
+**Table 2: Detailed Node Configuration**
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
 | ---------- | --------------- | ------- | ---- | ---- | ---- | ------------- | -------------------- | --------------------- | ----------- | ----------- | -------------- | ------------------ |
@@ -258,7 +258,7 @@ If the model has specific optimizations, summarize the key optimization techniqu
 
 **Example:**
 
-#### Optimizations Enabled by Default
+**Optimizations Enabled by Default**
 
 The following optimizations are enabled by default and require no additional configuration:
 
@@ -269,7 +269,7 @@ The following optimizations are enabled by default and require no additional con
 | Zero-like Elimination | Removes unnecessary zero-tensor operations in Attention forward pass | Reduces memory footprint, improves matrix operation efficiency |
 | FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |
 
-#### Optimizations That Require Explicit Enabling
+**Optimizations That Require Explicit Enabling**
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | --------------------- | -------------------- | ----------------- | ------------------- | ----------- |

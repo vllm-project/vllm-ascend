@@ -284,6 +284,12 @@ msgstr ""
 "关于性能调优，请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)中的通用调优方法，包括操作系统优化"
 " (jemalloc, tcmalloc)、`torch_npu` 优化（内存和调度）以及 CANN 优化。"
 
+msgid ""
+"Please refer to the [Feature "
+"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr "详细的功能描述请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
+
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
 

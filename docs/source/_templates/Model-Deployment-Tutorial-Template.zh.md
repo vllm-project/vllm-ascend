@@ -47,9 +47,9 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **示例2：引用**
 
-请参考[支持的功能列表](../user_guide/support_matrix/supported_models.md)，获取模型支持的功能矩阵。
+请参考[模型支持列表](../user_guide/support_matrix/supported_models.md)，获取模型支持的特性。
 
-请参考[特性指南](../user_guide/feature_guide/index.md)获取功能配置信息。
+请参考[特性指南](../user_guide/feature_guide/index.md)，获取功能配置信息。
 
 ## 3 前置准备
 
@@ -179,11 +179,11 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **资料写作要求：** 介绍评估模型输出质量（精度）的标准化方法及工具，以下提供两种精度评估方法作为示例；或直接链接现有文档进行呈现。
 
-### AISBench的使用
+### 7.1 AISBench的使用
 
 详情请参考[Using AISBench](../developer_guide/evaluation/using_ais_bench.md)。
 
-### Language Model Evaluation Harness的使用
+### 7.2 Language Model Evaluation Harness的使用
 
 以`gsm8k`数据集作为测试数据集为例，在线模式下运行`DeepSeek-V3.2-W8A8`的精度评估。
 
@@ -204,7 +204,7 @@ lm_eval \
 
 ## 9 性能调优
 
-### 9.1推荐配置
+### 9.1 推荐配置
 
 **资料写作要求：**
 
@@ -214,7 +214,7 @@ lm_eval \
 
 > **说明**：以下配置基于特定测试环境验证，仅作参考。实际最优配置取决于最大输入输出长度、前缀缓存命中率、精度要求、部署机器配比等因素，建议根据实际参考9.2章节进行调优。
 
-#### 表1：场景概览
+**表1：场景概览**
 
 | 场景 | 部署形态 | *总卡数 | 权重版本 | 场景要点 |
 |------|------|---------|----------|----------|
@@ -224,7 +224,7 @@ lm_eval \
 
 > `*总卡数` 表示所有节点使用的 NPU 总数。
 
-#### 表2：节点详细配置
+**表2：节点详细配置**
 
 | 场景 | 配置 | 卡数 | TP | DP | 最大序列数 | 最大批量Token数 | 最大上下文 | MTP投机数 | FUSED_MC2 | EP开关 | FC+CP开关 | 异步调度 |
 |------|------|------|----|----|----|------|----------|---------|---------------|--------|-------|------|
@@ -248,7 +248,7 @@ lm_eval \
 **示例：**
 
 请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)获得调优方法。
-请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)获得详细特性说明。
+请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)获得详细特性说明。
 
 #### 9.2.2  模型特有优化（可选）
 
@@ -258,7 +258,7 @@ lm_eval \
 
 **示例：**
 
-#### 默认启用的优化
+**默认启用的优化**
 
 以下优化默认启用，无需额外配置：
 
@@ -269,7 +269,7 @@ lm_eval \
 | Zero-like Elimination | 移除Attention前向中的非必要零张量操作 | 减少内存占用，提高矩阵运算效率 |
 | FullGraph优化 | 通过`compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}`将整个解码图一次性捕获重放 | 显著降低调度延迟，稳定多设备性能 |
 
-#### 需显式开启的优化
+**需显式开启的优化**
 
 | 优化技术 | 适用场景 | 启用方式 | 技术原理 | 注意事项 |
 | --------- | --------- | --------- | --------- | --------- |
