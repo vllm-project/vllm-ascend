@@ -412,8 +412,12 @@ jobs:
         env:
           SOC_VERSION: ascend910b1
         run: |
-          grep -v '^uc-manager$' requirements-dev.txt > /tmp/req-dev-nouc.txt
-          uv pip install -r /tmp/req-dev-nouc.txt
+          # Keep the filtered copy in the repo root so the `-r
+          # requirements-lint.txt` / `-r requirements.txt` includes inside
+          # requirements-dev.txt still resolve relative to the checkout.
+          grep -v '^uc-manager$' requirements-dev.txt > requirements-dev-nouc.txt
+          uv pip install -r requirements-dev-nouc.txt
+          rm -f requirements-dev-nouc.txt
           python3 - <<'PY'
           import importlib.util
           import os
