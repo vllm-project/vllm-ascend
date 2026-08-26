@@ -31,6 +31,10 @@ DSPARK_MAIN_MODEL = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
 MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
 
+@pytest.mark.skip(
+    reason="Temporarily skipped due to Ascend vector core timeout in "
+    "https://github.com/vllm-project/vllm-ascend/actions/runs/32917991546/job/98027616603"
+)
 @pytest.mark.e2e_model(MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
