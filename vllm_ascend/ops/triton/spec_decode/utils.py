@@ -18,6 +18,40 @@
 from vllm.triton_utils import tl, triton
 
 
+@triton.jit
+def dcp_local_slot(
+    positions,
+    req_indices,
+    block_table_ptr,
+    block_table_stride,
+    logical_block_size,
+    physical_block_size,
+    blocks_per_phys_block,
+    dcp_rank,
+    DCP_SIZE: tl.constexpr,
+    DCP_INTERLEAVE: tl.constexpr,
+    PAD_ID: tl.constexpr,
+    mask,
+):
+    """Return rank-local KV slots for Ascend's DCP block-table layout."""
+    virtual_physical_block_size = physical_block_size * DCP_SIZE
+    physical_block_idx = positions // virtual_physical_block_size
+    virtual_block_offsets = positions % virtual_physical_block_size
+
+    is_local = virtual_block_offsets // DCP_INTERLEAVE % DCP_SIZE == dcp_rank
+    local_physical_offsets = (
+        virtual_block_offsets // (DCP_SIZE * DCP_INTERLEAVE) * DCP_INTERLEAVE + virtual_block_offsets % DCP_INTERLEAVE
+    )
+    logical_block_idx = physical_block_idx * blocks_per_phys_block + (local_physical_offsets // logical_block_size)
+    block_numbers = tl.load(
+        block_table_ptr + req_indices * block_table_stride + logical_block_idx,
+        mask=mask,
+        other=0,
+    ).to(tl.int64)
+    local_slots = block_numbers * logical_block_size + (local_physical_offsets % logical_block_size)
+    return tl.where(is_local, local_slots, PAD_ID)
+
+
 @triton.jit(do_not_specialize=["num_reqs"])
 def prepare_inputs_padded_kernel(
     cu_num_draft_tokens_ptr,  # [num_reqs]
@@ -92,6 +126,13 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     num_speculative_tokens,  # tl.int32
     total_input_tokens,  # tl.int32
     batch_size,  # tl.int32
+    dcp_rank=0,  # tl.int32
+    dcp_logical_block_size=1,  # tl.int32
+    dcp_physical_block_size=1,  # tl.int32
+    dcp_blocks_per_phys_block=1,  # tl.int32
+    DCP_SIZE: tl.constexpr = 1,
+    DCP_INTERLEAVE: tl.constexpr = 1,
+    PAD_ID: tl.constexpr = -1,
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
     TILE_SIZE: tl.constexpr = 256,
@@ -155,11 +196,29 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         # rather than from query_pos. For text-only inputs the two values are
         # identical, so this only changes behaviour for multimodal inputs.
         query_kv_slot_pos = effective_seq_len + q_idx
-        block_num_q = query_kv_slot_pos // block_size
-        block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
-            tl.int64
-        )
-        slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
+        if DCP_SIZE > 1:
+            slot_q = dcp_local_slot(
+                query_kv_slot_pos,
+                req_idx,
+                block_table_ptr,
+                block_table_stride,
+                dcp_logical_block_size,
+                dcp_physical_block_size,
+                dcp_blocks_per_phys_block,
+                dcp_rank,
+                DCP_SIZE,
+                DCP_INTERLEAVE,
+                PAD_ID,
+                mask,
+            )
+        else:
+            block_num_q = query_kv_slot_pos // block_size
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_num_q,
+                mask=mask,
+                other=0,
+            ).to(tl.int64)
+            slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
         bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
