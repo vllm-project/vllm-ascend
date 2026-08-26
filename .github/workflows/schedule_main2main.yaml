@@ -403,12 +403,17 @@ jobs:
       # main2main-e2e workflow's prepare job).  UT/mypy consume the checkout
       # through PYTHONPATH; only the _build_info.py stub is generated, which
       # tests/ut/device imports at module load.
+      #
+      # uc-manager is excluded: it has no amd64 wheel and its sdist build
+      # fetches vendor deps over git, which fails on this runner (run
+      # 32985956048).  It is a device-side library — no CPU UT imports it.
       - name: Install vllm-ascend deps only (no csrc compile/install)
         working-directory: ${{ github.workspace }}
         env:
           SOC_VERSION: ascend910b1
         run: |
-          uv pip install -r requirements-dev.txt
+          grep -v '^uc-manager$' requirements-dev.txt > /tmp/req-dev-nouc.txt
+          uv pip install -r /tmp/req-dev-nouc.txt
           python3 - <<'PY'
           import importlib.util
           import os
