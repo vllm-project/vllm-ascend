@@ -591,20 +591,6 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 22. Removed: platform/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#    What:
-#       Deleted. The v2 model runner enablement no longer uses a patch;
-#       `NPUPlatform.check_and_update_config` replaces
-#       `VllmConfig.use_v2_model_runner` with an Ascend whitelist property
-#       defined in `vllm_ascend/platform.py`. The property uses a two-level
-#       whitelist: a model whitelist (default-V2 architectures and non-MoE
-#       models) is enabled first, and a whitelisted model may then stack only
-#       the whitelisted features (`eagle`/`mtp` spec decoding); anything else
-#       falls back to the V1 runner. `VLLM_USE_V2_MODEL_RUNNER` still overrides.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm-ascend/pull/11692
-#
 # * Worker Patch:
 # ===============
 # Entries are listed in alphabetical order by file name.
@@ -1135,15 +1121,6 @@
 #    Future Plan:
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
-#
-# ** 29. Removed: worker/patch_v2/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#    What:
-#       Deleted together with `platform/patch_use_v2_model_runner.py`.
-#       The Ascend whitelist property for `VllmConfig.use_v2_model_runner`
-#       is now applied in `NPUPlatform.check_and_update_config`, which runs
-#       in both EngineCore subprocesses and workers, so the compatibility
-#       import module is no longer needed.
 #
 # ** 30. File: worker/patch_v2/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
