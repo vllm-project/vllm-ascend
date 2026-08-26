@@ -1,16 +1,17 @@
 # vllm-ascend .dockerignore
-# 减少 build context 大小，加速 buildkitd 上传
-# 注意：csrc/, cmake/, CMakeLists.txt, pyproject.toml, setup.py, vllm_ascend/ 必须保留
+# Reduce build context size to speed up buildkitd upload.
+# NOTE: Keep csrc/, cmake/, CMakeLists.txt, pyproject.toml, setup.py,
+#       vllm_ascend/ and .github/ (.github/workflows/scripts/install_daily_deps.sh
+#       is COPY'd into all images; cannot be restored once .github is ignored).
 
-# Git 历史（最大头 ~92M）
+# Git history (largest, ~92M)
 .git/
 .gitattributes
 .gitignore
 .gitmodules
 .patch
 
-# CI / 工具链 / IDE
-.github/
+# Tooling / IDE
 .agents/
 .claude/
 .gemini/
@@ -23,18 +24,18 @@ CONTRIBUTING.md
 DCO
 codecov.yml
 
-# 其他 markdown（README.md 要保留，setup.py 引用它做 long_description）
+# Other markdown (README.md must be kept, setup.py uses it for long_description)
 docs/*.md
 examples/*.md
 benchmarks/*.md
 
-# 文档 / 示例 / 测试 / 基准（构建和运行都不需要）
+# Docs / examples / tests / benchmarks (not needed at build or runtime)
 docs/
 examples/
 benchmarks/
 tests/
 
-# Python 缓存 / 构建产物
+# Python cache / build artifacts
 __pycache__/
 *.pyc
 *.egg-info/
@@ -42,10 +43,10 @@ __pycache__/
 *.egg
 dist/
 
-# 注意：不能排除 build/！csrc/cmake/third_party/build/modules/patch/*.patch 被构建引用
-# （abseil-cpp.cmake / ascend_protobuf.cmake 用 PATCH_COMMAND patch -p1 < .../build/modules/patch/*.patch）
+# NOTE: build/ is NOT excluded - csrc/cmake/third_party/build/modules/patch/*.patch
+#       is referenced by abseil-cpp.cmake / ascend_protobuf.cmake (PATCH_COMMAND).
 
-# 本地环境
+# Local environment
 .venv/
 venv/
 .env
