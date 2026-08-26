@@ -4364,14 +4364,17 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec
                     )
 
-                    # vLLM #51718 packs every layer of a dense group into a single
-                    # KVCacheTensor on main (size = num_layers * page_size * num_blocks).
-                    # Each layer owns its own page_size * num_blocks region, which is
-                    # exactly the per-layer size v0.27.1 stored directly on the tensor.
+                    # vLLM #51718 packs every layer of a group into a single
+                    # KVCacheTensor on main (size = num_layers * page_size * num_blocks,
+                    # `layers` lists every layer). Each layer owns an equal share, so
+                    # divide by the layer count to recover the per-layer size that
+                    # v0.27.1 stored directly on the tensor. Dividing the tensor
+                    # directly (rather than via the spec's page_size_bytes) stays
+                    # correct even when a group spec reports the summed page size.
                     kv_cache_tensor_size = (
                         kv_cache_tensor.size
                         if vllm_version_is("0.27.1")
-                        else kv_cache_config.num_blocks * current_kv_cache_spec.page_size_bytes
+                        else kv_cache_tensor.size // len(shared_layers)
                     )
                     if current_sparse_sfa_c8:
                         k_tensor_size = kv_cache_tensor_size
