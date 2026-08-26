@@ -52,9 +52,7 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
         from vllm.forward_context import get_forward_context, is_forward_context_available
 
         if is_forward_context_available():
-            scale_alg = get_forward_context().additional_kwargs.get(
-                "dynamic_mx_quant_scale_alg"
-            )
+            scale_alg = get_forward_context().additional_kwargs.get("dynamic_mx_quant_scale_alg")
             if scale_alg is not None:
                 return scale_alg
 
