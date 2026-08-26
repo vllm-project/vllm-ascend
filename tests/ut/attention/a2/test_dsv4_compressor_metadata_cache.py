@@ -24,7 +24,13 @@ def _make_forward_context() -> ForwardContext:
 
 
 def test_reuses_by_cache_group_and_resets_between_substeps():
-    metadata = SimpleNamespace(
+    class PrefillMetadata(SimpleNamespace):
+        pass
+
+    class DecodeMetadata(SimpleNamespace):
+        pass
+
+    metadata = PrefillMetadata(
         cache_group_key="model.layers.0.self_attn.attn",
         full_compress_cos=torch.zeros((2, 1, 1, 4)),
         full_compress_sin=torch.zeros((2, 1, 1, 4)),
@@ -35,14 +41,15 @@ def test_reuses_by_cache_group_and_resets_between_substeps():
         num_compressed_tokens=1,
         num_reqs_actual=1,
     )
-    same_group_metadata = SimpleNamespace(**vars(metadata))
-    other_group_metadata = SimpleNamespace(
+    same_group_metadata = PrefillMetadata(**vars(metadata))
+    same_group_decode_metadata = DecodeMetadata(**vars(metadata))
+    other_group_metadata = PrefillMetadata(
         **{
             **vars(metadata),
             "cache_group_key": "model.layers.0.self_attn.indexer.k_cache",
         }
     )
-    outputs = [(torch.full((1,), value),) * 3 for value in range(4)]
+    outputs = [(torch.full((1,), value),) * 3 for value in range(5)]
 
     with (
         patch.object(
@@ -60,6 +67,7 @@ def test_reuses_by_cache_group_and_resets_between_substeps():
         with override_forward_context(_make_forward_context()):
             first = get_or_compute_compressor_metadata(metadata, 4)
             reused = get_or_compute_compressor_metadata(same_group_metadata, 4)
+            decode = get_or_compute_compressor_metadata(same_group_decode_metadata, 4)
             isolated = get_or_compute_compressor_metadata(other_group_metadata, 4)
             reset_compressor_metadata_cache()
             next_substep = get_or_compute_compressor_metadata(metadata, 4)
@@ -67,7 +75,8 @@ def test_reuses_by_cache_group_and_resets_between_substeps():
             next_forward = get_or_compute_compressor_metadata(metadata, 4)
 
     assert first is reused
+    assert decode is not first
     assert isolated is not first
     assert next_substep is not first
     assert next_forward is not first
-    assert metadata_op.call_count == 4
+    assert metadata_op.call_count == 5

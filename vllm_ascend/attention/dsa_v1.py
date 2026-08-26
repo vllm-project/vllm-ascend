@@ -72,13 +72,17 @@ def get_or_compute_compressor_metadata(
 ) -> CompressorMetadataOutput:
     """Build compressor metadata once per cache group in the current substep."""
     forward_context = get_forward_context()
-    cache: dict[str, CompressorMetadataOutput] = forward_context.additional_kwargs.setdefault(
+    cache: dict[tuple[str, type], CompressorMetadataOutput] = forward_context.additional_kwargs.setdefault(
         _COMPRESSOR_METADATA_CACHE_KEY,
         {},
     )
-    cache_key = metadata.cache_group_key
-    if not cache_key:
+    cache_group_key = metadata.cache_group_key
+    if not cache_group_key:
         raise ValueError("DSV4 compressor metadata requires a cache-group key")
+    # The pre-refactor v0.26 DSA path invokes prefill and decode separately
+    # within one mixed-batch forward. They share a cache group but require
+    # different compressor metadata, so keep the metadata phases isolated.
+    cache_key = (cache_group_key, type(metadata))
     cached_metadata = cache.get(cache_key)
     if cached_metadata is not None:
         return cached_metadata
