@@ -602,6 +602,24 @@ class TestNPUPlatform(TestBase):
         self.assertFalse(kwargs["in_profile_run"])
         self.assertEqual(kwargs["padded_num_tokens"], 8)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
+        self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
+
+    def test_set_additional_forward_context_v1_includes_dynamic_mx_scale_alg(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = False
+
+        with patch(
+            "vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg",
+            return_value=1,
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=None,
+                num_tokens=5,
+            )
+
+        self.assertEqual(kwargs, {"dynamic_mx_quant_scale_alg": 1})
 
     def test_set_additional_forward_context_reads_v2_profile_override(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
