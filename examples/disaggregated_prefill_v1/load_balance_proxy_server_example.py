@@ -950,7 +950,7 @@ async def assign_instances(
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
-    except BaseException:
+    except (Exception, asyncio.CancelledError):
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
         raise
 
@@ -966,7 +966,7 @@ async def assign_instances(
         decoder_key = decoder["key"]
         prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
         decoder_client = await runtime.get_client(ServerRole.DECODE, decoder_key)
-    except BaseException:
+    except (Exception, asyncio.CancelledError):
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
         if decoder_key is not None:
             await runtime.schedule("release_decoder", decoder_key, decoder_score)
@@ -990,9 +990,12 @@ async def reassign_instances(
     req_data: Any,
     request_length: int,
     previous_instance: InstanceInfo,
+    *,
+    previous_prefiller_kv_released: bool,
 ) -> InstanceInfo:
     runtime = get_runtime()
-    await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
+    if not previous_prefiller_kv_released:
+        await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
     await runtime.schedule("release_decoder", previous_instance.decoder_key, previous_instance.decoder_score)
     return await assign_instances(api, req_data, request_length, is_initial_request=False)
 
@@ -1097,7 +1100,13 @@ async def handle_completions_impl(api: str, request: Request):
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
+                            instance_info = await reassign_instances(
+                                api,
+                                req_data,
+                                tmp_request_length,
+                                instance_info,
+                                previous_prefiller_kv_released=released_kv,
+                            )
                             released_kv = False
                             break
                         if retry_count > 0 and not stream_flag:
