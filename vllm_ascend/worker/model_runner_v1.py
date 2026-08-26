@@ -121,6 +121,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    is_glm5_next_kpool_cache,
     using_paged_attention,
 )
 
@@ -4833,6 +4834,12 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, DeepseekV32IndexerCache):
+                # GLM-5.3-Flash kpool indexer/tail caches subclass the DeepSeek
+                # V3.2 indexer cache but keep compress_ratio / KpoolTailSpec.
+                if is_glm5_next_kpool_cache(attn_module):
+                    if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                        kv_cache_spec[layer_name] = spec
+                    continue
                 # TODO: This mirrors upstream's separated KV/indexer specs for
                 # SFA, but keeps Ascend-specific shape/block-size accounting.
                 # Remove this special case once the generic vLLM spec/backend

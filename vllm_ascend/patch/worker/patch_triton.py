@@ -12,6 +12,25 @@ triton.next_power_of_2 = next_power_of_2
 fla_layernorm_guard.LayerNormFn = LayerNormFn
 fla_ops.chunk_gated_delta_rule = chunk_gated_delta_rule
 
+# GLM-5.3-Flash (and Kimi KDA) import fused_recurrent_kda / chunk_kda_with_fused_gate
+# from this FLA module. Swap them for the NPU Triton implementations before the
+# model is constructed. Missing on older vLLM trees that predate KDA.
+try:
+    import vllm.third_party.flash_linear_attention.ops.kda as fla_kda
+    from vllm_ascend.ops.triton.kda.kda import (
+        chunk_kda as _npu_chunk_kda,
+        chunk_kda_with_fused_gate as _npu_chunk_kda_with_fused_gate,
+        fused_kda_gate as _npu_fused_kda_gate,
+        fused_recurrent_kda as _npu_fused_recurrent_kda,
+    )
+
+    fla_kda.fused_recurrent_kda = _npu_fused_recurrent_kda
+    fla_kda.chunk_kda = _npu_chunk_kda
+    fla_kda.chunk_kda_with_fused_gate = _npu_chunk_kda_with_fused_gate
+    fla_kda.fused_kda_gate = _npu_fused_kda_gate
+except ImportError:
+    pass
+
 # On NPU platforms without an active Triton backend (e.g. 310P), replace the
 # Triton-based fused_post_conv_prep with a pure-PyTorch fallback so that
 # qwen_gdn_linear_attn's from-import picks up the replacement before model

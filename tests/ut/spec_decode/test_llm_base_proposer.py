@@ -54,6 +54,7 @@ class TestMultimodalImageTokenIndex:
             "Step3p7ForConditionalGeneration",
             "Gemma4ForConditionalGeneration",
             "Gemma4UnifiedForConditionalGeneration",
+            "Glm5NextForConditionalGeneration",
         ],
     )
     def test_models_using_image_token_id(self, model_name: str):

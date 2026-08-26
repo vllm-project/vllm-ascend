@@ -1,0 +1,25 @@
+model_name: "zai-org/GLM-5.3-Flash"
+model_type: "vllm"
+hardware: "Ascend 950PR"
+
+serve:
+  tensor_parallel_size: 8
+  dtype: auto
+  max_model_len: 131072
+  gpu_memory_utilization: 0.9
+  trust_remote_code: true
+  enable_expert_parallel: false
+  enforce_eager: false
+  block_size: 512
+
+# Metric values are placeholders until AISBench is run on 950PR with real weights.
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,flexible-extract"
+    value: 0.0
+
+num_fewshot: 5
+apply_chat_template: true
+fewshot_as_multiturn: true
+batch_size: 1

@@ -122,6 +122,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "Step3p7ForConditionalGeneration",
             "Gemma4ForConditionalGeneration",
             "Gemma4UnifiedForConditionalGeneration",
+            "Glm5NextForConditionalGeneration",
         ]:
             return config.image_token_id
         if model_name == "PixtralForConditionalGeneration":
