@@ -110,6 +110,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "causal_conv1d"
         "lightning_indexer_quant"
         "compressor"
+        "compress_norm_rope"
         "compressor_metadata"
         "vllm_quant_lightning_indexer"
         "vllm_quant_lightning_indexer_metadata"

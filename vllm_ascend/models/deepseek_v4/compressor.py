@@ -27,16 +27,18 @@ import typing
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -122,21 +124,15 @@ class Compressor(nn.Module):
         self.coff = 1 + self.overlap
 
         self.ape = nn.Parameter(torch.empty(compress_ratio, self.coff * self.head_dim, dtype=torch.float32))
-        self.wkv = ReplicatedLinear(
+        output_dim = self.coff * self.head_dim
+        self.fused_wkv_wgate = MergedColumnParallelLinear(
             self.dim,
-            self.coff * self.head_dim,
+            [output_dim, output_dim],
             bias=False,
             quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
-            prefix=f"{prefix}.wkv",
+            prefix=f"{prefix}.fused_wkv_wgate",
             return_bias=False,
-        )
-        self.wgate = ReplicatedLinear(
-            self.dim,
-            self.coff * self.head_dim,
-            bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
-            prefix=f"{prefix}.wgate",
-            return_bias=False,
+            disable_tp=True,
         )
 
         # A5 compressor kernel needs float for norm_weight input
@@ -209,24 +205,41 @@ class Compressor(nn.Module):
         assert compressor_metadata is not None
         assert state_metadata is not None
         compress_cos, compress_sin, slot_mapping = self._compute_metadata(compressor_metadata)
-        compressed_kv = torch.ops._C_ascend.compressor(
-            hidden_states,
-            self.wkv.weight,
-            self.wgate.weight,
+        compressor_args = (
             state_cache.squeeze(-2),
             self.ape,
             self.norm.weight,
             compress_sin.view(-1, compress_sin.shape[-1]),
             compress_cos.view(-1, compress_cos.shape[-1]),
-            state_block_table=state_metadata.block_table,
-            cu_seqlens=compressor_metadata.query_start_loc,
-            seqused=None,
-            start_pos=compressor_metadata.start_pos,
-            rope_head_dim=self.rope_head_dim,
-            cmp_ratio=self.compress_ratio,
-            coff=2 if self.overlap else 1,
-            norm_eps=self.norm_eps,
-            rotary_mode=2,
-            cache_mode=1,
         )
+        compressor_kwargs = {
+            "state_block_table": state_metadata.block_table,
+            "cu_seqlens": compressor_metadata.query_start_loc,
+            "seqused": None,
+            "start_pos": compressor_metadata.start_pos,
+            "rope_head_dim": self.rope_head_dim,
+            "cmp_ratio": self.compress_ratio,
+            "coff": 2 if self.overlap else 1,
+            "norm_eps": self.norm_eps,
+            "rotary_mode": 2,
+            "cache_mode": 1,
+        }
+        if envs_ascend.VLLM_ASCEND_DSA_COMPRESSOR_SPLIT:
+            mm = F.linear(hidden_states, self.fused_wkv_wgate.weight)
+            mm_kv, mm_score = mm.chunk(2, dim=-1)
+            compressed_kv = torch.ops._C_ascend.compress_norm_rope(
+                mm_kv,
+                mm_score,
+                *compressor_args,
+                **compressor_kwargs,
+            )
+        else:
+            wkv_weight, wgate_weight = self.fused_wkv_wgate.weight.chunk(2, dim=0)
+            compressed_kv = torch.ops._C_ascend.compressor(
+                hidden_states,
+                wkv_weight,
+                wgate_weight,
+                *compressor_args,
+                **compressor_kwargs,
+            )
         return compressed_kv, slot_mapping
