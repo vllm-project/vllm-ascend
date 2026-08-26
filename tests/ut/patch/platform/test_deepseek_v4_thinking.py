@@ -213,6 +213,11 @@ def test_deepseek_v4_tokenizer_adds_system_for_tools_when_missing(monkeypatch):
         captured_messages.append(messages)
         return "prompt"
 
+    monkeypatch.setattr(
+        patch_deepseek_v4_thinking,
+        "get_hf_file_to_dict",
+        lambda *args, **kwargs: {"dspark_block_size": 5},
+    )
     monkeypatch.setattr(deepseek_v4, "encode_messages", fake_encode_messages)
     tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
     messages = [{"role": "user", "content": "hi"}]
@@ -336,7 +341,12 @@ def test_parser_splits_implicit_start_reasoning(request_kwargs):
         {"enable_thinking": False, "reasoning_effort": "max"},
     ],
 )
-def test_deepseek_v4_explicit_disable_overrides_reasoning_effort(kwargs):
+def test_deepseek_v4_explicit_disable_overrides_reasoning_effort(monkeypatch, kwargs):
+    monkeypatch.setattr(
+        patch_deepseek_v4_thinking,
+        "get_hf_file_to_dict",
+        lambda *args, **kwargs: {"dspark_block_size": 5},
+    )
     tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
     prompt = tokenizer.apply_chat_template(
         [{"role": "user", "content": "hi"}],
