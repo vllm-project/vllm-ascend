@@ -156,19 +156,21 @@ class _MockKVConnectorPromMetrics:
         labelnames,
         per_engine_labelvalues,
     ):
-        self._kv_transfer_config = getattr(
-            vllm_config, "kv_transfer_config", None
-        )
+        self._kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
         self._labelnames = labelnames
         self.per_engine_labelvalues = per_engine_labelvalues
         # The real framework builds metric_types as
         # {Gauge: g, Counter: c, Histogram: h} (insertion order), so the
         # positional lookup below matches the real keyed lookup.
-        values = list(metric_types.values()) if isinstance(metric_types, dict) else [
-            metric_types,
-            metric_types,
-            metric_types,
-        ]
+        values = (
+            list(metric_types.values())
+            if isinstance(metric_types, dict)
+            else [
+                metric_types,
+                metric_types,
+                metric_types,
+            ]
+        )
         self._gauge_cls = values[0]
         self._counter_cls = values[1]
         self._histogram_cls = values[2]
@@ -178,24 +180,17 @@ _MockPromMetric = type("PromMetric", (), {})
 _MockPromMetricT = TypeVar("PromMetricT")
 
 _metrics_mod: Any = (
-    sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.metrics"]
-    if _MOCK_VLLM_DEPS
-    else types.SimpleNamespace()
+    sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.metrics"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 )
 _metrics_mod.KVConnectorStats = _MockKVConnectorStats
 _metrics_mod.KVConnectorPromMetrics = _MockKVConnectorPromMetrics
 _metrics_mod.PromMetric = _MockPromMetric
 _metrics_mod.PromMetricT = _MockPromMetricT
 
-_metrics_utils_mod: Any = (
-    sys.modules["vllm.v1.metrics.utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
-)
-_metrics_utils_mod.create_metric_per_engine = (
-    lambda metric, per_engine_labelvalues: {
-        idx: metric.labels(*labelvalues)
-        for idx, labelvalues in per_engine_labelvalues.items()
-    }
-)
+_metrics_utils_mod: Any = sys.modules["vllm.v1.metrics.utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+_metrics_utils_mod.create_metric_per_engine = lambda metric, per_engine_labelvalues: {
+    idx: metric.labels(*labelvalues) for idx, labelvalues in per_engine_labelvalues.items()
+}
 
 _events_mod: Any = sys.modules["vllm.distributed.kv_events"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]

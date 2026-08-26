@@ -38,9 +38,7 @@ def _nearest_rank_percentile(values: list[float], percentile: float) -> float:
     if not values:
         return 0.0
     sorted_values = sorted(values)
-    rank = max(
-        0, min(len(sorted_values) - 1, int(percentile * len(sorted_values) - 1e-12))
-    )
+    rank = max(0, min(len(sorted_values) - 1, int(percentile * len(sorted_values) - 1e-12)))
     return sorted_values[rank]
 
 
@@ -85,13 +83,9 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
             durations = [float(record["duration_seconds"]) for record in records]
             reduced["load_count"] = len(records)
             reduced["load_avg_ms"] = round(fmean(durations) * 1e3, 3)
-            reduced["load_p90_ms"] = round(
-                _nearest_rank_percentile(durations, 0.9) * 1e3, 3
-            )
+            reduced["load_p90_ms"] = round(_nearest_rank_percentile(durations, 0.9) * 1e3, 3)
             reduced["load_keys"] = sum(int(record["num_keys"]) for record in records)
-            reduced["load_failed_keys"] = sum(
-                int(record["num_failed_keys"]) for record in records
-            )
+            reduced["load_failed_keys"] = sum(int(record["num_failed_keys"]) for record in records)
         delayed_release = self.data.get("delayed_release")
         if delayed_release is not None:
             reduced["delayed_release_requests"] = int(delayed_release["num_requests"])
@@ -156,8 +150,7 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
 
         self._histogram_load_duration = self._histogram_cls(
             name="vllm:kv_pool_load_duration_seconds",
-            documentation="Histogram of per-request KV cache load duration "
-            "from the KV pool.",
+            documentation="Histogram of per-request KV cache load duration from the KV pool.",
             buckets=[
                 1e-3,
                 5e-3,
@@ -188,13 +181,10 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
         )
         self._gauge_delayed_release = self._gauge_cls(
             name="vllm:kv_pool_delayed_release_requests",
-            documentation="Number of requests whose KV blocks are currently "
-            "held in the delayed-release window.",
+            documentation="Number of requests whose KV blocks are currently held in the delayed-release window.",
             labelnames=labelnames,
         )
-        self._delayed_release_per_engine = create_metric_per_engine(
-            self._gauge_delayed_release, per_engine_labelvalues
-        )
+        self._delayed_release_per_engine = create_metric_per_engine(self._gauge_delayed_release, per_engine_labelvalues)
 
     def _get_load_metrics(self, engine_idx: int, path: str) -> dict[str, PromMetric]:
         cache_key = (engine_idx, path)

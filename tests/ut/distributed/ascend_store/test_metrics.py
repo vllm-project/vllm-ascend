@@ -20,7 +20,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
     AscendStorePromMetrics,
@@ -232,12 +231,8 @@ class TestAscendStorePromMetrics(unittest.TestCase):
         prom = _make_prom_metrics()
         self.assertEqual(prom._histogram_load_duration.name, "vllm:kv_pool_load_duration_seconds")
         self.assertEqual(prom._counter_load_keys.name, "vllm:kv_pool_load_keys_total")
-        self.assertEqual(
-            prom._counter_load_failed_keys.name, "vllm:kv_pool_load_failed_keys_total"
-        )
-        self.assertEqual(
-            prom._gauge_delayed_release.name, "vllm:kv_pool_delayed_release_requests"
-        )
+        self.assertEqual(prom._counter_load_failed_keys.name, "vllm:kv_pool_load_failed_keys_total")
+        self.assertEqual(prom._gauge_delayed_release.name, "vllm:kv_pool_delayed_release_requests")
 
 
 class TestKVPoolWorkerLoadTiming(unittest.TestCase):
