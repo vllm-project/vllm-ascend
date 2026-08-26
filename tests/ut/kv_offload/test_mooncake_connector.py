@@ -3664,6 +3664,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_uses_full_blocks_for_prefix(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.vllm_config = MagicMock()
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16
@@ -3686,6 +3687,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_ignores_empty_regular_kv_shard(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.vllm_config = MagicMock()
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16
@@ -3735,6 +3737,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_requires_full_blocks_for_prefix(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.vllm_config = MagicMock()
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16
