@@ -404,16 +404,8 @@ class AscendConfig:
                 "only guaranteed when the recompute scheduler is enabled."
             )
 
-        # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
+        # enable_fused_mc2 enum + multistream auto-disable
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
-        model_architectures = getattr(vc.model_config, "architectures", None) or []
-        assert not (
-            self.enable_fused_mc2 == 1
-            and any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        ), (
-            "MiniMax M3 does not support enable_fused_mc2=1. Please set "
-            "additional_config.enable_fused_mc2 to 0 or unset VLLM_ASCEND_ENABLE_FUSED_MC2."
-        )
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
@@ -587,6 +579,11 @@ class AscendConfig:
             return False
 
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        model_architectures = getattr(vllm_config.model_config, "architectures", None) or []
+        if moe_intermediate_size is None and any(
+            architecture.startswith("MiniMaxM3") for architecture in model_architectures
+        ):
+            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
         if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:

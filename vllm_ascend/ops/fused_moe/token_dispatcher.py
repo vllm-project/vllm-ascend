@@ -25,11 +25,11 @@ from typing import Generic
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
+from vllm_ascend.ascend_forward_context import _MEGA_MOE_TOKENS_PER_RANK_LIMIT, get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
@@ -58,6 +58,14 @@ from vllm_ascend.utils import (
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
 EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
+
+
+def _get_mega_moe_max_num_tokens_per_rank(vllm_config: VllmConfig, decode_capacity_per_rank: int) -> int:
+    kv_transfer_config = vllm_config.kv_transfer_config
+    is_pd_decode_consumer = (
+        kv_transfer_config is not None and kv_transfer_config.is_kv_consumer and not kv_transfer_config.is_kv_producer
+    )
+    return decode_capacity_per_rank if is_pd_decode_consumer else _MEGA_MOE_TOKENS_PER_RANK_LIMIT
 
 
 def _get_expert_token_nums_type(token_dispatch_input: MoETokenDispatchInput) -> int:
@@ -140,6 +148,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # this, MegaMoe falls back to hidden_states.shape[0] which jitters
         # under eager mode and forces sym-buffer rebuilds every step.
         self.max_num_tokens_per_rank = num_tokens_per_tp_rank
+        # A disaggregated decode instance never receives prefill batches, so
+        # size its CANN MegaMoe buffer for the rank-invariant decode capacity.
+        # Other instances must retain the operator limit for prefill chunks.
+        self.mega_moe_max_num_tokens_per_rank = _get_mega_moe_max_num_tokens_per_rank(
+            vllm_config, num_tokens_per_tp_rank
+        )
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:

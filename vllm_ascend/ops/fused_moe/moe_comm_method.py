@@ -290,24 +290,7 @@ class FusedMC2CommImpl(MoECommMethod):
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
         group = get_mc2_group().device_group
-        # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
-        # collective handshake over the EP (mc2) group. Its shape params —
-        # especially num_max_tokens_per_rank — MUST be identical on every EP
-        # rank, otherwise ranks allocate mismatched buffers / at different
-        # times and HCCL aborts (SUSPECT REMOTE ERROR 507057). So this value
-        # must be derived ONLY from rank-invariant, compile-time config,
-        # NEVER from the current forward's per-rank token count.
-        if self.token_dispatcher.global_bs > 0:
-            # global_bs = num_tokens_per_tp_rank * ep_world_size (compile-time).
-            num_max_tokens_per_rank = max(
-                1,
-                int(self.token_dispatcher.global_bs // self.token_dispatcher.ep_world_size),
-            )
-        else:
-            # num_tokens_per_tp_rank, set once in TokenDispatcherWithMC2.__init__
-            # from scheduler/graph config — rank-invariant.
-            rank_invariant_cap = getattr(self.token_dispatcher, "max_num_tokens_per_rank", 0)
-            num_max_tokens_per_rank = max(1, int(rank_invariant_cap))
+        num_max_tokens_per_rank = self.token_dispatcher.mega_moe_max_num_tokens_per_rank
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
         expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
@@ -317,10 +300,12 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         logger.info(
-            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",
+            "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): "
+            "ep_rank=%s ep_world=%s global_bs=%s num_max_tokens_per_rank=%s",
             getattr(self.token_dispatcher, "ep_rank_id", "?"),
             getattr(self.token_dispatcher, "ep_world_size", "?"),
             self.token_dispatcher.global_bs,
+            num_max_tokens_per_rank,
         )
 
         return self.get_symm_buffer_for_mega_moe(
@@ -386,22 +371,52 @@ class FusedMC2CommImpl(MoECommMethod):
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
 
-        out, expert_tokens = self.mega_moe(
-            fused_experts_input.hidden_states,
-            fused_experts_input.topk_ids.to(torch.int32),
-            fused_experts_input.topk_weights.to(torch.float32),
-            weight1,
-            weight2,
-            self.mega_moe_symm_buffer,
-            l1_weights_sf=weight_scales1,
-            l2_weights_sf=weight_scales2,
-            l1_bias=l1_bias,
-            l2_bias=l2_bias,
-            x_active_mask=x_active_mask,
-            activation_clamp=activation_clamp,
-            weight1_type=weight_type,
-            weight2_type=weight_type,
-        )
+        activation_kwargs = {}
+        if getattr(fused_experts_input.activation, "value", fused_experts_input.activation) == "swigluoai_uninterleave":
+            activation_kwargs = {
+                "activation": "swigluoai",
+                "activation_params": {
+                    "alpha": self.swiglu_alpha,
+                    "beta": self.swiglu_beta,
+                },
+            }
+
+        hidden_states = fused_experts_input.hidden_states
+        topk_ids = fused_experts_input.topk_ids.to(torch.int32)
+        topk_weights = fused_experts_input.topk_weights.to(torch.float32)
+        num_tokens = hidden_states.shape[0]
+        max_tokens_per_call = int(self.mega_moe_symm_buffer.num_max_tokens_per_rank)
+
+        out = torch.empty_like(hidden_states) if num_tokens > max_tokens_per_call else None
+        expert_tokens = None
+        for start in range(0, num_tokens, max_tokens_per_call):
+            end = min(start + max_tokens_per_call, num_tokens)
+            chunk_mask = None if x_active_mask is None else x_active_mask[start:end]
+            chunk_out, chunk_expert_tokens = self.mega_moe(
+                hidden_states[start:end],
+                topk_ids[start:end],
+                topk_weights[start:end],
+                weight1,
+                weight2,
+                self.mega_moe_symm_buffer,
+                l1_weights_sf=weight_scales1,
+                l2_weights_sf=weight_scales2,
+                l1_bias=l1_bias,
+                l2_bias=l2_bias,
+                x_active_mask=chunk_mask,
+                activation_clamp=activation_clamp,
+                **activation_kwargs,
+                weight1_type=weight_type,
+                weight2_type=weight_type,
+            )
+            if out is None:
+                out = chunk_out
+            else:
+                out[start:end].copy_(chunk_out)
+            expert_tokens = chunk_expert_tokens if expert_tokens is None else expert_tokens + chunk_expert_tokens
+
+        assert out is not None, "MegaMoe requires at least one input token."
+        assert expert_tokens is not None, "MegaMoe requires at least one input token."
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
         # pre-allocated in/out buffer. The MegaMoe op returns a fresh

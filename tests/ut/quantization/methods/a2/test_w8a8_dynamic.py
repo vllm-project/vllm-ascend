@@ -241,6 +241,46 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
         self.assertIs(fused_experts_input.lora_context, lora_context)
 
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._MEGA_MOE_SUPPORTED", True)
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    def test_apply_swigluoai_uses_cann_mega_moe_weights(self, mock_extra_ctx, mock_get_config):
+        mock_get_config.return_value.enable_fused_mc2 = 1
+        mock_extra_ctx.moe_comm_type = MoECommType.FUSED_MC2
+        mock_extra_ctx.moe_comm_method.fused_experts.return_value = torch.empty(1, self.hidden_size)
+        self.quant_method.in_dtype = torch.float32
+        self.quant_method.use_expert_weight_list = False
+
+        layer = SimpleNamespace(
+            activation="swigluoai_uninterleave",
+            cann_mega_moe_w13_weight_list=[torch.empty(self.hidden_size, 2 * self.intermediate_size)],
+            cann_mega_moe_w2_weight_list=[torch.empty(self.intermediate_size, self.hidden_size)],
+            cann_mega_moe_fused_w1_scale_list=[torch.empty(2 * self.intermediate_size)],
+            cann_mega_moe_fused_w2_scale_list=[torch.empty(self.hidden_size)],
+            ascend_expert_map=None,
+            global_redundant_expert_num=0,
+            ascend_mc2_mask=None,
+            apply_router_weight_on_input=False,
+            ascend_pertoken_scale=None,
+        )
+
+        self.quant_method.apply(
+            layer=layer,
+            x=torch.empty(1, self.hidden_size),
+            topk_weights=torch.ones(1, 1),
+            topk_ids=torch.zeros(1, 1, dtype=torch.int64),
+            shared_experts=None,
+            shared_experts_input=None,
+        )
+
+        fused_experts_input = mock_extra_ctx.moe_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertIs(fused_experts_input.weights.w1, layer.cann_mega_moe_w13_weight_list)
+        self.assertIs(fused_experts_input.weights.w2, layer.cann_mega_moe_w2_weight_list)
+        self.assertIs(fused_experts_input.weights.w1_scale, layer.cann_mega_moe_fused_w1_scale_list)
+        self.assertIs(fused_experts_input.weights.w2_scale, layer.cann_mega_moe_fused_w2_scale_list)
+        self.assertIsNone(fused_experts_input.weights.w1_scale_bias)
+        self.assertIsNone(fused_experts_input.weights.w2_scale_bias)
+
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
     def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):
