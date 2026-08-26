@@ -39,6 +39,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import use_v2_model_runner
 
 # isort: off
 from vllm_ascend.utils import (
@@ -502,7 +503,14 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.config.vllm import VllmConfig as VllmConfig
 
-        VllmConfig.use_v2_model_runner = property(_use_v2_model_runner)
+        # NOTE: This still monkey-patches VllmConfig by replacing the
+        # use_v2_model_runner property (the "patch way"). It is kept here
+        # because upstream vLLM does not yet expose a platform hook to
+        # customize the default V2 model runner decision; the whitelist
+        # logic itself lives in vllm_ascend.mrv2_utils.
+        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
+        # override the default, and contribute the whitelist upstream.
+        VllmConfig.use_v2_model_runner = property(use_v2_model_runner)
 
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
