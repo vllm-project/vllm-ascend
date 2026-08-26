@@ -201,6 +201,11 @@ class CaMemAllocator:
             len(self.pointer_to_data),
             offload_tags,
         )
+        # Workaround for verl v0.8.0: synchronize pending NPU work before
+        # unmapping tensor memory. The exact root cause is unclear, but this
+        # avoids rtMemcpy errors observed when releasing the mappings too early.
+        torch.npu.synchronize()
+
         for ptr, data in self.pointer_to_data.items():
             if data.tag == CaMemAllocator.sleep_persistent_tag:
                 # This memory is not offloaded or released during sleep.
