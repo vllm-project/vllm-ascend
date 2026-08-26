@@ -941,7 +941,7 @@ class KVDeliveryScheduler(Scheduler):
                         request.num_output_placeholders -= num_rejected
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_physical_draft_tokens=num_draft_tokens,
+                    num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
