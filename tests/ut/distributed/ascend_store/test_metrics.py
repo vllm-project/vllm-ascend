@@ -123,6 +123,14 @@ class TestAscendStoreKVConnectorStats(unittest.TestCase):
         self.assertEqual(records[0]["num_failed_keys"], 2)
         self.assertEqual(records[1]["num_keys"], 5)
 
+    def test_record_load_defaults_not_overlapped_to_duration(self):
+        stats = AscendStoreKVConnectorStats()
+        stats.record_load(0.5, 10, path="async")
+        record = stats.data["load"][0]
+        self.assertEqual(record["not_overlapped_seconds"], 0.5)
+        stats.record_load(0.25, 5, path="layerwise", not_overlapped_seconds=0.1)
+        self.assertEqual(stats.data["load"][1]["not_overlapped_seconds"], 0.1)
+
     def test_record_delayed_release_overwrites(self):
         stats = AscendStoreKVConnectorStats()
         stats.record_delayed_release(3)
@@ -158,6 +166,24 @@ class TestAscendStoreKVConnectorStats(unittest.TestCase):
         self.assertAlmostEqual(reduced["load_p90_ms"], 900.0)
         self.assertEqual(reduced["load_keys"], 20)
         self.assertEqual(reduced["load_failed_keys"], 10)
+
+    def test_reduce_not_overlapped_and_overlap_ratio(self):
+        stats = AscendStoreKVConnectorStats()
+        # Half-covered layerwise load and a fully covered one.
+        stats.record_load(0.1, 2, path="layerwise", not_overlapped_seconds=0.05)
+        stats.record_load(0.2, 3, path="layerwise", not_overlapped_seconds=0.0)
+        reduced = stats.reduce()
+        self.assertAlmostEqual(reduced["not_overlapped_avg_ms"], 25.0)
+        self.assertAlmostEqual(reduced["not_overlapped_p90_ms"], 50.0)
+        # ratios = [0.5, 1.0] -> avg 0.75
+        self.assertAlmostEqual(reduced["overlap_ratio_avg"], 0.75)
+
+    def test_reduce_overlap_ratio_sync_defaults_to_zero(self):
+        stats = AscendStoreKVConnectorStats()
+        # sync/async loads block compute for the whole duration: ratio 0.
+        stats.record_load(0.1, 2, path="sync")
+        stats.record_load(0.2, 3, path="async")
+        self.assertAlmostEqual(stats.reduce()["overlap_ratio_avg"], 0.0)
 
     def test_reduce_delayed_release_only(self):
         stats = AscendStoreKVConnectorStats()
@@ -233,6 +259,40 @@ class TestAscendStorePromMetrics(unittest.TestCase):
         self.assertEqual(prom._counter_load_keys.name, "vllm:kv_pool_load_keys_total")
         self.assertEqual(prom._counter_load_failed_keys.name, "vllm:kv_pool_load_failed_keys_total")
         self.assertEqual(prom._gauge_delayed_release.name, "vllm:kv_pool_delayed_release_requests")
+        self.assertEqual(prom._histogram_load_not_overlapped.name, "vllm:kv_pool_load_not_overlapped_seconds")
+        self.assertEqual(prom._histogram_load_overlap_ratio.name, "vllm:kv_pool_load_overlap_ratio")
+
+    def test_observe_records_not_overlapped_metrics(self):
+        prom = _make_prom_metrics()
+        prom.observe(
+            {
+                "load": [
+                    {
+                        "duration_seconds": 0.1,
+                        "num_keys": 4,
+                        "num_failed_keys": 0,
+                        "path": "layerwise",
+                        "not_overlapped_seconds": 0.04,
+                    },
+                    # Legacy record without the field: falls back to duration.
+                    {
+                        "duration_seconds": 0.2,
+                        "num_keys": 4,
+                        "num_failed_keys": 0,
+                        "path": "sync",
+                    },
+                ]
+            }
+        )
+        lw_not_overlapped = prom._histogram_load_not_overlapped.children[("test-model", "layerwise")]
+        self.assertEqual(lw_not_overlapped.observations, [0.04])
+        lw_ratio = prom._histogram_load_overlap_ratio.children[("test-model", "layerwise")]
+        self.assertEqual(len(lw_ratio.observations), 1)
+        self.assertAlmostEqual(lw_ratio.observations[0], 0.6)
+        sync_not_overlapped = prom._histogram_load_not_overlapped.children[("test-model", "sync")]
+        self.assertEqual(sync_not_overlapped.observations, [0.2])
+        sync_ratio = prom._histogram_load_overlap_ratio.children[("test-model", "sync")]
+        self.assertEqual(sync_ratio.observations, [0.0])
 
 
 class TestKVPoolWorkerLoadTiming(unittest.TestCase):
@@ -408,6 +468,162 @@ class TestKVPoolWorkerLoadTiming(unittest.TestCase):
         self.assertLess(record["duration_seconds"], 0.15)
         self.assertEqual(record["num_keys"], 3)
         self.assertEqual(record["path"], "layerwise")
+
+    def test_not_overlapped_accumulates_layer_stalls(self):
+        """Only layers finishing after their wait entry contribute a stall.
+
+        Layer 1's transfer completes before compute starts waiting on it
+        (fully overlapped, zero stall); layer 0's transfer completes 0.02s
+        after the wait entry (0.02s stall).
+        """
+        worker = self._make_worker()
+
+        block_range = MagicMock()
+        block_range.request.req_id = "req-lw"
+        block_range.start_block = 0
+        block_range.end_block = 3
+        block_range.partial_block_index = None
+        task = MagicMock()
+        task.block_ranges = [block_range]
+        worker.layer_load_tasks = [[task]]
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            _TimedLayerLoadEvent,
+        )
+
+        events = [_TimedLayerLoadEvent() for _ in range(2)]
+        worker.layer_load_finished_events = events
+
+        worker._record_layerwise_load_started()
+        # Layer 1's transfer finishes first ...
+        time.sleep(0.01)
+        events[1].set()
+        time.sleep(0.01)
+        # ... compute starts waiting on layer 0 ...
+        wait_enter_0 = time.perf_counter()
+        time.sleep(0.02)
+        events[0].set()
+        # ... compute only reaches layer 1's wait long after it finished.
+        wait_enter_1 = time.perf_counter()
+
+        worker._accumulate_layer_stall(0, wait_enter_0)
+        worker._accumulate_layer_stall(1, wait_enter_1)
+        worker._record_layerwise_load_finished()
+
+        stats = worker.get_stats()
+        self.assertIsNotNone(stats)
+        record = stats.data["load"][0]
+        # Only layer 0's stall counts (~0.02s); layer 1 contributes zero.
+        self.assertGreaterEqual(record["not_overlapped_seconds"], 0.02)
+        self.assertLess(record["not_overlapped_seconds"], 0.1)
+        # Invariant: the stalled portion never exceeds the total duration.
+        self.assertLess(record["not_overlapped_seconds"], record["duration_seconds"])
+
+    def test_not_overlapped_zero_when_fully_overlapped(self):
+        """Events set before the waits entered: no stall, ratio 1."""
+        worker = self._make_worker()
+
+        block_range = MagicMock()
+        block_range.request.req_id = "req-lw"
+        block_range.start_block = 0
+        block_range.end_block = 1
+        block_range.partial_block_index = None
+        task = MagicMock()
+        task.block_ranges = [block_range]
+        worker.layer_load_tasks = [[task]]
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            _TimedLayerLoadEvent,
+        )
+
+        events = [_TimedLayerLoadEvent() for _ in range(2)]
+        worker.layer_load_finished_events = events
+
+        worker._record_layerwise_load_started()
+        # Both transfers finish before compute starts waiting.
+        time.sleep(0.01)
+        events[0].set()
+        events[1].set()
+        time.sleep(0.01)
+        wait_enter = time.perf_counter()
+        worker._accumulate_layer_stall(0, wait_enter)
+        worker._accumulate_layer_stall(1, wait_enter)
+        worker._record_layerwise_load_finished()
+
+        stats = worker.get_stats()
+        self.assertIsNotNone(stats)
+        record = stats.data["load"][0]
+        self.assertEqual(record["not_overlapped_seconds"], 0.0)
+        self.assertAlmostEqual(stats.reduce()["overlap_ratio_avg"], 1.0)
+
+    def test_step_not_overlapped_reset_between_steps(self):
+        """The per-step accumulator must not leak into the next step.
+
+        start_load_kv resets ``_step_not_overlapped_s`` for every layerwise
+        step; simulate the reset the same way and verify the second step's
+        record is unaffected by the first step's stall.
+        """
+        worker = self._make_worker()
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            _TimedLayerLoadEvent,
+        )
+
+        events = [_TimedLayerLoadEvent() for _ in range(2)]
+        worker.layer_load_finished_events = events
+
+        block_range = MagicMock()
+        block_range.request.req_id = "req-lw"
+        block_range.start_block = 0
+        block_range.end_block = 1
+        block_range.partial_block_index = None
+        task = MagicMock()
+        task.block_ranges = [block_range]
+
+        # Step 1: layer 0 stalls ~0.02s.
+        worker.layer_load_tasks = [[task]]
+        worker._record_layerwise_load_started()
+        wait_enter = time.perf_counter()
+        time.sleep(0.02)
+        events[0].set()
+        worker._accumulate_layer_stall(0, wait_enter)
+        worker._record_layerwise_load_finished()
+        step1 = worker.get_stats()
+        self.assertGreaterEqual(step1.data["load"][0]["not_overlapped_seconds"], 0.02)
+
+        # Step 2 (fresh events, reset accumulator as start_load_kv does).
+        worker._step_not_overlapped_s = 0.0
+        events = [_TimedLayerLoadEvent() for _ in range(2)]
+        worker.layer_load_finished_events = events
+        worker.layer_load_tasks = [[task]]
+        worker._record_layerwise_load_started()
+        time.sleep(0.01)
+        events[0].set()
+        wait_enter = time.perf_counter()
+        time.sleep(0.01)
+        worker._accumulate_layer_stall(0, wait_enter)
+        worker._record_layerwise_load_finished()
+        step2 = worker.get_stats()
+        # Fully overlapped step 2 must not inherit step 1's stall.
+        self.assertEqual(step2.data["load"][0]["not_overlapped_seconds"], 0.0)
+
+    def test_accumulate_layer_stall_ignores_plain_events(self):
+        """Plain Events (no set_time) contribute no stall and never raise."""
+        import threading
+
+        worker = self._make_worker()
+        worker.layer_load_finished_events = [threading.Event(), threading.Event()]
+        worker._accumulate_layer_stall(0, time.perf_counter())
+        self.assertEqual(worker._step_not_overlapped_s, 0.0)
+
+    def test_sync_path_not_overlapped_equals_duration(self):
+        """sync/async records default to not_overlapped == duration."""
+        worker = self._make_worker()
+        worker._record_load_started("req-1")
+        time.sleep(0.01)
+        worker._record_load_finished("req-1", 4, path="sync")
+        record = worker.get_stats().data["load"][0]
+        self.assertEqual(record["not_overlapped_seconds"], record["duration_seconds"])
 
 
 class TestKVPoolSchedulerDelayedRelease(unittest.TestCase):

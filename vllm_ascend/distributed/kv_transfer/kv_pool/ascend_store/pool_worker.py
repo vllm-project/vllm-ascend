@@ -158,6 +158,9 @@ class KVPoolWorker:
         self._kv_stats_lock = threading.Lock()
         self._load_start_times: dict[str, float] = {}
         self._layerwise_load_keys: dict[str, int] = {}
+        # Layerwise not-overlapped time: per-step sum of the compute thread's
+        # stalls while waiting for layer loads (wait() entry -> event set).
+        self._step_not_overlapped_s = 0.0
 
     def _init_parallelism_info(self, model_config, parallel_config) -> None:
         self.local_rank = envs.LOCAL_RANK
@@ -863,6 +866,7 @@ class KVPoolWorker:
             # newly prepared loads/saves and leave a reused buffer stale.
             self.layer_save_tasks = [[] for _ in range(self.num_layers)]
             self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+            self._step_not_overlapped_s = 0.0
             reset_attention_compute_start_gate()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
@@ -1063,6 +1067,20 @@ class KVPoolWorker:
         ]
         return max(times) if times else None
 
+    def _accumulate_layer_stall(self, layer_id: int, wait_enter: float) -> None:
+        """Accumulate the compute thread's stall for one layer's load.
+
+        The stall is the time the compute thread spent blocked in
+        ``wait_for_layer_load`` before the transfer thread finished that
+        layer's load. A layer whose event was already set when the wait
+        entered contributes zero (the load was fully overlapped). Plain
+        Events without ``set_time`` (tests) contribute nothing.
+        """
+        event = self.layer_load_finished_events[layer_id]
+        set_time = getattr(event, "set_time", None)
+        if set_time is not None:
+            self._step_not_overlapped_s += max(0.0, set_time - wait_enter)
+
     def _record_layerwise_load_finished(self) -> None:
         # Called after the last layer's load has been waited for: all
         # requests of this step finish together. The end time is the latest
@@ -1075,12 +1093,18 @@ class KVPoolWorker:
         if end_time is None or end_time < min(self._load_start_times.values()):
             # No usable event timestamps for this step; fall back to now.
             end_time = time.perf_counter()
+        not_overlapped_s = self._step_not_overlapped_s
         for req_id, num_keys in self._layerwise_load_keys.items():
             start_time = self._load_start_times.pop(req_id, None)
             if start_time is None or num_keys <= 0:
                 continue
             with self._kv_stats_lock:
-                self._kv_stats.record_load(end_time - start_time, num_keys, path="layerwise")
+                self._kv_stats.record_load(
+                    end_time - start_time,
+                    num_keys,
+                    not_overlapped_seconds=not_overlapped_s,
+                    path="layerwise",
+                )
         self._layerwise_load_keys.clear()
         # Drain leftovers (e.g. requests preempted mid-layerwise) so the
         # next step starts from a clean slate.
@@ -1790,9 +1814,11 @@ class KVPoolWorker:
             if is_last_layer:
                 self._record_layerwise_load_finished()
             return
+        wait_enter = time.perf_counter()
         while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
             self.kv_recv_thread.raise_if_failed()
             logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
+        self._accumulate_layer_stall(self.current_layer, wait_enter)
         self.layer_load_finished_events[self.current_layer].clear()
         if is_last_layer:
             self._record_layerwise_load_finished()
