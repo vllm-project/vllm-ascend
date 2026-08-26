@@ -254,7 +254,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a4 \
 ::::{tab-item} A3 series
 :sync: A3
 
-- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
+- Quantized model `glm-5-w4a8` and `glm-5.1-w4a8` can be deployed on 1 Atlas 800 A3 (128GB × 8) .
 
 Run the following script to execute online inference.
 
@@ -283,43 +283,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --served-model-name glm-5 \
 --max-num-seqs 16 \
 --max-model-len 200000 \
---max-num-batched-tokens 4096 \
---trust-remote-code \
---gpu-memory-utilization 0.95 \
---quantization ascend \
---enable-chunked-prefill \
---enable-prefix-caching \
---additional-config '{"multistream_overlap_shared_expert": true}' \
---compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
---hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
---speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
-```
-
-- Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
-
-Run the following script to execute online inference.
-
-```{code-block} bash
-   :substitutions:
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=200
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
---host 0.0.0.0 \
---port 8077 \
---data-parallel-size 1 \
---tensor-parallel-size 16 \
---enable-expert-parallel \
---seed 1024 \
---served-model-name glm-5 \
---max-num-seqs 16 \
---max-model-len 40960 \
 --max-num-batched-tokens 4096 \
 --trust-remote-code \
 --gpu-memory-utilization 0.95 \
@@ -418,7 +381,7 @@ Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
 
 **High-Throughput Scenario (DP8 TP4)**
 
-- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16) for high-throughput scenarios.
+- `glm-5.1-w8a8c8`: can be deployed on 2 Atlas 800 A3 (128GB × 8) for high-throughput scenarios.
 
 Run the following scripts on two nodes respectively.
 
@@ -431,6 +394,9 @@ Run the following scripts on two nodes respectively.
 nic_name="xxx"
 local_ip="xxx"
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -480,6 +446,9 @@ local_ip="xxx"
 node0_ip="xxxx"
 
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_TRANSFER_TIMEOUT=600
+export HCCL_EXEC_TIMEOUT=3600
+export HCCL_CONNECT_TIMEOUT=3600
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -1084,7 +1053,7 @@ Once the preparation is done, you can start the server with the following comman
 
 #### 5.3.2 Prefill-Decode Disaggregation (A3 series)
 
-The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (64GB × 16): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). The same scripts serve both the high-throughput and low-latency cases.
+The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). The same scripts serve both the high-throughput and low-latency cases.
 
 1. prepare the script `run_dp_template.sh` on each node.
 
@@ -1101,6 +1070,9 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (64GB
         node_rank=0
 
         export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
 
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -1172,6 +1144,9 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (64GB
         node_rank=1
 
         export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
 
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
@@ -1230,15 +1205,90 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (64GB
         }'
         ```
 
-    3. Decode node 0 / decode node 1
+    3. Decode node 0 (ranks 0–3)
 
-        Launch one instance per DP rank via positional parameters: `$1` = visible devices, `$2` = engine port, `$3` = data-parallel-size, `$4` = data-parallel-rank, `$5` = data-parallel-address, `$6` = data-parallel-rpc-port, `$7` = tensor-parallel-size. Decode node 0 hosts ranks 0–3, decode node 1 hosts ranks 4–7.
+        Launch one instance per DP rank via positional parameters: `$1` = visible devices, `$2` = engine port, `$3` = data-parallel-size, `$4` = data-parallel-rank, `$5` = data-parallel-address, `$6` = data-parallel-rpc-port, `$7` = tensor-parallel-size. Prepare `run_dp_template.sh` on decode node 0 with the content below.
 
         ```shell
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
         export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
+
+        export HCCL_IF_IP=$local_ip
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export TP_SOCKET_IFNAME=$nic_name
+        export HCCL_SOCKET_IFNAME=$nic_name
+
+        #Mooncake
+        export OMP_PROC_BIND=false
+        export OMP_NUM_THREADS=1
+
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        export HCCL_BUFFSIZE=256
+
+        export ACL_OP_INIT_MODE=1
+        export ASCEND_A3_ENABLE=1
+        export TASK_QUEUE_ENABLE=1
+        export ASCEND_RT_VISIBLE_DEVICES=$1
+
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+        export VLLM_ASCEND_ENABLE_MLAPO=1
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
+            --host 0.0.0.0 \
+            --port $2 \
+            --data-parallel-size $3 \
+            --data-parallel-rank $4 \
+            --data-parallel-address $5 \
+            --data-parallel-rpc-port $6 \
+            --tensor-parallel-size $7 \
+            --enable-expert-parallel \
+            --speculative-config '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}' \
+            --seed 1024 \
+            --served-model-name glm-5 \
+            --max-model-len 202752 \
+            --max-num-batched-tokens 164 \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --additional-config '{"fuse_muls_add":true, "recompute_scheduler_enable":true, "multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}' \
+            --trust-remote-code \
+            --max-num-seqs 32 \
+            --gpu-memory-utilization 0.92 \
+            --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
+            --async-scheduling \
+            --quantization ascend \
+            --enable-auto-tool-choice \
+            --tool-call-parser glm47 \
+            --reasoning-parser glm45 \
+            --kv-transfer-config \
+            '{"kv_connector": "MooncakeConnectorV1",
+            "kv_role": "kv_consumer",
+            "kv_port": "30200",
+            "engine_id": "2",
+            "kv_connector_extra_config": {
+                "use_ascend_direct": true,
+                "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
+                "decode": {"dp_size": 8, "tp_size": 4}
+            }
+        }'
+        ```
+
+    4. Decode node 1 (ranks 4–7)
+
+        Prepare `run_dp_template.sh` on decode node 1 with the content below.
+
+        ```shell
+        nic_name="xxxx" # change to your own nic name
+        local_ip="xxxx" # change to your own ip
+
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_TRANSFER_TIMEOUT=600
+        export HCCL_EXEC_TIMEOUT=3600
+        export HCCL_CONNECT_TIMEOUT=3600
 
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
