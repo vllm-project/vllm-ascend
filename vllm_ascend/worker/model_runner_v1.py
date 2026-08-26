@@ -4929,12 +4929,33 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
+            tensor_parallel_size = self.parallel_config.tensor_parallel_size
+            resolver_tensor_parallel_size = tensor_parallel_size
+            if (
+                self.compilation_config.pass_config.enable_sp
+                and self.uniform_decode_query_len > 1
+                and tensor_parallel_size > 1
+            ):
+                graph_alignment = math.lcm(
+                    self.uniform_decode_query_len,
+                    tensor_parallel_size,
+                )
+                capture_sizes = self.compilation_config.cudagraph_capture_sizes
+                # Explicit sizes aligned to both speculative steps and SP do
+                # not need the resolver's second TP adjustment.
+                if (
+                    graph_alignment
+                    > max(self.uniform_decode_query_len, tensor_parallel_size)
+                    and capture_sizes
+                    and all(size % graph_alignment == 0 for size in capture_sizes)
+                ):
+                    resolver_tensor_parallel_size = 1
             cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                 min_cg_support=min_cg_support,
                 min_cg_attn_backend=min_cg_attn_backend,
                 uniform_decode_query_len=self.uniform_decode_query_len,
                 use_v2_model_runner=False,
-                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                tensor_parallel_size=resolver_tensor_parallel_size,
                 kv_cache_config=self.kv_cache_config,
                 max_num_reqs=self.max_num_reqs,
             )
