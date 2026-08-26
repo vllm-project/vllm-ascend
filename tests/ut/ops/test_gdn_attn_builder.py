@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import TypedDict
 from unittest.mock import patch
 
 import pytest
@@ -69,6 +70,13 @@ class BatchSpec:
     @property
     def batch_size(self) -> int:
         return len(self.seq_lens)
+
+
+class _DispatchCalls(TypedDict):
+    custom_op_modes: list[bool]
+    fused: int
+    stock_core: int
+    norm: int
 
 
 def create_common_attn_metadata(
@@ -365,7 +373,12 @@ def test_qwen35_fused_dispatch_requires_packed_layout_and_decode(
 
     # Count calls at the fused and stock boundaries to verify dispatch only;
     # the underlying NPU kernel numerics are covered by operator tests.
-    calls = {"custom_op_modes": [], "fused": 0, "stock_core": 0, "norm": 0}
+    calls: _DispatchCalls = {
+        "custom_op_modes": [],
+        "fused": 0,
+        "stock_core": 0,
+        "norm": 0,
+    }
     num_tokens = layer_metadata.num_actual_tokens
     projected_qkvz = torch.zeros((num_tokens, 12288), dtype=torch.bfloat16)
     projected_qkvz[:, 8192:] = 2
