@@ -10,8 +10,11 @@ Two families of telemetry are collected:
   ``layerwise``) attached as a label. The measured span is the full load
   path on this rank: ``sync`` includes key preparation before
   ``m_store.get``; ``async`` additionally includes receive-thread queueing
-  time; ``layerwise`` spans from task submission to the last layer's load
-  completion.
+  time; ``layerwise`` spans from task submission to the completion of the
+  last layer transfer (the transfer thread's completion timestamp, not
+  the compute-side wait return, so compute running past a finished load
+  no longer stretches the sample; prefetch layers may still include
+  waiting for the attention-start gate).
 - ``delayed_release``: latest snapshot of the number of requests whose KV
   blocks are held in the delayed-release window on the scheduler side
   (i.e. ``len(pool_scheduler._delayed_free_req_ids)``).
@@ -121,8 +124,9 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
       per-request KV pool load wall-clock duration. Measured spans differ
       per path: ``sync`` covers key preparation plus ``m_store.get``;
       ``async`` additionally includes queueing time in the receiving
-      thread; ``layerwise`` covers from layer-task submission to the last
-      layer's load completion (end-to-end span, compute may overlap).
+      thread; ``layerwise`` covers from layer-task submission to the
+      completion of the last layer transfer (transfer-thread completion
+      time; compute overlap no longer stretches the sample).
     - ``vllm:kv_pool_load_keys_total`` (Counter, label ``path``): number of
       pool keys loaded. ``sync``/``async`` count this rank's key chunks
       (keys are circular-shifted across TP ranks, so sums across ranks
@@ -130,7 +134,10 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
       transfers (approx. blocks x layers), which is not directly
       comparable with the other paths.
     - ``vllm:kv_pool_load_failed_keys_total`` (Counter, label ``path``):
-      number of pool keys that failed to load.
+      number of pool keys that failed to load. Only meaningful for
+      ``sync``/``async``; on the ``layerwise`` path a transfer failure is
+      fatal (the transfer thread raises), so this counter is expected to
+      stay 0 there.
     - ``vllm:kv_pool_delayed_release_requests`` (Gauge): number of requests
       whose KV blocks are currently held in the delayed-release window.
       Latest-snapshot semantics: reflects the most recent scheduling step,
@@ -201,7 +208,10 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
         if not transfer_stats_data:
             return
         for record in transfer_stats_data.get("load", []):
-            assert isinstance(record, dict)
+            if not isinstance(record, dict):
+                # Malformed entry after deserialization; skip it rather than
+                # crash the metrics pipeline (assert would vanish under -O).
+                continue
             metrics = self._get_load_metrics(engine_idx, str(record["path"]))
             metrics["duration"].observe(float(record["duration_seconds"]))
             metrics["keys"].inc(int(record["num_keys"]))

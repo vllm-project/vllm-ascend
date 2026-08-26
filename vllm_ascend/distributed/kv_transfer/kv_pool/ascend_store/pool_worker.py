@@ -96,6 +96,27 @@ PARTIAL_LEASE_RETRY_COUNT = 10
 PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 
 
+class _TimedLayerLoadEvent(threading.Event):
+    """Layer-load finished event that records when it was set.
+
+    The timestamp is written by the transfer thread right before the event
+    is set, i.e. the true completion time of that layer's pool load. The
+    layerwise load-duration metric uses it as the end time so the measured
+    span is not stretched by compute-side waits that return after the load
+    already finished. ``clear()`` intentionally keeps the last set time:
+    earlier layers are cleared while the last layer is still being waited
+    for, and the metric takes the max over all layers.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_time: float | None = None
+
+    def set(self) -> None:
+        self.set_time = time.perf_counter()
+        super().set()
+
+
 class KVPoolWorker:
     # The main class for the cache engine.
 
@@ -479,7 +500,7 @@ class KVPoolWorker:
 
         if self.use_layerwise:
             self.get_event = threading.Event()
-            self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
+            self.layer_load_finished_events = [_TimedLayerLoadEvent() for _ in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
             can_save = self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
@@ -1030,12 +1051,30 @@ class KVPoolWorker:
                         self._load_start_times[req_id] = start_time
                         self._layerwise_load_keys[req_id] = num_blocks
 
+    def _latest_layer_load_finish_time(self) -> float | None:
+        """Latest layer-load completion timestamp set by the transfer threads.
+
+        Returns None when no layer recorded a completion time (e.g. plain
+        Events in tests, or the timed events never being set this step).
+        """
+        events = self.layer_load_finished_events or []
+        times = [
+            event.set_time for event in events if isinstance(event, _TimedLayerLoadEvent) and event.set_time is not None
+        ]
+        return max(times) if times else None
+
     def _record_layerwise_load_finished(self) -> None:
         # Called after the last layer's load has been waited for: all
-        # requests of this step finish together.
+        # requests of this step finish together. The end time is the latest
+        # transfer-thread completion timestamp (event set time), not the
+        # compute-side wait return time, so the duration is not stretched
+        # when compute keeps running after the loads already finished.
         if not self._load_start_times:
             return
-        end_time = time.perf_counter()
+        end_time = self._latest_layer_load_finish_time()
+        if end_time is None or end_time < min(self._load_start_times.values()):
+            # No usable event timestamps for this step; fall back to now.
+            end_time = time.perf_counter()
         for req_id, num_keys in self._layerwise_load_keys.items():
             start_time = self._load_start_times.pop(req_id, None)
             if start_time is None or num_keys <= 0:
