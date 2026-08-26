@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/misc/model_dataset_list.json'
-      - '.github/workflows/labled_download_model.yaml'
+      - '.github/workflows/labeled_download_model_dataset.yaml'
     types: [labeled, synchronize]
 
 defaults:
@@ -22,7 +22,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        runner: [linux-aarch64-a2b3-0, linux-aarch64-a3-0, linux-aarch64-a5-0]
+        include:
+          - runner: linux-aarch64-a2b3-0
+            cluster: a2
+          - runner: linux-aarch64-a3-0
+            cluster: a3
+          - runner: linux-aarch64-a5-0
+            cluster: a5
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
 
@@ -53,14 +59,19 @@ jobs:
           git fetch origin main
 
           git show origin/main:$JSON_PATH > /tmp/models_main.json || \
-            echo '{"models":[], "datasets":[]}' > /tmp/models_main.json
+            echo '{"models":{}, "datasets":[]}' > /tmp/models_main.json
 
           cp $JSON_PATH /tmp/models_pr.json
 
-          jq -r '
-            (.models // []) as $pr
+          # a3 and 310p share the same PVC (persistent volume claim).
+          # 310p models are merged into a3's download list so they are
+          # cached on the same volume the 310p tests use.
+          jq -r --arg cluster "${{ matrix.cluster }}" '
+            (if $cluster == "a3" then (.models["310p"] // []) else [] end) as $shared
+            | ((.models[$cluster] // []) + $shared) as $pr
             | input
-            | (.models // []) as $main
+            | (if $cluster == "a3" then (.models["310p"] // []) else [] end) as $shared_main
+            | ((.models[$cluster] // []) + $shared_main) as $main
             | ($pr - $main)[]
           ' /tmp/models_pr.json /tmp/models_main.json > /tmp/new_models.txt
 
