@@ -292,7 +292,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         assert topk_weights is not None
-        topk_weights = topk_weights.to(self.in_dtype)
 
         act_name = getattr(activation, "value", activation)
         moe_comm_method = _EXTRA_CTX.moe_comm_method
