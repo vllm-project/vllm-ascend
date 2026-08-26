@@ -204,7 +204,7 @@ a3:
       - name: DeepSeek-V3_2-W8A8-EP_weekly
         config_file_path: DeepSeek-V3_2-W8A8-EP_weekly.yaml
         config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
-        size: 2
+        size: 4
       - name: DeepSeek-V3-W8A8_weekly
         config_file_path: DeepSeek-V3.yaml
         config_base_path: tests/e2e/weekly/multi_node/internal_dp/config
