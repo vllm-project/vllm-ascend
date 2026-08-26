@@ -28,7 +28,51 @@ We will support Ascend 950 Products and other NPUs in the future.
 
 ## Software Requirements
 
-Batch invariance requires a custom operator library for Atlas A2 and A3 inference products, and users need to set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
+Batch invariance requires a custom operator library for Atlas A2 and A3 inference products, and users need to set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to build `batch_invariant_ops` wheel during the installation process. Here's a specific example of the operation:
+
+### Option 1: vllm-ascend is NOT installed
+
+The `batch_invariant_ops` wheel are built into the vllm-ascend installation flow. Set `VLLM_BATCH_INVARIANT=1` to enable the building of `batch_invariant_ops` wheel:
+
+```bash
+# original
+pip install \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
+    vllm-ascend=={{ pip_vllm_ascend_version }}
+# set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to build `batch_invariant_ops` wheel.
+VLLM_BATCH_INVARIANT=1 pip install \
+    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
+    vllm-ascend=={{ pip_vllm_ascend_version }}
+```
+
+## Option 2: vllm-ascend is ALREADY installed
+
+Enter the vllm-ascend installation directory and build and install the `batch_invariant_ops` wheel:
+
+**A2:**
+```bash
+cd <vllm-ascend-install-dir>
+bash csrc/build_batch_invariant_ops.sh ascend910b
+```
+
+**A3:**
+```bash
+cd <vllm-ascend-install-dir>
+bash csrc/build_batch_invariant_ops.sh ascend910_93
+```
+
+### Quick Check
+After installation, verify the ops are available:
+
+```bash
+python -c "
+import batch_invariant_ops
+import torch
+op = torch.ops.batch_invariant_ops.npu_matmul_batch_invariant
+print(op)
+assert 'npu_matmul_batch_invariant' in str(op)
+"
+```
 
 ## Enabling Batch Invariance
 

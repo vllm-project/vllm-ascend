@@ -131,6 +131,8 @@ def enable_batch_invariant_mode():
         _batch_invariant_LIB.impl("aten::mm", torch.ops.batch_invariant_ops.npu_mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", torch.ops.batch_invariant_ops.npu_matmul_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::sum", reduce_sum, "NPU")
+        # topk_weights.sum(dim=-1, keepdim=True) dispatches to aten::sum.dim_IntList,
+        # where dim=-1 is represented as [-1]. Now registers this overload to reduce_sum.
         _batch_invariant_LIB.impl("aten::sum.dim_IntList", reduce_sum, "NPU")
         # torch_npu.npu_fused_infer_attention_score is a function of torch_npu, not a torch.ops.Operator,
         # so we need to patch it directly.

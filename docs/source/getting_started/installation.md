@@ -133,7 +133,7 @@ Before building vLLM Ascend, explicitly set the build target and disable automat
 
 ???+ tip "Enable batch invariance"
 
-    To enable batch invariance, set `VLLM_BATCH_INVARIANT=1` before building vLLM Ascend so that the custom operator library for batch invariance is installed during installation. For usage instructions, see [Batch Invariance](../user_guide/feature_guide/batch_invariance.md).
+    Batch invariance requires the `batch_invariant_ops` wheel. Set `VLLM_BATCH_INVARIANT=1` before building vLLM Ascend to build and install the wheel as part of the installation flow. For usage instructions, see [Batch Invariance](../user_guide/feature_guide/batch_invariance.md).
 
 ```bash
 export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
