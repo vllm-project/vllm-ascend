@@ -183,19 +183,7 @@ def test_is_decode_only_node_false_without_kv_transfer():
     assert afc._is_decode_only_node(_make_vllm_config()) is False
 
 
-def test_is_decode_only_node_true_for_decode_bench_connector():
-    vllm_config = _make_vllm_config(kv_connector="DecodeBenchConnector", kv_role="kv_both")
-
-    assert afc._is_decode_only_node(vllm_config) is True
-
-
-def test_is_decode_only_node_true_for_kv_consumer():
-    vllm_config = _make_vllm_config(kv_role="kv_consumer")
-
-    assert afc._is_decode_only_node(vllm_config) is True
-
-
-def test_is_decode_only_node_false_with_recompute_scheduler(monkeypatch):
+def test_is_decode_only_node_true_for_decode_bench_connector(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -205,10 +193,42 @@ def test_is_decode_only_node_false_with_recompute_scheduler(monkeypatch):
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
         ),
     )
+    vllm_config = _make_vllm_config(kv_connector="DecodeBenchConnector", kv_role="kv_both")
+
+    assert afc._is_decode_only_node(vllm_config) is True
+
+
+def test_is_decode_only_node_true_for_kv_consumer(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=0,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
+    vllm_config = _make_vllm_config(kv_role="kv_consumer")
+
+    assert afc._is_decode_only_node(vllm_config) is True
+
+
+def test_is_decode_only_node_false_without_recompute_scheduler(monkeypatch):
+    # With recompute scheduling disabled, prefill runs locally on the
+    # decode node, so it is not a decode-only node.
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=0,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=False),
+        ),
+    )
     vllm_config = _make_vllm_config(
         kv_connector="DecodeBenchConnector",
         kv_role="kv_both",
-        recompute_scheduler_enable=True,
+        recompute_scheduler_enable=False,
     )
 
     assert afc._is_decode_only_node(vllm_config) is False
