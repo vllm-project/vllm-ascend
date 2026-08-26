@@ -149,9 +149,12 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
         self.cpu_freed: list[str] = []
 
         # ---------------- Load model config (used to estimate theoretical compute cost) ----------------
-        self.attn_heads = vllm_config.model_config.hf_config.vision_config.num_heads
-        self.hidden_size = vllm_config.model_config.hf_config.vision_config.hidden_size
-        self.feedforward = vllm_config.model_config.hf_config.vision_config.intermediate_size
+        vision_config = vllm_config.model_config.hf_config.vision_config
+        self.attn_heads = getattr(vision_config, "num_attention_heads", None)
+        if self.attn_heads is None:
+            self.attn_heads = vision_config.num_heads
+        self.hidden_size = vision_config.hidden_size
+        self.feedforward = vision_config.intermediate_size
 
         # Hardware throughput (FLOPs)
         self.hardware_flops = 4 * 1e14
@@ -429,16 +432,6 @@ class ScoreEncoderCacheManager(EncoderCacheManager):
     def get_freed_mm_hashes(self) -> list[str]:
         """Report evictions through layer-specific manager metadata."""
         return []
-
-    def get_promoting_mm_hashes(self) -> list[str]:
-        promoting = self.promoting
-        self.promoting = []
-        return promoting
-
-    def get_cpu_get_encoder_mm_hashes(self) -> list[str]:
-        cpu_get_encoder_mm_hashes = self.cpu_get_encoder_mm_hashes
-        self.cpu_get_encoder_mm_hashes = []
-        return cpu_get_encoder_mm_hashes
 
     def _check_invariant(self):
         """

@@ -112,10 +112,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
-from vllm_ascend.ascend_config import (
-    get_ascend_config,
-    is_score_encoder_cache_manager,
-)
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
@@ -185,6 +182,7 @@ from vllm_ascend.utils import (
     get_c_env,
     global_stream,
     is_hidden_state_cache_spec,
+    is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
     oproj_tp_enable,
@@ -234,28 +232,6 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
-
-
-class _EncoderCacheView:
-
-    def __init__(
-        self,
-        contains: Callable[[str], bool],
-        get: Callable[[str], torch.Tensor | None],
-    ) -> None:
-        self._contains = contains
-        self._get = get
-
-    def __contains__(self, mm_hash: object) -> bool:
-        return isinstance(mm_hash, str) and self._contains(mm_hash)
-
-    def get(
-        self,
-        mm_hash: str,
-        default: torch.Tensor | None = None,
-    ) -> torch.Tensor | None:
-        value = self._get(mm_hash)
-        return default if value is None else value
 
 
 @dataclass
@@ -985,16 +961,6 @@ class NPUModelRunner(GPUModelRunner):
                 cur_hash = mm_feature.identifier
                 self.cached.setdefault(cur_hash, set()).add(new_req_data.req_id)
 
-    def _get_score_encoder_cache_metadata(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> Any | None:
-        return getattr(
-            scheduler_output,
-            "encoder_cache_manager_metadata",
-            getattr(scheduler_output, "ec_manager_metadata", None),
-        )
-
     def _on_request_state_removed(self, req_id: str, req_state: Any | None) -> None:
         if req_state is None:
             return
@@ -1025,7 +991,7 @@ class NPUModelRunner(GPUModelRunner):
             super()._process_encoder_cache_scheduler_output(scheduler_output)
             return
 
-        ec_manager_metadata = self._get_score_encoder_cache_metadata(scheduler_output)
+        ec_manager_metadata = scheduler_output.ec_manager_metadata
         if ec_manager_metadata is None:
             super()._process_encoder_cache_scheduler_output(scheduler_output)
             return
@@ -1084,17 +1050,6 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.tmp_encoder_cache[mm_hash] = encoder_output
         return encoder_output
-
-    def _has_encoder_output_in_cache(self, mm_hash: str) -> bool:
-        if mm_hash in self.encoder_cache or mm_hash in self.tmp_encoder_cache:
-            return True
-        return self.use_score_encoder_cache and mm_hash in self.cpu_encoder_cache
-
-    def _get_encoder_cache_view(self) -> _EncoderCacheView:
-        return _EncoderCacheView(
-            contains=self._has_encoder_output_in_cache,
-            get=self._get_encoder_output_from_cache,
-        )
 
     def _clear_finished_encoder_cache_copies(self) -> None:
         while (

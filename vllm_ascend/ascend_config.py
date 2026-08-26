@@ -1311,9 +1311,3 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
-
-
-def is_score_encoder_cache_manager(vllm_config) -> bool:
-    from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
-
-    return vllm_config.ec_manager_config.get_encoder_cache_manager_obj() is ScoreEncoderCacheManager

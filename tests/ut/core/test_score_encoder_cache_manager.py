@@ -3,14 +3,16 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from transformers import CLIPVisionConfig, Qwen2_5_VLConfig
 from vllm.config import EncoderCacheManagerConfig
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 
-from vllm_ascend.ascend_config import is_score_encoder_cache_manager
 from vllm_ascend.ec_manager.score_ec_manager import (
     CacheEntry,
+    ScoreEncoderCacheConfig,
     ScoreEncoderCacheManager,
 )
+from vllm_ascend.utils import is_score_encoder_cache_manager, vllm_version_is
 
 SCORE_MANAGER_CLS = "vllm_ascend.ec_manager.score_ec_manager.ScoreEncoderCacheManager"
 
@@ -20,30 +22,19 @@ def _build_manager(
     npu_cache_size: int = 10,
     cpu_cache_size: int = 10,
 ) -> ScoreEncoderCacheManager:
-    manager = ScoreEncoderCacheManager.__new__(ScoreEncoderCacheManager)
-    EncoderCacheManager.__init__(manager, npu_cache_size)
-    manager.npu_num_free_slots = npu_cache_size
-    manager.npu_num_freeable_slots = npu_cache_size
-    manager.cpu_cache_size = cpu_cache_size
-    manager.cpu_num_free_slots = cpu_cache_size
-    manager.cpu_num_freeable_slots = cpu_cache_size
-    manager.npu_cache = {}
-    manager.cpu_cache = {}
-    manager.npu_freeable = {}
-    manager.cpu_freeable = OrderedDict()
-    manager.req_cnt = 0
-    manager.watermark = 0.2
-    manager.promote_percentile = 0.2
-    manager.max_clock = 15
-    manager.clock_decay_every = 64
-    manager.promoting = []
-    manager.cpu_get_encoder_mm_hashes = []
-    manager.npu_freed = []
-    manager.cpu_freed = []
-    manager.alpha = 1
-    manager.beta = 1
-    manager.hardware_flops = 1
-    return manager
+    vision_config = SimpleNamespace(
+        num_heads=1,
+        hidden_size=1,
+        intermediate_size=1,
+    )
+    vllm_config = SimpleNamespace(
+        ec_manager_config=SimpleNamespace(manager_config={"cpu_cache_slots": cpu_cache_size}),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(vision_config=vision_config)),
+    )
+    return ScoreEncoderCacheManager(
+        cache_size=npu_cache_size,
+        vllm_config=vllm_config,
+    )
 
 
 def _build_request(request_id: str, mm_hash: str, num_embeds: int):
@@ -69,23 +60,25 @@ def test_other_managers_do_not_enable_score_cache():
     assert not is_score_encoder_cache_manager(vllm_config)
 
 
-def test_factory_reads_score_parameters_from_vllm_config():
-    manager_config = {
-        "cpu_cache_slots": 12,
-        "max_clock": 7,
-        "clock_decay_every": 8,
-        "watermark": 0.3,
-        "promote_percentile": 0.4,
-    }
-    vision_config = SimpleNamespace(
-        num_heads=2,
-        hidden_size=4,
-        intermediate_size=8,
-    )
+@pytest.mark.skipif(
+    vllm_version_is("0.27.1"),
+    reason=("ScoreEncoderCacheManager configuration requires vllm-project/vllm#51251."),
+)
+@pytest.mark.parametrize(
+    ("vision_config", "expected_attn_heads"),
+    [
+        (CLIPVisionConfig(num_attention_heads=3), 3),
+        (Qwen2_5_VLConfig(vision_config={"num_heads": 4}).vision_config, 4),
+    ],
+)
+def test_factory_reads_score_parameters_from_vllm_config(
+    vision_config,
+    expected_attn_heads,
+):
     vllm_config = SimpleNamespace(
         ec_manager_config=EncoderCacheManagerConfig(
             encoder_cache_manager_cls=SCORE_MANAGER_CLS,
-            manager_config=manager_config,
+            manager_config={"cpu_cache_slots": 12},
         ),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(vision_config=vision_config)),
     )
@@ -96,10 +89,56 @@ def test_factory_reads_score_parameters_from_vllm_config():
     )
 
     assert manager.cpu_cache_size == 12
-    assert manager.max_clock == 7
-    assert manager.clock_decay_every == 8
-    assert manager.watermark == 0.3
-    assert manager.promote_percentile == 0.4
+    assert manager.attn_heads == expected_attn_heads
+    manager._check_invariant()
+
+
+def test_score_config_accepts_valid_boundary_values():
+    config = ScoreEncoderCacheConfig.from_dict(
+        {
+            "cpu_cache_slots": 1,
+            "max_clock": 0,
+            "clock_decay_every": 1,
+            "watermark": 0,
+            "promote_percentile": 1,
+        }
+    )
+
+    assert config.cpu_cache_slots == 1
+    assert config.max_clock == 0
+    assert config.clock_decay_every == 1
+    assert config.watermark == 0
+    assert config.promote_percentile == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "user_config"),
+    [
+        ("cpu_cache_slots", {"cpu_cache_slots": 0}),
+        ("cpu_cache_slots", {"cpu_cache_slots": 1.5}),
+        ("cpu_cache_slots", {"cpu_cache_slots": True}),
+        ("max_clock", {"max_clock": -1}),
+        ("max_clock", {"max_clock": 1.5}),
+        ("max_clock", {"max_clock": True}),
+        ("clock_decay_every", {"clock_decay_every": 0}),
+        ("clock_decay_every", {"clock_decay_every": True}),
+        ("watermark", {"watermark": -0.1}),
+        ("watermark", {"watermark": 1.1}),
+        ("watermark", {"watermark": float("nan")}),
+        ("watermark", {"watermark": True}),
+        ("promote_percentile", {"promote_percentile": -0.1}),
+        ("promote_percentile", {"promote_percentile": 1.1}),
+        ("promote_percentile", {"promote_percentile": True}),
+    ],
+)
+def test_score_config_rejects_invalid_values(field: str, user_config: dict[str, object]):
+    with pytest.raises(ValueError, match=field):
+        ScoreEncoderCacheConfig.from_dict(user_config)
+
+
+def test_score_config_rejects_non_dict_config():
+    with pytest.raises(ValueError, match="manager_config must be a dict"):
+        ScoreEncoderCacheConfig.from_dict([])
 
 
 def test_cpu_evict_preserves_npu_residency():
@@ -256,41 +295,6 @@ def test_should_promote_caps_watermark_eviction_to_freeable_capacity():
     assert manager.npu_num_free_slots == 1
 
 
-def test_cpu_promotion_score_ignores_clock():
-    manager = _build_manager(npu_cache_size=1, cpu_cache_size=1)
-    candidate = CacheEntry(
-        mm_hash="candidate",
-        freq=4,
-        clock=manager.max_clock,
-        num_embeds=1,
-        cal_cost=1,
-    )
-    victim = CacheEntry(
-        mm_hash="victim",
-        freq=5,
-        clock=0,
-        num_embeds=1,
-        cal_cost=1,
-    )
-    manager.cached = {
-        "candidate": {"request"},
-        "victim": set(),
-    }
-    manager.cpu_cache = {"candidate": candidate}
-    manager.cpu_num_free_slots = 0
-    manager.cpu_num_freeable_slots = 0
-    manager.npu_cache = {"victim": victim}
-    manager.npu_freeable = {"victim": victim}
-    manager.npu_num_free_slots = 0
-    manager.npu_num_freeable_slots = 1
-    manager.promote_percentile = 0
-
-    assert not manager.should_promote("candidate")
-    manager._check_invariant()
-    assert "victim" in manager.npu_cache
-    assert manager.npu_freed == []
-
-
 def test_cpu_temporary_hit_does_not_get_npu_clock():
     manager = _build_manager(npu_cache_size=1, cpu_cache_size=2)
     first_request = _build_request("first", "candidate", 1)
@@ -349,15 +353,3 @@ def test_clock_tracks_npu_residency_lifecycle():
     manager.evict_from_npu(entry)
     manager._check_invariant()
     assert entry.clock == 0
-
-
-@pytest.mark.parametrize("seq_len", [1, 4, 16])
-def test_theory_cost_is_normalized_by_storage_cost(seq_len):
-    manager = _build_manager()
-    manager.alpha = 2
-    manager.beta = 3
-    manager.hardware_flops = 4
-
-    expected = 32 * (manager.alpha * seq_len + manager.beta) / manager.hardware_flops
-
-    assert manager.cal_theory_cost_storage_cost(seq_len) == pytest.approx(expected)

@@ -825,6 +825,12 @@ def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp
 
 
+def is_score_encoder_cache_manager(vllm_config: VllmConfig) -> bool:
+    from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
+
+    return vllm_config.ec_manager_config.get_encoder_cache_manager_obj() is ScoreEncoderCacheManager
+
+
 def is_moe_model(vllm_config: VllmConfig):
     """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL

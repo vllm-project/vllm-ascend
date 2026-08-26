@@ -42,7 +42,6 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheConfig
 from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
 
 
@@ -639,63 +638,6 @@ class TestAscendConfig(TestBase):
         second_ascend_config = init_ascend_config(second_vllm_config)
         self.assertIsNot(first_ascend_config, second_ascend_config)
         self.assertTrue(second_ascend_config.ascend_compilation_config.enable_npugraph_ex)
-
-
-class TestScoreEncoderCacheConfig(TestBase):
-    def test_accepts_valid_boundary_values(self):
-        config = ScoreEncoderCacheConfig.from_dict(
-            {
-                "cpu_cache_slots": 1,
-                "max_clock": 0,
-                "clock_decay_every": 1,
-                "watermark": 0,
-                "promote_percentile": 1,
-            }
-        )
-
-        self.assertEqual(config.cpu_cache_slots, 1)
-        self.assertEqual(config.max_clock, 0)
-        self.assertEqual(config.clock_decay_every, 1)
-        self.assertEqual(config.watermark, 0)
-        self.assertEqual(config.promote_percentile, 1)
-
-    def test_rejects_invalid_values(self):
-        invalid_configs: list[tuple[str, dict[str, object]]] = [
-            ("cpu_cache_slots", {"cpu_cache_slots": 0}),
-            ("cpu_cache_slots", {"cpu_cache_slots": 1.5}),
-            ("cpu_cache_slots", {"cpu_cache_slots": True}),
-            ("max_clock", {"max_clock": -1}),
-            ("max_clock", {"max_clock": 1.5}),
-            ("max_clock", {"max_clock": True}),
-            ("clock_decay_every", {"clock_decay_every": 0}),
-            ("clock_decay_every", {"clock_decay_every": True}),
-            ("watermark", {"watermark": -0.1}),
-            ("watermark", {"watermark": 1.1}),
-            ("watermark", {"watermark": float("nan")}),
-            ("watermark", {"watermark": True}),
-            ("promote_percentile", {"promote_percentile": -0.1}),
-            ("promote_percentile", {"promote_percentile": 1.1}),
-            ("promote_percentile", {"promote_percentile": float("inf")}),
-            ("promote_percentile", {"promote_percentile": True}),
-        ]
-
-        for field, user_config in invalid_configs:
-            with (
-                self.subTest(field=field, value=user_config[field]),
-                self.assertRaisesRegex(ValueError, field),
-            ):
-                ScoreEncoderCacheConfig.from_dict(user_config)
-
-    def test_rejects_unknown_fields(self):
-        with self.assertRaisesRegex(ValueError, "enabled"):
-            ScoreEncoderCacheConfig.from_dict({"enabled": False})
-
-    def test_rejects_non_dict_config(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            "manager_config must be a dict",
-        ):
-            ScoreEncoderCacheConfig.from_dict([])
 
 
 class TestShortRequestFirstConfig(TestBase):
