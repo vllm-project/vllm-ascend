@@ -59,6 +59,7 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     is_rc_device,
     lmhead_tp_enable,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -763,6 +764,10 @@ class NPUModelRunner310(NPUModelRunner):
                     assert isinstance(kv_cache_spec, AttentionSpec)
                     assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                    if not vllm_version_is("0.27.1"):
+                        # vLLM #51718 packs all group layers into one tensor;
+                        # kv_cache_config.num_blocks is the per-layer block count.
+                        num_blocks = kv_cache_config.num_blocks
                     assert num_blocks >= kv_cache_config.num_blocks
                     # Page attention operation on 310P limits block_size * head_size <= 128 * 128
                     supported_sizes = [
@@ -786,16 +791,31 @@ class NPUModelRunner310(NPUModelRunner):
                     k_shape = kv_cache_shape[1:]
                     v_shape = k_shape
                     dtype = kv_cache_spec.dtype
-                    k_cache = torch_npu.empty_with_format(
-                        size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
-                    )
-                    v_cache = torch_npu.empty_with_format(
-                        size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
-                    )
-                    for layer_name_inner in shared_names:
-                        # shared the kvcache between the self_attn specs in the same group
-                        if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            kv_cache[layer_name_inner] = (k_cache, v_cache)
+                    if vllm_version_is("0.27.1"):
+                        # v0.27.1 `shared_by` aliases the same physical blocks.
+                        k_cache = torch_npu.empty_with_format(
+                            size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
+                        )
+                        v_cache = torch_npu.empty_with_format(
+                            size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
+                        )
+                        for layer_name_inner in shared_names:
+                            # shared the kvcache between the self_attn specs in the same group
+                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                kv_cache[layer_name_inner] = (k_cache, v_cache)
+                    else:
+                        # main: every layer owns its own region; give each layer a
+                        # private (k, v) so block indices don't collide across layers.
+                        for layer_name_inner in shared_names:
+                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                kv_cache[layer_name_inner] = (
+                                    torch_npu.empty_with_format(
+                                        size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
+                                    ),
+                                    torch_npu.empty_with_format(
+                                        size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
+                                    ),
+                                )
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
