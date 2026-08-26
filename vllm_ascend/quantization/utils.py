@@ -52,11 +52,15 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
         from vllm.forward_context import get_forward_context, is_forward_context_available
 
         if is_forward_context_available():
-            vllm_config = get_forward_context().vllm_config
-        else:
-            from vllm.config import get_current_vllm_config
+            scale_alg = get_forward_context().additional_kwargs.get(
+                "dynamic_mx_quant_scale_alg"
+            )
+            if scale_alg is not None:
+                return scale_alg
 
-            vllm_config = get_current_vllm_config()
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
 
     model_config = vllm_config.model_config
     architectures = getattr(model_config, "architectures", None) or ()
