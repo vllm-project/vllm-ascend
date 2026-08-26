@@ -220,7 +220,7 @@ Run a single accuracy model (only that model from a group):
 /nightly accuracy-group-1/Qwen3-8B
 ```
 
-Re-trigger after fixing an issue: just push a new commit. The `synchronize` event
+To re-trigger after fixing an issue, just push a new commit. The `synchronize` event
 re-runs the workflow and picks up the existing `/nightly` comment automatically — no
 need to post a new comment.
 
