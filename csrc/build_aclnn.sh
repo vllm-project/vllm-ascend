@@ -159,6 +159,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "moe_grouped_matmul"
         "lightning_indexer_quant"
         "compressor"
+        "compress_norm_rope"
         "compressor_metadata"
         "vllm_quant_lightning_indexer"
         "vllm_quant_lightning_indexer_metadata"

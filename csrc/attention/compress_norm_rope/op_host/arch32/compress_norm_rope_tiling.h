@@ -10,7 +10,7 @@
 
 /*!
  * \file compress_norm_rope_tiling.h
- * \brief CompressNormRope arch22 tiling 声明（两阶段重构版，扁平实现，保留 ASCENDC_TPL key 分发）
+ * \brief CompressNormRope A2/A3 tiling 声明（两阶段重构版，扁平实现，保留 ASCENDC_TPL key 分发）
  */
 
 #ifndef COMPRESS_NORM_ROPE_TILING_H

@@ -10,7 +10,7 @@
 
 /*!
  * \file compress_norm_rope_tiling_data.h
- * \brief CompressNormRope tiling data（arch22 两阶段重构版，扁平结构，kernel/host 共用）
+ * \brief CompressNormRope tiling data（A2/A3 两阶段重构版，扁平结构，kernel/host 共用）
  *
  * C4（coff=2）按"组"均分任务；C128（coff=1）按"组×dChunk"均分任务 + workspace 中转两阶段。
  */

@@ -94,7 +94,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to split the DSA compressor into a packed GEMM and compress_norm_rope.
-    # 0 disables it (default), 1 enables it on Ascend 910B. This variable is not sensitive.
+    # 0 disables it (default), 1 enables it on A2/A3. This variable is not sensitive.
     "VLLM_ASCEND_DSA_COMPRESSOR_SPLIT": lambda: bool(int(os.getenv("VLLM_ASCEND_DSA_COMPRESSOR_SPLIT", "0"))),
 }
 

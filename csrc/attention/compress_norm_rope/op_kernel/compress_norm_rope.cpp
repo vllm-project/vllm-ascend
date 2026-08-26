@@ -17,7 +17,7 @@
  *        本算子只做 ape + softmax gate + 加权压缩 + state 递归 + rms_norm + rope。
  *        输入 mm_kv / mm_score 为 [tokenSize, coff*headDim] 的 bf16/fp16 GEMM 结果。
  *
- * arch22（910B）两阶段实现：
+ * A2/A3 两阶段实现：
  *   - C4（coff=2, cmpRatio=4）：组流式 + 双缓冲流水，UB 内融合 RmsNorm/RoPE/cast（无 SyncAll）
  *   - C128（coff=1, cmpRatio=128）：d 分块压缩 → GM workspace → SyncAll
  *     → 完整行高精度 RmsNorm/RoPE/cast
@@ -31,7 +31,7 @@
 #include "arch32/compress_norm_rope_kernel_c4.h"
 #include "arch32/compress_norm_rope_kernel_c128.h"
 #else
-#error "compress_norm_rope currently only supports arch22 (Ascend910B)"
+#error "compress_norm_rope currently only supports A2/A3"
 #endif
 
 using namespace CompressNormRope;

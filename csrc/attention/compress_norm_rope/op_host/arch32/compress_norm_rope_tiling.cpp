@@ -10,7 +10,7 @@
 
 /*!
  * \file compress_norm_rope_tiling.cpp
- * \brief CompressNormRope arch22 tiling（两阶段重构版）
+ * \brief CompressNormRope A2/A3 tiling（两阶段重构版）
  *
  *   - C4（coff=2）：按"组"均分任务（组数上界 = T/r + 2B，start_pos 未对齐跨组）
  *   - C128（coff=1）：按"组×dChunk"均分任务（dChunk=64），压缩行经用户 workspace 中转二阶段

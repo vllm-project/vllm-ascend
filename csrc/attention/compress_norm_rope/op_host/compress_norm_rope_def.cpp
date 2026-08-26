@@ -106,7 +106,7 @@ public:
             .NeedCheckSupportFlag(false)
             .PrecisionReduceFlag(true)
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn");   // set value of aclnn support
-        // 910B：dtype 组合对齐 fused compressor（config910）：norm_weight/rope_sin/cos 与
+        // A2/A3：dtype 组合对齐 fused compressor（config910）：norm_weight/rope_sin/cos 与
         // mm_kv 同精度（bf16/fp16）或 fp32（rope 另有 fp32 组合），kernel 内 cast 到 fp32。
         // 950：全 FLOAT（kernel 直接 fp32 读法）。
         OpAICoreConfig config910;
