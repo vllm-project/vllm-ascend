@@ -4,11 +4,14 @@
 
 Two families of telemetry are collected:
 
-- ``load``: per-request wall-clock duration of loading KV cache blocks
-  from the KV pool backend (``m_store.get``), together with the number of
-  keys touched and keys that failed to load. One record per request, with
-  the loading path (``sync`` / ``async`` / ``layerwise``) attached as a
-  label.
+- ``load``: per-request wall-clock duration of a KV pool load, together
+  with the number of keys touched and keys that failed to load. One
+  record per request, with the loading path (``sync`` / ``async`` /
+  ``layerwise``) attached as a label. The measured span is the full load
+  path on this rank: ``sync`` includes key preparation before
+  ``m_store.get``; ``async`` additionally includes receive-thread queueing
+  time; ``layerwise`` spans from task submission to the last layer's load
+  completion.
 - ``delayed_release``: latest snapshot of the number of requests whose KV
   blocks are held in the delayed-release window on the scheduler side
   (i.e. ``len(pool_scheduler._delayed_free_req_ids)``).
@@ -121,13 +124,23 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
     Metrics:
 
     - ``vllm:kv_pool_load_duration_seconds`` (Histogram, label ``path``):
-      per-request KV pool load wall-clock duration.
+      per-request KV pool load wall-clock duration. Measured spans differ
+      per path: ``sync`` covers key preparation plus ``m_store.get``;
+      ``async`` additionally includes queueing time in the receiving
+      thread; ``layerwise`` covers from layer-task submission to the last
+      layer's load completion (end-to-end span, compute may overlap).
     - ``vllm:kv_pool_load_keys_total`` (Counter, label ``path``): number of
-      pool keys loaded per request.
+      pool keys loaded. ``sync``/``async`` count this rank's key chunks
+      (keys are circular-shifted across TP ranks, so sums across ranks
+      equal the global key count); ``layerwise`` counts per-layer block
+      transfers (approx. blocks x layers), which is not directly
+      comparable with the other paths.
     - ``vllm:kv_pool_load_failed_keys_total`` (Counter, label ``path``):
       number of pool keys that failed to load.
     - ``vllm:kv_pool_delayed_release_requests`` (Gauge): number of requests
       whose KV blocks are currently held in the delayed-release window.
+      Latest-snapshot semantics: reflects the most recent scheduling step,
+      not the peak within a scrape interval.
     """
 
     def __init__(

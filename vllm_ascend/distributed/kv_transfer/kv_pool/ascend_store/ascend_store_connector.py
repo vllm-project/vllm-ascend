@@ -111,6 +111,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         self._current_step_has_real_forward = False
 
+        # Both sides are declared up-front: the upstream metrics framework
+        # calls get_kv_connector_stats() on worker-role instances too, so the
+        # "other" attribute must exist (None) rather than be absent.
+        self.connector_scheduler: KVPoolScheduler | None = None
+        self.connector_worker: KVPoolWorker | None = None
+
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
             self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
