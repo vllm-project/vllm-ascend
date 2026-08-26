@@ -30,6 +30,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import ProfilingChunkConfig, clear_ascend_config, init_ascend_config
 from vllm_ascend.core.profiling_chunk_predictor import ChunkSizePredictor, ProfilingChunkManager
 from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
+from vllm_ascend.utils import vllm_version_is
 
 MODEL = "Qwen/Qwen3-0.6B"
 BLOCK_SIZE = 16
@@ -333,6 +334,11 @@ class TestProfilingChunkScheduler(TestBase):
         from unittest.mock import PropertyMock
 
         type(model_config).is_encoder_decoder = PropertyMock(return_value=False)
+        if not vllm_version_is("0.27.1"):
+            # vLLM main (post-v0.27.1) reads model_config.uses_mrope in
+            # Scheduler.__init__, which infinitely recurses on a bare
+            # MagicMock hf_config. Override it to keep the UT runnable.
+            type(model_config).uses_mrope = PropertyMock(return_value=False)
         vllm_config.model_config.hf_config.is_encoder_decoder = False
 
         kv_cache_config = KVCacheConfig(

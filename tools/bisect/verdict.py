@@ -62,7 +62,7 @@ def _any_benchmark_failed(results_dir: Path | None) -> bool:
 # genuine functional pass/fail. These are NOT a clean bisect signal, so they map
 # to SKIP (like ``git bisect skip``):
 #   2 = interrupted, 3 = internal error, 4 = usage/collection error
-#       (e.g. a conftest ImportError -> vllm/vllm-ascend version mismatch),
+#       (e.g. a conftest ImportError caused by an environment mismatch),
 #   5 = no tests collected (e.g. -k matched nothing).
 # 124 is our own timeout sentinel (see runner) -> also unjudgeable.
 _INFRA_EXIT_CODES = {2, 3, 4, 5, 124}

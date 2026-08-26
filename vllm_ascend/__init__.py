@@ -21,6 +21,10 @@ from types import ModuleType
 
 _triton_available = importlib.util.find_spec("triton") is not None
 
+if "triton.experimental" not in sys.modules:
+    _experimental = ModuleType("triton.experimental")
+    _experimental.__path__ = []
+    sys.modules["triton.experimental"] = _experimental
 for _gluon_stub in (
     "triton.experimental.gluon",
     "triton.experimental.gluon.language",

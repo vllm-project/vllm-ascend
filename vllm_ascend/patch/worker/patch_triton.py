@@ -1,18 +1,14 @@
-import vllm.model_executor.layers.mamba.ops.causal_conv1d
 import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.fused_recurrent as fla_fused_recurrent
 import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
-import vllm.v1.worker.gpu.sample.gumbel
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
-from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu
 
 triton.next_power_of_2 = next_power_of_2
 
-vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = causal_conv1d_update_npu
 fla_layernorm_guard.LayerNormFn = LayerNormFn
 fla_ops.chunk_gated_delta_rule = chunk_gated_delta_rule
 

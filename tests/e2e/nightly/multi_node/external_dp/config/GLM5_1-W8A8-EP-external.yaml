@@ -66,7 +66,6 @@ env_common: &env_common
   HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "0"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
 
 
@@ -99,7 +98,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -159,7 +158,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -223,7 +222,7 @@ templates:
       - --max-num-batched-tokens
       - "32"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -287,7 +286,7 @@ templates:
       - --max-num-batched-tokens
       - "32"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code

@@ -8,7 +8,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   OMP_NUM_THREADS: "1"
   TASK_QUEUE_ENABLE: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -163,6 +162,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_fused_mc2":1}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "8000"
@@ -180,6 +181,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_fused_mc2":1}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "18432"
@@ -197,6 +200,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_fused_mc2":1}'
       - "--max-model-len"
       - "18432"
       - "--max-num-batched-tokens"
@@ -213,6 +218,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_fused_mc2":1}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "34304"
@@ -230,6 +237,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_fused_mc2":1}'
       - "--max-model-len"
       - "34304"
       - "--max-num-batched-tokens"
@@ -246,6 +255,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_fused_mc2":1}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "67584"
@@ -264,6 +275,8 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--additional-config"
+      - '{"enable_fused_mc2":1}'
       - "--max-model-len"
       - "67584"
       - "--max-num-batched-tokens"

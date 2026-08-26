@@ -19,6 +19,7 @@ from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
@@ -28,6 +29,7 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeReqInfo,
     RecomputeScheduler,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_add_request_does_not_inject_placeholder_spec_tokens():
@@ -35,6 +37,9 @@ def test_add_request_does_not_inject_placeholder_spec_tokens():
     scheduler.requests = {}
     scheduler.log_stats = False
     scheduler.connector = None
+    if not vllm_version_is("0.27.1"):
+        # vllm main: Scheduler.add_request reads spec_decode_metrics_level.
+        scheduler.spec_decode_metrics_level = "none"
 
     enqueued_requests = []
 
@@ -125,6 +130,35 @@ def test_finish_recomputed_request_uses_normal_abort_cleanup():
             client_index=request.client_index,
         )
     ]
+
+
+def test_truncate_computed_blocks_supports_legacy_short_mamba_group():
+    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
+    mamba_block = MagicMock()
+    attention_blocks = [MagicMock(), MagicMock()]
+    blocks = SimpleNamespace(blocks=([mamba_block], attention_blocks))
+    kv_cache_manager = SimpleNamespace(
+        truncate_computed_blocks=MagicMock(),
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                SimpleNamespace(block_size=4),
+                SimpleNamespace(block_size=4),
+            ]
+        ),
+        kv_cache_config=SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(kv_cache_spec=MagicMock(spec=MambaSpec)),
+                SimpleNamespace(kv_cache_spec=MagicMock()),
+            ]
+        ),
+        create_kv_cache_blocks=MagicMock(side_effect=lambda value: value),
+    )
+    scheduler.kv_cache_manager = kv_cache_manager
+
+    truncated = scheduler._truncate_computed_blocks_for_connector(blocks, 8)
+
+    assert truncated == ([mamba_block], attention_blocks)
+    kv_cache_manager.truncate_computed_blocks.assert_not_called()
 
 
 def test_dsv4_decode_node_observes_real_dense_local_cache_hit():
