@@ -499,11 +499,21 @@ class KVPoolScheduler:
 
         store_skip_tokens = num_external_hit_tokens
         if self.use_layerwise and self.use_eagle:
-            # TODO(lf): Support loading the trailing block as dirty data.
-            num_external_hit_tokens = max(
-                num_computed_tokens,
-                num_external_hit_tokens - self.lcm_block_size,
-            )
+            # Keep the draft model's recomputation zone intact: the
+            # generation-point hidden states must be freshly computed, and the
+            # local prefix-cache path already drops its trailing block
+            # (drop_eagle_block). Only trim the external hit when it reaches
+            # into the prompt's final granularity block, so that (local +
+            # external) never covers the last block whose KV the engine will
+            # rewrite during MTP draft/verify steps. Partial hits that stop on
+            # an interior block boundary carry a valid mamba state snapshot
+            # at that boundary and can be loaded as-is.
+            hit_reaches_final_block = num_external_hit_tokens > (request.num_tokens - self.lcm_block_size)
+            if hit_reaches_final_block:
+                num_external_hit_tokens = max(
+                    num_computed_tokens,
+                    num_external_hit_tokens - self.lcm_block_size,
+                )
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
 
