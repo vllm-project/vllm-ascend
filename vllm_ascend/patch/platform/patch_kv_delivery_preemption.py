@@ -9,6 +9,7 @@ admission is intentionally not handled here. The request/connector contracts
 and every scheduler method changed by those PRs live here as well.
 """
 
+import inspect
 import time
 from collections import defaultdict
 
@@ -53,6 +54,29 @@ def _multi_requires_kv_delivery(connector: MultiConnector) -> bool:
 
 def _best_effort_cache_requires_kv_delivery(_: KVConnectorBase_V1) -> bool:
     return False
+
+
+def _call_make_spec_decoding_stats(
+    scheduler,
+    spec_decoding_stats,
+    *,
+    num_draft_tokens,
+    num_accepted_tokens,
+    num_invalid_spec_tokens,
+    request_id,
+):
+    # vLLM 0.26.0 still uses num_draft_tokens; later versions renamed it.
+    params = inspect.signature(scheduler.make_spec_decoding_stats).parameters
+    token_key = "num_physical_draft_tokens" if "num_physical_draft_tokens" in params else "num_draft_tokens"
+    return scheduler.make_spec_decoding_stats(
+        spec_decoding_stats,
+        **{
+            token_key: num_draft_tokens,
+            "num_accepted_tokens": num_accepted_tokens,
+            "num_invalid_spec_tokens": num_invalid_spec_tokens,
+            "request_id": request_id,
+        },
+    )
 
 
 class KVDeliveryScheduler(Scheduler):
@@ -939,7 +963,8 @@ class KVDeliveryScheduler(Scheduler):
                         request.num_computed_tokens -= num_rejected
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
+                spec_decoding_stats = _call_make_spec_decoding_stats(
+                    self,
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
