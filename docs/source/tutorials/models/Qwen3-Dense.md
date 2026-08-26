@@ -520,9 +520,9 @@ For detailed parameter descriptions, please refer to the deployment examples in 
 <u>High Throughput Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -544,9 +544,9 @@ vllm serve your_model_path \
 <u>Long Context Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --host <host_ip> \
@@ -569,9 +569,9 @@ vllm serve your_model_path \
 <u>Low Latency Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --served-model-name qwen3 \

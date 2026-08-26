@@ -167,14 +167,15 @@ Notes:
 - If you only care about short-context low latency, you can set `--max-model-len 32768`, `--tensor-parallel-size 4`, and `--data-parallel-size 4`.
 
 ```bash
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
+
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --served-model-name "MiniMax-M2.7" \
@@ -185,8 +186,8 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"scheduler_config":{"enable_balance_scheduling":false},
                           "enable_cpu_binding":true,
-                          "enable_fused_mc2":true,
-                          "weight_nz_mode":true}' \
+                          "enable_fused_mc2":1,
+                          "weight_nz_mode":1}' \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
@@ -210,14 +211,14 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 #### A2 (single node)
 
 ```bash
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=512
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
+
+export HCCL_BUFFSIZE=512
+export HCCL_OP_EXPANSION_MODE="AIV"
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_INTRA_ROCE_ENABLE=0
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --served-model-name MiniMax-M2.7 \
@@ -265,27 +266,25 @@ Then prepare `run_dp_template.sh` on each node.
 
 ```bash
 unset http_proxy https_proxy ftp_proxy
-
-nic_name="<your_nic_name>"
-local_ip="<your_ip>"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-
-export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export PYTHONHASHSEED=0
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
 
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
+
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --host 0.0.0.0 \
@@ -323,27 +322,25 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 
 ```bash
 unset http_proxy https_proxy ftp_proxy
-
-nic_name="<your_nic_name>"
-local_ip="<your_ip>"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-
-export HCCL_BUFFSIZE=2048
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export PYTHONHASHSEED=0
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
 
+export HCCL_BUFFSIZE=2048
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
+
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --host 0.0.0.0 \
@@ -554,6 +551,7 @@ vllm bench serve \
 
 The following configurations are validated in internal testing and are categorized by use case.
 
+| Scenario | Input/Output | Deployment | NPUs | P Config | D Config | Max Batched Tokens | Max Num Seqs (P/D) | Max Model Len | EAGLE3 | FUSED_MC2 | FlashComm1 | Async Scheduling |
 |----------|-------------|------------|------|----------|----------|-------------------|----------------|---------------|--------|-----------|------------|------------------|
 | Short Seq High Throughput | 3.5k → 1.5k | 1P2D PD separation | 24 (A3) | DP8TP2EP16 | DP32TP1EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
 | Short Seq Low Latency | 3.5k → 1.5k | 1P2D PD separation | 24 (A3) | DP4TP4EP16 | DP8TP4EP32 | 16384 | 128 / 128 | 32k | 3 | On | On | On |
@@ -586,8 +584,8 @@ The following optimizations are enabled by default and require no additional con
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
-| Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{"enable_fused_mc2": true}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
-| Balanced Scheduling | High DP scenarios | `--additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}'` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
+| Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{"enable_fused_mc2": 1}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
+| Balanced Scheduling | High DP scenarios | `--additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}'` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`false`). Set to `true` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
 | EAGLE3 Speculative Decoding | All scenarios | `--speculative_config '{"method": "eagle3", "model": "/path/to/Eagle3/", "num_speculative_tokens": 3}'` | Uses a draft model to predict future tokens | 1–3 tokens for long context; 3 tokens for short context |
 | jemalloc Preload | All scenarios | `export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | Replaces default memory allocator to reduce fragmentation | Ensure jemalloc is installed in the container |
 

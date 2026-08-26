@@ -226,9 +226,9 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 === "Atlas 800I A2/A3"
 
     ```bash
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-    export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
     export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve your_model_path \
@@ -516,9 +516,9 @@ vllm bench serve \
 **Low Latency Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -550,9 +550,9 @@ vllm serve your_model_path \
 **High Throughput Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -583,9 +583,9 @@ vllm serve your_model_path \
 **Long Context Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \

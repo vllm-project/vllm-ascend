@@ -204,9 +204,9 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 Atlas 800I A2/A3:
 
 ```shell
+export HCCL_BUFFSIZE=512
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=512
 
 vllm serve your_model_path \
     --host <host_ip> \
@@ -319,25 +319,24 @@ Then prepare `run_dp_template.sh` on each node.
 **Prefill node** (set `nic_name` and `local_ip` to your own):
 
 ```bash
-nic_name="<your_nic_name>"
-local_ip="<your_ip>"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-
-export HCCL_BUFFSIZE=512
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
+
+export HCCL_BUFFSIZE=512
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --host 0.0.0.0 \
@@ -380,24 +379,24 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
 **Decode node 0** (set `nic_name` and `local_ip` to your own):
 
 ```bash
-nic_name="<your_nic_name>"
-local_ip="<your_ip>"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
+
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --host 0.0.0.0 \
@@ -440,24 +439,24 @@ vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
 **Decode node 1** (set `nic_name` and `local_ip` to your own):
 
 ```bash
-nic_name="<your_nic_name>"
-local_ip="<your_ip>"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
+
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
 
 export ASCEND_RT_VISIBLE_DEVICES=$1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
     --host 0.0.0.0 \
@@ -730,19 +729,19 @@ After several minutes, you will get the performance evaluation result.
 Single-node PD hybrid deployment optimized for maximum throughput on Atlas 800I A3 (64GB × 16):
 
 ```bash
-export HCCL_IF_IP=<node_ip>
-export GLOO_SOCKET_IFNAME=<ifname>
-export HCCL_SOCKET_IFNAME=<ifname>
-
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
+
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -771,19 +770,19 @@ vllm serve your_model_path \
 Single-node PD hybrid deployment optimized for low latency with speculative decoding (Eagle3):
 
 ```bash
-export HCCL_IF_IP=<node_ip>
-export GLOO_SOCKET_IFNAME=<ifname>
-export HCCL_SOCKET_IFNAME=<ifname>
-
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
+
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -813,19 +812,19 @@ vllm serve your_model_path \
 Single-node PD hybrid deployment optimized for long context with Context Parallelism and yarn rope-scaling:
 
 ```bash
-export HCCL_IF_IP=<node_ip>
-export GLOO_SOCKET_IFNAME=<ifname>
-export HCCL_SOCKET_IFNAME=<ifname>
-
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
+
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
