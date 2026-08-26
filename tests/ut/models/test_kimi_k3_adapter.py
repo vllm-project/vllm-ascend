@@ -114,16 +114,18 @@ def test_dspark_decoder_uses_upstream_mlp_activation_contract(
         intermediate_size=16,
         hidden_act="silu",
         rms_norm_eps=1e-6,
+        full_attention_causal=True,
     )
     vllm_config = SimpleNamespace(cache_config=None)
     mlp_factory = MagicMock(return_value=nn.Identity())
+    attention_factory = MagicMock(return_value=nn.Identity())
     monkeypatch.setattr(
         "vllm_ascend.models.kimi_k3_dspark.get_draft_quant_config",
         lambda _: None,
     )
     monkeypatch.setattr(
         "vllm_ascend.models.kimi_k3_dspark.AscendKimiMLAAttention",
-        lambda **_: nn.Identity(),
+        attention_factory,
     )
     monkeypatch.setattr(
         "vllm_ascend.models.kimi_k3_dspark.KimiMLP",
@@ -142,6 +144,22 @@ def test_dspark_decoder_uses_upstream_mlp_activation_contract(
     assert mlp_factory.call_args.kwargs["hidden_act"] == "silu"
     assert "activation_situ_beta" not in mlp_factory.call_args.kwargs
     assert "activation_situ_linear_beta" not in mlp_factory.call_args.kwargs
+    assert attention_factory.call_args.kwargs["non_causal_multi_token_decode"] is False
+
+
+def test_k3_dspark_reports_draft_attention_causality():
+    model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
+    nn.Module.__init__(model)
+    model.model = SimpleNamespace(layers=[object(), object(), object()])
+
+    model.config = SimpleNamespace(dflash_config={"causal": True})
+    assert model.get_draft_attn_causal() == [True, True, True]
+
+    model.config = SimpleNamespace(full_attention_causal=True)
+    assert model.get_draft_attn_causal() == [True, True, True]
+
+    model.config = SimpleNamespace()
+    assert model.get_draft_attn_causal() == [False, False, False]
 
 
 def test_ascend_kimi_moe_quantizes_modelslim_latent_projections(monkeypatch):
@@ -657,8 +675,9 @@ def test_k3_dspark_load_weights_keeps_per_layer_context_kv(monkeypatch):
     seen_names: list[str] = []
 
     class CapturingLoader:
-        def __init__(self, loaded_model):
+        def __init__(self, loaded_model, *, skip_substrs):
             assert loaded_model is model
+            assert skip_substrs == list(model.checkpoint_skip_substrs)
 
         def load_weights(self, weights, *, mapper):
             assert mapper is model.hf_to_vllm_mapper
@@ -691,8 +710,9 @@ def test_k3_dspark_reuses_modelslim_rotation_loader(monkeypatch):
     seen_weights: list[tuple[str, torch.Tensor]] = []
 
     class CapturingLoader:
-        def __init__(self, loaded_model):
+        def __init__(self, loaded_model, *, skip_substrs):
             assert loaded_model is model
+            assert skip_substrs == list(model.checkpoint_skip_substrs)
 
         def load_weights(self, weights, *, mapper):
             assert mapper is model.hf_to_vllm_mapper
