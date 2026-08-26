@@ -28,7 +28,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
-from vllm.v1.worker.gpu import pcp_manager as vllm_pcp_manager
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
@@ -86,12 +85,15 @@ def _use_ascend_pcp_manager_for_vllm_0271():
         yield
         return
 
-    original_pcp_manager_cls = vllm_pcp_manager.PCPManager
-    vllm_pcp_manager.PCPManager = AscendPCPManager
+    # Patch the exact module object captured by GPUModelRunner. vLLM 0.27.1
+    # resolves PCPManager through this alias inside initialize_kv_cache().
+    pcp_module = vllm_model_runner.pcp
+    original_pcp_manager_cls = pcp_module.PCPManager
+    pcp_module.PCPManager = AscendPCPManager
     try:
         yield
     finally:
-        vllm_pcp_manager.PCPManager = original_pcp_manager_cls
+        pcp_module.PCPManager = original_pcp_manager_cls
 
 
 class NPUModelRunner(GPUModelRunner):
