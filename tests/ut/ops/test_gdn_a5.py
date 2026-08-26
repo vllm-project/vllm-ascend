@@ -40,9 +40,6 @@ def test_log_solve_tri_debug_is_gated_by_environment(monkeypatch):
         shape=(1, 2, 64, 64),
         dtype="float32",
         device="npu:0",
-        ndim=4,
-        numel=lambda: 8192,
-        storage_offset=lambda: 0,
         stride=lambda: (8192, 4096, 64, 1),
         is_contiguous=lambda: True,
     )
