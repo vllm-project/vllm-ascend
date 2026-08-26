@@ -269,39 +269,42 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            if for_cudagraph_capture:
-                # All backends use the capture wrapper; DSA overrides it internally.
-                metadata = attn_metadata_builder.build_for_cudagraph_capture(common_attn_metadata)
-            else:
-                is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
-                attn_metadata_extra_kwargs = (
-                    model_specific_attn_metadata.get_extra_attn_kwargs(
-                        attn_metadata_builder,
-                        num_reqs,
-                    )
-                    if model_specific_attn_metadata is not None
-                    else {}
+            is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
+            attn_metadata_extra_kwargs = (
+                model_specific_attn_metadata.get_extra_attn_kwargs(
+                    attn_metadata_builder,
+                    num_reqs,
                 )
-                if is_dsa_builder:
-                    # DSA cache groups share request-level metadata during replay.
+                if not for_cudagraph_capture and model_specific_attn_metadata is not None
+                else {}
+            )
+            if is_dsa_builder:
+                # DSA cache groups share request-level metadata during replay.
+                attn_metadata_extra_kwargs.update(
+                    num_actual_reqs=num_actual_reqs,
+                    common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                )
+                if pcp_context is not None:
                     attn_metadata_extra_kwargs.update(
-                        num_actual_reqs=num_actual_reqs,
-                        common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                        pcp_context=pcp_context,
+                        pcp_cache_group_idx=i,
                     )
-                    if pcp_context is not None:
-                        attn_metadata_extra_kwargs.update(
-                            pcp_context=pcp_context,
-                            pcp_cache_group_idx=i,
-                        )
+
+            if for_cudagraph_capture:
+                metadata = attn_metadata_builder.build_for_cudagraph_capture(
+                    common_attn_metadata,
+                    **attn_metadata_extra_kwargs,
+                )
+            else:
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
-                if is_dsa_builder:
-                    # Preserve sharing even if a builder replaces one of the
-                    # dictionaries while constructing its metadata.
-                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+            if is_dsa_builder:
+                # Preserve sharing even if a builder replaces one of the
+                # dictionaries while constructing its metadata.
+                common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata

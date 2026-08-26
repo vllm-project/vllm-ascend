@@ -19,14 +19,14 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 
 | Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | Sequence Parallelism (SP) + PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MLA | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
-| GQA | 🟠 Partial compatibility (eager) | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
-| SFA | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
-| DSA | 🟠 Partial compatibility (eager) | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.
-- ❌ **No compatibility**: The backend or feature combination is not supported by the initial MRV2 PCP implementation.
+- ❌ **No compatibility**: The backend or feature combination is not supported by the current MRV2 PCP implementation.
 - **Not applicable**: The feature does not apply to the attention backend.
 
 ### Decode Context Parallel
