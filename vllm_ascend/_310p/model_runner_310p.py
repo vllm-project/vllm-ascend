@@ -743,22 +743,44 @@ class NPUModelRunner310(NPUModelRunner):
                 if "linear_attn" in layer_name and layer_name not in kv_cache:
                     cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(cache_spec, MambaSpec)
-                    assert kv_cache_tensor.size % cache_spec.page_size_bytes == 0
-                    num_blocks = kv_cache_tensor.size // cache_spec.page_size_bytes
+                    # vLLM #51718 packs all group layers into one tensor on main;
+                    # each layer owns an equal share of `kv_cache_tensor.size`.
+                    per_layer_size = (
+                        kv_cache_tensor.size if vllm_version_is("0.27.1") else kv_cache_tensor.size // len(shared_names)
+                    )
+                    assert per_layer_size % cache_spec.page_size_bytes == 0
+                    num_blocks = per_layer_size // cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-                    state_tensors = []
-                    target_idx = 0
-                    start_idx = 0
-                    for shape, dtype in zip(cache_spec.shapes, cache_spec.dtypes):
-                        target_shape = (num_blocks, *shape)
-                        target_idx += math.prod(target_shape) * get_dtype_size(dtype)
-                        tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
-                        start_idx = target_idx
-                        state_tensors.append(tensor)
-                    for layer_name_inner in shared_names:
-                        if "linear_attn" in layer_name_inner:
-                            kv_cache[layer_name_inner] = state_tensors
+                    if vllm_version_is("0.27.1"):
+                        raw_tensor = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
+                        state_tensors = []
+                        target_idx = 0
+                        start_idx = 0
+                        for shape, dtype in zip(cache_spec.shapes, cache_spec.dtypes):
+                            target_shape = (num_blocks, *shape)
+                            target_idx += math.prod(target_shape) * get_dtype_size(dtype)
+                            tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
+                            start_idx = target_idx
+                            state_tensors.append(tensor)
+                        for layer_name_inner in shared_names:
+                            if "linear_attn" in layer_name_inner:
+                                kv_cache[layer_name_inner] = state_tensors
+                    else:
+                        # main: every layer owns its own region; allocate private
+                        # state tensors per layer so blocks don't collide.
+                        for layer_name_inner in shared_names:
+                            if "linear_attn" in layer_name_inner:
+                                raw_tensor = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
+                                state_tensors = []
+                                target_idx = 0
+                                start_idx = 0
+                                for shape, dtype in zip(cache_spec.shapes, cache_spec.dtypes):
+                                    target_shape = (num_blocks, *shape)
+                                    target_idx += math.prod(target_shape) * get_dtype_size(dtype)
+                                    tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
+                                    start_idx = target_idx
+                                    state_tensors.append(tensor)
+                                kv_cache[layer_name_inner] = state_tensors
                 elif "attn" in layer_name and layer_name not in kv_cache:
                     kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(kv_cache_spec, AttentionSpec)
