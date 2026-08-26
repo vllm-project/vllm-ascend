@@ -645,6 +645,13 @@ class AscendModelSlimConfig(QuantizationConfig):
                     ".v_proj.kv_cache_offset": ".attn.v_cache_offset",
                 }
             )
+        if self.enable_c8_fp8_quant:
+            suffix_map.update(
+                {
+                    ".k_proj.kv_cache_scale": ".attn.k_cache_scale",
+                    ".v_proj.kv_cache_scale": ".attn.v_cache_scale",
+                }
+            )
         if self.enable_fa_quant:
             # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
             # mapping, we use regex mapping.
@@ -765,6 +772,11 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
+        elif isinstance(layer, AttentionLayerBase) and self.is_c8_fp8_quant_layer(prefix):
+            from .methods.kv_c8 import AscendC8Fp8KVCacheAttentionMethod
+
+            logger.debug("Select AscendKVCacheMethod(C8_FP8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8_FP8]")
+            return AscendKVCacheMethod(AscendC8Fp8KVCacheAttentionMethod(self.quant_description, prefix))
         elif _is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
@@ -852,6 +864,13 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.enable_c8_quant:
             layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
             if layer_id_str.isdigit() and int(layer_id_str) in self.c8_quant_layers:
+                return True
+        return False
+
+    def is_c8_fp8_quant_layer(self, prefix):
+        if self.enable_c8_fp8_quant:
+            layer_id_str = "".join(re.findall(r"\.(\d+)\.", prefix))
+            if layer_id_str.isdigit() and int(layer_id_str) in self.c8_fp8_quant_layers:
                 return True
         return False
 
@@ -1056,8 +1075,10 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
         self.enable_c8_quant = kv_quant_type == "C8"
+        self.enable_c8_fp8_quant = kv_quant_type == "C8_FP8"
         self.c8_quant_layers = []
-        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
+        self.c8_fp8_quant_layers = []
+        if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant or self.enable_c8_fp8_quant:
             for key in self.quant_description:
                 _id = "".join(re.findall(r"\.(\d+)\.", key))
                 if "fa_k.scale" in key:
@@ -1065,4 +1086,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 if "indexer.quant_type" in key:
                     self.indexer_quant_layers.append(int(_id))
                 if "k_proj.kv_cache_scale" in key:
-                    self.c8_quant_layers.append(int(_id))
+                    if self.enable_c8_fp8_quant:
+                        self.c8_fp8_quant_layers.append(int(_id))
+                    else:
+                        self.c8_quant_layers.append(int(_id))

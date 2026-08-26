@@ -162,3 +162,55 @@ class AscendC8KVCacheAttentionMethod(AscendAttentionScheme):
             "attention backend."
         )
         raise RuntimeError(err_msg)
+
+
+class AscendC8Fp8KVCacheAttentionMethod(AscendAttentionScheme):
+    """C8 FP8 fp8-perchannel KV cache quantization for dense-attention models (e.g. Qwen3)."""
+
+    def __init__(self, quant_description: dict, prefix: str):
+        self.quant_description = quant_description
+        self.prefix = prefix
+        vllm_config = get_current_vllm_config()
+        self.is_kv_producer = False
+        if vllm_config.kv_transfer_config is not None:
+            self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
+
+    def create_weights(self, layer: torch.nn.Module) -> None:
+        # C8 FP8 always set kv_cache to fp8
+        logger.info_once("[vllm-ascend/C8_FP8_KV] setting kv_cache_torch_dtype to torch.float8_e4m3fn")
+        layer.kv_cache_torch_dtype = torch.float8_e4m3fn
+
+        if hasattr(layer, "impl"):
+            from vllm_ascend.attention.attention_v1 import AscendC8AttentionBackendImpl
+
+            layer.impl.__class__ = AscendC8AttentionBackendImpl
+
+        dtype = torch.get_default_dtype()
+        layer.k_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
+        layer.k_cache_scale.weight_loader = _c8_kv_scale_weight_loader
+        layer.v_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
+        layer.v_cache_scale.weight_loader = _c8_kv_scale_weight_loader
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.k_cache_scale.data = layer.k_cache_scale.data.flatten()
+        layer.v_cache_scale.data = layer.v_cache_scale.data.flatten()
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache,
+        attn_metadata,
+        attn_type,
+        scale,
+        output,
+    ) -> torch.Tensor:
+        err_msg = (
+            "[vllm-ascend/C8_KV] AscendC8KVCacheAttentionMethod.apply should "
+            "not be called. C8 KV cache quantization is handled by the "
+            "attention backend."
+        )
+
+        raise RuntimeError(err_msg)
