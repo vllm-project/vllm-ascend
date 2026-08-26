@@ -38,6 +38,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_hybrid_kv_cache_config(
@@ -399,10 +400,9 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     assert sum(tensor.size for tensor in tensors) == available_memory
 
 
-def test_kimi_k3_gqa_mixed_grouping_falls_back_on_partial_signature() -> None:
+def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
     specs = _make_kimi_k3_dspark_kv_cache_specs()
-    draft_layer = "model.layers.93.self_attn.attn"
-    specs.pop(draft_layer)
+    specs["unrecognized.layer"] = next(iter(specs.values()))
 
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
 
@@ -560,6 +560,10 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
 
 
 @pytest.mark.parametrize("num_prefill_lookahead", [0, 8])
+@pytest.mark.skipif(
+    vllm_version_is("0.27.1"),
+    reason="num_prefill_lookahead was added to the coordinator after v0.27.1",
+)
 def test_get_kv_cache_coordinator_forwards_prefill_lookahead(
     monkeypatch,
     num_prefill_lookahead: int,

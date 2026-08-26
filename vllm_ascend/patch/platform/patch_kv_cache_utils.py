@@ -22,10 +22,32 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
+
+
+if vllm_version_is("0.27.1"):
+
+    def _uniform_type_max_num_blocks_per_req(
+        self: UniformTypeKVCacheSpecs,
+        vllm_config: VllmConfig,
+        max_len: int,
+    ) -> int:
+        """Use the per-layer block-table width, matching current vLLM."""
+        widths = {spec.max_num_blocks_per_req(vllm_config, max_len) for spec in self.kv_cache_specs.values()}
+        assert len(widths) == 1, (
+            "All layers in the same KV cache group must need the same number "
+            f"of block table entries, got {sorted(widths)}."
+        )
+        return next(iter(widths))
+
+    UniformTypeKVCacheSpecs.max_num_blocks_per_req = (  # type: ignore[method-assign]
+        _uniform_type_max_num_blocks_per_req
+    )
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -78,8 +100,8 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
 
     Block and page sizes are resolved by the runtime and intentionally not
     fixed here: TP8 and TP16 produce different sizes but the same ownership
-    relation. A partial or incompatible signature falls back to vLLM's generic
-    hybrid grouping.
+    relation. An unrecognized or incompatible signature falls back to vLLM's
+    generic hybrid grouping.
     """
     target_attention_specs = {
         name: spec
