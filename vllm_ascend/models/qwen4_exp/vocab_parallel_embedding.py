@@ -193,7 +193,6 @@ def get_masked_input_and_mask(
 
 
 # --8<-- [start:vocab_parallel_embedding]
-@PluggableLayer.register("vocab_parallel_embedding")
 class VocabParallelEmbedding(PluggableLayer):
     """Embedding parallelized in the vocabulary dimension.
 
@@ -511,7 +510,6 @@ class VocabParallelEmbedding(PluggableLayer):
 
 
 # --8<-- [start:parallel_lm_head]
-@PluggableLayer.register("parallel_lm_head")
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 
