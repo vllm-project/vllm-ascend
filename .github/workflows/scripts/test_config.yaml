@@ -278,6 +278,7 @@
     - tests/ut/lora
     - tests/e2e/pull_request/one_card/lora
     - tests/e2e/pull_request/two_card/lora
+    - tests/e2e/pull_request/four_card/lora
 
 # CPU Weight Offloading
 - name: cpu_weight_offload
@@ -883,6 +884,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 690
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 190
   tests/e2e/pull_request/four_card/test_qwen3_5.py: 670
+  tests/e2e/pull_request/four_card/lora/test_qwen35_27b_multi_lora_mtp_eager.py: 1200
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1160
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
