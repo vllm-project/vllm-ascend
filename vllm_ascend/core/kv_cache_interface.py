@@ -9,10 +9,35 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowMLASpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+from vllm_ascend.core.single_type_kv_cache_manager import (
+    CircularBufferManager,
+    CompressAttentionManager,
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class AscendCircularBufferSpec(AttentionSpec):
+    """One fixed-capacity raw-key ring block for each active request."""
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        del vllm_config
+        return self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        del vllm_config, max_len
+        return 1
+
+    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
+        return all(isinstance(spec, AscendCircularBufferSpec) for spec in kv_cache_specs.values())
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -218,6 +243,11 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 def register_ascend_kv_cache_specs() -> None:
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendCircularBufferSpec,
+        manager_class=CircularBufferManager,
+        uniform_type_base_spec=AscendCircularBufferSpec,
+    )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
         manager_class=CompressAttentionManager,

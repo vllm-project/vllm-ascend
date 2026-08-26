@@ -1,6 +1,7 @@
 import torch
 
 from vllm_ascend import models
+from vllm_ascend.models.qwen4_exp.config import Qwen4ExpTextConfig
 from vllm_ascend.ops.triton.qwen4_exp.hc import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -26,6 +27,26 @@ def test_qwen4_exp_architectures_are_registered(monkeypatch) -> None:
         "vllm_ascend.models.qwen4_exp:AscendQwen4ExpForConditionalGeneration"
     )
     assert registered["Qwen4ExpMTP"] == ("vllm_ascend.models.qwen4_exp:AscendQwen4ExpMTP")
+
+
+def test_qwen4_exp_config_is_owned_by_plugin() -> None:
+    config = Qwen4ExpTextConfig(
+        hidden_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        intermediate_size=128,
+        head_dim=16,
+        ple_layer_ids=[1],
+        ple_embed_dim=64,
+        ngram_size=3,
+        heads_per_ngram=4,
+        layer_types=["full_attention", "linear_attention"],
+    )
+
+    assert config.model_type == "qwen4_exp_text"
+    assert config.short_conv_layer_ids == [0]
+    assert config.ngram_context_len == 2
 
 
 def test_hyperconnection_ops_match_torch_reference() -> None:

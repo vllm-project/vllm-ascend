@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -23,6 +24,9 @@ from vllm.v1.kv_cache_interface import (
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 
 _orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
+_orig_get_kv_cache_config_from_groups = (
+    vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
+)
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -128,6 +132,90 @@ def get_kv_cache_groups(vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCach
                 f"{spec_summary}."
             ) from exc
         return fallback_groups
+
+
+def _group_member_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
+    if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+        return group.kv_cache_spec.kv_cache_specs
+    return {name: group.kv_cache_spec for name in group.layer_names}
+
+
+def _get_qwen4_exp_kv_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig | None:
+    """Build the packed QSA/linear-cache layout without a vLLM source patch."""
+    from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+
+    members = {
+        name: spec
+        for group in kv_cache_groups
+        for name, spec in _group_member_specs(group).items()
+    }
+    if not any(isinstance(spec, AscendCircularBufferSpec) for spec in members.values()):
+        return None
+
+    main = [(name, spec) for name, spec in members.items() if type(spec) is FullAttentionSpec]
+    compressed = [(name, spec) for name, spec in members.items() if type(spec) is MLAAttentionSpec]
+    compressor_state = [
+        (name, spec) for name, spec in members.items() if isinstance(spec, AscendCircularBufferSpec)
+    ]
+    mamba_groups = [group for group in kv_cache_groups if isinstance(group.kv_cache_spec, MambaSpec)]
+    if not main or not compressed or len(compressed) != len(compressor_state):
+        raise ValueError("Qwen4Exp QSA cache owners have an inconsistent packed layout")
+
+    main_page_size = max(spec.page_size_bytes for _, spec in main)
+    compressed_page_size = max(
+        spec.page_size_bytes for _, spec in (*compressed, *compressor_state)
+    )
+    bytes_per_block = len(main) * main_page_size + len(compressed) * compressed_page_size
+    num_blocks = may_override_num_blocks(vllm_config, available_memory // bytes_per_block)
+    total_size = bytes_per_block * num_blocks
+    compressed_offset = len(main) * main_page_size
+
+    def packed_tensor(layer_name: str, offset: int) -> KVCacheTensor:
+        return KVCacheTensor(
+            size=total_size,
+            shared_by=[layer_name],
+            offset=offset,
+            block_stride=bytes_per_block,
+        )
+
+    tensors = [
+        packed_tensor(name, index * main_page_size)
+        for index, (name, _) in enumerate(main)
+    ]
+    for owners in (compressed, compressor_state):
+        tensors.extend(
+            packed_tensor(name, compressed_offset + index * compressed_page_size)
+            for index, (name, _) in enumerate(owners)
+        )
+    for group in mamba_groups:
+        tensors.extend(
+            packed_tensor(name, index * main_page_size)
+            for index, name in enumerate(group.layer_names)
+        )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=kv_cache_groups,
+    )
+
+
+def get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    qwen_config = _get_qwen4_exp_kv_cache_config(
+        vllm_config, kv_cache_groups, available_memory
+    )
+    if qwen_config is not None:
+        return qwen_config
+    return _orig_get_kv_cache_config_from_groups(
+        vllm_config, kv_cache_groups, available_memory
+    )
 
 
 def group_and_unify_kv_cache_specs(
@@ -321,6 +409,9 @@ def _get_kv_cache_config_deepseek_v4(
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 vllm.v1.core.kv_cache_utils.get_kv_cache_groups = get_kv_cache_groups
+vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = (
+    get_kv_cache_config_from_groups
+)
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and
