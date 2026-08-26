@@ -17,6 +17,7 @@
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -24,6 +25,8 @@ from unittest.mock import MagicMock, patch
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
+    DEFAULT_TENANT_ID,
+    MooncakeBackend,
     MooncakeStoreConfig,
     _convert_to_bytes,
     _parse_global_segment_size,
@@ -82,11 +85,28 @@ class TestMooncakeStoreConfig(unittest.TestCase):
         self.assertEqual(defaults.protocol, "ascend")
         self.assertEqual(defaults.device_name, "")
         self.assertFalse(defaults.enable_ssd_offload)
+        self.assertEqual(defaults.tenant_id, DEFAULT_TENANT_ID)
 
         ssd_path = TestMooncakeStoreConfig._writable_ssd_path()
         self.addCleanup(lambda: os.rmdir(ssd_path))
         ssd = _make_mooncake_store_config(enable_ssd_offload=True, ssd_offload_path=ssd_path)
         self.assertEqual(ssd.ssd_offload_path, ssd_path)
+
+    def test_from_file_normalizes_tenant_id(self):
+        for value, expected in (
+            (None, DEFAULT_TENANT_ID),
+            ("", DEFAULT_TENANT_ID),
+            ("   ", DEFAULT_TENANT_ID),
+            ("tenant-a", "tenant-a"),
+            ("  tenant-a  ", "tenant-a"),
+        ):
+            with self.subTest(value=value):
+                cfg = _make_mooncake_store_config(tenant_id=value)
+                self.assertEqual(cfg.tenant_id, expected)
+
+    def test_from_file_rejects_non_string_tenant_id(self):
+        with self.assertRaisesRegex(TypeError, "tenant_id must be a string or null"):
+            _make_mooncake_store_config(tenant_id=False)
 
     def test_ssd_offload_validation(self):
         for path in ("relative/path", None):
@@ -221,10 +241,134 @@ class TestYuanrongConfig(unittest.TestCase):
 # =========================================================================
 # MooncakeBackend (mocked store)
 # =========================================================================
+class TestMooncakeBackendSetup(unittest.TestCase):
+    _MODULE_PATH = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend"
+
+    def _make_backend(
+        self,
+        *,
+        config: MooncakeStoreConfig,
+        use_fabric_mem: bool,
+        contribute_memory: bool = True,
+    ) -> MooncakeBackend:
+        backend = MooncakeBackend.__new__(MooncakeBackend)
+        backend.parallel_config = MagicMock()
+        backend.config = config
+        backend.local_seg = None
+        backend._use_fabric_mem = use_fabric_mem
+        backend._contribute_memory = contribute_memory
+        return backend
+
+    def _setup_store(self, backend: MooncakeBackend, store: MagicMock):
+        transfer_engine = MagicMock()
+        transfer_engine.get_rpc_port.return_value = 50052
+        fake_store_module = sys.modules["mooncake.store"]
+        with (
+            patch.object(
+                fake_store_module,
+                "MooncakeDistributedStore",
+                return_value=store,
+                create=True,
+            ),
+            patch(f"{self._MODULE_PATH}.get_ip", return_value="10.0.0.7"),
+            patch(f"{self._MODULE_PATH}.global_te") as mock_global_te,
+            patch(f"{self._MODULE_PATH}.get_global_rank", return_value=3),
+            patch(
+                f"{self._MODULE_PATH}._mooncake_setup_supports_ssd_offload",
+                return_value=True,
+            ),
+        ):
+            mock_global_te.get_transfer_engine.return_value = transfer_engine
+            return backend._setup_store()
+
+    def test_setup_omits_default_tenant_for_all_memory_paths(self):
+        for use_fabric_mem in (False, True):
+            with self.subTest(use_fabric_mem=use_fabric_mem):
+                backend = self._make_backend(
+                    config=_make_mooncake_store_config(),
+                    use_fabric_mem=use_fabric_mem,
+                )
+                store = MagicMock()
+                store.setup.return_value = 0
+
+                result = self._setup_store(backend, store)
+
+                self.assertIs(result, store)
+                self.assertNotIn("tenant_id", store.setup.call_args.kwargs)
+
+    def test_setup_forwards_tenant_for_all_memory_paths(self):
+        for use_fabric_mem in (False, True):
+            with self.subTest(use_fabric_mem=use_fabric_mem):
+                backend = self._make_backend(
+                    config=_make_mooncake_store_config(tenant_id="  tenant-a  "),
+                    use_fabric_mem=use_fabric_mem,
+                )
+                store = MagicMock()
+                store.setup.return_value = 0
+
+                self._setup_store(backend, store)
+
+                self.assertEqual(store.setup.call_args.kwargs["tenant_id"], "tenant-a")
+
+    def test_setup_preserves_ssd_kwargs_with_tenant(self):
+        with tempfile.TemporaryDirectory(prefix="mooncake_ssd_ut_") as ssd_path:
+            config = _make_mooncake_store_config(
+                tenant_id="tenant-a",
+                enable_ssd_offload=True,
+                ssd_offload_path=ssd_path,
+            )
+            for use_fabric_mem in (False, True):
+                with self.subTest(use_fabric_mem=use_fabric_mem):
+                    backend = self._make_backend(
+                        config=config,
+                        use_fabric_mem=use_fabric_mem,
+                    )
+                    store = MagicMock()
+                    store.setup.return_value = 0
+
+                    self._setup_store(backend, store)
+
+                    setup_kwargs = store.setup.call_args.kwargs
+                    self.assertEqual(setup_kwargs["tenant_id"], "tenant-a")
+                    self.assertIs(setup_kwargs["enable_ssd_offload"], True)
+                    self.assertEqual(setup_kwargs["ssd_offload_path"], os.path.join(ssd_path, "rank_3"))
+
+    def test_scheduler_client_forwards_tenant(self):
+        config = _make_mooncake_store_config(tenant_id="tenant-a")
+        for use_fabric_mem in (False, True):
+            with self.subTest(use_fabric_mem=use_fabric_mem):
+                backend = self._make_backend(
+                    config=config,
+                    use_fabric_mem=use_fabric_mem,
+                    contribute_memory=False,
+                )
+                store = MagicMock()
+                store.setup.return_value = 0
+
+                self._setup_store(backend, store)
+
+                setup_kwargs = store.setup.call_args.kwargs
+                self.assertEqual(setup_kwargs["tenant_id"], "tenant-a")
+                self.assertEqual(setup_kwargs["global_segment_size"], 0)
+                self.assertEqual(setup_kwargs["local_buffer_size"], 0)
+
+    def test_non_default_tenant_preserves_setup_type_error(self):
+        setup_error = TypeError("setup(): incompatible function arguments")
+        backend = self._make_backend(
+            config=_make_mooncake_store_config(tenant_id="tenant-a"),
+            use_fabric_mem=False,
+        )
+        store = MagicMock()
+        store.setup.side_effect = setup_error
+
+        with self.assertRaises(TypeError) as context:
+            self._setup_store(backend, store)
+
+        self.assertIs(context.exception, setup_error)
+
+
 class TestMooncakeBackendMethods(unittest.TestCase):
     def _make_backend(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import MooncakeBackend
-
         with (
             patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": "/dev/null"}),
             patch.object(MooncakeBackend, "__init__", lambda self, pc: None),

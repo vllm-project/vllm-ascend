@@ -366,6 +366,8 @@ class TestNPUWorker(TestBase):
         )
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+        worker.model_runner = MagicMock()
+        worker.model_runner.model.named_buffers.return_value = []
         worker.sleep_wakeup_manager = MagicMock()
 
         worker.sleep()
