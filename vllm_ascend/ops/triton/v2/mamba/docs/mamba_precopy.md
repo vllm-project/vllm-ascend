@@ -4,9 +4,9 @@
 
 - 算子功能：在 Mamba 前向计算前，将跨 block 请求的旧运行状态复制到目标 block；`src_col < 0` 或 `src_col == dst_col` 时跳过。
 - 计算公式：
-  - SD 卷积：`state[dst, :W-bias, ...] = state[src, bias:, ...]`。
-  - DS 卷积：`state[dst, row, :W-bias] = state[src, row, bias:]`。
-  - Temporal：`state[dst] = state[block_table[src_col+bias]]`。
+    - SD 卷积：`state[dst, :W-bias, ...] = state[src, bias:, ...]`。
+    - DS 卷积：`state[dst, row, :W-bias] = state[src, row, bias:]`。
+    - Temporal：`state[dst] = state[block_table[src_col+bias]]`。
 - 算法流程（逐请求、逐状态独立处理）：
   1. 从三维 grid 获取 `batch_idx`、`state_idx` 和 `tile_idx`。
   2. 可选地通过 `idx_mapping_ptr` 获取请求下标，并查询源、目标物理 block。
