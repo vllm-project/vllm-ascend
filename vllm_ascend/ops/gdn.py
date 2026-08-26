@@ -203,6 +203,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         return cls._fused_chunk_available
 
     @classmethod
+    def _can_use_fused_chunk(cls, query: torch.Tensor) -> bool:
+        """Whether the fused operator is available for the input dtype.
+
+        The current ACLNN implementation accepts BF16 query/key/value tensors
+        only. The probe intentionally uses BF16, so checking only its result
+        would incorrectly enable the fused path for FP16 inputs.
+        """
+        return query.dtype == torch.bfloat16 and cls._probe_fused_chunk()
+
+    @classmethod
     def _supports_host_metadata_prefill(cls) -> bool:
         """Whether an available fused prefill path only needs host metadata."""
         use_fla_gdn_prefill = get_current_hardware_profile().supports(HardwareCapability.FLA_GDN_PREFILL)
@@ -627,7 +637,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             use_fused_chunk = (
                 fla_gdn_prefill_op is None
                 and query_non_spec.device.type != "cpu"
-                and AscendGatedDeltaNetAttention._probe_fused_chunk()
+                and AscendGatedDeltaNetAttention._can_use_fused_chunk(query_non_spec)
                 and get_pcp_group().world_size == 1
             )
             if fla_gdn_prefill_op is not None:
