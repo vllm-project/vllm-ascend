@@ -45,7 +45,12 @@ def test_log_solve_tri_debug_is_gated_by_environment(monkeypatch):
     )
     with patch("vllm_ascend.ops.gdn_a5.logger.info") as info:
         monkeypatch.setenv("VLLM_ASCEND_GDN_DEBUG_SOLVE_TRI", "1")
-        log_solve_tri_debug(tensor, output_dtype="float32", layout="bsnd")
+        log_solve_tri_debug(
+            tensor,
+            output_dtype="float32",
+            layout="tnd",
+            cu_seqlens_host=[0, 64],
+        )
         info.assert_called_once()
         assert "solve_tri" in info.call_args.args[0]
 

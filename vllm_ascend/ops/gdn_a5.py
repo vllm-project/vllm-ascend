@@ -31,7 +31,15 @@ def log_solve_tri_debug(
         return
 
     def shape(value: Any) -> Any:
-        return None if value is None else tuple(value.shape)
+        if value is None:
+            return None
+        value_shape = getattr(value, "shape", None)
+        if value_shape is not None:
+            return tuple(value_shape)
+        try:
+            return (len(value),)
+        except TypeError:
+            return type(value).__name__
 
     logger.info(
         "[GDN A5][solve_tri] input shape=%s dtype=%s device=%s stride=%s "
