@@ -100,7 +100,7 @@ def _is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     if getattr(model_config, "is_attention_free", False):
         return False
     architectures = getattr(model_config, "architectures", [])
-    return any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures) or not model_config.is_moe
+    return any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
 
 
 def _is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
