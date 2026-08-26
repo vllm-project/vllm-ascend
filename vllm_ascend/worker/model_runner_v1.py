@@ -175,7 +175,6 @@ from vllm_ascend.utils import (
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
-    enable_dsa_cp,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
