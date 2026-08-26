@@ -24,16 +24,19 @@ CONTRIBUTING.md
 DCO
 codecov.yml
 
-# Other markdown (README.md must be kept, setup.py uses it for long_description)
-docs/*.md
-examples/*.md
-benchmarks/*.md
+# Other markdown at repo root (README.md must be kept, setup.py uses it for long_description)
+/docs/*.md
+/examples/*.md
+/benchmarks/*.md
 
-# Docs / examples / tests / benchmarks (not needed at build or runtime)
-docs/
-examples/
-benchmarks/
-tests/
+# Docs / examples / tests / benchmarks at REPO ROOT only (not needed at build or
+# runtime). Leading "/" anchors to repo root so nested dirs under csrc/ (e.g.
+# csrc/cmake/scripts/examples/, csrc/attention/*/examples/) are KEPT - they are
+# referenced by csrc/cmake/func_examples.cmake and custom_build.cmake.
+/docs/
+/examples/
+/benchmarks/
+/tests/
 
 # Python cache / build artifacts
 __pycache__/
