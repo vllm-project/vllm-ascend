@@ -1076,8 +1076,8 @@ class KVPoolWorker:
         entered contributes zero (the load was fully overlapped). Plain
         Events without ``set_time`` (tests) contribute nothing.
         """
-        event = self.layer_load_finished_events[layer_id]
-        set_time = getattr(event, "set_time", None)
+        event = self.layer_load_finished_events[layer_id] if self.layer_load_finished_events else None
+        set_time = getattr(event, "set_time", None) if event is not None else None
         if set_time is not None:
             self._step_not_overlapped_s += max(0.0, set_time - wait_enter)
 
