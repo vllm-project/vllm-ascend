@@ -178,11 +178,11 @@ jobs:
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
       # External E2E on the A2/A3/310P runners (select_tests.py ready-all
-      # selection, identical to PR CI).  The flow dispatches main2main-e2e.yaml
-      # against HEAD_FORK — round=prep only builds the runner envs, exec
-      # rounds (round=N) run the tests; MAIN2MAIN_E2E_PREP_RUN_ID is filled by
-      # the "Pre-start E2E runner envs" step so the flow reuses that run.
-      MAIN2MAIN_E2E_MODE: cumulative
+      # selection, identical to PR CI).  Every step with source changes
+      # dispatches main2main-e2e.yaml against MAIN2MAIN_E2E_REPO —
+      # round=prep only builds the runner envs, exec rounds (round=N) run
+      # the tests; MAIN2MAIN_E2E_PREP_RUN_ID is filled by the "Pre-start
+      # E2E runner envs" step so the flow reuses that run.
       MAIN2MAIN_E2E_REPO: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_E2E_BRANCH: main2main_e2e
       # Pin the flow revision the install step clones.  Kept on
@@ -397,19 +397,34 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
-      # CPU-runner install mirrors PR CI's cpu group (COMPILE_CUSTOM_KERNELS=0,
-      # no csrc build — the GPU runners own kernel compilation via the
-      # main2main-e2e workflow's prepare job).  vllm-ascend must still be
-      # importable for the final quality gate's CPU-UT batch.
-      - name: Install vllm-ascend no device
+      # CPU-runner install: requirements-dev.txt only.  The vllm-ascend
+      # package itself is NOT installed — no csrc compile or install on the
+      # CPU runner (the GPU runners own kernel compilation via the
+      # main2main-e2e workflow's prepare job).  UT/mypy consume the checkout
+      # through PYTHONPATH; only the _build_info.py stub is generated, which
+      # tests/ut/device imports at module load.
+      - name: Install vllm-ascend deps only (no csrc compile/install)
         working-directory: ${{ github.workspace }}
         env:
           SOC_VERSION: ascend910b1
-          COMPILE_CUSTOM_KERNELS: 0
         run: |
-          pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+
+          # Reproduce setup.py's gen_build_info without installing the
+          # package (hardware.py is stdlib-only by design for setup.py).
+          spec = importlib.util.spec_from_file_location(
+              "hardware", os.path.join(os.getcwd(), "vllm_ascend", "device", "hardware.py"))
+          hardware = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(hardware)
+          device_type = hardware.device_type_from_soc_version(os.environ["SOC_VERSION"]).name
+          Path("vllm_ascend/_build_info.py").write_text(
+              "# Auto-generated file\n"
+              f"__device_type__ = '{device_type}'\n")
+          PY
 
       - name: Run main2main flow
         id: run-main2main

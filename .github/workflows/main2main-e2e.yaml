@@ -151,6 +151,16 @@ jobs:
                  "$GITHUB_WORKSPACE/.venv" \
                  "$GITHUB_WORKSPACE/.ready" \
                  "$GITHUB_WORKSPACE"/main2main-e2e-round-*
+          # Pre-create the workspace repo so the ascend checkout below
+          # (clean: false) treats the directory as an existing repository
+          # instead of wiping it: actions/checkout deletes the workspace
+          # contents when it finds no .git, and git-cleans untracked files
+          # (the .venv built above) when clean defaults to true.
+          git init "$GITHUB_WORKSPACE"
+          git -C "$GITHUB_WORKSPACE" config user.name "main2main-e2e"
+          git -C "$GITHUB_WORKSPACE" config user.email "main2main-e2e@users.noreply.github.com"
+          git -C "$GITHUB_WORKSPACE" remote add origin "https://github.com/${GITHUB_REPOSITORY}"
+          git -C "$GITHUB_WORKSPACE" commit --allow-empty -m "workspace init"
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
@@ -187,6 +197,9 @@ jobs:
           ref: ${{ inputs.base_ref }}
           fetch-depth: 0
           submodules: recursive
+          # Keep the workspace .venv / vllm-empty built above: the default
+          # clean would git-clean them as untracked files.
+          clean: false
 
       - name: Get csrc hash
         id: get_csrc_hash
