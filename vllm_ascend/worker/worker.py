@@ -1069,6 +1069,9 @@ class NPUWorker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         self.log_memory_stats()
+        # Idle DP skips execute_model; still must join this EngineCore's DFX
+        # sync (per-DP config group or file poll + last-PP TP dump OR).
+        self.model_runner.dfx.sync_for_step(allow_arm=False)
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
