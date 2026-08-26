@@ -14,7 +14,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.batch_invariant import (
     linear_batch_invariant,
 )
@@ -193,7 +192,7 @@ def get_masked_input_and_mask(
 
 
 # --8<-- [start:vocab_parallel_embedding]
-class VocabParallelEmbedding(PluggableLayer):
+class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
 
     Adapted from torch.nn.Embedding, note that we pad the vocabulary size to

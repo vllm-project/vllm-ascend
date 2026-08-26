@@ -493,7 +493,6 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             tp_world_size=1,
             intermediate_size=self.hc_hidden_size,
             conv_kernel=self.conv_state_len + 1,
-            num_spec=self.num_spec_tokens,
         )
 
     def _apply_norm(

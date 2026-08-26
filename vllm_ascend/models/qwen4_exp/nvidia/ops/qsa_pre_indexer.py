@@ -35,21 +35,36 @@ def _norm_rope(
         w_mask = ((pairs % 3) == 2) & (pairs <= 3 * MROPE_W)
         t_mask = ~(h_mask | w_mask)
         base = cos_sin_ptr + pairs[None, :]
-        pos_rows = (pos_t, pos_h, pos_w)
-        axis_masks = (t_mask, h_mask, w_mask)
-        cos = tl.zeros((TILE_T, QUARTER), dtype=cos_sin_ptr.dtype.element_ty)
-        sin = tl.zeros((TILE_T, QUARTER), dtype=cos_sin_ptr.dtype.element_ty)
-        for axis in tl.static_range(3):
-            cos += tl.load(
-                base + pos_rows[axis][:, None] * cos_sin_stride,
-                mask=axis_masks[axis][None, :],
-                other=0,
-            )
-            sin += tl.load(
-                base + pos_rows[axis][:, None] * cos_sin_stride + QUARTER,
-                mask=axis_masks[axis][None, :],
-                other=0,
-            )
+        cos = tl.load(
+            base + pos_t[:, None] * cos_sin_stride,
+            mask=t_mask[None, :],
+            other=0,
+        )
+        cos += tl.load(
+            base + pos_h[:, None] * cos_sin_stride,
+            mask=h_mask[None, :],
+            other=0,
+        )
+        cos += tl.load(
+            base + pos_w[:, None] * cos_sin_stride,
+            mask=w_mask[None, :],
+            other=0,
+        )
+        sin = tl.load(
+            base + pos_t[:, None] * cos_sin_stride + QUARTER,
+            mask=t_mask[None, :],
+            other=0,
+        )
+        sin += tl.load(
+            base + pos_h[:, None] * cos_sin_stride + QUARTER,
+            mask=h_mask[None, :],
+            other=0,
+        )
+        sin += tl.load(
+            base + pos_w[:, None] * cos_sin_stride + QUARTER,
+            mask=w_mask[None, :],
+            other=0,
+        )
     else:
         cos = tl.load(cos_sin_ptr + pos_t[:, None] * cos_sin_stride + pairs[None, :])
         sin = tl.load(

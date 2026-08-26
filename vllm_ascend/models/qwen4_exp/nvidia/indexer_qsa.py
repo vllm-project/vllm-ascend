@@ -15,6 +15,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
+from vllm_ascend import envs
 from vllm_ascend.models.qwen4_exp.config import (
     Qwen4ExpTextConfig,
 )
@@ -42,7 +43,7 @@ def apply_qsa_rope(
     cos, sin = cos_sin.chunk(2, dim=-1)
     if positions.ndim == 2:
         shape = tensor.shape
-        tensor, _ = triton_mrope(
+        args = (
             tensor.reshape(num_tokens, -1),
             tensor.new_empty((num_tokens, head_dim)),
             cos,
@@ -51,8 +52,13 @@ def apply_qsa_rope(
             head_dim,
             rotary_dim,
             rotary_emb.mrope_interleaved,
-            rotary_emb.is_neox_style,
         )
+        try:
+            tensor, _ = triton_mrope(*args, rotary_emb.is_neox_style)
+        except TypeError as exc:
+            if "takes 8 positional arguments" not in str(exc):
+                raise
+            tensor, _ = triton_mrope(*args)
         return tensor.reshape(shape)
 
     rotated = rotary_emb.apply_rotary_emb.forward_cuda(
@@ -61,6 +67,15 @@ def apply_qsa_rope(
         sin,
     )
     return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
+
+
+def _gemma_rmsnorm(
+    tensor: torch.Tensor, weight: torch.Tensor, eps: float
+) -> torch.Tensor:
+    normalized = tensor.float() * torch.rsqrt(
+        tensor.float().pow(2).mean(dim=-1, keepdim=True) + eps
+    )
+    return (normalized * (1.0 + weight.float())).to(tensor.dtype)
 
 
 def _supports_fused_pre_indexer(
@@ -125,7 +140,7 @@ class QSAIndexer(nn.Module):
             self.index_head_dim,
             self.index_kv_heads,
             self.compress_ratio,
-        )
+        ) and not envs.VLLM_ASCEND_FORCE_QSA_REFERENCE
         self.prefix = prefix
         # MTP step 0 selects the target-aligned rows; later steps reuse them
         # while continuing to update the QSA side cache.
@@ -271,10 +286,8 @@ class QSAIndexer(nn.Module):
             )
         else:
             # Unfused reference path
-            from flashinfer.norm import gemma_rmsnorm
-
             q = projected_q.reshape(-1, self.index_n_heads, self.index_head_dim)
-            q = gemma_rmsnorm(
+            q = _gemma_rmsnorm(
                 q.reshape(-1, self.index_head_dim),
                 self.q_layernorm.weight,
                 self.q_layernorm.variance_epsilon,
@@ -303,7 +316,7 @@ class QSAIndexer(nn.Module):
                 self.compress_ratio,
                 rope_position_cache,
             )
-            compressed_keys = gemma_rmsnorm(
+            compressed_keys = _gemma_rmsnorm(
                 pooled.reshape(-1, self.index_head_dim),
                 self.k_layernorm.weight,
                 self.k_layernorm.variance_epsilon,

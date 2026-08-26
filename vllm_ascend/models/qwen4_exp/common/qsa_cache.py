@@ -736,6 +736,11 @@ class _QSAStateCache(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return QSAStateBackend
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # vLLM 0.26 binds caches by assigning ``kv_cache`` directly and does
+        # not provide the newer AttentionLayerBase hook used by Qwen4Exp.
+        self.kv_cache = kv_cache
+
 
 class QSAKeyStateCache(_QSAStateCache):
     """Raw BF16 key, optionally followed by exact int64 MRoPE positions."""
@@ -786,7 +791,6 @@ class QSAKeyStateCache(_QSAStateCache):
             block_size=capacity,
             num_kv_heads=1,
             head_size=self.head_size,
-            head_size_v=0,
             dtype=self.dtype,
         )
 

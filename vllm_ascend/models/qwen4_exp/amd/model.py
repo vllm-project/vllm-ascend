@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from itertools import islice
 
 import torch
+import vllm.model_executor.models.qwen3_next as _qwen3_next
 from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -71,12 +72,15 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm_ascend.models.qwen4_exp.config import (
     Qwen4ExpTextConfig,
 )
+from vllm_ascend.patch.platform.patch_fused_moe import _ascend_FusedMoE
 
 from ..config import Qwen4ExpConfig
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
+
+_qwen3_next.FusedMoE = _ascend_FusedMoE
 
 
 def without_modelopt_fp4(
@@ -570,6 +574,11 @@ class Qwen4ExpModel(nn.Module):
         ]
         loader = AutoWeightsLoader(
             self,
+            skip_prefixes=(
+                ["hyper_connection_mixer."]
+                if not get_pp_group().is_last_rank
+                else None
+            ),
             skip_substrs=skip_substrs,
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
@@ -649,8 +658,9 @@ class Qwen4ExpForCausalLM(
     ) -> torch.Tensor | IntermediateTensors:
         # Forward kwargs unchanged so the runner's _maybe_add_ngram_kwargs
         # path (query_start_loc / ngram_context) reaches Qwen4ExpModel.
+        ple_input_ids = kwargs.pop("ple_input_ids", input_ids)
         return self.model(
-            input_ids,
+            ple_input_ids,
             positions,
             intermediate_tensors,
             inputs_embeds,
@@ -678,18 +688,12 @@ class Qwen4ExpForCausalLM(
         conv_kernel_size = hf_config.ple_conv_kernel_size
         short_conv_dilation = hf_config.ngram_size
         conv_state_len = (conv_kernel_size - 1) * short_conv_dilation
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
         hc_count = hf_config.hc_count
         hc_hidden_size = hf_config.hidden_size * hc_count
         return MambaStateShapeCalculator.short_conv_state_shape(
             tp_world_size=1,
             intermediate_size=hc_hidden_size,
             conv_kernel=conv_state_len + 1,
-            num_spec=num_spec,
         )
 
     @classmethod
@@ -838,6 +842,13 @@ class Qwen4ExpForConditionalGeneration(
 
         return Qwen4ExpModelState
 
+    def _init_video_pruning(self, multimodal_config) -> None:
+        """Keep compatibility with the Qwen3.5 base in vLLM 0.26.0."""
+        del multimodal_config
+        self.is_multimodal_pruning_enabled = False
+        self.video_pruning_method = None
+        self.video_pruning_rate = 0.0
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
         config: Qwen4ExpConfig = vllm_config.model_config.hf_config
@@ -974,8 +985,9 @@ class Qwen4ExpForConditionalGeneration(
         else:
             deepstack_input_embeds = None
 
+        ple_input_ids = kwargs.get("ple_input_ids", input_ids)
         hidden_states = self.language_model.model(
-            input_ids=input_ids,
+            input_ids=ple_input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
