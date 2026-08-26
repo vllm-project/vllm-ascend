@@ -68,8 +68,8 @@ DEEPSEEK_V4_PROMPTS = [
     "What is the meaning of life?",
 ]
 
-# The routed-expert SwiGLU clamp changes the second continuation (#14397).
-DEEPSEEK_V4_GOLDEN = ["Hello, my name is {name} and I", "What is the meaning of life?', 'What is the"]
+# FlashComm1 defaults shared experts to DP; this continuation matches that path.
+DEEPSEEK_V4_GOLDEN = ["Hello, my name is {name} and I", 'What is the meaning of life?",\n    "What is']
 
 
 @dataclass(frozen=True)

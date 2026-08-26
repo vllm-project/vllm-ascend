@@ -18,6 +18,7 @@ import os
 
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_thinking  # noqa
+import vllm_ascend.patch.platform.patch_deepseek_v4_tool_streaming  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_glm_reasoning_usage_accounting  # noqa
 import vllm_ascend.patch.platform.patch_kimi_k3_parsers  # noqa
@@ -34,7 +35,8 @@ if not is_310p():
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
-
+import vllm_ascend.patch.platform.patch_recompute_chat  # noqa
+import vllm_ascend.patch.platform.patch_shm_broadcast  # noqa
 import vllm_ascend.patch.platform.patch_structured_output  # noqa
 import vllm_ascend.patch.platform.patch_weight_transfer_engine  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
@@ -43,7 +45,12 @@ import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
+# Install the base KV-delivery scheduler before balance derives from it.
+import vllm_ascend.patch.platform.patch_kv_delivery_preemption  # noqa
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+
+# Must follow the Scheduler class swap so AsyncScheduler inherits it.
+import vllm_ascend.patch.platform.patch_async_scheduler  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa

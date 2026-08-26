@@ -97,8 +97,16 @@ def _patched_get_deepseek_v4_tokenizer(tokenizer: deepseek_v4.HfTokenizer):
         conversation = kwargs.get("conversation", messages)
         messages = conversation.copy()
         if tools is not None and len(tools) > 0:
-            messages.insert(0, {"role": "system"})
-            messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+            system_index = next(
+                (index for index, message in enumerate(messages) if message.get("role") == "system"),
+                None,
+            )
+            if system_index is None:
+                messages.insert(0, {"role": "system", "tools": tools})
+            else:
+                system_message = messages[system_index].copy()
+                system_message["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                messages[system_index] = system_message
 
         reasoning_effort = kwargs.get("reasoning_effort")
         if not isinstance(reasoning_effort, str):

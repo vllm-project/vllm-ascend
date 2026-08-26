@@ -76,6 +76,10 @@ class NPUModelRunner(GPUModelRunner):
             and not self.model_config.enforce_eager
         )
 
+        self.update_stream = None
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
+
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.req_states
@@ -88,6 +92,9 @@ class NPUModelRunner(GPUModelRunner):
         self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
+            # Shared update_stream: main model (ModelAclGraphManager) and draft
+            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
+            self.speculator.update_stream = self.update_stream
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -462,7 +469,10 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        if (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        ):
             num_reqs_padded = num_reqs
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs

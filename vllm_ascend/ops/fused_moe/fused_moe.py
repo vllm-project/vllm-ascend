@@ -35,7 +35,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -133,10 +133,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+        layer.w13_weight.data = w13_data
 
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        layer.w2_weight.data = w2_data
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -146,14 +146,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if enable_fused_mc2 == 1 and self.dynamic_eplb:
+            if _CANN_OPS_TRANSFORMER_AVAILABLE:
+                # MegaMoe bg16 Need to use ND format to support
                 layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
                 layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
+            else:
+                layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+                layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+                if enable_fused_mc2 == 1 and self.dynamic_eplb:
+                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+                    del layer.w13_weight
+                    del layer.w2_weight
+                    torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
@@ -255,17 +260,25 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            if _CANN_OPS_TRANSFORMER_AVAILABLE:
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = None
+                w2_scale = None
+                w1_scale_bias = None
+                w2_scale_bias = None
+            else:
+                if self.dynamic_eplb and not has_split_weight_lists:
+                    logger.warning_once(
+                        "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
+                        "tensor lists. This may cause accuracy issues or communication hangs."
+                    )
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
             w1_scale = None
@@ -471,6 +484,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.num_iter = eplb_config.expert_heat_collection_interval
             self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
+        # Level-2 sleep restores parameters and buffers only. Preserve the
+        # runtime EPLB tensors that are otherwise plain NPU attributes.
+        self._promote_attr_to_buffer("log2phy")
+        if self.dynamic_eplb:
+            self._promote_attr_to_buffer("moe_load")
+            if self.multi_stage:
+                self._promote_attr_to_buffer("load_counter")
+
         setup_moe_comm_method(self.moe_config)
         if self.multistream_overlap_shared_expert:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -491,6 +512,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
+
+    def _promote_attr_to_buffer(self, name: str) -> None:
+        tensor = getattr(self, name, None)
+        if tensor is None:
+            return
+        delattr(self, name)
+        self.register_buffer(name, tensor)
 
     @property
     def activation(self):

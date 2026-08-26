@@ -10,15 +10,15 @@ This document will show the main verification steps of both `InternVL3_5-38B` an
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Environment Preparation
 
 ### 3.1 Model Weight
 
-require 1 Atlas 800 A3 (64G × 16) node:
+require 1 Atlas 800 A3 (64GB × 16) node:
 
 - `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B)
 - `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://huggingface.co/OpenGVLab/InternVL3_5-241B-A28B)
@@ -84,7 +84,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "InternVL3_5-38B"
 
-    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `InternVL3_5-38B-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) node.
 
     Run the following script to execute online inference.
 
@@ -127,7 +127,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 === "InternVL3_5-241B-A28B"
 
-    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16) .
+    - Quantized model `InternVL3_5-241B-A28B-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) node.
 
     Run the following script to execute online inference.
 

@@ -556,7 +556,7 @@ class KVPoolWorker:
                 self.kv_send_thread = KVCacheStoreSendingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
@@ -573,11 +573,13 @@ class KVPoolWorker:
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
                     self.m_store,
                     self.token_database,
-                    self.block_size,
+                    self.grouped_block_size,
                     self.tp_rank,
                     self.tp_size,
                     self.dcp_size,
                     ready_event,
+                    invalid_block_ids=self._invalid_block_ids,
+                    invalid_block_ids_lock=self._invalid_block_ids_lock,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
