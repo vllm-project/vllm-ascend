@@ -50,7 +50,7 @@ def log_solve_tri_debug(
 
     logger.info(
         "[GDN A5][solve_tri] input shape=%s dtype=%s device=%s stride=%s "
-        "contiguous=%s output_dtype=%s layout=%s cu_seqlens=%s "
+        "ndim=%s numel=%s storage_offset=%s contiguous=%s output_dtype=%s layout=%s cu_seqlens=%s "
         "cu_seqlens_host=%s chunk_indices=%s chunk_indices_host=%s "
         "chunk_indices_large_block=%s cu_seqlens_host_values=%s "
         "chunk_indices_host_values=%s chunk_indices_large_block_values=%s",
@@ -58,6 +58,9 @@ def log_solve_tri_debug(
         a.dtype,
         a.device,
         a.stride(),
+        a.ndim,
+        a.numel(),
+        a.storage_offset(),
         a.is_contiguous(),
         output_dtype,
         layout,
@@ -1088,24 +1091,63 @@ class A5GDNAdapter:
                 )
                 del cu_seqlens, chunk_indices, chunk_indices_large_block
                 a = a.to(output_dtype).contiguous()
-                if cu_seqlens_host is None:
-                    return raw(a, layout="bsnd")
+                raw_a = a if cu_seqlens_host is None else a.squeeze(0)
+                raw_layout = "bsnd" if cu_seqlens_host is None else "tnd"
                 if os.environ.get("VLLM_ASCEND_GDN_DEBUG_SOLVE_TRI", "0") == "1":
                     logger.info(
-                        "[GDN A5][solve_tri] FLA input after squeeze "
-                        "shape=%s dtype=%s device=%s stride=%s contiguous=%s",
-                        tuple(a.squeeze(0).shape),
-                        a.squeeze(0).dtype,
-                        a.squeeze(0).device,
-                        a.squeeze(0).stride(),
-                        a.squeeze(0).is_contiguous(),
+                        "[GDN A5][solve_tri] FLA raw call "
+                        "input_type=%s shape=%s dtype=%s device=%s stride=%s "
+                        "ndim=%s numel=%s storage_offset=%s contiguous=%s "
+                        "layout=%s cu_seqlens_type=%s cu_seqlens=%s "
+                        "chunk_indices_type=%s chunk_indices=%s",
+                        type(raw_a).__name__,
+                        tuple(raw_a.shape),
+                        raw_a.dtype,
+                        raw_a.device,
+                        raw_a.stride(),
+                        raw_a.ndim,
+                        raw_a.numel(),
+                        raw_a.storage_offset(),
+                        raw_a.is_contiguous(),
+                        raw_layout,
+                        type(cu_seqlens_host).__name__,
+                        cu_seqlens_host,
+                        type(chunk_indices_host).__name__,
+                        chunk_indices_host,
                     )
-                return raw(
-                    a.squeeze(0),
-                    cu_seqlens=cu_seqlens_host,
-                    chunk_indices=chunk_indices_host,
-                    layout="tnd",
-                ).unsqueeze(0)
+                try:
+                    if cu_seqlens_host is None:
+                        output = raw(raw_a, layout=raw_layout)
+                    else:
+                        output = raw(
+                            raw_a,
+                            cu_seqlens=cu_seqlens_host,
+                            chunk_indices=chunk_indices_host,
+                            layout=raw_layout,
+                        )
+                        output = output.unsqueeze(0)
+                except Exception:
+                    logger.exception(
+                        "[GDN A5][solve_tri] FLA raw call failed "
+                        "shape=%s dtype=%s layout=%s cu_seqlens=%s chunk_indices=%s",
+                        tuple(raw_a.shape),
+                        raw_a.dtype,
+                        raw_layout,
+                        cu_seqlens_host,
+                        chunk_indices_host,
+                    )
+                    raise
+                if os.environ.get("VLLM_ASCEND_GDN_DEBUG_SOLVE_TRI", "0") == "1":
+                    logger.info(
+                        "[GDN A5][solve_tri] FLA raw call returned "
+                        "shape=%s dtype=%s device=%s stride=%s contiguous=%s",
+                        tuple(output.shape),
+                        output.dtype,
+                        output.device,
+                        output.stride(),
+                        output.is_contiguous(),
+                    )
+                return output
 
             return call
 
