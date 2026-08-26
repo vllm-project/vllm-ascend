@@ -57,7 +57,7 @@ _benchmarks_aime: &benchmarks_aime
 # ==========================================
 
 test_cases:
-  - name: "MTPX-DeepSeek-R1-0528-W8A8-mtp2"
+  - name: "MTPX-DeepSeek-R1-0528-W8A8-mtp1"
     model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
     envs:
       <<: *envs
