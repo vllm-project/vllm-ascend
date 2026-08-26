@@ -48,7 +48,7 @@ _server_cmd: &server_cmd
 _benchmarks_perf: &benchmarks_perf
   perf:
     case_type: performance
-    dataset_path: /home/wkf68687/GSM8K-in3500-bs128
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 128
@@ -87,7 +87,7 @@ test_cases:
       - "--speculative_config"
       - '{
         "method": "eagle3",
-        "model":"/mnt/share/weight/lightseekorg_kimi-k2.5-eagle3",
+        "model":"lightseekorg/kimi-k2.5-eagle3",
         "num_speculative_tokens": 7}'
     benchmarks:
       <<: *benchmarks_perf
