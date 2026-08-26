@@ -52,12 +52,10 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     prepare_sparse_kv_offload_mtp_dummy_metadata,
 )
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
@@ -361,7 +359,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Sliding-window draft attention adapter.
         # Read from the validated AscendConfig singleton instead of bypassing it
         # via additional_config["draft_window_size"] (architecture debt #7).
-        from vllm_ascend.ascend_config import get_ascend_config
 
         self.draft_window_size = get_ascend_config().draft_window_size
         if self.draft_window_size is not None:
@@ -1302,37 +1299,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     ori_token_indices_to_sample,
                     is_logits=False,
                 )
-        elif get_ascend_config().enable_reduce_sample:
-            if self.method in ("eagle3", "dflash", "mtp"):
-                draft_token_ids, draft_probs_step0 = self.compute_draft_token_ids(
-                    sample_hidden_states, sampling_metadata
-                )
-                if lmhead_tp_enable():
-                    draft_token_ids, token_indices_to_sample = self._align_tensor_and_indices(
-                        draft_token_ids,
-                        num_indices,
-                        token_indices_to_sample,
-                        ori_token_indices_to_sample,
-                        is_logits=False,
-                    )
-                    if draft_probs_step0 is not None and num_indices < draft_probs_step0.shape[0]:
-                        draft_probs_step0 = draft_probs_step0[:num_indices]
-            else:
-                logits = self.model.compute_logits(sample_hidden_states)
-                if lmhead_tp_enable():
-                    # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
-                    logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
-                else:
-                    logits = self.model.model.logits_processor._gather_logits(logits)
-                if lmhead_tp_enable():
-                    logits, token_indices_to_sample = self._align_tensor_and_indices(
-                        logits,
-                        num_indices,
-                        token_indices_to_sample,
-                        ori_token_indices_to_sample,
-                        is_logits=True,
-                    )
-                draft_token_ids, draft_probs_step0 = self._sample_draft_from_logits(logits, sampling_metadata)
         else:
             if self.method == "dspark":
                 # Dspark speculation requires autoregressive applications of MarkovHead and ConfidenceHead.
@@ -1536,33 +1502,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
             draft_probs_step: torch.Tensor | None = None
-            if get_ascend_config().enable_reduce_sample:
-                if self.method in ("eagle3", "dflash", "dspark", "mtp"):
-                    draft_token_ids, draft_probs_step = self.compute_draft_token_ids(
-                        sample_hidden_states, sampling_metadata
-                    )
-                    if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                        draft_token_ids = draft_token_ids[:num_indices]
-                        token_indices_to_sample = token_indices_to_sample[:num_indices]
-                        if draft_probs_step is not None:
-                            draft_probs_step = draft_probs_step[:num_indices]
-                else:
-                    logits = self.model.compute_logits(sample_hidden_states)
-                    if lmhead_tp_enable():
-                        # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
-                        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
-                    else:
-                        logits = self.model.model.logits_processor._gather_logits(logits)
-                    if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                        logits = logits[:num_indices]
-                        token_indices_to_sample = token_indices_to_sample[:num_indices]
-                    draft_token_ids, draft_probs_step = self._sample_draft_from_logits(logits, sampling_metadata)
-            else:
-                logits = self.model.compute_logits(sample_hidden_states)
-                if lmhead_tp_enable() and num_indices < logits.shape[0]:
-                    logits = logits[:num_indices]
-                    token_indices_to_sample = token_indices_to_sample[:num_indices]
-                draft_token_ids, draft_probs_step = self._sample_draft_from_logits(logits, sampling_metadata)
+            logits = self.model.compute_logits(sample_hidden_states)
+            if lmhead_tp_enable() and num_indices < logits.shape[0]:
+                logits = logits[:num_indices]
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
+            draft_token_ids, draft_probs_step = self._sample_draft_from_logits(logits, sampling_metadata)
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]

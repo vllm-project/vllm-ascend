@@ -17,12 +17,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 from vllm.v1.worker.utils import AttentionGroup
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
-from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.utils import lmhead_tp_enable
 
@@ -182,24 +179,9 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         spec_step_idx: int,
         num_indices: int,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """GPU Step3.5 sampling semantics with Ascend TP/reduce-sample paths."""
+        """GPU Step3.5 sampling semantics with Ascend TP paths."""
         logits: torch.Tensor | None = None
-        if get_ascend_config().enable_reduce_sample and self.method == "mtp":
-            if not hasattr(self.model.model, "compute_logits"):
-                draft_token_ids, draft_probs = self.compute_draft_token_ids(hidden_states, sampling_metadata)
-                if lmhead_tp_enable() and num_indices < draft_token_ids.shape[0]:
-                    draft_token_ids = draft_token_ids[:num_indices]
-                    if draft_probs is not None:
-                        draft_probs = draft_probs[:num_indices]
-                return draft_token_ids, draft_probs
-            logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
-            if lmhead_tp_enable():
-                # Defensive: mutually exclusive with enable_reduce_sample at startup (ascend_config.py).
-                logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
-            else:
-                logits = self.model.model.logits_processor._gather_logits(logits)
-        else:
-            logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
+        logits = self.model.compute_logits(hidden_states, spec_step_idx=spec_step_idx)
 
         if lmhead_tp_enable() and num_indices < logits.shape[0]:
             logits = logits[:num_indices]

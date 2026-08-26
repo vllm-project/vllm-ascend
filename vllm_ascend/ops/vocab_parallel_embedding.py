@@ -37,7 +37,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import GroupCoordinator, get_embed_tp_group, get_lmhead_tp_group
 from vllm_ascend.utils import embedding_tp_enable, get_potential_max_tokens, lmhead_tp_enable
 
@@ -334,9 +333,7 @@ def lmhead_all_to_all(
         )
     vocab_per_partition = logits.shape[-1]
     # [N, V/P] -> [P, N/P, V/P]. The `.contiguous()` is a no-op on the live
-    # lm-head path (fresh matmul output), but load-bearing for the spec-decode
-    # reduce-sample callers, whose input is a vocab-truncated last-dim slice
-    # (non-contiguous whenever the vocab shard is padded): view() would fail.
+    # lm-head path (fresh matmul output).
     input_ = logits.contiguous().view(world_size, -1, vocab_per_partition)
     output = torch.empty_like(input_)
     dist.all_to_all_single(output, input_, group=comm_group.device_group)
@@ -379,15 +376,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         gathered_hidden_states = get_lmhead_tp_group().all_gather(hidden_states, dim=0)
         logits = self._apply_head(lm_head, gathered_hidden_states, embedding_bias)
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
-            logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
+        logits = lmhead_all_to_all(logits, get_lmhead_tp_group())
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            if not get_ascend_config().enable_reduce_sample:
-                logits = logits[..., : self.org_vocab_size]
-            else:
-                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
+            logits = logits[..., : self.org_vocab_size]
         return logits
 
     def _get_logits_normal(
@@ -398,14 +391,10 @@ class AscendLogitsProcessor(LogitsProcessor):
     ) -> torch.Tensor | None:
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
         # Gather logits for tensor parallel
-        if not get_ascend_config().enable_reduce_sample:
-            logits = self._gather_logits(logits)
+        logits = self._gather_logits(logits)
 
         # Remove paddings in vocab (if any)
         if logits is not None:
-            if not get_ascend_config().enable_reduce_sample:
-                logits = logits[..., : self.org_vocab_size]
-            else:
-                logits = logits[..., : lm_head.num_org_embeddings_per_partition]
+            logits = logits[..., : self.org_vocab_size]
 
         return logits
