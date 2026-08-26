@@ -40,8 +40,10 @@ __pycache__/
 *.egg-info/
 *.whl
 *.egg
-build/
 dist/
+
+# 注意：不能排除 build/！csrc/cmake/third_party/build/modules/patch/*.patch 被构建引用
+# （abseil-cpp.cmake / ascend_protobuf.cmake 用 PATCH_COMMAND patch -p1 < .../build/modules/patch/*.patch）
 
 # 本地环境
 .venv/
