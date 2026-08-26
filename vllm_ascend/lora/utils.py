@@ -1,5 +1,6 @@
-import vllm
+from vllm.lora import utils as lora_utils
 
+from vllm_ascend.lora.dsa import DSA_LORA_CLASSES
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoE3DWithLoRA,
     AscendFusedMoEWithLoRA,
@@ -8,12 +9,18 @@ from vllm_ascend.lora.fused_moe import (
 
 def refresh_all_lora_classes():
     ascend_classes = (
+        *DSA_LORA_CLASSES,
         AscendFusedMoEWithLoRA,
         AscendFusedMoE3DWithLoRA,
     )
     # vLLM #35077 changed _all_lora_classes from set to ordered tuple.
-    # Append the Ascend classes in a deterministic order.
-    vllm.lora.utils._all_lora_classes = (
+    # Prepend the Ascend classes in a deterministic order. PunicaWrapperNPU
+    # may be constructed more than once in a process, so remove old entries
+    # first to keep the registry idempotent.
+    upstream_classes = tuple(
+        lora_class for lora_class in lora_utils._all_lora_classes if lora_class not in ascend_classes
+    )
+    lora_utils._all_lora_classes = (
         *ascend_classes,
-        *vllm.lora.utils._all_lora_classes,
+        *upstream_classes,
     )

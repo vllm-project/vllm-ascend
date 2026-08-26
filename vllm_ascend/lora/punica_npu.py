@@ -176,7 +176,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         )
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
+        return self.get_token_lora_indices(x.size(0))
+
+    def get_token_lora_indices(self, num_tokens: int) -> torch.Tensor:
+        """Return device-side adapter slots for the requested token rows."""
+        return torch.narrow(self._token_lora_indices, 0, 0, num_tokens)
 
     def _apply_expand(
         self,
