@@ -652,9 +652,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         if self.quant_description:
             optional_metadata = self.quant_description.get("optional")
             layer_descriptions = {
-                name: description
-                for name, description in self.quant_description.items()
-                if name != "optional"
+                name: description for name, description in self.quant_description.items() if name != "optional"
             }
             self.quant_description = hf_to_vllm_mapper.apply_dict(layer_descriptions)
             if optional_metadata is not None:
