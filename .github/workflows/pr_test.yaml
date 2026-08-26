@@ -459,7 +459,7 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }} \
             --modules a5 \
-            --runner-override a5_x4 \
+            --runner-label-override linux-aarch64-a5-4 \
             --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
 
       - name: Set no-tests output for A5 when source paths unchanged
