@@ -1,0 +1,48 @@
+# vllm-ascend .dockerignore
+# 减少 build context 大小，加速 buildkitd 上传
+# 注意：csrc/, cmake/, CMakeLists.txt, pyproject.toml, setup.py, vllm_ascend/ 必须保留
+
+# Git 历史（最大头 ~92M）
+.git/
+.gitattributes
+.gitignore
+.gitmodules
+.patch
+
+# CI / 工具链 / IDE
+.github/
+.agents/
+.claude/
+.gemini/
+.idea/
+.vscode/
+*.md
+AGENTS.md
+CLAUDE.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+DCO
+codecov.yml
+
+# 文档 / 示例 / 测试 / 基准（构建和运行都不需要）
+docs/
+examples/
+benchmarks/
+tests/
+
+# Python 缓存 / 构建产物
+__pycache__/
+*.pyc
+*.egg-info/
+*.whl
+*.egg
+build/
+dist/
+
+# 本地环境
+.venv/
+venv/
+.env
+*.log
+.DS_Store
+Thumbs.db
