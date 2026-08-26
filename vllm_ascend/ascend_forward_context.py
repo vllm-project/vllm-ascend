@@ -54,7 +54,7 @@ def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
         return False
 
     scheduler_config = getattr(get_ascend_config(), "scheduler_config", None)
-    return not bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
+    return bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
 
 
 @contextmanager
