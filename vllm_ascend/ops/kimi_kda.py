@@ -560,9 +560,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         elif core_non_spec is not None:
             core_attn_out[:, :num_actual_tokens] = core_non_spec
 
-        # Let vLLM's CustomOp dispatch select FusedRMSNormGated.forward_native
-        # on Ascend. Calling the CUDA/Triton helper directly bypasses platform
-        # dispatch.
+        # The registered Ascend FusedRMSNormGated uses the fused norm-gate
+        # kernel while preserving the upstream parameter/loading contract.
         normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
         # Mask again after the norm gate: zero * sigmoid(NaN) is still NaN in
         # static padding rows whose captured gate values are not live.
