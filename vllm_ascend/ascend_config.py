@@ -1065,8 +1065,8 @@ class SchedulerConfig:
             return default
 
         resolved = {
-            # VLLM_ASCEND_BALANCE_SCHEDULING is being sunset; do not carry its
-            # environment fallback into the new construction path.
+            # Balance scheduling is configured only through additional_config;
+            # the legacy environment fallback has been removed.
             "enable_balance_scheduling": _resolve("enable_balance_scheduling", False),
             "recompute_scheduler_enable": _resolve("recompute_scheduler_enable", False),
             # Let pydantic coerce the resolved dicts into typed sub-configs.

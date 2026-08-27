@@ -260,9 +260,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The W8A8 v
     export OMP_NUM_THREADS=1
     export OMP_PROC_BIND=false
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
-
-    vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot --additional-config '{"enable_fused_mc2":1}' \
+    vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot --additional-config '{"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true}}' \
       --host 0.0.0.0 \
       --port 8000 \
       --served-model-name qwen3-vl-235b \

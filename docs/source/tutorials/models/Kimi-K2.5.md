@@ -143,9 +143,8 @@ export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=800
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
   --host 0.0.0.0 \
   --port 8088 \
   --quantization ascend \
@@ -171,7 +170,7 @@ vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
@@ -272,9 +271,8 @@ Run the following scripts on two nodes respectively.
 
     export HCCL_BUFFSIZE=1024
     export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -339,9 +337,8 @@ Run the following scripts on two nodes respectively.
 
     export HCCL_BUFFSIZE=1024
     export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \

@@ -300,5 +300,5 @@ To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long seque
 
 - **Pipeline Parallelism Required**: `--pipeline-parallel-size > 1`
 - **Chunked Prefill Required**: `--enable-chunked-prefill`
-- **Incompatible with Balance Scheduling**: Cannot enable `VLLM_ASCEND_BALANCE_SCHEDULING`
+- **Incompatible with Balance Scheduling**: Cannot enable `additional_config.scheduler_config.enable_balance_scheduling`
 - **Startup Overhead**: Profiling adds ~64 forward passes (tens of seconds)
