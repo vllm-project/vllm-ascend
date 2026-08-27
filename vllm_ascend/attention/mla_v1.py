@@ -1829,13 +1829,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_slots = attn_metadata.slot_mapping[num_decode_tokens:num_actual_tokens]
         prefill_q_pe = self.rope_single(
             prefill_q_pe,
-            cos[:num_actual_prefill_tokens],
-            sin[:num_actual_prefill_tokens],
+            cos[:num_actual_prefill_tokens] if cos is not None else None,
+            sin[:num_actual_prefill_tokens] if sin is not None else None,
         )
         prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
             prefill_kv_no_split,
-            cos[:num_prefill_kv_tokens],
-            sin[:num_prefill_kv_tokens],
+            cos[:num_prefill_kv_tokens] if cos is not None else None,
+            sin[:num_prefill_kv_tokens] if sin is not None else None,
             kv_cache,
             prefill_slots,
             attn_metadata=attn_metadata,
