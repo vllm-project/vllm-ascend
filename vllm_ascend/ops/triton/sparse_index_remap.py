@@ -47,9 +47,11 @@ def remap_sparse_indices_fused_kernel(
     is pre-filled with -1 (the gather kernel later overwrites the compacted
     front).
 
-    NOTE: keep the compaction serial. ``tl.cumsum``/``tl.sum`` based
-    compaction miscompiles or carries a large fixed cost on triton-ascend
-    3.2.0 / CANN 9.1 on 910B (verified); scalar ops are the reliable
+    NOTE: keep the compaction serial. A ``tl.cumsum`` prefix-sum compaction
+    is not reliable on triton-ascend 3.2.0 / CANN 9.1: on a2 it produces
+    nondeterministic garbage values, and on a3 it returns correct
+    single-shot results but deterministically traps the vector core under
+    repeated launches (re-verified 2026-08). Scalar ops are the reliable
     primitive. Out-of-bounds lanes need no explicit check: their indices
     load as -1 and fail the ``idx >= 0`` test.
     """
@@ -130,10 +132,12 @@ def remap_sparse_indices_triton(
         owned by this rank remapped to DCP-local KV positions and compacted
         to the front of the last dim in top-k order, padded with -1.
 
-    Design notes (verified on triton-ascend 3.2.0 / CANN 9.1 / 910B):
-    - Do not use ``tl.cumsum`` + ``tl.sum`` for compaction: it miscompiles
-      (nondeterministic garbage values), and ``tl.cumsum`` alone carries a
-      large per-program fixed cost that makes row-parallel layouts very slow.
+    Design notes (verified on triton-ascend 3.2.0 / CANN 9.1):
+    - Do not use a ``tl.cumsum`` prefix-sum compaction: on a2 it produces
+      nondeterministic garbage values, and on a3 it traps the vector core
+      under repeated launches (single-shot results are correct). ``tl.cumsum``
+      alone carries a large per-program fixed cost that makes row-parallel
+      layouts very slow.
     - Do not fill the output tail inside the gather kernel after its copy
       loop with a scalar-comparison mask: it writes wrong values. The tail
       is pre-filled in the fused kernel with a plain ``in_bounds`` mask
