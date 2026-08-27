@@ -112,7 +112,7 @@ jobs:
     name: prepare-${{ matrix.chip }}-${{ inputs.main_run_id }}
     # round=prep runs the hold guard (prepare ends only on exec dispatch /
     # main-run stop / timeout), so the timeout follows hold_minutes then.
-    timeout-minutes: ${{ inputs.round == 'prep' && inputs.hold_minutes || 180 }}
+    timeout-minutes: ${{ inputs.round == 'prep' && fromJSON(inputs.hold_minutes) || 180 }}
     strategy:
       fail-fast: false
       matrix:
@@ -445,7 +445,7 @@ jobs:
     name: e2e-${{ matrix.chip }}
     if: ${{ inputs.round != 'prep' }}
     needs: prepare
-    timeout-minutes: ${{ inputs.timeout_minutes }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     strategy:
       fail-fast: false
       matrix:
