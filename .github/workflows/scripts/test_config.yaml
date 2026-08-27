@@ -929,6 +929,8 @@ estimated_times:
   tests/ut/worker/a2/test_worker_multi_instance.py: 30
   tests/ut/worker/a2/test_worker_v1.py: 40
   tests/ut/worker/a2/test_worker_v2.py: 30
+  tests/ut/worker/a2/test_execute_dummy_batch.py: 30
+  tests/ut/worker/a2/test_sync_metadata_dp.py: 30
 
 # === Pinned Routes ===
 # Applied after normal selection, skip filtering, and containment-aware
