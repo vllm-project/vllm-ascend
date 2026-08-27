@@ -50,7 +50,13 @@ from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
@@ -659,6 +665,45 @@ class NPUWorker(WorkerBase):
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
+        # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
+        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
+        # all groups in one physical budget and must not take the generic
+        # per-layer multi-group scale below.
+        for group in kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            specs = (
+                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
+            )
+            if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
+                return available_memory
+
+        # vLLM #51718 overlays KV cache groups in one standardized backing
+        # allocation. For the default layer/block-compact layout, Ascend can
+        # preserve that contract for hybrid attention/Mamba models while still
+        # exposing contiguous per-layer views to its existing backends. Do not
+        # shrink the planner budget when the runner can consume that layout.
+        per_layer_specs = []
+        for group in kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                per_layer_specs.extend(group_spec.kv_cache_specs.values())
+            else:
+                per_layer_specs.append(group_spec)
+        has_attention = any(isinstance(spec, AttentionSpec) for spec in per_layer_specs)
+        has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
+        model_runner = getattr(self, "model_runner", None)
+        layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        if (
+            has_attention
+            and has_mamba
+            and layout.is_layer_compact
+            and layout.is_block_compact
+            and self.vllm_config.kv_transfer_config is None
+            and not getattr(model_runner, "use_sparse", False)
+            and not getattr(model_runner, "use_compress", False)
+        ):
+            return available_memory
+
         bytes_per_block = 0
         sum_pages = 0
         for group in kv_cache_groups:
