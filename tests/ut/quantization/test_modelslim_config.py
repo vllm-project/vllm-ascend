@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -8,8 +10,10 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tests.ut.base import TestBase
+from vllm_ascend.models.llama_eagle3 import get_rotation_path
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
@@ -193,6 +197,42 @@ class TestAscendModelSlimConfig(TestBase):
             shard_id="w1",
             expert_id=0,
             return_success=True,
+        )
+
+    def test_get_quant_method_for_kimi_linear_moe_uses_kimi_k3_mapping(self):
+        prefix = "language_model.model.layers.1.block_sparse_moe.experts"
+        quant_description = {f"{prefix}.0.{name}.weight": "W4A8_DYNAMIC" for name in ("w1", "w2", "w3")}
+        config = AscendModelSlimConfig(quant_description)
+        layer = RoutedExperts.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = MagicMock()
+        layer.weight_loader = MagicMock(return_value=True)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.hf_config.model_type = "kimi_linear"
+        mock_scheme = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+                return_value=mock_vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
+                return_value=mock_scheme,
+            ) as create_scheme,
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod",
+                return_value=MagicMock(),
+            ),
+        ):
+            config.get_quant_method(layer, prefix)
+
+        self.assertEqual(config.packed_modules_mapping, get_packed_modules_mapping("kimi_k3"))
+        create_scheme.assert_called_once_with(
+            quant_description,
+            prefix,
+            "moe",
+            get_packed_modules_mapping("kimi_k3"),
         )
 
     def test_get_quant_method_for_c8_kv_cache_attention(self):
@@ -484,6 +524,36 @@ class TestApplyVllmMapper(TestBase):
         self.assertEqual(config.quant_description, {"new_key.weight": "INT8"})
         mock_mapper.apply_dict.assert_called_once_with({"old_key.weight": "INT8"})
 
+    def test_apply_mapper_preserves_optional_metadata(self):
+        optional_metadata = {
+            "quarot": {
+                "rotation_map": {
+                    "global_rotation": "optional/quarot.safetensors",
+                }
+            }
+        }
+        config = AscendModelSlimConfig(
+            {
+                "context_proj.weight": "W8A8",
+                "optional": optional_metadata,
+            }
+        )
+        draft_mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+
+        config.apply_vllm_mapper(draft_mapper)
+
+        self.assertEqual(config.quant_description["model.context_proj.weight"], "W8A8")
+        self.assertEqual(config.quant_description["optional"], optional_metadata)
+        self.assertNotIn("model.optional", config.quant_description)
+        vllm_config = SimpleNamespace(
+            quant_config=config,
+            model_config=SimpleNamespace(model="/target"),
+        )
+        self.assertEqual(
+            get_rotation_path(vllm_config),
+            Path("/target/optional/quarot.safetensors"),
+        )
+
 
 class TestQuantPrefixMapper(TestBase):
     def test_qwen3_5_text_backbones_use_packed_module_mappings(self):
@@ -571,6 +641,89 @@ class TestQuantPrefixMapper(TestBase):
         for model_type in ("gemma4", "gemma4_text"):
             with self.subTest(model_type=model_type):
                 self.assertEqual(get_packed_modules_mapping(model_type), expected_mapping)
+
+    def test_kimi_k3_packed_modules_mapping_covers_kda_and_moe(self):
+        expected_mapping = {
+            "gate_up_proj": ["gate_proj", "up_proj"],
+            "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+            "in_proj_qkvgfab": [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "g_proj",
+                "f_a_proj",
+                "b_proj",
+            ],
+            "in_proj_qkv": ["q_proj", "k_proj", "v_proj"],
+            "in_proj_gfab": ["g_proj", "f_a_proj", "b_proj"],
+            "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+            "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        }
+
+        for model_type in ("kimi_k3", "kimi_linear"):
+            with self.subTest(model_type=model_type):
+                self.assertEqual(get_packed_modules_mapping(model_type), expected_mapping)
+
+    def test_kimi_k3_modelslim_resolves_fused_kda_and_moe_types(self):
+        layer_prefix = "language_model.model.layers.1"
+        quant_description = {
+            **{
+                f"{layer_prefix}.self_attn.{name}.weight": "FLOAT"
+                for name in ("q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj")
+            },
+            **{
+                f"{layer_prefix}.block_sparse_moe.experts.0.{name}.weight": "W4A8_DYNAMIC"
+                for name in ("w1", "w2", "w3")
+            },
+        }
+        packed_mapping = get_packed_modules_mapping("kimi_k3")
+
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                f"{layer_prefix}.self_attn.in_proj_qkvgfab",
+                packed_mapping,
+            ),
+            "FLOAT",
+        )
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                f"{layer_prefix}.block_sparse_moe.experts",
+                packed_mapping,
+            ),
+            "W4A8_DYNAMIC",
+        )
+
+    def test_kimi_k3_quarot_splits_mixed_kda_projection(self):
+        attention_prefix = "language_model.model.layers.0.self_attn"
+        quant_description = {
+            **{f"{attention_prefix}.{name}.weight": "W8A8_DYNAMIC" for name in ("q_proj", "k_proj", "v_proj")},
+            **{f"{attention_prefix}.{name}.weight": "FLOAT" for name in ("g_proj", "f_a_proj", "b_proj")},
+        }
+        config = AscendModelSlimConfig(quant_description)
+        fused_prefix = f"{attention_prefix}.in_proj_qkvgfab"
+
+        self.assertTrue(config.uses_kimi_k3_mixed_kda_projection(fused_prefix))
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                f"{attention_prefix}.in_proj_qkv",
+                get_packed_modules_mapping("kimi_k3"),
+            ),
+            "W8A8_DYNAMIC",
+        )
+
+        layer = MagicMock(spec=LinearBase)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.hf_config.model_type = "kimi_linear"
+        with patch(
+            "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+            return_value=mock_vllm_config,
+        ):
+            method = config.get_quant_method(layer, fused_prefix)
+
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
 
     def test_gemma4_moe_experts_float_shards_are_skipped_together(self):
         quant_description = {

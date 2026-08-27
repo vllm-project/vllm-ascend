@@ -1,8 +1,10 @@
 import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 from vllm.config import (
     CacheConfig,
     CUDAGraphMode,
@@ -15,6 +17,7 @@ from vllm.config import (
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -389,3 +392,85 @@ def test_determine_batch_execution_and_padding(
     finally:
         runner.speculative_config = saved_spec_config
         runner.uniform_decode_query_len = saved_query_len
+
+
+@pytest.mark.parametrize(
+    ("num_spec_tokens", "computed", "prompts", "scheduled", "expected_mode"),
+    [
+        pytest.param(0, [7], [8], [1], CUDAGraphMode.FULL, id="stateful_one_token_handoff"),
+        pytest.param(0, [0], [1], [1], CUDAGraphMode.NONE, id="first_token_without_state"),
+        pytest.param(7, [16, 24], [8, 8], [8, 8], CUDAGraphMode.FULL, id="steady_spec_decode"),
+        pytest.param(7, [16, 7], [8, 8], [8, 8], CUDAGraphMode.FULL, id="handoff_padded_to_spec_width"),
+        pytest.param(7, [16, 0], [8, 8], [8, 8], CUDAGraphMode.NONE, id="spec_width_prefill_without_state"),
+        pytest.param(7, [16, 7], [8, 8], [8, 1], CUDAGraphMode.NONE, id="nonuniform_handoff"),
+    ],
+)
+@pytest.mark.parametrize("dp_size", [1, 4])
+def test_stateful_handoff_preserves_decode_graph(
+    monkeypatch,
+    num_spec_tokens,
+    computed,
+    prompts,
+    scheduled,
+    expected_mode,
+    dp_size,
+):
+    # Exercise the real dispatcher and DP synchronization using CPU metadata only.
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.dp_size = dp_size
+    runner.dp_rank = 0
+    runner.parallel_config = SimpleNamespace(
+        data_parallel_size=dp_size,
+        data_parallel_rank=0,
+        tensor_parallel_size=8,
+        use_sequence_parallel_moe=True,
+    )
+    runner.compilation_config = SimpleNamespace(
+        pass_config=SimpleNamespace(enable_sp=True),
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        cudagraph_capture_sizes=[8, 16, 24, 32],
+        max_cudagraph_capture_size=32,
+        compile_sizes=[],
+    )
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=runner.parallel_config,
+        compilation_config=runner.compilation_config,
+        scheduler_config=SimpleNamespace(max_num_seqs=32),
+        observability_config=SimpleNamespace(cudagraph_metrics=False),
+        num_speculative_tokens=num_spec_tokens,
+        lora_config=None,
+    )
+    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+    runner.uniform_decode_query_len = 1 + num_spec_tokens
+    runner.input_batch = SimpleNamespace(
+        num_computed_tokens_cpu=np.array(computed),
+        num_prompt_tokens=np.array(prompts),
+        lora_id_to_lora_request={},
+    )
+    runner.cudagraph_dispatcher = CudagraphDispatcher(runner.vllm_config)
+    runner.cudagraph_dispatcher.initialize_cudagraph_keys(
+        CUDAGraphMode.FULL_DECODE_ONLY, runner.uniform_decode_query_len
+    )
+
+    def all_reduce(packed_tensor, group):
+        # Other DP replicas are already decoding at the largest captured size.
+        packed_tensor[0, 1:] = 32
+        packed_tensor[1, 1:] = CUDAGraphMode.FULL.value
+
+    module = "vllm_ascend.worker.model_runner_v1"
+    monkeypatch.setattr(f"{module}.should_skip_allreduce_across_dp_group", lambda *args: False)
+    monkeypatch.setattr(f"{module}.get_dp_group", lambda: SimpleNamespace(cpu_group=None))
+    monkeypatch.setattr(f"{module}.dist.all_reduce", all_reduce)
+    mode, descriptor, _, tokens_across_dp, _ = runner._determine_batch_execution_and_padding(
+        num_tokens=sum(scheduled),
+        num_reqs=len(scheduled),
+        num_scheduled_tokens_np=np.array(scheduled, dtype=np.int32),
+        max_num_scheduled_tokens=max(scheduled),
+        use_cascade_attn=False,
+    )
+
+    assert mode == expected_mode
+    assert descriptor.uniform == (expected_mode == CUDAGraphMode.FULL)
+    if dp_size > 1:
+        assert descriptor.num_tokens == 32
+        torch.testing.assert_close(tokens_across_dp, torch.full((dp_size,), 32, dtype=torch.int32))
