@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from typing_extensions import Self
@@ -53,56 +53,48 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         return self.block_size // self.compress_ratio
 
     @property
-    def page_size_bytes(self) -> int:
+    def real_page_size_bytes(self) -> int:
         return (
             self.storage_block_size
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
 
+    @property
+    def unpadded_page_size_bytes(self) -> int:
+        return self.real_page_size_bytes
+
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
-        layout_set = {
+        ascend_layouts = {
             (
-                spec.block_size,
-                spec.num_kv_heads,
-                spec.head_size,
                 spec.scale_dim,
                 spec.scale_dtype,
-                spec.dtype,
-                spec.compress_ratio,
+                spec.cache_sparse_sfa_c8,
+                spec.store_on_host,
+                spec.alignment,
             )
             for spec in specs
         }
-        assert len(layout_set) == 1, (
-            "All attention layers in the same KV cache group must use the same KV cache layout."
+        assert len(ascend_layouts) == 1, (
+            "All attention layers in the same KV cache group must use the same Ascend KV cache layout."
         )
-        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        assert len(cache_dtype_str_set) == 1, (
-            "All attention layers in the same KV cache group must use the same quantization method."
+        non_causal_multi_token_decode_set = set(spec.non_causal_multi_token_decode for spec in specs)
+        assert len(non_causal_multi_token_decode_set) == 1, (
+            "Causal target layers and non-causal multi-token draft layers must use separate KV cache groups."
         )
-        cache_sparse_sfa_c8_set = set(spec.cache_sparse_sfa_c8 for spec in specs)
-        assert len(cache_sparse_sfa_c8_set) == 1, (
-            "All attention layers in the same KV cache group must use the same sparse SFA C8 setting."
-        )
-        store_on_host_set = set(spec.store_on_host for spec in specs)
-        assert len(store_on_host_set) == 1, (
-            "All attention layers in the same KV cache group must use the same host storage setting."
-        )
-        return cls(
-            block_size=specs[0].block_size,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            scale_dim=specs[0].scale_dim,
-            scale_dtype=specs[0].scale_dtype,
-            dtype=specs[0].dtype,
-            cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=specs[0].compress_ratio,
-            cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
-            store_on_host=store_on_host_set.pop(),
+        first_spec = specs[0]
+        merged = super().merge(specs)
+        return replace(
+            merged,
+            scale_dim=first_spec.scale_dim,
+            scale_dtype=first_spec.scale_dtype,
+            alignment=first_spec.alignment,
+            cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
+            store_on_host=first_spec.store_on_host,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

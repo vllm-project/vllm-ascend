@@ -3,7 +3,7 @@
 
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
@@ -32,7 +32,11 @@ def _npu_parallel_config_platform():
 
 
 def test_parallel_and_vllm_config_keep_upstream_validation():
-    with _npu_parallel_config_platform():
+    with (
+        _npu_parallel_config_platform(),
+        patch("vllm_ascend.logger.configure_ascend_file_logging"),
+        patch("vllm_ascend.logger.configure_ascend_logging"),
+    ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=2,
             enable_expert_parallel=True,

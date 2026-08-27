@@ -26,6 +26,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -62,7 +68,10 @@ class _DSparkProposerTestBase:
         """Build the minimal config consumed by the DSpark initializer."""
         draft_model_config = SimpleNamespace(hf_config=hf_config, get_hidden_size=lambda: _HIDDEN_SIZE)
         return SimpleNamespace(
-            speculative_config=SimpleNamespace(draft_sample_method="greedy", draft_model_config=draft_model_config)
+            speculative_config=SimpleNamespace(
+                draft_sample_method="greedy",
+                draft_model_config=draft_model_config,
+            )
         )
 
     @classmethod
@@ -100,7 +109,16 @@ class _DSparkProposerTestBase:
                 else SimpleNamespace()
             )
 
-        with patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init):
+        dynamic_spec_config = SimpleNamespace(method="", method_params={})
+        with (
+            patch.object(AscendDSparkProposer.__base__, "__init__", mock_parent_init),
+            patch(
+                "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+                return_value=SimpleNamespace(
+                    dynamic_spec_config=dynamic_spec_config,
+                ),
+            ),
+        ):
             proposer = AscendDSparkProposer(vllm_config, device)
         num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
@@ -131,11 +149,11 @@ class _DSparkProposerTestBase:
         proposer._per_group_block_table_buffers = {gid: block_table}
         slot = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer._per_group_slot_mappings = {gid: slot}
+        proposer._per_group_kernel_block_sizes = {gid: block_size}
         proposer._per_group_query_slot_mapping_buffers = {gid: slot.clone()}
         proposer._per_group_context_slot_mapping_buffers = {gid: slot.clone()}
         return proposer
 
-    # fmt: off
     @staticmethod
     def _invoke_set_inputs_first_pass(
         proposer,
@@ -143,6 +161,8 @@ class _DSparkProposerTestBase:
         num_reqs,
         block_size,
         seq_len=128,
+        host_seq_len=None,
+        async_metadata=False,
         context=None,
         num_rejected=None,
         with_optional_attrs=False,
@@ -155,17 +175,20 @@ class _DSparkProposerTestBase:
         next_token_ids, target_hidden_states)``.
         """
         next_token_ids = torch.arange(1, num_reqs + 1, dtype=torch.int64)
-        target_hidden_states = torch.arange(
-            num_reqs * 8, dtype=torch.float32
-        ).reshape(num_reqs, 8)
+        target_hidden_states = torch.arange(num_reqs * 8, dtype=torch.float32).reshape(num_reqs, 8)
         query_start_loc_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
         if context is not None:
             query_start_loc_cpu[num_reqs] = context
+        if host_seq_len is None:
+            host_seq_len = seq_len
+        seq_lens_cpu = torch.full((num_reqs,), host_seq_len, dtype=torch.int32)
         cad = SimpleNamespace(
             num_reqs=num_reqs,
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=torch.full((num_reqs,), seq_len, dtype=torch.int32),
+            _seq_lens_cpu=seq_lens_cpu,
+            seq_lens_cpu=None if async_metadata else seq_lens_cpu,
             max_seq_len=seq_len,
         )
         if with_optional_attrs:
@@ -183,9 +206,6 @@ class _DSparkProposerTestBase:
         return num_query_total, token_indices, cad, extra, next_token_ids, target_hidden_states
 
 
-# fmt: on
-
-
 class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     """Guard: under multi-DP the dspark draft proposer must hand DSA attention a
     full-length positions buffer so ``positions[:num_input_tokens]`` never reads
@@ -199,6 +219,8 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=torch.zeros(num_reqs + 1, dtype=torch.int32),
             seq_lens=torch.full((num_reqs,), 128, dtype=torch.int32),
+            _seq_lens_cpu=torch.full((num_reqs,), 128, dtype=torch.int32),
+            seq_lens_cpu=torch.full((num_reqs,), 128, dtype=torch.int32),
             max_seq_len=128,
         )
         proposer.set_inputs_first_pass(
@@ -368,7 +390,6 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         assert proposer.max_query_tokens == expected_max_query_tokens
 
 
-# fmt: off
 class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
     """``set_per_group_attn_metadata`` stores the runner-provided per-group
     block table / slot mapping into the read-only dicts the proposer consults
@@ -376,9 +397,7 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
 
     def test_stores_block_table_and_slot_mapping(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         # a gid not pre-populated by _make_proposer (which only seeds gid=0)
         gid = 7
         block_table = torch.zeros((num_reqs, 16), dtype=torch.int32)
@@ -391,9 +410,7 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
 
     def test_overwrites_existing_gid(self):
         num_reqs, block_size, max_num_tokens = 2, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         gid = 0  # already populated by _make_proposer
         old_block_table = proposer._per_group_block_tables[gid]
         new_block_table = torch.ones((num_reqs, 16), dtype=torch.int32)
@@ -424,10 +441,7 @@ class TestDSparkInitValidation:
         speculative_config = SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             draft_sample_method=draft_sample_method,
-            draft_model_config=SimpleNamespace(
-                hf_config=SimpleNamespace(),
-                get_hidden_size=lambda: hidden_size
-            ),
+            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(), get_hidden_size=lambda: hidden_size),
         )
         return SimpleNamespace(speculative_config=speculative_config)
 
@@ -451,7 +465,6 @@ class TestDSparkInitValidation:
             self.dtype = dtype
             self.device = device
             self.draft_model_config = vllm_config.speculative_config.draft_model_config
-            # present so the ``del`` in DSpark.__init__ succeeds
             self.hidden_size = 0
             self.hidden_states = None
             self._dflash_hidden_states = None
@@ -498,7 +511,14 @@ class TestDSparkInitValidation:
             draft_sample_method="greedy",
             hidden_size=hidden,
         )
-        proposer = AscendDSparkProposer(vllm_config, device)
+        dynamic_spec_config = SimpleNamespace(method="", method_params={})
+        with patch(
+            "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
+            return_value=SimpleNamespace(
+                dynamic_spec_config=dynamic_spec_config,
+            ),
+        ):
+            proposer = AscendDSparkProposer(vllm_config, device)
 
         blk = 1 + num_spec
         max_query_tokens = max_batch * num_spec
@@ -533,21 +553,16 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
     @pytest.fixture(autouse=True)
     def _mock_kernel(self, monkeypatch):
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer."
-            "copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
 
     def test_return_value_and_token_indices(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
-        num_query_total, token_indices, _cad, extra = (
-            self._invoke_set_inputs_first_pass(
-                proposer, num_reqs=num_reqs, block_size=block_size
-            )[:4]
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
+        num_query_total, token_indices, _cad, extra = self._invoke_set_inputs_first_pass(
+            proposer, num_reqs=num_reqs, block_size=block_size
+        )[:4]
         assert num_query_total == num_reqs * block_size
         assert token_indices.shape == (num_reqs * block_size,)
         assert token_indices.dtype == torch.int32
@@ -556,33 +571,49 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
 
     def test_seed_buffer_copied_from_next_tokens(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
-        self._invoke_set_inputs_first_pass(
-            proposer, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
+        self._invoke_set_inputs_first_pass(proposer, num_reqs=num_reqs, block_size=block_size)
         expected = torch.arange(1, num_reqs + 1, dtype=torch.int64)
         assert torch.equal(proposer._dspark_seed_buffer[:num_reqs], expected)
         assert torch.all(proposer._dspark_seed_buffer[num_reqs:] == 0)
 
     def test_context_hidden_states_copied(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
-        self._invoke_set_inputs_first_pass(
-            proposer, num_reqs=num_reqs, block_size=block_size, context=num_reqs
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
+        self._invoke_set_inputs_first_pass(proposer, num_reqs=num_reqs, block_size=block_size, context=num_reqs)
         assert proposer._dflash_num_context == num_reqs
         expected = torch.arange(num_reqs * 8, dtype=torch.float32).reshape(num_reqs, 8)
         assert torch.equal(proposer._dflash_hidden_states[:num_reqs], expected)
 
+    def test_query_slot_kernel_uses_logical_block_size(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+        num_reqs, num_speculative_tokens, max_num_tokens = 1, 7, 32
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=num_speculative_tokens,
+        )
+        proposer.draft_attn_groups[0].kv_cache_spec.block_size = 384
+        proposer._per_group_kernel_block_sizes[0] = 128
+
+        self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=num_speculative_tokens,
+            seq_len=720,
+        )
+
+        kwargs = kernel[1,].call_args.kwargs
+        assert proposer.draft_attn_groups[0].kv_cache_spec.block_size == 384
+        assert kwargs["block_size"] == 128
+
     def test_cad_rewritten_to_cross_attention_shape(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         num_query_total, _, cad, _ = self._invoke_set_inputs_first_pass(
             proposer, num_reqs=num_reqs, block_size=block_size, with_optional_attrs=True
         )[:4]
@@ -600,10 +631,7 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         # slot mapping is a slice of the primary group's query buffer (shares
         # storage from offset 0); a fresh slice is not identity-equal, so check
         # the underlying storage and length instead.
-        assert (
-            cad.slot_mapping.data_ptr()
-            == proposer._per_group_query_slot_mapping_buffers[0].data_ptr()
-        )
+        assert cad.slot_mapping.data_ptr() == proposer._per_group_query_slot_mapping_buffers[0].data_ptr()
         assert cad.slot_mapping.shape[0] == num_query_total
         # optional attrs the proposer rewrites when present.
         assert cad.actual_seq_lengths_q == [block_size] * num_reqs
@@ -617,25 +645,24 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
             block_size=block_size,
             draft_attn_causal=True,
         )
-        _, _, cad, _ = self._invoke_set_inputs_first_pass(
-            proposer, num_reqs=num_reqs, block_size=block_size
-        )[:4]
+        _, _, cad, _ = self._invoke_set_inputs_first_pass(proposer, num_reqs=num_reqs, block_size=block_size)[:4]
 
         assert cad.causal is True
 
     def test_cad_query_start_loc_and_seq_lens(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
-        _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
-            proposer, num_reqs=num_reqs, block_size=block_size
-        )[:4]
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
+        _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(proposer, num_reqs=num_reqs, block_size=block_size)[
+            :4
+        ]
         expected_qsl = torch.arange(num_reqs + 1, dtype=torch.int32) * block_size
         assert torch.equal(cad.query_start_loc, expected_qsl)
         assert torch.equal(cad.query_start_loc_cpu, expected_qsl)
         # seq_lens grow by block_size when no tokens were rejected.
-        assert torch.equal(cad.seq_lens, torch.full((num_reqs,), 128 + block_size, dtype=torch.int32))
+        expected = torch.full((num_reqs,), 128 + block_size, dtype=torch.int32)
+        assert torch.equal(cad.seq_lens, expected)
+        assert torch.equal(cad._seq_lens_cpu, expected)
+        assert torch.equal(cad.seq_lens_cpu, expected)
 
 
 class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
@@ -644,38 +671,36 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
 
     def test_seq_lens_subtracts_rejected(self, monkeypatch):
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer."
-            "copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             MagicMock(),
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         rejected = torch.full((num_reqs,), 2, dtype=torch.int32)
         _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
-            proposer, num_reqs=num_reqs, block_size=block_size, num_rejected=rejected
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            host_seq_len=126,
+            async_metadata=True,
+            num_rejected=rejected,
         )[:4]
         # effective = seq_lens(128) - rejected(2) = 126; then + block_size(5) = 131.
-        assert torch.equal(
-            cad.seq_lens, torch.full((num_reqs,), 128 - 2 + block_size, dtype=torch.int32)
-        )
+        assert torch.equal(cad.seq_lens, torch.full((num_reqs,), 128 - 2 + block_size, dtype=torch.int32))
+        expected_host = torch.full((num_reqs,), 126 + block_size, dtype=torch.int32)
+        assert torch.equal(cad._seq_lens_cpu, expected_host)
+        assert cad.seq_lens_cpu is None
 
     def test_kernel_called_with_has_num_rejected(self, monkeypatch):
         kernel = MagicMock()
         monkeypatch.setattr(
-            "vllm_ascend.spec_decode.dspark_proposer."
-            "copy_and_expand_dflash_and_dspark_inputs_kernel",
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
             kernel,
         )
         num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
         rejected = torch.full((num_reqs,), 2, dtype=torch.int32)
-        self._invoke_set_inputs_first_pass(
-            proposer, num_reqs=num_reqs, block_size=block_size, num_rejected=rejected
-        )
+        self._invoke_set_inputs_first_pass(proposer, num_reqs=num_reqs, block_size=block_size, num_rejected=rejected)
         # The proposer calls the kernel as ``kernel[1,](...)`` (Triton-style
         # grid indexing), so the call lands on the indexed sub-mock.
         sub = kernel[1,]
@@ -686,10 +711,8 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         assert kwargs["SAMPLE_FROM_ANCHOR"] is True
 
 
-class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
-    """``initialize_attn_backend`` raises clearly when the draft model does not
-    expose the DSpark layer-name API, or when no draft attention groups can be
-    built from the kv-cache groups."""
+class TestInitializeAttnBackend(_DSparkProposerTestBase):
+    """Initialization preserves each group's logical kernel block size."""
 
     @staticmethod
     def _make_proposer_for_init():
@@ -698,32 +721,118 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         proposer.device = torch.device("cpu")
         return proposer
 
-    def test_model_without_draft_layer_names_raises(self, monkeypatch):
-        # get_layers_from_vllm_config is called first; stub it so the model
-        # check is what actually fails.
+    def test_initialization_tracks_logical_block_size_per_gid(self, monkeypatch):
+        manager_specs = [MagicMock(), MagicMock()]
+        for spec in manager_specs:
+            spec.block_size = 384
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.backend"
+        layers = {}
+        for gid in range(2):
+            layer = MagicMock()
+            layer.get_attn_backend.return_value = backend
+            layers[f"L{gid}"] = layer
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
-            lambda *a, **k: {},
+            lambda *a, **k: layers,
         )
+
         proposer = self._make_proposer_for_init()
-        # model lacks get_draft_kv_cache_layer_names entirely.
-        proposer.model = SimpleNamespace()
+        proposer.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: {"L0", "L1"})
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[f"L{gid}"],
+                    kv_cache_spec=manager_specs[gid],
+                )
+                for gid in range(2)
+            ],
+        )
 
-        kv_cache_config = SimpleNamespace(kv_cache_groups=[])
-        with pytest.raises(RuntimeError, match="get_draft_kv_cache_layer_names"):
-            proposer.initialize_attn_backend(kv_cache_config)
+        with patch.object(AttentionGroup, "create_metadata_builders") as create_builders:
+            proposer.initialize_attn_backend(
+                kv_cache_config,
+                kernel_block_sizes=[128, 64],
+            )
 
-    def test_no_draft_attn_groups_raises(self, monkeypatch):
+        assert [spec.block_size for spec in manager_specs] == [384, 384]
+        assert proposer._per_group_kernel_block_sizes == {0: 128, 1: 64}
+        assert [group.kv_cache_group_id for group in proposer.draft_attn_groups] == [0, 1]
+        assert proposer.kernel_block_size == 128
+        assert [call.kwargs["kernel_block_size"] for call in create_builders.call_args_list] == [128, 64]
+
+    @pytest.mark.parametrize("draft_uses_mla", [False, True], ids=["gqa", "mla"])
+    def test_mixed_target_and_dspark_group_creates_one_draft_attention_group(self, monkeypatch, draft_uses_mla: bool):
+        page_size = 488448
+        target_layer = "language_model.model.layers.3.self_attn.attn"
+        draft_layers = [f"model.layers.{layer_idx}.self_attn.attn" for layer_idx in range(93, 98)]
+        target_spec = MLAAttentionSpec(
+            block_size=384,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+        )
+        if draft_uses_mla:
+            draft_spec = MLAAttentionSpec(
+                block_size=384,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.bfloat16,
+                page_size_padded=page_size,
+                non_causal_multi_token_decode=True,
+            )
+        else:
+            draft_spec = FullAttentionSpec(
+                block_size=384,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.bfloat16,
+                page_size_padded=page_size,
+            )
+        mixed_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                target_layer: target_spec,
+                **{layer_name: draft_spec for layer_name in draft_layers},
+            }
+        )
+        assert mixed_spec is not None
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.gqa.backend"
+        layers = {}
+        for layer_name in draft_layers:
+            layer = MagicMock()
+            layer.get_attn_backend.return_value = backend
+            layers[layer_name] = layer
         monkeypatch.setattr(
             "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
-            lambda *a, **k: {},
+            lambda *args, **kwargs: layers,
         )
-        proposer = self._make_proposer_for_init()
-        # draft layer names exist, but no kv-cache group names overlap them.
-        proposer.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: {"L0"})
 
-        non_overlapping_group = SimpleNamespace(layer_names=["OTHER_LAYER"])
-        kv_cache_config = SimpleNamespace(kv_cache_groups=[non_overlapping_group])
-        with pytest.raises(RuntimeError, match="registered draft attention groups"):
-            proposer.initialize_attn_backend(kv_cache_config)
-# fmt: on
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: set(draft_layers))
+        proposer.max_query_tokens = 16
+        proposer.max_num_tokens = 32
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[target_layer, *draft_layers],
+                    kv_cache_spec=mixed_spec,
+                )
+            ]
+        )
+
+        with patch.object(AttentionGroup, "create_metadata_builders"):
+            proposer.initialize_attn_backend(
+                kv_cache_config,
+                kernel_block_sizes=[128],
+            )
+
+        assert len(proposer.draft_attn_groups) == 1
+        assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_layers)
+        assert proposer.draft_attn_groups[0].kv_cache_group_id == 0
+        assert proposer._layer_group_idx == [0] * 5
