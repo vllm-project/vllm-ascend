@@ -15,6 +15,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.ops.activation import AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams, MoEQuantParams
@@ -906,6 +907,7 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
                 return_value=(requantized, requant_scale),
             ) as mock_dynamic_quant,
             patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 2)),
+            patch(f"{MOE_MLP}.ensure_mxfp8_moe_available"),
             patch(f"{MOE_MLP}.dispose_tensor"),
         ):
             quant_apply_mlp(**kwargs)
@@ -1157,7 +1159,7 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
     def _run_non_gelu(self, activation):
         gate_up = torch.zeros(1, 16 if activation == MoEActivation.SWIGLUSTEP else 8)
         with (
-            _mock_w8a8_gelu_compute(gate_up),
+            _mock_w8a8_gelu_compute(torch.zeros(1, 8)),
             patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
             patch(f"{MOE_MLP}.HAS_TRITON", False),
             patch("vllm.triton_utils.HAS_TRITON", False),
@@ -1175,7 +1177,12 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
         mock_swiglu.assert_called()
 
     def test_swiglustep_activation_skips_gelu_path(self):
-        mock_gelu, _ = self._run_non_gelu(MoEActivation.SWIGLUSTEP)
+        with patch.object(
+            AscendSwigluStepAndMul,
+            "swiglustep_forward",
+            return_value=torch.zeros(1, 8),
+        ):
+            mock_gelu, _ = self._run_non_gelu(MoEActivation.SWIGLUSTEP)
         mock_gelu.assert_not_called()
 
     def test_swigluoai_activation_skips_gelu_path(self):
