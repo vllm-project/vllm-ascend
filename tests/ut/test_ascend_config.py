@@ -22,6 +22,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
+    AscendCompilationConfig,
     AscendConfig,
     SchedulerConfig,
     ShortRequestFirstConfig,
@@ -195,6 +196,43 @@ class TestAscendConfig(TestBase):
         ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
         self.assertTrue(ascend_compilation_config.enable_npugraph_ex)
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
+        self.assertTrue(ascend_compilation_config.enable_super_kernel)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_super_kernel_explicit_disable(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": True,
+                "enable_static_kernel": True,
+                "enable_super_kernel": False,
+            },
+            "refresh": True,
+        }
+        ascend_compilation_config = init_ascend_config(test_vllm_config).ascend_compilation_config
+        self.assertTrue(ascend_compilation_config.enable_static_kernel)
+        self.assertFalse(ascend_compilation_config.enable_super_kernel)
+
+    def test_ascend_compilation_config_super_kernel_defaults_to_static_kernel(self):
+        cfg = AscendCompilationConfig(enable_static_kernel=True)
+        self.assertTrue(cfg.enable_static_kernel)
+        self.assertTrue(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel=False)
+        self.assertFalse(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel=True, enable_super_kernel=False)
+        self.assertTrue(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig(enable_static_kernel="true")
+        self.assertTrue(cfg.enable_super_kernel)
+
+        cfg = AscendCompilationConfig()
+        self.assertFalse(cfg.enable_static_kernel)
+        self.assertFalse(cfg.enable_super_kernel)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

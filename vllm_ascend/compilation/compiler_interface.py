@@ -127,6 +127,12 @@ def _configure_backend(
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
             options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+            if ascend_compilation_config.enable_super_kernel:
+                options["super_kernel_optimize"] = True
+                options["super_kernel_optimize_options"] = {
+                    "dcci_after_kernel_end": [".*"],
+                }
+                options["super_kernel_debug_options"] = {}
         process_kwargs_options(config, {"options": options})
     else:
         # torchair (reduce-overhead): use nested config structure directly.
@@ -244,6 +250,7 @@ class AscendCompiler(CompilerInterface):
             "torch_npu_version": torch_npu.__version__,
             "enable_npugraph_ex": ascend_compilation_config.enable_npugraph_ex,
             "enable_static_kernel": ascend_compilation_config.enable_static_kernel,
+            "enable_super_kernel": ascend_compilation_config.enable_super_kernel,
         }
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
