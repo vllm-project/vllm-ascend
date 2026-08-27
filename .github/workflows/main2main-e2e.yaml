@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# One round of the main2main external E2E on the three GPU runners
+# One round of the main2main external E2E on the three NPU runners
 # (A2/A3/310P).  Merged prep + exec into a single workflow:
 #
 # - round=prep (dispatched by the flow at start): only the prepare-<chip>

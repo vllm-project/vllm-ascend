@@ -140,7 +140,7 @@ jobs:
   main2main:
     needs: [resolve-source, ensure-csrc-cache]
     # All analysis/planning/adapter/QA/pre-CI/final-gate work runs on a pure
-    # CPU runner; E2E runs on the A2/A3/310P GPU runners via the external
+    # CPU runner; E2E runs on the A2/A3/310P NPU runners via the external
     # main2main-e2e workflows (dispatched by step 0 below).
     runs-on: linux-amd64-cpu-8-hk
     timeout-minutes: 1440
@@ -275,7 +275,7 @@ jobs:
           fi
           echo "Pre-starting main2main E2E env prep for vllm=${VLLM_COMMIT} (A2/A3/310P)..."
           # Reuse the most recent completed+successful run whose vllm input
-          # matches: the GPU runners' env persists across runs (.ready
+          # matches: the NPU runners' env persists across runs (.ready
           # marker keyed by vllm/base_ref/image_tag), so a matching run
           # means the env is already prepared — dispatching again would
           # only queue an idempotent no-op.  Falls back to a fresh prep
@@ -451,7 +451,7 @@ jobs:
 
       # CPU-runner install: requirements-dev.txt plus an editable install of
       # the package itself with kernel compilation disabled (COMPILE_CUSTOM_
-      # KERNELS=0 — the GPU runners own csrc builds via the main2main-e2e
+      # KERNELS=0 — the NPU runners own csrc builds via the main2main-e2e
       # workflow's prepare job).  Without the editable install the
       # vllm.platform_plugins entry point is absent and `import vllm` fails
       # device inference ("Failed to infer device type") — 162 UT failures
