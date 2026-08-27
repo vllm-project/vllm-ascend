@@ -90,7 +90,7 @@ The details of each configuration option are as follows:
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable Xlite graph mode. See [Using XliteGraph](../feature_guide/graph_mode.md#using-xlitegraph) for the supported models, the decode-only vs. full-mode distinction, and examples. |
-| `full_mode` | bool | `False` | Whether to enable Xlite for both the prefill and decode stages. By default, Xlite is only enabled for the decode stage, with prefill falling back to the runnable under ACLGraph. When `True`, xlite owns prefill and decode, ACLGraph capture is not used, and `--enforce-eager` is recommended (unless speculative decoding is configured, etc.). |
+| `full_mode` | bool | `False` | Token budget sizing for the xlite runtime. Batches are routed by token count: those within the budget run on the xlite runtime, larger ones fall back to the runnable under ACLGraph. By default (`False`), the budget is sized for decode steps (`max_num_seqs × (1 + num_speculative_tokens)`), so prefill and large mixed batches typically fall back. When `True`, the budget is `max_num_batched_tokens`, so xlite handles prefill and decode alike, ACLGraph capture is not used, and `--enforce-eager` is recommended (unless speculative decoding is configured, etc.). Since v0.28.0, routing is by token count instead of the batch attention state. |
 
 **finegrained_tp_config**
 
