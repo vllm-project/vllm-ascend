@@ -915,6 +915,7 @@ estimated_times:
   tests/ut/ops/a2/test_gdn_layerwise_kv.py: 70
   tests/ut/ops/a2/test_token_dispatcher.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50
+  tests/ut/ops/a3_2/test_kimi_kda_fused_norm_gate.py: 60
   tests/ut/ops/a3_2/test_select_experts.py: 20
   tests/ut/quantization/methods/a2/test_w4a16.py: 30
   tests/ut/quantization/methods/a2/test_w4a4_flatquant.py: 40
