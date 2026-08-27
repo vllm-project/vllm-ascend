@@ -520,7 +520,7 @@ Please refer to the [vLLM Features](https://docs.vllm.ai/en/stable/features), [v
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
 
->For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-online-service-deployment).
+>For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 <u>High Throughput Configuration:</u>
 
