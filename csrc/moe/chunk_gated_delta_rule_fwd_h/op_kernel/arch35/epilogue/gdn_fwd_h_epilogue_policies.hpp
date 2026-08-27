@@ -7,19 +7,21 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-/*!
- * \file chunk_fwd_o_tiling.h
- * \brief Compatibility include for chunk_fwd_o tiling data.
- */
+#ifndef CATLASS_EPILOGUE_GDN_FWD_H_EPILOGUE_POLICIES_HPP
+#define CATLASS_EPILOGUE_GDN_FWD_H_EPILOGUE_POLICIES_HPP
 
-#pragma once
+#include "catlass/catlass.hpp"
 
-#include "../op_kernel/chunk_fwd_o_struct.h"
+namespace Catlass::Epilogue {
 
-namespace optiling {
+struct EpilogueAtlasGDNFwdHVnew {
+    using ArchTag = Arch::Ascend950;
+};
 
-using GDN::ChunkFwdOTilingData;
+struct EpilogueAtlasGDNFwdHUpdate {
+    using ArchTag = Arch::Ascend950;
+};
 
-struct ChunkFwdOCompileInfo {};
+}  // namespace Catlass::Epilogue
 
-} // namespace optiling
+#endif  // CATLASS_EPILOGUE_GDN_FWD_H_EPILOGUE_POLICIES_HPP
