@@ -310,57 +310,71 @@ jobs:
           fi
           echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
           echo "Prep run ${RUN_ID} started"
-          # Phase 2: wait until all three NPU runners picked up their
-          # prepare jobs (status left queued).  Jobs are queried by the
-          # prep run id itself, so prefix matching on prepare-<chip>- is
-          # unambiguous — no owner suffix needed in the job names.  Use the
-          # local RUN_ID: MAIN2MAIN_E2E_PREP_RUN_ID was written to
+          # Phase 2: wait until each prepare job's "Check NPU availability"
+          # step completed (npu-smi ok) — not merely until the job leaves
+          # queued (which is right after the init container finishes, before
+          # the NPU is confirmed usable).  Jobs are queried by the prep run
+          # id itself, so prefix matching on prepare-<chip>- is unambiguous.
+          # Use the local RUN_ID: MAIN2MAIN_E2E_PREP_RUN_ID was written to
           # GITHUB_ENV for later steps and is not bound in this shell
           # (set -u would abort on it).
           PREP_RUN_ID=${RUN_ID}
           WAIT_MIN=${MAIN2MAIN_E2E_READY_TIMEOUT_MIN:-120}
-          echo "Waiting for the three NPU runners (prepare-a2/a3/310p) — up to ${WAIT_MIN} min..."
+          echo "Waiting for the NPU runners to pass NPU availability check (prepare-a2/310p) — up to ${WAIT_MIN} min..."
           DEADLINE=$(( $(date +%s) + WAIT_MIN * 60 ))
           while :; do
             READY_STATE=$(gh api "repos/${HEAD_FORK}/actions/runs/${PREP_RUN_ID}/jobs" \
               | python3 -c "
           import json, sys
           jobs = json.load(sys.stdin).get('jobs', [])
-          want = [f'prepare-{c}-' for c in ('a2', 'a3', '310p')]
+          want = [f'prepare-{c}-' for c in ('a2', '310p')]
+          NPU_STEP = 'Check NPU availability'
           state = {}
           for j in jobs:
               name = j.get('name') or ''
               for w in want:
                   if name.startswith(w):
-                      state[w[:-1]] = (j.get('status'), j.get('conclusion') or '')
+                      step_st = step_con = 'missing'
+                      for st in j.get('steps', []) or []:
+                          if st.get('name') == NPU_STEP:
+                              step_st = st.get('status') or 'missing'
+                              step_con = (st.get('conclusion') or '') or 'missing'
+                      state[w[:-1]] = (step_st, step_con, j.get('status'))
           out = []
           for w in want:
               if w[:-1] in state:
-                  st, con = state[w[:-1]]
-                  out.append(f'{w[:-1]}|{st}|{con}')
+                  step_st, step_con, job_st = state[w[:-1]]
+                  out.append(f'{w[:-1]}|{step_st}|{step_con}|{job_st}')
               else:
-                  out.append(f'{w[:-1]}|missing|')
+                  out.append(f'{w[:-1]}|missing|missing|missing')
           print(';'.join(out))
           ")
             echo "  runners: ${READY_STATE}"
             ALL_READY=true
             for entry in $(echo "${READY_STATE}" | tr ';' '\n'); do
-              IFS='|' read -r jname jstatus jconclusion <<< "${entry}"
+              IFS='|' read -r jname jstep jconclusion jstatus <<< "${entry}"
               case "${jstatus}" in
-                in_progress|completed) ;;
                 failed|skipped|cancelled|timed_out)
-                  echo "::error::${jname} reached terminal state ${jstatus} (${jconclusion}) — cannot wait for it"
+                  echo "::error::${jname} job reached terminal state ${jstatus} — cannot wait for it"
                   exit 1
+                  ;;
+              esac
+              case "${jstep}" in
+                completed)
+                  if [ "${jconclusion}" != "success" ]; then
+                    echo "::error::${jname} 'Check NPU availability' failed (${jconclusion})"
+                    exit 1
+                  fi
                   ;;
                 *) ALL_READY=false ;;
               esac
             done
             if [ "${ALL_READY}" = "true" ]; then
-              echo "All three NPU runners are ready (prepare jobs in progress/completed)"
+              echo "All NPU runners passed the NPU availability check (npu-smi ok)"
               break
             fi
             if [ "$(date +%s)" -gt "${DEADLINE}" ]; then
-              echo "::error::timed out after ${WAIT_MIN} min waiting for the three NPU runners (last state: ${READY_STATE})"
+              echo "::error::timed out after ${WAIT_MIN} min waiting for the NPU availability check (last state: ${READY_STATE})"
               exit 1
             fi
             sleep 30
