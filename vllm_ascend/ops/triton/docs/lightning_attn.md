@@ -10,11 +10,11 @@ They have no individual entry point — they only ever run as one pipeline dispa
 | Product | Supported |
 | ------------------------------------------------------------ | :------: |
 |<term>Ascend 950PR/Ascend 950DT</term>|      √     |
-|<term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>|      √     |
-|<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>|      √     |
-|<term>Atlas 200I/500 A2 推理产品</term>|      ×     |
-|<term>Atlas 推理系列加速卡产品</term>|      ×     |
-|<term>Atlas 训练系列产品</term>|      ×     |
+|<term>Atlas A3 Training Series Product/Atlas A3 Inference Series Product</term>|      √     |
+|<term>Atlas A2 Training Series Product/Atlas A2 Inference Series Product</term>|      √     |
+|<term>Atlas 200I/500 A2 Inference Product</term>|      ×     |
+|<term>Atlas Inference Series Accelerator Card Product</term>|      ×     |
+|<term>Atlas Training Series Product</term>|      ×     |
 
 > The operator does not go through `DeviceOperator`: A2/A3 and Ascend 950 receive
 > identical launch parameters and there is no adaptor branch.
