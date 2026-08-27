@@ -135,11 +135,13 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
 
         ops.register_dummy_fusion_op()
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        ascend_device_type = get_ascend_device_type()
+        if ascend_device_type != AscendDeviceType.A5:
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
-        init_ascend_config(vllm_config)
+        ascend_config = init_ascend_config(vllm_config)
+        ascend_config.validate_kv_offload_device_support(ascend_device_type)
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging()

@@ -127,6 +127,68 @@ class TestAscendConfig(TestBase):
         config._sparse_li_c8_layer_filter_enabled = AscendConfig._has_sparse_li_c8_layer_config(quant_config)
         return config
 
+    @staticmethod
+    def _make_kv_offload_device_validation_config(
+        kv_transfer_config=None,
+        *,
+        sparse_offload_enabled: bool = False,
+    ):
+        config = AscendConfig.__new__(AscendConfig)
+        config.vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+        config.sparse_kv_offload_config = SimpleNamespace(enabled=sparse_offload_enabled)
+        return config
+
+    def test_rejects_prefill_kv_offload_on_a2(self):
+        multi_connector = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_producer",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "SfaRemoteD2HConnector",
+                        "kv_role": "kv_producer",
+                    },
+                    {
+                        "kv_connector": "AscendStoreConnector",
+                        "kv_role": "kv_producer",
+                        "kv_connector_extra_config": {
+                            "backend": "memcache",
+                            "use_layerwise": True,
+                        },
+                    },
+                ]
+            },
+        )
+        config = self._make_kv_offload_device_validation_config(multi_connector)
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "Layerwise Prefill KV Cache Offload, SfaRemoteD2HConnector",
+        ):
+            config.validate_kv_offload_device_support(AscendDeviceType.A2)
+
+    def test_rejects_decode_kv_offload_on_non_a3(self):
+        connector = KVTransferConfig(
+            kv_connector="SfaRemoteD2HConnector",
+            kv_role="kv_consumer",
+        )
+        config = self._make_kv_offload_device_validation_config(
+            connector,
+            sparse_offload_enabled=True,
+        )
+
+        for device_type in (AscendDeviceType.A2, AscendDeviceType.A5, AscendDeviceType._310P):
+            with (
+                self.subTest(device_type=device_type),
+                self.assertRaisesRegex(
+                    NotImplementedError,
+                    "Sparse KV Cache Offload, SfaRemoteD2HConnector",
+                ),
+            ):
+                config.validate_kv_offload_device_support(device_type)
+
+        config.validate_kv_offload_device_support(AscendDeviceType.A3)
+
     def test_sparse_li_c8_layer_filter_uses_indexer_quant_type(self):
         config = self._make_sparse_li_c8_config(
             {
