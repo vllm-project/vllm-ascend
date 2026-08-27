@@ -17,7 +17,7 @@
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -635,7 +635,8 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_save_batch_put_failure_is_nonfatal(self):
         t, store = self._make_thread([0])
-        store.put = MagicMock(side_effect=RuntimeError("put failed"))
+        error = RuntimeError("put failed")
+        store.put = MagicMock(side_effect=error)
         t.start()
         self.assertTrue(t.ready_event.wait(timeout=1))
         req = ReqMeta(
@@ -646,8 +647,16 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         batch = t.prepare_save_batch([req])
         self.assertTrue(batch.prepared.wait(timeout=1))
-        t.commit_save_batch(batch, MagicMock())
-        t.wait_for_batch(batch)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger.exception"
+        ) as log_exception:
+            t.commit_save_batch(batch, MagicMock())
+            t.wait_for_batch(batch)
+        log_exception.assert_called_once_with(
+            "Failed to put AscendStore save batch. type=%s, error=%s",
+            "RuntimeError",
+            error,
+        )
         self.assertTrue(batch.done.is_set())
         self.assertNotIn("r1", t.stored_requests)
 

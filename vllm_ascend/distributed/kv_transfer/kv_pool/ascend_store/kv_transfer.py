@@ -889,8 +889,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     self.m_store.put(store.keys, store.addrs, store.sizes)
                     if self.enable_kv_event and store.stored_events:
                         self.update_kv_event(store.stored_events)
-        except Exception:
-            logger.exception("Failed to put AscendStore save batch")
+        except Exception as error:
+            logger.exception(
+                "Failed to put AscendStore save batch. type=%s, error=%s",
+                type(error).__name__,
+                error,
+            )
         finally:
             for request, _ in prepared_requests:
                 self._complete_request(request)
