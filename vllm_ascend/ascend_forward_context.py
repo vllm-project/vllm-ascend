@@ -231,25 +231,42 @@ def get_a5_mega_moe_buffer_tokens_per_rank(
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int | None = None,
 ) -> int:
-    if mc2_tokens_capacity is None:
-        mc2_tokens_capacity = get_mc2_tokens_capacity()
-    if mc2_tokens_capacity is None:
-        raise RuntimeError("MC2 token capacity must be initialized before using A5 MegaMoE.")
+    """Resolve the A5 MegaMoE capacity for the current PD role.
+
+    Prefill scheduler capacity is rank-local in vLLM. Other roles retain the
+    conservative MC2/graph capacity to avoid increasing decode memory usage.
+    """
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    if kv_role == "kv_producer":
+        execution_tokens_per_rank = vllm_config.scheduler_config.max_num_batched_tokens
+        capacity_source = "scheduler.max_num_batched_tokens"
+    else:
+        if mc2_tokens_capacity is None:
+            mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if mc2_tokens_capacity is None:
+            raise RuntimeError("MC2 token capacity must be initialized before using A5 MegaMoE.")
+        execution_tokens_per_rank = mc2_tokens_capacity
+        capacity_source = "mc2_tokens_capacity"
 
     ascend_config = get_ascend_config()
     expert_parallel_size = vllm_config.parallel_config.world_size_across_dp
     buffer_tokens_per_rank = compute_mega_moe_buffer_tokens_per_rank(
         ascend_config.mega_moe_max_tokens,
-        mc2_tokens_capacity,
+        execution_tokens_per_rank,
         expert_parallel_size,
     )
     logger.debug(
         "A5 MegaMoE buffer capacity resolved: mega_moe_max_tokens=%s, "
-        "configured_tokens_per_rank=%s, mc2_tokens_capacity=%s, "
+        "configured_tokens_per_rank=%s, capacity_source=%s, "
+        "execution_tokens_per_rank=%s, mc2_tokens_capacity=%s, kv_role=%s, "
         "expert_parallel_size=%s, buffer_tokens_per_rank=%s",
         ascend_config.mega_moe_max_tokens,
         ascend_config.mega_moe_max_tokens // expert_parallel_size,
+        capacity_source,
+        execution_tokens_per_rank,
         mc2_tokens_capacity,
+        kv_role,
         expert_parallel_size,
         buffer_tokens_per_rank,
     )

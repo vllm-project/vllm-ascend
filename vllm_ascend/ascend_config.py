@@ -26,22 +26,22 @@ if TYPE_CHECKING:
 
 def compute_mega_moe_buffer_tokens_per_rank(
     mega_moe_max_tokens: int,
-    mc2_tokens_capacity: int,
+    execution_tokens_per_rank: int,
     expert_parallel_size: int,
 ) -> int:
     """Compute the per-rank token capacity used to allocate the MegaMoE buffer."""
-    if mc2_tokens_capacity <= 0:
-        raise ValueError(f"mc2_tokens_capacity must be positive, got {mc2_tokens_capacity}")
+    if execution_tokens_per_rank <= 0:
+        raise ValueError(f"execution_tokens_per_rank must be positive, got {execution_tokens_per_rank}")
     if expert_parallel_size <= 0:
         raise ValueError(f"expert_parallel_size must be positive, got {expert_parallel_size}")
 
     configured_tokens_per_rank = mega_moe_max_tokens // expert_parallel_size
-    buffer_tokens_per_rank = min(configured_tokens_per_rank, mc2_tokens_capacity)
+    buffer_tokens_per_rank = min(configured_tokens_per_rank, execution_tokens_per_rank)
     if buffer_tokens_per_rank <= 0:
         raise ValueError(
             "MegaMoE per-rank token capacity must be positive: "
             f"mega_moe_max_tokens={mega_moe_max_tokens}, "
-            f"mc2_tokens_capacity={mc2_tokens_capacity}, "
+            f"execution_tokens_per_rank={execution_tokens_per_rank}, "
             f"expert_parallel_size={expert_parallel_size}."
         )
     return buffer_tokens_per_rank

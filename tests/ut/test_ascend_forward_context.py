@@ -36,6 +36,7 @@ def _make_vllm_config(
     max_num_batched_tokens: int = 65536,
     resolved_moe_quant_type: QuantType | None = None,
     hidden_act: str | None = None,
+    kv_role: str | None = None,
 ):
     hf_text_config_attrs: dict[str, object] = {"top_k_experts": top_k_experts}
     if quant_type is not None:
@@ -68,6 +69,7 @@ def _make_vllm_config(
         compilation_config=compilation_config,
         scheduler_config=scheduler_config,
         quant_config=None if quant_description is None else SimpleNamespace(quant_description=quant_description),
+        kv_transfer_config=None if kv_role is None else SimpleNamespace(kv_role=kv_role),
     )
     if resolved_moe_quant_type is not None:
         afc.cache_a5_moe_quant_type(vllm_config, resolved_moe_quant_type, "test_layer")
@@ -171,6 +173,40 @@ def test_get_a5_mega_moe_buffer_capacity_uses_mc2_execution_capacity(monkeypatch
     assert afc.get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, 64) == 64
 
 
+def test_get_a5_mega_moe_buffer_capacity_uses_prefill_scheduler_capacity(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mega_moe_max_tokens=65536),
+    )
+    vllm_config = _make_vllm_config(
+        world_size=4,
+        max_num_batched_tokens=2048,
+        kv_role="kv_producer",
+    )
+
+    assert afc.get_a5_mega_moe_buffer_tokens_per_rank(vllm_config) == 2048
+
+
+@pytest.mark.parametrize("kv_role", [None, "kv_consumer", "kv_both"])
+def test_get_a5_mega_moe_buffer_capacity_keeps_mc2_capacity_outside_prefill(
+    monkeypatch,
+    kv_role,
+):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mega_moe_max_tokens=65536),
+    )
+    vllm_config = _make_vllm_config(
+        world_size=4,
+        max_num_batched_tokens=2048,
+        kv_role=kv_role,
+    )
+
+    assert afc.get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, 512) == 512
+
+
 def test_get_a5_mega_moe_buffer_capacity_honors_configured_global_limit(monkeypatch):
     monkeypatch.setattr(
         afc,
@@ -180,6 +216,21 @@ def test_get_a5_mega_moe_buffer_capacity_honors_configured_global_limit(monkeypa
     vllm_config = _make_vllm_config(world_size=8)
 
     assert afc.get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, 128) == 32
+
+
+def test_get_a5_mega_moe_prefill_buffer_honors_configured_global_limit(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mega_moe_max_tokens=4096),
+    )
+    vllm_config = _make_vllm_config(
+        world_size=4,
+        max_num_batched_tokens=2048,
+        kv_role="kv_producer",
+    )
+
+    assert afc.get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, 512) == 1024
 
 
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
@@ -439,10 +490,30 @@ def test_select_moe_comm_method_a5_uses_decode_graph_bucket_instead_of_scheduler
         top_k_experts=6,
         max_num_batched_tokens=120,
         resolved_moe_quant_type=QuantType.W4A8MXFP,
+        kv_role="kv_consumer",
     )
 
     assert afc.select_moe_comm_method(64, vllm_config) == MoECommType.FUSED_MC2
     assert afc.select_moe_comm_method(65, vllm_config) == MoECommType.ALLGATHER
+
+
+def test_select_moe_comm_method_a5_prefill_uses_scheduler_capacity(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=512,
+        enable_fused_mc2=1,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=4,
+        top_k_experts=6,
+        max_num_batched_tokens=2048,
+        resolved_moe_quant_type=QuantType.W4A8MXFP,
+        kv_role="kv_producer",
+    )
+
+    assert afc.select_moe_comm_method(2048, vllm_config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(2049, vllm_config) == MoECommType.ALLGATHER
 
 
 @pytest.mark.parametrize(
