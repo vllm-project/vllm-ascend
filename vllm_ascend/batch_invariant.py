@@ -94,20 +94,21 @@ def reduce_sum(
             native_kwargs["out"] = out
         return torch_sum(x, **native_kwargs)
 
-    target_dtype = dtype or x.dtype
-    if x.device.type != "npu" or target_dtype not in _BATCH_INVARIANT_SUM_DTYPES or x.dim() == 0:
-        return native_sum()
-
-    if dim is None and x.dim() == 1:
+    ndim = x.dim()
+    if dim is None and ndim == 1:
         reduce_dim = -1
     elif isinstance(dim, int):
         reduce_dim = dim
     elif isinstance(dim, (tuple, list)) and len(dim) == 1 and isinstance(dim[0], int):
         reduce_dim = dim[0]
     else:
-        return native_sum()
+        reduce_dim = None
 
-    if reduce_dim < -x.dim() or reduce_dim >= x.dim() or reduce_dim % x.dim() != x.dim() - 1:
+    # NOTE: The AscendC op supports only the last dimension. For a 3-D
+    # tensor, dim=-1 and dim=2 are supported; dim=0 and dim=1 use torch.sum.
+    is_last_dim = reduce_dim is not None and ndim > 0 and -ndim <= reduce_dim < ndim and reduce_dim % ndim == ndim - 1
+    target_dtype = dtype or x.dtype
+    if x.device.type != "npu" or target_dtype not in _BATCH_INVARIANT_SUM_DTYPES or not is_last_dim:
         return native_sum()
 
     result = x.to(dtype=dtype) if dtype is not None and x.dtype != dtype else x
