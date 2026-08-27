@@ -247,9 +247,9 @@ log_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
-  log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
+  log "build command: bash build.sh --pkg -j$(nproc) --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
-  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
+  bash build.sh --pkg -j$(nproc) --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
