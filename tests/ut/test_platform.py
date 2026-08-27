@@ -11,7 +11,12 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform, _setup_compile_backend, _validate_eplb_config
+from vllm_ascend.platform import (
+    NPUPlatform,
+    _setup_compile_backend,
+    _validate_eplb_config,
+    _validate_sfa_dcp_kv_sp,
+)
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
@@ -88,6 +93,34 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
+    @patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True)
+    def test_sfa_dcp_replicated_indexer_aligns_interleave_to_block_size(
+        self,
+        _mock_sparse,
+        _mock_replicated_indexer,
+        _mock_enable_sp,
+    ):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.parallel_config.decode_context_parallel_size = 8
+        vllm_config.parallel_config.tensor_parallel_size = 8
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 128
+
+        with patch("vllm_ascend.platform.logger.warning_once") as mock_warning:
+            _validate_sfa_dcp_kv_sp(vllm_config)
+
+        self.assertEqual(
+            vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            vllm_config.cache_config.block_size,
+        )
+        mock_warning.assert_called_once()
+        self.assertIn(
+            "Override cp_kv_cache_interleave_size to 128",
+            mock_warning.call_args.args[0],
+        )
 
     def test_validate_eplb_config_allows_v2_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()

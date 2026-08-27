@@ -424,7 +424,7 @@ def test_build_req_metadata_preserves_zero_max_sequence_lengths():
     metadata = builder.build_req_metadata(
         common_attn_metadata=common_attn_metadata,
         seq_lens_cpu=torch.zeros(2, dtype=torch.int32),
-        num_reqs_actual=None,
+        num_actual_reqs=None,
         cos=torch.empty(0),
         sin=torch.empty(0),
     )
@@ -462,12 +462,12 @@ def test_build_req_metadata_clears_graph_padding_rows():
     metadata = builder.build_req_metadata(
         common_attn_metadata=common_attn_metadata,
         seq_lens_cpu=torch.tensor([8, 6, 7], dtype=torch.int32),
-        num_reqs_actual=1,
+        num_actual_reqs=1,
         cos=torch.ones(2),
         sin=torch.zeros(2),
     )
 
-    assert metadata.num_reqs_actual == 1
+    assert metadata.num_actual_reqs == 1
     assert torch.equal(
         metadata.start_pos,
         torch.tensor([6, 0, 0], dtype=torch.int32),
@@ -1191,7 +1191,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
             pcp_context=pcp_context,
             pcp_cache_group_idx=1,
             common_ratio_to_sas_metadata={"local": True},
-            num_reqs_actual=7,
+            num_actual_reqs=7,
         )
 
     assert isinstance(actual, AscendDSAPCPMetadata)
@@ -1213,10 +1213,10 @@ def test_pcp_metadata_builds_from_manager_global_view():
     assert global_common.block_table_tensor is global_block_table
     assert torch.equal(global_common.slot_mapping, global_slot_mapping)
     assert global_common.attn_state is global_batch.attn_state
-    assert global_call.kwargs["num_reqs_actual"] == global_batch.num_reqs
+    assert global_call.kwargs["num_actual_reqs"] == global_batch.num_reqs
     assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
     assert build_local.call_args.args[2] is local_common
-    assert build_local.call_args.kwargs["num_reqs_actual"] == 7
+    assert build_local.call_args.kwargs["num_actual_reqs"] == 7
 
 
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
