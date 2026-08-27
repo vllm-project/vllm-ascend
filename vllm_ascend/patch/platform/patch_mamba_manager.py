@@ -79,7 +79,8 @@ class AscendMambaManager(MambaManager):
         # num_tokens_main_model exceeds total_computed_tokens.)
         has_external_tokens = total_computed_tokens > local_hit_tokens
         has_new_scheduled_tokens = num_tokens_main_model > total_computed_tokens
-        if has_external_tokens and has_new_scheduled_tokens:
+        has_existing_blocks = bool(self.req_to_blocks.get(request_id))
+        if not has_existing_blocks and has_external_tokens and has_new_scheduled_tokens:
             # one more block for external computed tokens
             num_new_blocks += 1
         return num_new_blocks
