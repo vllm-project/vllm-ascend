@@ -34,6 +34,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    build_dspark_swa_indices,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -93,6 +94,85 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     builder.num_decodes = 2
     return builder
+
+
+def test_build_dspark_swa_indices_returns_logical_positions_and_lengths():
+    indices, topk_lengths = build_dspark_swa_indices(
+        num_speculative_tokens=3,
+        window_size=4,
+        query_start_loc=torch.tensor([0, 3, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([10, 4], dtype=torch.int32),
+        num_decode_tokens=5,
+        index_width=8,
+    )
+
+    assert indices.shape == (5, 1, 8)
+    assert topk_lengths.shape == (5, 1)
+    assert indices[0, 0].tolist() == [3, 4, 5, 6, 7, 8, 9, -1]
+    assert indices[2, 0].tolist() == [3, 4, 5, 6, 7, 8, 9, -1]
+    assert indices[3, 0].tolist() == [0, 1, 2, 3, -1, -1, -1, -1]
+    assert topk_lengths[:, 0].tolist() == [7, 7, 7, 4, 4]
+
+
+def test_build_dspark_swa_indices_legacy_physical_slot_fallback():
+    indices, topk_lengths = build_dspark_swa_indices(
+        num_speculative_tokens=2,
+        window_size=4,
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([6], dtype=torch.int32),
+        num_decode_tokens=2,
+        index_width=6,
+        storage_block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+        storage_block_size=4,
+    )
+
+    expected = [20, 21, 22, 23, 8, 9]
+    assert indices[0, 0].tolist() == expected
+    assert indices[1, 0].tolist() == expected
+    assert topk_lengths[:, 0].tolist() == [6, 6]
+
+
+def test_build_dspark_swa_indices_rejects_narrow_index_width():
+    with pytest.raises(ValueError, match="window_size \\+ block_size"):
+        build_dspark_swa_indices(
+            num_speculative_tokens=3,
+            window_size=4,
+            query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+            seq_lens=torch.tensor([10], dtype=torch.int32),
+            index_width=6,
+        )
+
+
+def test_build_dspark_smla_metadata_uses_ori_sparse_contract():
+    builder = _make_builder(compressor_ratio=1)
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
+
+    with patch.object(
+        DeviceOperator,
+        "get_dspark_sparse_flash_mla_metadata_op",
+        return_value=metadata_op,
+    ):
+        result = builder._build_dspark_smla_metadata(
+            query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+            seq_lens=torch.tensor([10], dtype=torch.int32),
+            topk_lengths=torch.tensor([[7], [7], [7]], dtype=torch.int32),
+            index_width=128,
+            max_seqlen_q=3,
+            max_seqlen_kv=10,
+            num_reqs=1,
+        )
+
+    assert result is generated_metadata
+    call_kwargs = metadata_op.call_args.kwargs
+    assert call_kwargs["ori_topk_length"].shape == (3, 1)
+    assert call_kwargs["ori_mask_mode"] == 0
+    assert call_kwargs["cmp_mask_mode"] == 0
+    assert call_kwargs["layout_q"] == "TND"
+    assert call_kwargs["layout_kv"] == "PA_BBND"
+    assert call_kwargs["has_ori_kv"] is True
+    assert call_kwargs["has_cmp_kv"] is False
+    assert call_kwargs["seqused_ori_kv"].tolist() == [10]
 
 
 @pytest.mark.parametrize(

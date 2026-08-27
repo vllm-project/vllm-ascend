@@ -507,6 +507,15 @@ class BaseDeviceAdaptor:
 
         return context_layer
 
+    @staticmethod
+    def get_dspark_sparse_flash_mla_metadata_op():
+        """Return the metadata builder for DSpark bidirectional attention."""
+        return torch.ops._C_ascend.npu_sparse_flash_mla_metadata
+
+    @staticmethod
+    def get_dspark_sparse_flash_mla_op():
+        """Return SparseFlashMla for DSpark bidirectional attention."""
+        return torch.ops._C_ascend.npu_sparse_flash_mla
     # ===== Indexer Quant + Scatter =====
 
     @staticmethod
@@ -1199,6 +1208,14 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             value=value,
         )
 
+    @staticmethod
+    def get_dspark_sparse_flash_mla_metadata_op():
+        # SparseFlashMla cannot consume the quantized KV cache used on A5.
+        return None
+
+    @staticmethod
+    def get_dspark_sparse_flash_mla_op():
+        return None
     # ===== Indexer Quant + Scatter =====
 
     @staticmethod

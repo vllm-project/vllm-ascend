@@ -124,6 +124,7 @@ class AscendDSAReqMetadata:
     ori_win_left: int | None = None
     ori_win_right: int = 0
     dspark_swa_indices: torch.Tensor | None = None
+    dspark_swa_topk_lengths: torch.Tensor | None = None
 
 
 @dataclass
@@ -504,17 +505,20 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         start_pos = self.seq_lens[:num_reqs] - seq_lens_q
 
         dspark_swa_indices = None
+        dspark_swa_topk_lengths = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         if is_noncausal:
             assert self.speculative_config is not None
-            global_dspark_indices, _ = build_dspark_swa_indices(
-                self.block_table[:num_reqs],
+            global_dspark_indices, global_dspark_topk_lengths = build_dspark_swa_indices(
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
-                self.storage_block_size,
                 query_start_loc[: num_reqs + 1],
                 self.seq_lens[:num_reqs],
                 self.num_actual_tokens,
+                storage_block_table=(
+                    None if DeviceOperator.get_dspark_sparse_flash_mla_op() is not None else self.block_table[:num_reqs]
+                ),
+                storage_block_size=self.storage_block_size,
             )
             pad_rows = num_tokens_pad - global_dspark_indices.shape[0]
             if pad_rows < 0:
@@ -524,16 +528,15 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
             if pad_rows:
                 global_dspark_indices = F.pad(global_dspark_indices, (0, 0, 0, 0, 0, pad_rows), value=-1)
+                global_dspark_topk_lengths = F.pad(global_dspark_topk_lengths, (0, 0, 0, pad_rows), value=0)
             dspark_swa_indices = global_dspark_indices[local_start:local_end_with_pad].contiguous()
+            dspark_swa_topk_lengths = global_dspark_topk_lengths[local_start:local_end_with_pad].contiguous()
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         assert self.spec_slot_mapping is not None
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
 
         num_heads = self.model_config.hf_config.num_attention_heads
-        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
-        metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         cu_seqlens_ori_kv = (
             local_query_start_loc
             if has_prefill
@@ -549,28 +552,63 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
-        sas_metadata = metadata_op(
-            **metadata_kwargs,
-            num_heads_q=num_heads,
-            num_heads_kv=1,
-            head_dim=self.model_config.get_head_size(),
-            cu_seqlens_q=local_query_start_loc,
-            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-            seqused_q=self.seqused_q,
-            seqused_kv=local_seq_lens,
-            max_seqlen_q=max_local_query_len,
-            max_seqlen_kv=max_local_seq_lens,
-            batch_size=num_reqs,
-            cmp_ratio=1,
-            ori_mask_mode=4,
-            ori_win_left=ori_win_left,
-            ori_win_right=ori_win_right,
-            layout_q="TND",
-            layout_kv=_dsa_layout_kv(self.vllm_config),
-            has_ori_kv=True,
-            has_cmp_kv=False,
+        sparse_metadata_op = (
+            DeviceOperator.get_dspark_sparse_flash_mla_metadata_op() if dspark_swa_indices is not None else None
         )
+        if sparse_metadata_op is not None:
+            assert dspark_swa_topk_lengths is not None
+            # A2/A3 sparse SWA with PA_BBND requires logical KV lengths in
+            # addition to the per-query topk lengths.
+            sas_metadata = sparse_metadata_op(
+                device=str(self.seqused_q.device),
+                num_heads_q=num_heads,
+                num_heads_kv=1,
+                head_dim=self.model_config.get_head_size(),
+                cu_seqlens_q=local_query_start_loc,
+                seqused_q=self.seqused_q,
+                seqused_ori_kv=local_seq_lens,
+                ori_topk_length=dspark_swa_topk_lengths,
+                batch_size=num_reqs,
+                max_seqlen_q=max_local_query_len,
+                max_seqlen_ori_kv=max_local_seq_lens,
+                ori_topk=dspark_swa_indices.shape[-1],
+                cmp_ratio=1,
+                ori_mask_mode=0,
+                cmp_mask_mode=0,
+                ori_win_left=0,
+                ori_win_right=0,
+                layout_q="TND",
+                layout_kv="PA_BBND",
+                has_ori_kv=True,
+                has_cmp_kv=False,
+            )
+        else:
+            kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+            metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
+            metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+            metadata_kwargs.setdefault("device", str(self.seqused_q.device))
+            sas_metadata = metadata_op(
+                **metadata_kwargs,
+                num_heads_q=num_heads,
+                num_heads_kv=1,
+                head_dim=self.model_config.get_head_size(),
+                cu_seqlens_q=local_query_start_loc,
+                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
+                seqused_kv=local_seq_lens,
+                max_seqlen_q=max_local_query_len,
+                max_seqlen_kv=max_local_seq_lens,
+                batch_size=num_reqs,
+                cmp_ratio=1,
+                ori_mask_mode=4,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
+                layout_q="TND",
+                layout_kv=_dsa_layout_kv(self.vllm_config),
+                has_ori_kv=True,
+                has_cmp_kv=False,
+            )
 
         cp_metadata = DSACPMetadata(
             local_query_start_loc=local_query_start_loc,
@@ -600,6 +638,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            dspark_swa_topk_lengths=dspark_swa_topk_lengths,
         )
 
     def _num_compressor_metadata_rows(
@@ -1722,7 +1761,32 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             **extra_attn_kwargs,
         )
 
-        if self.compress_ratio <= 1:
+        sparse_flash_op = (
+            DeviceOperator.get_dspark_sparse_flash_mla_op() if swa_req_metadata.dspark_swa_indices is not None else None
+        )
+        if self.compress_ratio <= 1 and sparse_flash_op is not None:
+            assert swa_req_metadata.dspark_swa_topk_lengths is not None
+            attn_output = sparse_flash_op(
+                q,
+                ori_kv=swa_kv_cache,
+                ori_sparse_indices=swa_req_metadata.dspark_swa_indices,
+                ori_block_table=swa_metadata.req_metadata.block_table,
+                cu_seqlens_q=local_seq_lengths_query,
+                seqused_ori_kv=local_seq_lengths_key,
+                ori_topk_length=swa_req_metadata.dspark_swa_topk_lengths,
+                sinks=self.attn_sink,
+                metadata=swa_metadata.req_metadata.sas_metadata,
+                softmax_scale=self.softmax_scale,
+                cmp_ratio=1,
+                ori_mask_mode=0,
+                cmp_mask_mode=0,
+                ori_win_left=0,
+                ori_win_right=0,
+                layout_q="TND",
+                layout_kv="PA_BBND",
+                topk_value_mode=dsa_v1.SPARSE_FLASH_MLA_TOPK_VALUE_MODE,
+            )[0]
+        elif self.compress_ratio <= 1:
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
