@@ -739,7 +739,7 @@ Please refer to the [vLLM Serve](https://docs.vllm.ai/en/stable/cli/serve/), [vL
 | Low Latency | Single-Node | 16 | 16 | 1 | 3 | Off | On | On |
 | Long Context | Single-Node | 16 | 8 | 2 | none | On | On | On |
 
-> For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment)
+> For additional parameter details, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 <u>Single-node PD Hybrid — High Throughput:</u>
 

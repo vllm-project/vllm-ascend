@@ -443,7 +443,7 @@ Please refer to the [vLLM Serve](https://docs.vllm.ai/en/stable/cli/serve/), [vL
 | Low Latency     | 2 (A3) | 4   | 37364         | 100          | Off       | On  | -            |
 | Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | -            |
 
-> For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-single-node-online-deployment)
+> For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 **Low Latency Configuration:**
 
