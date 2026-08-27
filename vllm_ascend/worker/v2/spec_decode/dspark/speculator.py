@@ -31,6 +31,7 @@ from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
+    vllm_version_is,
 )
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -167,9 +168,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
+        sync_state = num_tokens_across_dp if vllm_version_is("0.27.1") else dp_sync
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
@@ -188,7 +192,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
