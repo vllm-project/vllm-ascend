@@ -634,19 +634,19 @@ jobs:
 
           echo "=== CI Gate: PASSED ==="
 
-  a5-release-debug-runner:
-    name: a5-release-debug-runner
-    runs-on: linux-aarch64-a5-4
+  release-310p-debug-runner:
+    name: 310p-release-debug-runner
+    runs-on: linux-aarch64-310p-1
     timeout-minutes: 360
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-releases-v0.23.0-a5
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:v0.23.0-310p
       env:
         VLLM_USE_MODELSCOPE: "True"
         VLLM_LOGGING_LEVEL: INFO
     steps:
-      - name: Keep A5 release container alive for manual testing
+      - name: Keep 310P release container alive for manual testing
         run: |
           npu-smi info
-          echo "A5 v0.23.0 release container is ready for manual testing."
+          echo "310P v0.23.0 release container is ready for manual testing."
           echo "Cancel this workflow after testing is complete."
           sleep 6h
