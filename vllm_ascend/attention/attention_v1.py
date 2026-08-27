@@ -58,11 +58,15 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import is_950, weak_ref_tensors
+from vllm_ascend.worker.v2.updatable_graph import (
+    get_capture_resource,
+    register_task,
+)
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
-
+_FIA_WORKSPACE_KEY = "npu_fused_infer_attention_score.workspace"
 
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -407,6 +411,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         attn_metadata.attn_state = attn_state
         return attn_metadata
 
+@dataclass(frozen=True, slots=True)
+class FIAParamProvider:
+    layer_name: str
+
+    def resolve(self, attn_metadata) -> dict[str, Any]:
+        metadata = attn_metadata[self.layer_name]
+        return {
+            "actual_seq_lengths": metadata.actual_seq_lengths_q,
+            "actual_seq_lengths_kv": metadata.seq_lens_list,
+        }
 
 class AscendAttentionBackendImpl(AttentionImpl):
     def __init__(
@@ -856,6 +870,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_draft_graph_params()
         else:
             graph_params = get_graph_params()
+        
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
@@ -863,6 +878,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+
+        output_view = output[: attn_metadata.num_actual_tokens]
 
         extra_args = {}
         if self.enable_c8_quant and layer is not None:
@@ -885,127 +902,46 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.unsqueeze(2)
             attn_mask = None
             sparse_mode = 0
-        use_max_workspace = self._use_max_workspace_for_fia_graph
-        workspace = graph_params.workspaces.get(num_tokens)
-        should_update_workspace_cache = False
-        if use_max_workspace:
-            # Some models mix attention layer shapes under the same graph size.
-            # During capture, keep the largest required workspace for that size.
-            candidate_workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+        
+        workspace = get_capture_resource(
+            _FIA_WORKSPACE_KEY,
+            lambda: torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
                 key=key,
                 value=value,
                 atten_mask=attn_mask,
                 block_table=block_table,
-                input_layout=input_layout,
+                input_layout="TND",
                 block_size=block_size,
                 actual_seq_lengths=actual_seq_lengths_q,
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
-                sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens,
-                next_tokens=next_tokens,
                 scale=self.scale,
-                **extra_args,
-            )
-            workspace = cache_graph_workspace(
-                graph_params,
-                num_tokens,
-                candidate_workspace,
-                use_max_workspace=use_max_workspace,
-            )
-            should_update_workspace_cache = True
-        elif workspace is None:
-            workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
-                query=query,
-                key=key,
-                value=value,
-                atten_mask=attn_mask,
-                block_table=block_table,
-                input_layout=input_layout,
-                block_size=block_size,
-                actual_seq_lengths=actual_seq_lengths_q,
-                actual_seq_lengths_kv=actual_seq_lengths_kv,
-                num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                sparse_mode=sparse_mode,
-                pre_tokens=pre_tokens,
-                next_tokens=next_tokens,
-                scale=self.scale,
-                **extra_args,
-            )
-            should_update_workspace_cache = True
-        if should_update_workspace_cache:
-            if _EXTRA_CTX.is_draft_model:
-                update_draft_graph_params_workspaces(num_tokens, workspace)
-            else:
-                update_graph_params_workspaces(num_tokens, workspace)
-
-        # Handle graph capturing mode
-        stream = torch_npu.npu.current_stream()
-
-        event = torch.npu.ExternalEvent()
-        event.wait(stream)
-        event.reset(stream)
-        graph_params.events[num_tokens].append(event)
-        attn_params = (
-            weak_ref_tensors(query),
-            weak_ref_tensors(key),
-            weak_ref_tensors(value),
-            weak_ref_tensors(block_table),
-            weak_ref_tensors(attn_mask) if attn_mask is not None else None,
-            block_size,
-            actual_seq_lengths_kv,
-            actual_seq_lengths_q,
-            self.num_kv_heads,
-            self.num_heads,
-            self.scale,
-            weak_ref_tensors(output),
-            weak_ref_tensors(softmax_lse),
-            sparse_mode,
-            pre_tokens,
-            next_tokens,
+                sparse_mode=3,
+            ),
+        ) 
+        register_task(
+            torch_npu.npu_fused_infer_attention_score.out,
+            {
+                "query": query,
+                "key": key,
+                "value": value,
+                "atten_mask": attn_mask,
+                "block_table": block_table,
+                "input_layout": "TND",
+                "block_size": block_size,
+                "actual_seq_lengths": actual_seq_lengths_q,
+                "actual_seq_lengths_kv": actual_seq_lengths_kv,
+                "num_key_value_heads": self.num_kv_heads,
+                "num_heads": self.num_heads,
+                "scale": self.scale,
+                "sparse_mode": 3,
+                "workspace": workspace,
+                "out": [output_view, softmax_lse],
+            },
+            FIAParamProvider(self._layer_name),
         )
-        if self.enable_c8_quant and layer is not None:
-            attn_params = attn_params + (
-                weak_ref_tensors(layer._c8_k_aq_scale_nz_bnsd),
-                None,
-                weak_ref_tensors(layer._c8_v_aq_scale_nz_bnsd),
-                None,
-            )  # type: ignore
-        else:
-            attn_params = attn_params + (None, None, None, None)  # type: ignore
-        layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
-        attn_params = attn_params + (layer_name,)  # type: ignore
-        graph_params.attn_params[num_tokens].append(attn_params)
-
-        torch.npu.graph_task_group_begin(stream)
-        torch_npu.npu_fused_infer_attention_score.out(
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_mask,
-            block_table=block_table,
-            input_layout=input_layout,
-            block_size=block_size,
-            actual_seq_lengths=actual_seq_lengths_q,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
-            num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            sparse_mode=sparse_mode,
-            pre_tokens=pre_tokens,
-            next_tokens=next_tokens,
-            workspace=workspace,
-            out=[output, softmax_lse],
-            **extra_args,
-        )
-
-        output = output.view(num_tokens, self.num_heads, self.head_size)
-
-        handle = torch.npu.graph_task_group_end(stream)
-        graph_params.handles[num_tokens].append(handle)
         return output, num_tokens
 
     def full_graph_fia_v2(
@@ -1620,8 +1556,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        if self._use_layer_aware_fia_graph_replay:
-            self._layer_name = layer.layer_name
+        # if self._use_layer_aware_fia_graph_replay:
+        self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not yet supported for AscendAttentionBackendImpl")

@@ -2683,11 +2683,11 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.enable_enpu:
             # The soft segmentation scenario requires event.record first, then event.wait
-            self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+            # self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
             hidden_states = run_model()
         else:
             hidden_states = run_model()
-            self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
+            # self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
@@ -3627,6 +3627,7 @@ class NPUModelRunner(GPUModelRunner):
                 runtime_mode=CUDAGraphMode.FULL,
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
+                update_stream=self.update_stream,
             )
             # Share the main-model update_stream with the draft drafter so that
             # both main and draft updates are serialized on the same stream.
