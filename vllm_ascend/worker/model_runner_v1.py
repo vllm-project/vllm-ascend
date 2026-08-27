@@ -4451,20 +4451,37 @@ class NPUModelRunner(GPUModelRunner):
                             for layer_name_inner in shared_layers:
                                 kv_cache_raw_tensors[layer_name_inner] = tensor
                     else:
-                        # main: every layer owns its own region; size each layer
-                        # from its own spec page so mixed-spec tensors stay exact.
-                        for layer_name_inner in shared_layers:
-                            layer_size = (
-                                kv_cache_config.num_blocks
-                                * layer_kv_cache_spec[layer_name_inner].page_size_bytes
-                            )
+                        if self.hybrid_with_attn_and_mamba:
+                            # Hybrid attn+mamba (e.g. the Qwen3.5 MTP layer) shares
+                            # one [state | k | v] buffer per block that
+                            # _reshape_kv_cache_tensors slices (upstream branch-1
+                            # semantics). On main the tensor packs one (attn+mamba)
+                            # slot per block, so its size is the shared buffer size.
                             if self.vllm_config.kv_transfer_config is None:
-                                tensor = torch.zeros(layer_size, dtype=torch.int8, device=self.device)
+                                tensor = torch.zeros(
+                                    kv_cache_tensor.size, dtype=torch.int8, device=self.device
+                                )
                             else:
-                                cache_size_aligned = layer_size + alignment
+                                cache_size_aligned = kv_cache_tensor.size + alignment
                                 tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                                tensor = self._align_memory(tensor, alignment)[: layer_size]
-                            kv_cache_raw_tensors[layer_name_inner] = tensor
+                                tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+                            for layer_name_inner in shared_layers:
+                                kv_cache_raw_tensors[layer_name_inner] = tensor
+                        else:
+                            # main: every layer owns its own region; size each layer
+                            # from its own spec page so mixed-spec tensors stay exact.
+                            for layer_name_inner in shared_layers:
+                                layer_size = (
+                                    kv_cache_config.num_blocks
+                                    * layer_kv_cache_spec[layer_name_inner].page_size_bytes
+                                )
+                                if self.vllm_config.kv_transfer_config is None:
+                                    tensor = torch.zeros(layer_size, dtype=torch.int8, device=self.device)
+                                else:
+                                    cache_size_aligned = layer_size + alignment
+                                    tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                                    tensor = self._align_memory(tensor, alignment)[: layer_size]
+                                kv_cache_raw_tensors[layer_name_inner] = tensor
 
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
                     if self.vllm_config.kv_transfer_config is None:
