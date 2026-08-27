@@ -57,7 +57,11 @@ def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
     return plan
 
 
-def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
+def _make_builder(
+    compressor_ratio: int = 4,
+    *,
+    use_tokens_per_state: bool = False,
+) -> AscendDSAMetadataBuilder:
     model_config = SimpleNamespace(
         hf_config=SimpleNamespace(
             model_type="test",
@@ -81,10 +85,15 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     )
     physical_block_size = 128
     logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
+    ratio_kwargs = (
+        {"tokens_per_state": compressor_ratio}
+        if use_tokens_per_state
+        else {"compress_ratio": compressor_ratio}
+    )
     kv_cache_spec = SimpleNamespace(
-        compress_ratio=compressor_ratio,
         block_size=physical_block_size * logical_compress_ratio,
         storage_block_size=physical_block_size,
+        **ratio_kwargs,
     )
     builder = AscendDSAMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
@@ -98,6 +107,15 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     builder.num_decodes = 2
     return builder
+
+
+@pytest.mark.parametrize("use_tokens_per_state", [False, True])
+def test_metadata_builder_accepts_compression_ratio_aliases(
+    use_tokens_per_state: bool,
+):
+    builder = _make_builder(4, use_tokens_per_state=use_tokens_per_state)
+
+    assert builder.compressor_ratio == 4
 
 
 @pytest.mark.parametrize(
