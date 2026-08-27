@@ -22,7 +22,6 @@ from typing import Any, cast
 import torch
 import vllm
 from torch.distributed import Backend
-from torch.distributed.distributed_c10d import _set_pg_timeout
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 
@@ -180,7 +179,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
                     self.rank_in_group = ranks.index(self.rank)
                     self.cpu_group = cpu_group
                     if timeout is not None:
-                        _set_pg_timeout(timeout=timeout, group=cpu_group)
+                        cpu_group.set_timeout(timeout)
                 self_device_group = device_group
 
         if self_device_group is not None:
