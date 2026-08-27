@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch_npu  # noqa: F401  -- registers torch.npu used by the module under test
 from torch.nn import functional as F
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SituAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
@@ -120,15 +120,18 @@ class TestSwigluOaiDynamicMxQuant(unittest.TestCase):
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
     def test_unquant_situ_matches_upstream_without_config_context(self):
+        # The reference CustomOp needs dispatch config, not platform/logging setup.
+        reference_config = MagicMock(spec=VllmConfig)
+        reference_config.compilation_config = CompilationConfig(custom_ops=["none"])
         for dtype in (torch.bfloat16, torch.float16, torch.float32):
             for beta, linear_beta in ((None, None), (None, 25.0), (4.0, None), (4.0, 25.0)):
                 with self.subTest(dtype=dtype, beta=beta, linear_beta=linear_beta):
                     hidden_states = torch.randn(2, 8, dtype=dtype)
                     gate_up_out = torch.linspace(-40, 40, 32).reshape(2, 16).to(dtype)
                     expected_output = torch.randn(2, 8, dtype=dtype)
-                    with set_current_vllm_config(VllmConfig()):
+                    with set_current_vllm_config(reference_config):
                         expected_activation = SituAndMul(
-                            beta=1.0 if beta is None else beta, linear_beta=linear_beta
+                            beta=1.0 if beta is None else beta, linear_beta=linear_beta, compile_native=False
                         ).forward_native(gate_up_out)
 
                     # The worker forward runs outside the model-init config context.
