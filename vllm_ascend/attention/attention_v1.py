@@ -1460,11 +1460,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 )
             else:
                 if _should_split_mixed_fia(attn_metadata):
-                    logger.info_once(
-                        "Mixed prefill/decode batches use split FIA; active torch_npu FIA implementation: %s",
-                        repr(torch_npu.npu_fused_infer_attention_score),
-                        scope="global",
-                    )
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
