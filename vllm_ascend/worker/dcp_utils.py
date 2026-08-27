@@ -542,14 +542,15 @@ class DCPManager:
         if is_mla and getattr(self, "speculative_config", None) is not None:
             num_draft_reqs = query_lens_cpu.shape[0]
             draft_histories = dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index
-            mask = self.generate_mtp_attention_mask_for_decode(
-                draft_histories.tolist(),
-                query_lens_cpu[:num_draft_reqs].numpy(),
-                num_decode_reqs=num_draft_reqs,
-            )
-            self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
-            self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
-            dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
+            if not self.use_sparse:
+                mask = self.generate_mtp_attention_mask_for_decode(
+                    draft_histories.tolist(),
+                    query_lens_cpu[:num_draft_reqs].numpy(),
+                    num_decode_reqs=num_draft_reqs,
+                )
+                self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
+                self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
+                dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
         common_attn_metadata.context_parallel_metadata = dcp_metadata
 
         if common_attn_metadata.is_prefilling is not None:
@@ -628,7 +629,7 @@ class DCPManager:
             max_query_len=(int(query_lens_cpu[:num_reqs].max().item()) if num_reqs else 0),
         )
 
-        if self.speculative_config:
+        if self.speculative_config and not self.use_sparse:
             if self.num_decode_reqs > 0:
                 decode_scheduled = num_scheduled_tokens[: self.num_decode_reqs]
                 if fixed_decode_seq_lens_cpu is not None:
