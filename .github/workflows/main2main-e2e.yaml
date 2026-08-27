@@ -66,6 +66,11 @@ on:
         required: false
         default: 'main2main_e2e'
         description: 'Fork branch carrying the accumulated patch + test_groups.json.'
+      signal_repo:
+        type: string
+        required: false
+        default: ''
+        description: 'Fork repo carrying the signal branch (the adapted code); empty = this repo.'
       timeout_minutes:
         type: number
         required: false
@@ -497,13 +502,20 @@ jobs:
           fi
 
       - name: Checkout signal branch
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
-          # Fresh GITHUB_TOKEN: the prep checkout's stored credential is dead
-          # (expired) — always fetch with an explicit token URL.
+          # The signal branch (adapted code) lives on the PR fork
+          # (signal_repo) — GITHUB_TOKEN is scoped to this repo, so use
+          # the PAT (GH_TOKEN) for the cross-repo fetch.  Always fetch
+          # with an explicit token URL (the prep checkout's stored
+          # credential is dead).
+          SIGNAL_REPO="${{ inputs.signal_repo || github.repository }}"
+          TOKEN="${GH_TOKEN:-${GITHUB_TOKEN}}"
           git fetch --force --no-tags \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}" \
+            "https://x-access-token:${TOKEN}@github.com/${SIGNAL_REPO}" \
             "${{ inputs.signal_branch }}"
           git checkout --force --detach FETCH_HEAD
           git submodule sync --recursive
@@ -513,13 +525,18 @@ jobs:
           ls -la test_groups.json
 
       - name: Rebuild kernels if csrc inputs changed
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
           # Refresh the local base_ref ref (prep-time origin/main may predate
           # the accumulated patch; diff against the base the patch built on).
+          # The signal branch comes from signal_repo, so refresh base there too.
+          SIGNAL_REPO="${{ inputs.signal_repo || github.repository }}"
+          TOKEN="${GH_TOKEN:-${GITHUB_TOKEN}}"
           git fetch --force --no-tags \
-            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}" \
+            "https://x-access-token:${TOKEN}@github.com/${SIGNAL_REPO}" \
             "${{ inputs.base_ref }}"
           BASE_SHA=$(git rev-parse FETCH_HEAD)
           CHANGED=$(git diff --name-only "$BASE_SHA" HEAD -- csrc setup.py CMakeLists.txt cmake)

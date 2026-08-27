@@ -174,6 +174,10 @@ jobs:
       # E2E runner envs" step so the flow reuses that run.
       MAIN2MAIN_E2E_REPO: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_E2E_BRANCH: main2main_e2e
+      # Fork carrying the signal branch (the adapted code + test_groups.json)
+      # that the E2E workflow checks out per round — same fork the PR head
+      # lives on, so the pushed history is already known there.
+      MAIN2MAIN_E2E_SIGNAL_REPO: vllm-ascend-ci/vllm-ascend
       # Identifies this main run in the e2e workflow: prep dispatch inputs,
       # the prepare-<chip>-<main_run_id> job names, and the hold guard's
       # exec-dispatch detection all key on it.
