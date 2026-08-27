@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -27,7 +28,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -255,6 +256,30 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 runner.num_accepted_tokens_event.record.assert_called_once()
 
 
+def _make_kv_cache_tensor(
+    per_layer_size: int,
+    layer_names: list[str],
+    page_size: int,
+) -> KVCacheTensor:
+    """Build the lane-specific descriptor changed by vLLM #51718."""
+    if "shared_by" in KVCacheTensor.__dataclass_fields__:
+        return KVCacheTensor(size=per_layer_size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=per_layer_size * len(layer_names),
+        layers=layer_names,
+        layer_stride=per_layer_size,
+        block_stride=page_size,
+        offset=0,
+    )
+
+
+def _ratio_kwargs(ratio: int) -> dict[str, int]:
+    """Map the MLA compression field renamed by vLLM #51718."""
+    if vllm_version_is("0.27.1"):
+        return {"compress_ratio": ratio}
+    return {"tokens_per_state": ratio}
+
+
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -298,7 +323,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[KVCacheTensor(size=kv_cache_spec.page_size_bytes * 2, shared_by=["draft_attn"])],
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=kv_cache_spec.page_size_bytes * 2,
+                    layer_names=["draft_attn"],
+                    page_size=kv_cache_spec.page_size_bytes,
+                )
+            ],
             kv_cache_groups=[KVCacheGroupSpec(layer_names=["draft_attn"], kv_cache_spec=kv_cache_spec)],
         )
 
@@ -440,9 +471,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
-                    size=indexer_spec.page_size_bytes * 2,
-                    shared_by=layer_names,
+                _make_kv_cache_tensor(
+                    per_layer_size=indexer_spec.page_size_bytes * 2,
+                    layer_names=layer_names,
+                    page_size=indexer_spec.page_size_bytes,
                 )
             ],
             kv_cache_groups=[
@@ -455,8 +487,68 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
-        assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
+        if vllm_version_is("0.27.1"):
+            assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
+            assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
+        else:
+            assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
+            assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
+
+    @unittest.skipIf(vllm_version_is("0.27.1"), "vLLM #51718 only changed the main planner")
+    def test_hybrid_descriptors_share_standardized_backing_allocation(self):
+        runner = self._build_runner()
+        attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
+        mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
+        attn_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.float16,
+        )
+        mamba_spec = MambaSpec(
+            block_size=2,
+            shapes=((2, 4),),
+            dtypes=(torch.float32,),
+        )
+        self.assertEqual(attn_spec.page_size_bytes, mamba_spec.page_size_bytes)
+        num_blocks = 3
+        layer_size = num_blocks * attn_spec.page_size_bytes
+        backing_size = layer_size * 2
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=attn_names,
+                    layer_stride=layer_size,
+                    block_stride=attn_spec.page_size_bytes,
+                    offset=0,
+                ),
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=mamba_names,
+                    layer_stride=layer_size,
+                    block_stride=mamba_spec.page_size_bytes,
+                    offset=0,
+                ),
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=attn_names, kv_cache_spec=attn_spec),
+                KVCacheGroupSpec(layer_names=mamba_names, kv_cache_spec=mamba_spec),
+            ],
+        )
+        layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
+        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = layout
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        storage_ptrs = {raw.untyped_storage().data_ptr() for raw in raw_caches.values()}
+
+        self.assertEqual(len(storage_ptrs), 1)
+        self.assertEqual(raw_caches[attn_names[0]].storage_offset(), 0)
+        self.assertEqual(raw_caches[mamba_names[0]].storage_offset(), 0)
+        self.assertEqual(raw_caches[attn_names[1]].storage_offset(), layer_size)
+        self.assertEqual(raw_caches[mamba_names[1]].storage_offset(), layer_size)
 
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
@@ -470,7 +562,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[KVCacheTensor(size=kv_cache_spec.page_size_bytes * 2, shared_by=["draft_attn"])],
+            kv_cache_tensors=[
+                _make_kv_cache_tensor(
+                    per_layer_size=kv_cache_spec.page_size_bytes * 2,
+                    layer_names=["draft_attn"],
+                    page_size=kv_cache_spec.page_size_bytes,
+                )
+            ],
             kv_cache_groups=[KVCacheGroupSpec(layer_names=["draft_attn"], kv_cache_spec=kv_cache_spec)],
         )
         kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
@@ -572,6 +670,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             backend.get_kv_cache_shape.call_args.args[:2],
             (num_kernel_blocks, kernel_block_size),
         )
+
     def test_reshape_cache_only_uses_upstream_bhnc_axis_order(self):
         """vLLM #51718 standardized cache-only views as [B, H, N, C]."""
         runner = self._build_runner()
@@ -700,9 +799,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
-                    size=spec.page_size_bytes * 2,
-                    shared_by=[layer_name],
+                _make_kv_cache_tensor(
+                    per_layer_size=spec.page_size_bytes * 2,
+                    layer_names=[layer_name],
+                    page_size=spec.page_size_bytes,
                 )
             ],
             kv_cache_groups=[
@@ -772,13 +872,15 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
-                    size=main_spec.page_size_bytes * 2,
-                    shared_by=[attn_layer_name],
+                _make_kv_cache_tensor(
+                    per_layer_size=main_spec.page_size_bytes * 2,
+                    layer_names=[attn_layer_name],
+                    page_size=main_spec.page_size_bytes,
                 ),
-                KVCacheTensor(
-                    size=indexer_spec.page_size_bytes * 2,
-                    shared_by=[indexer_layer_name],
+                _make_kv_cache_tensor(
+                    per_layer_size=indexer_spec.page_size_bytes * 2,
+                    layer_names=[indexer_layer_name],
+                    page_size=indexer_spec.page_size_bytes,
                 ),
             ],
             kv_cache_groups=[
@@ -899,13 +1001,15 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 kv_cache_config = KVCacheConfig(
                     num_blocks=2,
                     kv_cache_tensors=[
-                        KVCacheTensor(
-                            size=main_spec.page_size_bytes * 2,
-                            shared_by=[attn_layer_name],
+                        _make_kv_cache_tensor(
+                            per_layer_size=main_spec.page_size_bytes * 2,
+                            layer_names=[attn_layer_name],
+                            page_size=main_spec.page_size_bytes,
                         ),
-                        KVCacheTensor(
-                            size=indexer_spec.page_size_bytes * 2,
-                            shared_by=[indexer_layer_name],
+                        _make_kv_cache_tensor(
+                            per_layer_size=indexer_spec.page_size_bytes * 2,
+                            layer_names=[indexer_layer_name],
+                            page_size=indexer_spec.page_size_bytes,
                         ),
                     ],
                     kv_cache_groups=[
@@ -1060,16 +1164,17 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             head_size=128,
             dtype=torch.int8,
             model_version="deepseek_v4",
-            compress_ratio=4,
             scale_dim=1,
             scale_dtype=torch.float16,
+            **_ratio_kwargs(4),
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
-                    size=indexer_spec.page_size_bytes * 2,
-                    shared_by=[layer_name],
+                _make_kv_cache_tensor(
+                    per_layer_size=indexer_spec.page_size_bytes * 2,
+                    layer_names=[layer_name],
+                    page_size=indexer_spec.page_size_bytes,
                 )
             ],
             kv_cache_groups=[
