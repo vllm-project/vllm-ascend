@@ -443,6 +443,7 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
                 "in_proj_qkvgfab": qkv_shards + gate_shards,
                 "in_proj_qkv": qkv_shards,
                 "in_proj_gfab": gate_shards,
+                "fused_bfg_proj": ["b_proj", "f_a_proj", "g_proj"],
             }
         )
         return mapping

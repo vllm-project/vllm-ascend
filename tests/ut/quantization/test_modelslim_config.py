@@ -656,6 +656,7 @@ class TestQuantPrefixMapper(TestBase):
             ],
             "in_proj_qkv": ["q_proj", "k_proj", "v_proj"],
             "in_proj_gfab": ["g_proj", "f_a_proj", "b_proj"],
+            "fused_bfg_proj": ["b_proj", "f_a_proj", "g_proj"],
             "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
             "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         }
