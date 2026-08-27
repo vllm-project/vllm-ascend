@@ -22,22 +22,20 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.utils import vllm_version_is
-
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
 
 
-if vllm_version_is("0.27.1"):
+if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
 
     def _uniform_type_max_num_blocks_per_req(
         self: UniformTypeKVCacheSpecs,
         vllm_config: VllmConfig,
         max_len: int,
     ) -> int:
-        """Use the per-layer block-table width, matching current vLLM."""
+        """Preserve the inner spec's block-table width."""
         widths = {spec.max_num_blocks_per_req(vllm_config, max_len) for spec in self.kv_cache_specs.values()}
         assert len(widths) == 1, (
             "All layers in the same KV cache group must need the same number "
