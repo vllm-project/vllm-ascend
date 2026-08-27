@@ -167,7 +167,7 @@ def test_build_dspark_smla_metadata_uses_ori_sparse_contract():
     call_kwargs = metadata_op.call_args.kwargs
     assert call_kwargs["ori_topk_length"].shape == (3, 1)
     assert call_kwargs["ori_mask_mode"] == 0
-    assert call_kwargs["cmp_mask_mode"] == 0
+    assert call_kwargs["cmp_mask_mode"] == 3
     assert call_kwargs["layout_q"] == "TND"
     assert call_kwargs["layout_kv"] == "PA_BBND"
     assert call_kwargs["has_ori_kv"] is True

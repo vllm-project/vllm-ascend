@@ -713,7 +713,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_topk=index_width,
             cmp_ratio=1,
             ori_mask_mode=0,
-            cmp_mask_mode=0,
+            # A2/A3 tiling requires cmp_mask_mode=3 even when cmp_kv is absent.
+            cmp_mask_mode=3,
             ori_win_left=0,
             ori_win_right=0,
             layout_q="TND",
@@ -1786,7 +1787,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 softmax_scale=self.softmax_scale,
                 cmp_ratio=1,
                 ori_mask_mode=0,
-                cmp_mask_mode=0,
+                # A2/A3 tiling requires cmp_mask_mode=3 even when cmp_kv is absent.
+                cmp_mask_mode=3,
                 ori_win_left=0,
                 ori_win_right=0,
                 layout_q="TND",
