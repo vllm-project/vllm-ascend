@@ -49,6 +49,13 @@ VLLM_BATCH_INVARIANT=1 pip install \
 
 Enter the vllm-ascend installation directory and build and install the `batch_invariant_ops` wheel:
 
+The `batch_invariant_ops` build and installation process consists of two stages, which must run in order:
+
+1. Install the operator run package. It provides the device-side batch-invariant operators implemented with AscendC.
+2. Build and install the `batch_invariant_ops` wheel. It provides the PyTorch extension interfaces that invoke the AscendC operators.
+
+The following script performs both stages in this order:
+
 **A2:**
 ```bash
 cd <vllm-ascend-install-dir>
