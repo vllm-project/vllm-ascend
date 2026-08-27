@@ -107,10 +107,6 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
-#      - name: GLM-5.2-w8a8c8-128k-1k-90-50-PD
-#        config_file_path: GLM-5.2-W8A8C8-128k-1k-90-50-PD.yaml
-#        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
-#        size: 4
 
   double_node:
     test_config:
@@ -147,14 +143,6 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-A3_198k_function.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
-#      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_128k
-#        config_file_path: GLM-5.2-W8A8C8-A3_128k_90_50.yaml
-#        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
-#        size: 2
-#      - name: multi-node-GLM-5.2-W8A8C8-MTP-A3_198k_function
-#        config_file_path: GLM-5.2-W8A8C8-A3_198k_function.yaml
-#        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
-#        size: 2
       - name: multi-node-deepseek-v3.1
         config_file_path: DeepSeek-V3.1-BF16.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
@@ -401,6 +389,15 @@ a3-560t:
       - name: Qwen3-32B-w8a8sc-310p
         os: linux-aarch64-310p-4
         config_file_path: Qwen3-32B-w8a8sc-310p.yaml
+      - name: Qwen3.6-27B-W8A8
+        os: linux-aarch64-310p-2
+        config_file_path: Qwen3.6-27B-W8A8-310P-300I-DUO.yaml
+      - name: Qwen3.6-35B-A3B-w8a8
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3.6-35B-W8A8-310P-300I-DUO.yaml
+      - name: Qwen3.6-35B-A3B-w8a8-310p-MTP
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3.6-35B-A3B-w8a8-310p-MTP.yaml
 
 a5:
   multi_node:

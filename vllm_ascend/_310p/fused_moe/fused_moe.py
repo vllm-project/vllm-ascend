@@ -129,6 +129,10 @@ class AscendMoERunner310(AscendMoERunner):
             routed_output_transform=routed_output_transform,
             routed_scaling_factor=routed_scaling_factor,
         )
+        if self.is_internal_router and self.gate is not None and not hasattr(self.gate, "weight_fp32"):
+            # Pre-cast the internal router weight during model loading. A
+            # forward-time Cast cannot be captured by ACLGraph on 310P.
+            self.gate.precast_fp32_weight = True
 
         ascend_shared_experts = getattr(self, "ascend_shared_experts", None)
         if ascend_shared_experts is not None:

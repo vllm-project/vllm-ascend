@@ -255,6 +255,12 @@ class AscendConfig:
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
     enable_mlapo: bool = True
+    # When True, keep MLAPO prefill weights on NPU instead of freeing them
+    # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
+    # normal local-prefill paths (recompute / fallback / preempt) that crash
+    # when the weights are freed (issue #11882). Default False (preserve
+    # existing memory-saving behavior).
+    mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
@@ -299,9 +305,7 @@ class AscendConfig:
         from vllm_ascend import envs as ascend_envs
 
         _A_FAMILY = {
-            "enable_fused_mc2": "VLLM_ASCEND_ENABLE_FUSED_MC2",
             "enable_mlapo": "VLLM_ASCEND_ENABLE_MLAPO",
-            "msmonitor_use_daemon": "MSMONITOR_USE_DAEMON",
             "enable_transpose_kv_cache_by_block": "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
             "weight_nz_mode": "VLLM_ASCEND_ENABLE_NZ",
         }
@@ -410,21 +414,35 @@ class AscendConfig:
         assert not (
             self.enable_fused_mc2 == 1
             and any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        ), (
-            "MiniMax M3 does not support enable_fused_mc2=1. Please set "
-            "additional_config.enable_fused_mc2 to 0 or unset VLLM_ASCEND_ENABLE_FUSED_MC2."
-        )
+        ), "MiniMax M3 does not support enable_fused_mc2=1. Please set additional_config.enable_fused_mc2 to 0."
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
-                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
+                "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
         if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(
-                "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+                "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
+
+        # mlapo_keep_prefill_weights preconditions: the prefill weights are only
+        # freed by MLAPO in the MLA attention path, so the keep switch is only
+        # meaningful under those same conditions. Fail fast on a no-op / mistaken
+        # config instead of silently leaving the switch ineffective (issue #11882).
+        if self.mlapo_keep_prefill_weights:
+            if not self.enable_mlapo:
+                raise ValueError(
+                    "mlapo_keep_prefill_weights=True requires enable_mlapo=True. "
+                    "The prefill weights are only freed when MLAPO is enabled."
+                )
+            if vc.model_config is None or not vc.model_config.is_deepseek_mla:
+                raise ValueError(
+                    "mlapo_keep_prefill_weights=True is only supported for MLA models "
+                    "(e.g., DeepSeek). The prefill weights are only freed by MLAPO "
+                    "in the MLA attention path."
+                )
 
         # PD tp_ratio / head_ratio / num_head_replica derivation
         if vc.kv_transfer_config is not None and vc.model_config is not None and not vc.model_config.is_deepseek_mla:
@@ -1046,8 +1064,8 @@ class SchedulerConfig:
             return default
 
         resolved = {
-            # VLLM_ASCEND_BALANCE_SCHEDULING is being sunset; do not carry its
-            # environment fallback into the new construction path.
+            # Balance scheduling is configured only through additional_config;
+            # the legacy environment fallback has been removed.
             "enable_balance_scheduling": _resolve("enable_balance_scheduling", False),
             "recompute_scheduler_enable": _resolve("recompute_scheduler_enable", False),
             # Let pydantic coerce the resolved dicts into typed sub-configs.

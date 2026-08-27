@@ -103,6 +103,9 @@ class AscendLinearMethod(LinearMethodBase):
         )
         scale_packed_dim = pergroup_dict.pop("_packed_dim", None)
         scale_packed_factor = pergroup_dict.pop("_packed_factor", None)
+        # Schemes whose scales are sharded along the reduction dim can say so
+        # directly instead of relying on the name/type heuristics below.
+        scale_input_dim = pergroup_dict.pop("_input_dim", None)
         for pergroup_name, pergroup_param in pergroup_dict.items():
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)
             set_weight_attrs(param, {"output_dim": 0})
@@ -110,7 +113,9 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, extra_weight_attrs)
             if scale_packed_dim is not None and scale_packed_factor is not None:
                 set_weight_attrs(param, {"packed_dim": scale_packed_dim, "packed_factor": scale_packed_factor})
-            if (
+            if scale_input_dim is not None:
+                param.input_dim = scale_input_dim
+            elif (
                 "weight_scale_second" in pergroup_name
                 or "weight_offset_second" in pergroup_name
                 or is_mx_quant_type(self.quant_method)

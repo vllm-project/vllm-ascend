@@ -459,7 +459,7 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }} \
             --modules a5 \
-            --runner-override a5_x4 \
+            --runner-label-override linux-aarch64-a5-4 \
             --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
 
       - name: Set no-tests output for A5 when source paths unchanged
@@ -571,7 +571,16 @@ jobs:
 
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
-    if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
+    # (skipped under ready-all) through select-tests, without running after workflow cancel.
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        needs.select-tests.result == 'success' &&
+        needs.select-tests.outputs.has_tests_a5 == 'true' &&
+        contains(github.event.pull_request.labels.*.name, 'ready-a5')
+      }}
     strategy:
       matrix:
         vllm_version:

@@ -61,34 +61,6 @@ msgstr "## 支持场景"
 msgid "## How to Enable"
 msgstr "## 启用方法"
 
-msgid "## Configuration Parameters"
-msgstr "## 配置参数"
-
-msgid "### Parameter Tuning"
-msgstr "### 参数调优"
-
-msgid ""
-"- `smooth_factor`: Controls trust level in dynamic prediction\n"
-"    - `1.0`: Strictly follow model prediction\n"
-"    - `0.6~0.85`: Balance dynamic adjustment and scheduling overhead\n"
-"    - `0.0`: No dynamic adjustment (degrades to fixed chunking)\n"
-"- `min_chunk`: Generally doesn't need adjustment. Should be smaller than `max-num-batched-tokens`"
-msgstr ""
-"- `smooth_factor`：控制对动态预测的信任程度\n"
-"    - `1.0`：严格遵循模型预测\n"
-"    - `0.6~0.85`：平衡动态调整与调度开销\n"
-"    - `0.0`：无动态调整（退化为固定分块）\n"
-"- `min_chunk`：通常无需调整。应小于 `max-num-batched-tokens`"
-
-msgid "## Recommended Settings"
-msgstr "## 推荐设置"
-
-msgid "### max-num-batched-tokens"
-msgstr "### max-num-batched-tokens"
-
-msgid "### Online Calibration"
-msgstr "### 在线校准"
-
 msgid ""
 "1. Modify "
 "`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:"
@@ -124,9 +96,6 @@ msgstr "- DeepSeek-V3.1-W8A8："
 
 msgid "| Parameter | Type | Default | Description |"
 msgstr "| 参数 | 类型 | 默认值 | 描述 |"
-
-msgid "| Sequence Length | `max-num-batched-tokens` |"
-msgstr "| 序列长度 | `max-num-batched-tokens` |"
 
 msgid ""
 "| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP "
@@ -173,31 +142,6 @@ msgstr ""
 "解码（PD）分离部署中的预填充器（P）节点设计。** 通过基于性能分析数据动态计算最优分块大小，CPP 显著降低了 P "
 "节点上长序列的首令牌时间（TTFT）。"
 
-msgid ""
-":::{important}\n"
-"CPP should be configured on the **P (Prefiller) node** in a PD disaggregation setup. The D (Decoder) node does not require CPP configuration. For PD disaggregation deployment guidance, refer to the tutorials below:"
-msgstr ""
-":::{important}\n"
-"CPP 应在 PD 分离部署中的 **P（预填充器）节点** 上配置。D（解码器）节点无需配置 CPP。有关 PD 分离部署的指导，请参考以下教程："
-
-msgid ""
-"- [PD Disaggregation Single Node (Qwen2.5-VL)](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)\n"
-"- [PD Disaggregation Multi Node (Deepseek)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)\n"
-":::"
-msgstr ""
-"- [PD 分离单节点 (Qwen2.5-VL)](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)\n"
-"- [PD 分离多节点 (Deepseek)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)\n"
-":::"
-
-msgid ""
-"- **PD disaggregation P node**: Enables CPP on the Prefiller node to optimize long-sequence prefill with Pipeline Parallelism. The Decoder node does not need CPP.\n"
-"- **Variable-length sequence serving**: PP does not introduce degradation on short sequences, and gains benefits through dynamic chunks on long sequences.\n"
-"- **Ultra-long sequence inference**: For sequences exceeding single-machine memory capacity (e.g., 1M tokens), dynamic chunking significantly reduces pipeline idle time."
-msgstr ""
-"- **PD 分离 P 节点**：在预填充器节点上启用 CPP，通过流水线并行优化长序列预填充。解码器节点无需 CPP。\n"
-"- **变长序列服务**：PP 不会对短序列引入性能下降，并通过动态分块在长序列上获得收益。\n"
-"- **超长序列推理**：对于超过单机内存容量的序列（例如 100 万 token），动态分块显著减少流水线空闲时间。"
-
 msgid "### PD Disaggregation Deployment Example"
 msgstr "### PD 分离部署示例"
 
@@ -219,18 +163,6 @@ msgstr ""
 "- 目前已知 `async-scheduling` 可能导致 PP 预填充阶段性能下降，且 `async-scheduling` 对预填充的收益极小。因此，当前建议不要在 PP 的 P 节点上启用异步调度。\n"
 "- 建议使用 `MooncakeConnectorV1` 作为 `kv_connector`，因为它对 PP 提供了更全面的支持。"
 
-msgid ":::::{tab-set}"
-msgstr ":::::{tab-set}"
-
-msgid "::::{tab-item} P Node (Prefiller — with CPP)"
-msgstr "::::{tab-item} P 节点（预填充器 — 启用 CPP）"
-
-msgid "::::{tab-item} D Node (Decoder — without CPP)"
-msgstr "::::{tab-item} D 节点（解码器 — 不启用 CPP）"
-
-msgid "::::{tab-item} Example Proxy for Deployment"
-msgstr "::::{tab-item} 部署示例代理"
-
 msgid ""
 "Run a proxy server on the same node with the prefiller service instance. You"
 " can get the proxy program in the repository's examples: "
@@ -244,18 +176,6 @@ msgstr ""
 
 msgid "| Parameter | Meaning |"
 msgstr "| 参数 | 含义 |"
-
-msgid "| --port | Port of proxy |"
-msgstr "| --port | 代理端口 |"
-
-msgid "| --prefiller-port | All ports of prefill |"
-msgstr "| --prefiller-port | 所有预填充端口 |"
-
-msgid "| --decoder-ports | All ports of decoder |"
-msgstr "| --decoder-ports | 所有解码器端口 |"
-
-msgid "::::{tab-item} Verification"
-msgstr "::::{tab-item} 验证"
 
 msgid "Check service health using the proxy server endpoint."
 msgstr "使用代理服务器端点检查服务健康状态。"
@@ -284,19 +204,6 @@ msgid ""
 msgstr "CPP专注于在**PD分离**场景中的**P节点**上的预填充阶段进行优化。CPP推荐用于PD（预填充/解码）分离场景。支持的功能如下："
 
 msgid ""
-"**Notably, the TTFT of CPP is very sensitive to `max-num-batched-tokens` "
-"(considered as the initial chunk size for dynamic chunk calculation).** "
-"Because if it is too large, it will introduce significant computational "
-"waste, and if it is too small, it will lead to a decrease in operator "
-"efficiency. To leave enough room for dynamic adjustments, we recommend that "
-"the longer the sequence being processed, the larger the `max-num-batched-"
-"tokens` should be set. Recommended values:"
-msgstr ""
-"**值得注意的是，CPP的TTFT对`max-num-batched-"
-"tokens`（被视为动态分块计算的初始块大小）非常敏感。**因为如果设置过大，会引入显著的计算浪费；如果设置过小，则会导致算子效率下降。为了给动态调整留出足够空间，我们建议处理的序列越长，`max-"
-"num-batched-tokens`应设置得越大。推荐值如下："
-
-msgid ""
 "You can use ais_bench to generate fixed-length random datasets. Refer to "
 "[Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -320,3 +227,142 @@ msgstr "    | 输入长度128k    | TTFT: 22.5s | TTFT: 27.0s |"
 
 msgid "    | Input length 256k    | TTFT: 53.5s | TTFT: 61.4s |"
 msgstr "    | 输入长度256k    | TTFT: 53.5s | TTFT: 61.4s |"
+
+msgid ""
+"CPP should be configured on the **P (Prefiller) node** in a PD "
+"disaggregation setup. The D (Decoder) node does not require CPP "
+"configuration. For PD disaggregation deployment guidance, refer to the "
+"tutorials below:"
+msgstr "在PD分离部署中，CPP应配置在**P（预填充）节点**上。D（解码）节点不需要配置CPP。有关PD分离部署的指导，请参考以下教程："
+
+msgid ""
+"- [PD Disaggregation Single Node (Qwen2.5-VL)](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)\n"
+"    - [PD Disaggregation Multi Node (Deepseek)](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)"
+msgstr ""
+"- [PD分离单节点（Qwen2.5-VL）](../../tutorials/features/pd_disaggregation_mooncake_single_node.md)\n"
+"    - [PD分离多节点（Deepseek）](../../tutorials/features/pd_disaggregation_mooncake_multi_node.md)"
+
+msgid ""
+"- **PD disaggregation P node**: Enables CPP on the Prefiller node to optimize long-sequence prefill with Pipeline Parallelism. The Decoder node does not need CPP.\n"
+"- **Variable-length sequence serving**: PP does not introduce degradation on short sequences, and gains benefits through dynamic chunks on long sequences.\n"
+"- **Long sequence inference**: For sequences exceeding single-machine memory capacity, dynamic chunking significantly reduces pipeline idle time."
+msgstr ""
+"- **PD分离P节点**：在预填充节点上启用CPP，通过流水线并行优化长序列预填充。解码节点不需要CPP。\n"
+"- **变长序列服务**：PP不会对短序列引入性能下降，并通过动态分块在长序列上获得收益。\n"
+"- **长序列推理**：对于超出单机内存容量的序列，动态分块显著减少流水线空闲时间。"
+
+msgid "=== \"P Node (Prefiller — with CPP)\""
+msgstr "=== \"P节点（预填充 — 启用CPP）\""
+
+msgid "=== \"D Node (Decoder — without CPP)\""
+msgstr "=== \"D节点（解码 — 不启用CPP）\""
+
+msgid "=== \"Example Proxy for Deployment\""
+msgstr "=== \"部署示例代理\""
+
+msgid "    | --port | Port of proxy |"
+msgstr "    | --port | 代理端口 |"
+
+msgid "    | --prefiller-port | All ports of prefill |"
+msgstr "    | --prefiller-port | 预填充的所有端口 |"
+
+msgid "    | --decoder-ports | All ports of decoder |"
+msgstr "    | --decoder-ports | 解码器的所有端口 |"
+
+msgid "=== \"Verification\""
+msgstr "=== \"验证\""
+
+msgid "## Configuration Parameters Tuning"
+msgstr "## 配置参数调优"
+
+msgid ""
+"The `--max-num-batched-tokens` and `smooth_factor` parameters need to be "
+"adjusted. It is recommended that you adjust the `--max-num-batched-tokens` "
+"parameter first and then adjust the `smooth_factor`."
+msgstr ""
+"需要调整`--max-num-batched-tokens`和`smooth_factor`参数。建议先调整`--max-num-batched-"
+"tokens`参数，然后再调整`smooth_factor`。"
+
+msgid "**1. --max-num-batched-tokens**"
+msgstr "**1. --max-num-batched-tokens**"
+
+msgid ""
+"**Notably, the TTFT of CPP is very sensitive to `--max-num-batched-tokens` "
+"(considered as the initial chunk size for dynamic chunk calculation).** "
+"Because if it is too large, it will introduce significant computational "
+"waste, and if it is too small, it will lead to a decrease in operator "
+"efficiency."
+msgstr ""
+"**值得注意的是，CPP的TTFT对`--max-num-batched-"
+"tokens`（视为动态分块计算的初始块大小）非常敏感。**因为如果设置过大，会引入显著的计算浪费；如果设置过小，则会导致算子效率下降。"
+
+msgid ""
+"We recommend first optimizing with a fixed chunk size without enabling "
+"dynamic chunking. The typical optimization search space is [8192, 16384, "
+"24576, 32768]. The optimal `--max-num-batched-tokens` for enabling dynamic "
+"chunking is generally 2 to 4 times that of fixed chunks."
+msgstr ""
+"我们建议先在不启用动态分块的情况下，使用固定块大小进行优化。典型的优化搜索空间为[8192, 16384, 24576, "
+"32768]。启用动态分块时的最优`--max-num-batched-tokens`通常是固定块的2到4倍。"
+
+msgid ""
+"Meanwhile, to leave enough room for dynamic adjustments, we recommend that "
+"the longer the sequence being processed, the larger the `--max-num-batched-"
+"tokens` should be set. Recommended values:"
+msgstr "同时，为了给动态调整留出足够的空间，我们建议处理的序列越长，`--max-num-batched-tokens`应设置得越大。推荐值如下："
+
+msgid "| Sequence Length | `--max-num-batched-tokens` |"
+msgstr "| 序列长度 | `--max-num-batched-tokens` |"
+
+msgid "**2. smooth_factor**"
+msgstr "**2. smooth_factor**"
+
+msgid "Controls trust level in dynamic prediction"
+msgstr "控制对动态预测的信任程度"
+
+msgid ""
+"- `1.0`: Strictly follow model prediction\n"
+"- `0.6~0.85`: Balance dynamic adjustment and scheduling overhead\n"
+"- `0.0`: No dynamic adjustment (degrades to fixed chunking)"
+msgstr ""
+"- `1.0`：严格遵循模型预测\n"
+"- `0.6~0.85`：在动态调整和调度开销之间取得平衡\n"
+"- `0.0`：不进行动态调整（退化为固定分块）"
+
+msgid ""
+"Enabling `need_timing` for correct online calibration can typically yield "
+"more accurate chunk-latency fitting results. Therefore, you are advised not "
+"to adjust `smooth_factor` when `need_timing` is enabled. If `need_timing` is"
+" disabled, you can adjust `smooth_factor` to a value ranging from 0.5 to 0.8"
+" to achieve the effect of enabling `need_timing`."
+msgstr ""
+"启用`need_timing`进行正确的在线校准通常可以获得更准确的分块延迟拟合结果。因此，建议在启用`need_timing`时不要调整`smooth_factor`。如果禁用了`need_timing`，可以将`smooth_factor`调整到0.5到0.8之间的值，以达到启用`need_timing`的效果。"
+
+msgid "**3. min_chunk**"
+msgstr "**3. min_chunk**"
+
+msgid ""
+"Generally doesn't need adjustment. Should be smaller than `max-num-batched-"
+"tokens`"
+msgstr "通常不需要调整。应小于`max-num-batched-tokens`"
+
+msgid "**4. max_fit_chunk**"
+msgstr "**4. max_fit_chunk**"
+
+msgid "Generally doesn't need adjustment."
+msgstr "通常不需要调整。"
+
+msgid "## Online Calibration"
+msgstr "## 在线校准"
+
+msgid ""
+"Currently, need_timing is enabled by default, that is, online calibration is"
+" enabled by default. Therefore, it is important to complete the online "
+"calibration process in a standard manner. Otherwise, severe performance "
+"deterioration will occur."
+msgstr "目前，need_timing默认启用，即默认启用在线校准。因此，以标准方式完成在线校准过程非常重要。否则，将出现严重的性能恶化。"
+
+msgid ""
+"Alternatively, you can set need_timing to False to avoid the online "
+"calibration process, but the performance result may be suboptimal."
+msgstr "或者，您可以将need_timing设置为False以避免在线校准过程，但性能结果可能不是最优的。"

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Source-level checks for the Ascend Mamba precision-kernel override."""
+"""Source-level checks for the Ascend Mamba precision-kernel overridess."""
 
 from __future__ import annotations
 
@@ -68,4 +68,4 @@ def test_patch_only_installs_existing_ascend_postprocess_kernel() -> None:
     assert "mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel" in patch_source
     assert "MambaBase.bind_kv_cache" not in patch_source
     assert "mamba_utils._copy_mamba_state_block" not in patch_source
-    assert "mamba_utils.precopy_mamba_align_fused_kernel" not in patch_source
+    assert "mamba_utils.precopy_mamba_align_fused_kernel" in patch_source

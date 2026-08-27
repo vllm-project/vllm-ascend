@@ -3012,7 +3012,7 @@ class NPUModelRunner(GPUModelRunner):
                 if for_cudagraph_capture:
                     common_ratio_to_sas_metadata = {}
                 extra_attn_metadata_args = dict(
-                    num_reqs_actual=num_reqs,
+                    num_actual_reqs=num_reqs,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                 )
 

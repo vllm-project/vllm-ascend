@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,7 +11,12 @@ from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform, _setup_compile_backend, _validate_eplb_config
+from vllm_ascend.platform import (
+    NPUPlatform,
+    _setup_compile_backend,
+    _validate_eplb_config,
+    _validate_sfa_dcp_kv_sp,
+)
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
@@ -87,6 +93,34 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
+
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    @patch("vllm_ascend.platform.enable_sfa_dcp_replicated_indexer", return_value=True)
+    @patch("vllm_ascend.platform.model_uses_sfa_sparse", return_value=True)
+    def test_sfa_dcp_replicated_indexer_aligns_interleave_to_block_size(
+        self,
+        _mock_sparse,
+        _mock_replicated_indexer,
+        _mock_enable_sp,
+    ):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.parallel_config.decode_context_parallel_size = 8
+        vllm_config.parallel_config.tensor_parallel_size = 8
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 128
+
+        with patch("vllm_ascend.platform.logger.warning_once") as mock_warning:
+            _validate_sfa_dcp_kv_sp(vllm_config)
+
+        self.assertEqual(
+            vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            vllm_config.cache_config.block_size,
+        )
+        mock_warning.assert_called_once()
+        self.assertIn(
+            "Override cp_kv_cache_interleave_size to 128",
+            mock_warning.call_args.args[0],
+        )
 
     def test_validate_eplb_config_allows_v2_load_collection_phase(self):
         vllm_config = self.mock_vllm_config()
@@ -294,6 +328,84 @@ class TestNPUPlatform(TestBase):
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
         self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, [1, 2, 4])
+
+    def test_validate_indexer_pp_config_rejects_indexshare_partition(self):
+        indexer_types = ["full", "full", "full", "shared", "shared", "shared"]
+        indexer_types.extend(["full", "shared", "shared", "shared"] * 18)
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.model_config.hf_text_config = SimpleNamespace(
+            num_hidden_layers=78,
+            indexer_types=indexer_types,
+        )
+
+        with (
+            patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None),
+            pytest.raises(ValueError, match="layer 39 uses a shared Indexer"),
+        ):
+            self.platform._validate_indexer_pp_config(vllm_config)
+
+    def test_validate_indexer_pp_config_accepts_aligned_partition(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.pipeline_parallel_size = 2
+        vllm_config.model_config.hf_text_config = SimpleNamespace(
+            num_hidden_layers=8,
+            indexer_types=["full", "shared", "shared", "shared"] * 2,
+        )
+
+        with patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None):
+            self.platform._validate_indexer_pp_config(vllm_config)
+
+    def test_validate_indexer_pp_config_rejects_index_cache_partition(self):
+        test_cases = (
+            (
+                2,
+                SimpleNamespace(
+                    num_hidden_layers=6,
+                    use_index_cache=True,
+                    index_topk_freq=4,
+                    index_skip_topk_offset=3,
+                ),
+                "layer 3 skips Top-K computation",
+            ),
+            (
+                3,
+                SimpleNamespace(
+                    num_hidden_layers=6,
+                    use_index_cache=True,
+                    index_topk_pattern="FFSFFS",
+                ),
+                "layer 2 skips Top-K computation",
+            ),
+        )
+
+        for pp_size, hf_text_config, error_match in test_cases:
+            with self.subTest(pp_size=pp_size, error_match=error_match):
+                vllm_config = TestNPUPlatform.mock_vllm_config()
+                vllm_config.parallel_config.pipeline_parallel_size = pp_size
+                vllm_config.model_config.hf_text_config = hf_text_config
+
+                with (
+                    patch("vllm.envs.VLLM_PP_LAYER_PARTITION", None),
+                    pytest.raises(ValueError, match=error_match),
+                ):
+                    self.platform._validate_indexer_pp_config(vllm_config)
+
+    @patch.object(
+        NPUPlatform,
+        "_validate_indexer_pp_config",
+        side_effect=ValueError("invalid Indexer PP partition"),
+    )
+    def test_check_and_update_config_validates_indexer_before_worker_start(
+        self,
+        mock_validate_indexer,
+    ):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+
+        with pytest.raises(ValueError, match="invalid Indexer PP partition"):
+            self.platform.check_and_update_config(vllm_config)
+
+        mock_validate_indexer.assert_called_once_with(vllm_config)
 
     def test_apply_config_platform_defaults_skips_when_scheduler_max_num_seqs_is_missing(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

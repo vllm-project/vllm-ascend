@@ -1310,13 +1310,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertIs(result_kv, kv_c_normed)
         self.assertIs(result_k_pe, k_pe)
 
-    @patch("vllm_ascend.attention.mla_v1.maybe_trans_nz")
-    def test_process_weights_for_fused_fa_quant(self, mock_maybe_trans_nz):
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_for_fused_fa_quant(self, mock_format_cast):
+        mock_format_cast.return_value = torch.randn(128, 128)
+
         self.impl.fa_quant_layer = True
-        self.impl.q_a_layernorm = MagicMock()
-        self.impl.q_a_layernorm.weight.data = torch.randn(128)
-        self.impl.kv_a_layernorm = MagicMock()
-        self.impl.kv_a_layernorm.weight.data = torch.randn(128)
         self.impl.q_proj = MagicMock()
         self.impl.q_proj.weight.data = torch.randn(128, 128)
         self.impl.q_proj.weight_scale.data = torch.randn(128, 128)
@@ -1332,78 +1330,64 @@ class TestAscendMLAImpl(TestBase):
         self.impl.vllm_config.compilation_config.static_forward_context = {"layer_0": mock_layer}
         self.impl.layer_name = "layer_0"
 
-        self.impl._process_weights_for_fused_fa_quant()
-        self.assertTrue(hasattr(self.impl, "gamma1"))
-        self.assertTrue(hasattr(self.impl, "gamma2"))
-        self.assertTrue(hasattr(self.impl, "wu_q"))
-        self.assertTrue(hasattr(self.impl, "wd_q"))
-        self.assertTrue(hasattr(self.impl, "wd_kv"))
+        self.impl.enable_mlapo = False
+        self.impl._process_weights_for_fused(torch.float16)
+        self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
+        self.assertTrue(hasattr(self.impl, "weight_dq"))
+        self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
 
-    @patch("vllm_ascend.attention.mla_v1.trans_rope_weight")
-    @patch("vllm_ascend.attention.mla_v1.transdata")
-    @patch("torch_npu.npu_format_cast")
-    @patch("vllm_ascend.attention.mla_v1.torch_npu")
-    def test_process_weights_for_fused_mlapo(
-        self, mock_torch_npu, mock_format_cast, mock_transdata, mock_trans_rope_weight
-    ):
-        mock_format_cast.return_value = torch.randn(1, 128, 128)
-        mock_transdata.return_value = torch.randn(128, 128)
-        call_count = 0
-
-        def mock_trans_rope_weight_func(x, rope_dim):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 2:
-                # second return [64] tensor
-                return torch.randn(64)
-            else:
-                # first return same shape tensor
-                return torch.randn(x.shape[0], x.shape[1])
-
-        mock_trans_rope_weight.side_effect = mock_trans_rope_weight_func
-        mock_torch_npu.npu_format_cast.return_value = torch.randn(1, 128, 128)
-
+    def _setup_mlapo_weight_prep_mocks(self):
         self.impl.enable_mlapo = True
-        self.impl.fused_qkv_a_proj = MagicMock()
-        q_lora_rank = 32
-        kv_lora_rank_plus_rope = 32 + 32  # kv_lora_rank + qk_rope_head_dim
-        total_rank = q_lora_rank + kv_lora_rank_plus_rope
-        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, total_rank)
-        # Fix the shape of deq_scale so that it matches the subsequent reshape operation
-        # Ensure that the size of kv_a_proj_deq_scl is divisible by 64
-        self.impl.fused_qkv_a_proj.deq_scale = torch.randn(32 + 64 * 128)
-        self.impl.fused_qkv_a_proj.quant_bias = torch.randn(total_rank)
-        self.impl.fused_qkv_a_proj.input_scale.data = torch.randn(1)
-        self.impl.fused_qkv_a_proj.input_offset.data = torch.randn(1)
         self.impl.q_proj = MagicMock()
         self.impl.q_proj.weight.data = torch.randn(128, 128)
-        self.impl.q_proj.weight.device = torch.device("cpu")
-        self.impl.q_proj.deq_scale.data = torch.randn(256 * 64)
-        self.impl.q_proj.quant_bias.data = torch.randn(256 * 64)
-        self.impl.q_proj.input_scale.data = torch.randn(1)
-        self.impl.q_proj.input_offset.data = torch.randn(1)
-        self.impl.q_a_layernorm = MagicMock()
-        self.impl.q_a_layernorm.weight.data = torch.randn(128)
-        self.impl.kv_a_layernorm = MagicMock()
-        self.impl.kv_a_layernorm.weight.data = torch.randn(128)
-        self.impl.q_lora_rank = q_lora_rank
-        self.impl.kv_lora_rank = 32
-        self.impl.qk_rope_head_dim = 32
-        self.impl.hidden_size = 128
-        self.impl.num_heads = 256
-        self.impl.qk_nope_head_dim = 32
+        self.impl.q_proj.weight_scale.data = torch.randn(128, 128)
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.weight.data = torch.randn(128, 128, 64)
+        self.impl.fused_qkv_a_proj.weight_scale = torch.randn(64)
+        self.impl.q_lora_rank = 32
         self.impl.vllm_config.scheduler_config.max_num_batched_tokens = 4096
         self.impl.vllm_config.kv_transfer_config = MagicMock()
         self.impl.vllm_config.kv_transfer_config.is_kv_consumer = False
 
-        self.impl._process_weights_for_fused_mlapo(torch.float16)
-        self.assertTrue(hasattr(self.impl, "wd_qkv"))
-        self.assertTrue(hasattr(self.impl, "deq_scale_qkv"))
-        self.assertTrue(hasattr(self.impl, "quant_bias_qkv"))
-        self.assertTrue(hasattr(self.impl, "wu_q"))
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_for_fused_mlapo(self, mock_format_cast):
+        mock_format_cast.return_value = torch.randn(128, 128)
+
+        self.impl.fa_quant_layer = False
+        self._setup_mlapo_weight_prep_mocks()
+
+        self.impl._process_weights_for_fused(torch.float16)
+        self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
+        self.assertTrue(hasattr(self.impl, "weight_dq"))
+        self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
+        self.assertTrue(hasattr(self.impl, "dequant_scale_w_dq"))
+        self.assertTrue(hasattr(self.impl, "dequant_scale_w_uq_qr"))
+        self.assertTrue(hasattr(self.impl, "dequant_scale_w_dkv_kr"))
+        self.assertFalse(hasattr(self.impl, "quant_kscale"))
 
     @patch("torch_npu.npu_format_cast")
-    def test_process_weights_for_fused_mlapo_a5(self, mock_format_cast):
+    def test_process_weights_for_fused_mlapo_with_fa_quant(self, mock_format_cast):
+        mock_format_cast.return_value = torch.randn(128, 128)
+
+        self.impl.fa_quant_layer = True
+        self._setup_mlapo_weight_prep_mocks()
+
+        mock_layer = MagicMock()
+        mock_layer.quant_kscale = torch.randn(1, 512)
+        mock_layer.fak_descale_float = torch.randn(1)
+        self.impl.vllm_config.compilation_config = MagicMock()
+        self.impl.vllm_config.compilation_config.static_forward_context = {"layer_0": mock_layer}
+        self.impl.layer_name = "layer_0"
+
+        self.impl._process_weights_for_fused(torch.float16)
+        self.assertTrue(hasattr(self.impl, "dequant_scale_w_dq"))
+        self.assertTrue(hasattr(self.impl, "dequant_scale_w_dkv_kr"))
+        self.assertTrue(hasattr(self.impl, "quant_kscale"))
+        self.assertTrue(hasattr(self.impl, "fak_descale_float"))
+
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    @patch("torch_npu.npu_format_cast")
+    def test_process_weights_for_fused_mlapo_a5(self, mock_format_cast, mock_get_ascend_device_type):
         mock_format_cast.return_value = torch.randn(128, 128)
 
         self.impl.enable_mlapo = True
@@ -1415,12 +1399,15 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj.weight_scale.data = torch.randn(128, 128, 128)
         self.impl.q_lora_rank = 32
 
-        self.impl._process_weights_for_fused_mlapo_a5(torch.float16)
+        from vllm_ascend.attention.mla_v1 import AscendDeviceType
+
+        mock_get_ascend_device_type.return_value = AscendDeviceType.A5
+        self.impl._process_weights_for_fused(torch.float16)
         self.assertTrue(hasattr(self.impl, "weight_dq"))
         self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
         self.assertTrue(hasattr(self.impl, "weight_dkv_kr"))
-        self.assertTrue(hasattr(self.impl, "weight_dq_scale"))
-        self.assertTrue(hasattr(self.impl, "weight_dkv_kr_scale"))
+        self.assertTrue(hasattr(self.impl, "dequant_scale_w_dq"))
+        self.assertTrue(hasattr(self.impl, "dequant_scale_w_dkv_kr"))
 
     @patch("vllm_ascend.attention.mla_v1.DeviceOperator")
     @patch("torch_npu.npu_fused_infer_attention_score")
@@ -1616,11 +1603,11 @@ class TestAscendMLAImpl(TestBase):
 
         mock_get_ascend_device_type.return_value = AscendDeviceType.A5
 
-        self.impl._process_weights_for_fused_mlapo_a5 = MagicMock()
+        self.impl._process_weights_for_fused = MagicMock()
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.impl._process_weights_for_fused_mlapo_a5.assert_called_once_with(torch.bfloat16)
+        self.impl._process_weights_for_fused.assert_called_once_with(torch.bfloat16)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
@@ -1658,11 +1645,11 @@ class TestAscendMLAImpl(TestBase):
 
         mock_get_ascend_device_type.return_value = AscendDeviceType.A2
 
-        self.impl._process_weights_for_fused_mlapo = MagicMock()
+        self.impl._process_weights_for_fused = MagicMock()
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.impl._process_weights_for_fused_mlapo.assert_called_once_with(torch.bfloat16)
+        self.impl._process_weights_for_fused.assert_called_once_with(torch.bfloat16)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)
@@ -1689,13 +1676,13 @@ class TestAscendMLAImpl(TestBase):
         self.impl.enable_mlapo = False
         self.impl.fa_quant_layer = True
 
-        self.impl._process_weights_for_fused_fa_quant = MagicMock()
+        self.impl._process_weights_for_fused = MagicMock()
 
         mock_maybe_trans_nz.return_value = torch.randn(1, 2, 3)
 
         self.impl.process_weights_after_loading(torch.bfloat16)
 
-        self.impl._process_weights_for_fused_fa_quant.assert_called_once()
+        self.impl._process_weights_for_fused.assert_called_once()
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)

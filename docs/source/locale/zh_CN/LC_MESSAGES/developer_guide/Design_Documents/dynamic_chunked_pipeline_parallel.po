@@ -21,11 +21,6 @@ msgstr ""
 msgid "# Dynamic Chunked Pipeline Parallel (CPP)"
 msgstr "# 动态分块流水线并行 (CPP)"
 
-msgid ""
-"TL;DR CPP uses profiling-based dynamic chunking to equalize per-chunk "
-"latency and eliminate pipeline bubbles in PP scenarios."
-msgstr "简而言之，CPP 使用基于性能分析的动态分块技术，均衡每个分块的延迟，消除 PP 场景中的流水线气泡。"
-
 msgid "## Background"
 msgstr "## 背景"
 
@@ -284,3 +279,8 @@ msgstr "| 准确性 | 在不同硬件上可能存在偏差 | 适应实际硬件�
 
 msgid "| Startup cost | None | ~64 forward passes (tens of seconds) |"
 msgstr "| 启动开销 | 无 | 约64次前向传播（数十秒） |"
+
+msgid ""
+"CPP uses profiling-based dynamic chunking to equalize per-chunk latency and "
+"eliminate pipeline bubbles in PP scenarios."
+msgstr "CPP 使用基于性能分析的动态分块来均衡每个分块的延迟，并消除 PP 场景中的流水线气泡。"
