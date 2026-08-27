@@ -19,11 +19,16 @@
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from safetensors.torch import save_file
+from torch import nn
 
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
+from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 
 
 class TestQwen3DSparkWeightLoading:
@@ -45,7 +50,11 @@ class TestQwen3DSparkWeightLoading:
         rotation_matrix = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
         fc_weight = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
         non_fc_weight = torch.tensor([[5.0, 6.0]])
-        weights_to_load = [("model.fc.weight", fc_weight), ("model.embed_tokens.weight", non_fc_weight)]
+        weights_to_load = [
+            ("model.fc.weight", fc_weight),
+            ("model.embed_tokens.weight", non_fc_weight),
+            ("lm_head.weight", non_fc_weight),
+        ]
         expected_fc_weight = torch.matmul(fc_weight, rotation_matrix)
 
         # Capture the final delegation without invoking the real model loader.
@@ -63,3 +72,86 @@ class TestQwen3DSparkWeightLoading:
         processed_weights = mock_parent_load_weights.call_args.args[0]
         torch.testing.assert_close(processed_weights[0][1], expected_fc_weight)
         torch.testing.assert_close(processed_weights[1][1], non_fc_weight)
+        torch.testing.assert_close(processed_weights[2][1], non_fc_weight)
+
+    def test_quarot_loads_missing_boundaries_in_modeling(self) -> None:
+        model_cls = qwen3_dspark.AscendQwen3DSparkForCausalLM
+        model = model_cls.__new__(model_cls)
+        nn.Module.__init__(model)
+        model.rotation_path = "quarot.safetensors"
+        model.target_model_path = "/target"
+        model.enable_confidence_head = False
+        model.model = SimpleNamespace(embed_tokens=object())
+        model.lm_head = object()
+        rotation = torch.eye(2)
+
+        with (
+            patch.object(
+                qwen3_dspark,
+                "get_rotation_matrix",
+                return_value=rotation,
+            ),
+            patch.object(
+                qwen3_dspark,
+                "load_quarot_target_layer",
+            ) as load_target_layer,
+            patch.object(
+                qwen3_dspark.Qwen3DSparkForCausalLM,
+                "load_weights",
+            ),
+        ):
+            model.load_weights([("model.fc.weight", torch.eye(2))])
+
+        assert load_target_layer.call_count == 2
+        assert load_target_layer.call_args_list[0].args[:2] == (
+            model.model.embed_tokens,
+            model.target_model_path,
+        )
+        assert load_target_layer.call_args_list[1].args[:2] == (
+            model.lm_head,
+            model.target_model_path,
+        )
+        assert model.has_own_embed_tokens
+        assert model.has_own_lm_head
+
+
+def test_load_quarot_target_layer_reads_local_vocab_shard(tmp_path) -> None:
+    weight_name = "language_model.model.embed_tokens.weight"
+    shard_name = "model-00001-of-00001.safetensors"
+    target_weight = torch.tensor(
+        [
+            [1.0, 2.0],
+            [3.0, 4.0],
+            [5.0, 6.0],
+            [7.0, 8.0],
+        ]
+    )
+    save_file({weight_name: target_weight}, tmp_path / shard_name)
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {weight_name: shard_name}}),
+        encoding="utf-8",
+    )
+
+    layer = nn.Linear(2, 3, bias=False)
+    layer.weight.data.fill_(99)
+    layer.shard_indices = SimpleNamespace(
+        org_vocab_start_index=1,
+        org_vocab_end_index=3,
+    )
+    rotation = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
+
+    load_quarot_target_layer(
+        layer,
+        tmp_path,
+        (weight_name,),
+        rotation,
+        "test embedding",
+    )
+
+    expected = torch.cat(
+        (
+            target_weight[1:3] @ rotation.T,
+            torch.zeros(1, 2),
+        )
+    )
+    torch.testing.assert_close(layer.weight, expected)

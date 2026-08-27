@@ -584,7 +584,7 @@ else:
         eagle_attn_layer_names: list[str] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
         max_num_batched_tokens: int | None = None,
-        num_prefill_lookahead: int | None = None,
+        num_prefill_lookahead: int = 0,
     ) -> KVCacheCoordinator:
         # Keep pcp_world_size in this patched function for upstream call
         # compatibility; platform validation guarantees that it is one.
@@ -622,8 +622,7 @@ else:
             )
             orig_kwargs["max_in_flight_tokens"] = token_budget
             orig_kwargs["scheduler_block_size"] = scheduler_block_size
-            if num_prefill_lookahead is not None:
-                orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+            orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
             return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
         return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
