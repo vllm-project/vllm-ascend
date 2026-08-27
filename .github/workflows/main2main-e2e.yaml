@@ -303,7 +303,10 @@ jobs:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
         run: |
           source "$GITHUB_WORKSPACE/.venv/bin/activate"
-          export MAX_JOBS=$(( ${{ matrix.max_jobs }} ))
+          # NPU runner memory can't take the CPU cache-builder parallelism
+          # (matrix.max_jobs=184): 54 parallel opc compiles were OOM-killed
+          # on the a2 runner.  Cap at the container default (4).
+          export MAX_JOBS=4
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
@@ -545,7 +548,7 @@ jobs:
             echo "$CHANGED"
             echo "Rebuilding kernels (one-time per csrc change)"
             source "$GITHUB_WORKSPACE/.venv/bin/activate"
-            export MAX_JOBS=$(( ${{ matrix.max_jobs }} ))
+            export MAX_JOBS=4
             uv pip install -e . --no-build-isolation
           else
             echo "csrc unchanged - reusing built kernels"
