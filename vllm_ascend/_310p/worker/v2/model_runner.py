@@ -39,7 +39,7 @@ from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -454,7 +454,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         }
         kv_caches: dict[str, Any] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            layer_names = [name for name in kv_cache_tensor.shared_by if name not in shared_layers]
+            layer_names = [name for name in get_kv_cache_tensor_layers(kv_cache_tensor) if name not in shared_layers]
             if not layer_names:
                 continue
             cache_groups: dict[tuple[Any, ...], list[str]] = {}
