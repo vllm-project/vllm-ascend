@@ -545,7 +545,7 @@ class AscendLogitsProcessor(LogitsProcessor):
         if lm_head.parallel_mode is VocabParallelMode.FINE_GRAINED:
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:
-            return self._get_logits_normal(hidden_states, lm_head, embedding_bias)
+            return self._get_logits_normal(hidden_states, lm_head, embedding_bias, skip_gather)
 
     def _get_logits_pcp_weight_sharding(
         self,
@@ -587,8 +587,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
         logits = self._apply_head(lm_head, hidden_states, embedding_bias)
+        if skip_gather:
+            return logits
         # Gather logits for tensor parallel. _gather_logits uses the global TP
         # group, so skip it for a replicated head (e.g. the DSpark Markov w2):
         # each rank already holds the full vocab logits locally and no
