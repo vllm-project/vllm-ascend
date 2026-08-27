@@ -224,6 +224,12 @@ class CandidateSelector(nn.Module):
 
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
+    # vLLM v0.28.0+ (PR #52816) builds the layer list through this class
+    # attribute, so shadowing it is enough to get DFlash2 layers. Older pins
+    # (e.g. main @ ba07e4a) still read the module global, which __init__
+    # swaps below; keep both so either pin builds DFlash2 layers.
+    decoder_layer_cls = DFlash2Qwen3DecoderLayer
+
     def __init__(
         self,
         *,
@@ -233,8 +239,8 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
     ) -> None:
         import vllm.model_executor.models.qwen3_dflash as dflash_mod
 
-        # Upstream PR 52816 adds decoder_layer_cls; until that pin lands, swap
-        # the parent ctor's global so it builds DFlash2 layers.
+        # Older pins reference the module global directly; swap it so the
+        # parent ctor builds DFlash2 layers there too.
         original_layer = dflash_mod.DFlashQwen3DecoderLayer
         dflash_mod.DFlashQwen3DecoderLayer = DFlash2Qwen3DecoderLayer
         try:
@@ -268,10 +274,17 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     # Share the target LM head so compute_candidates can top-k the full vocab.
     has_own_lm_head = False
+    # vLLM v0.28.0+ (PR #52816) builds the draft through this class attribute,
+    # so shadowing it is enough to get the DFlash2 model. Older pins (e.g.
+    # main @ ba07e4a) still read the module global, which __init__ swaps
+    # below; keep both so either pin builds the DFlash2 draft.
+    model_cls = DFlash2Qwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         import vllm.model_executor.models.qwen3_dflash as dflash_mod
 
+        # Older pins reference the module global directly; swap it so the
+        # parent ctor builds the DFlash2 model there too.
         original_model = dflash_mod.DFlashQwen3Model
         dflash_mod.DFlashQwen3Model = DFlash2Qwen3Model
         try:

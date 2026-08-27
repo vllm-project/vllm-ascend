@@ -40,7 +40,6 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -108,56 +107,30 @@ def _get_graph_update_backend(
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
-    if vllm_version_is("0.27.1"):
-
-        def __init__(
-            self,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            cudagraph_mode: CUDAGraphMode,
-            decode_query_len: int,
-            model_runner: Any,
-            lora_capture_cases: list[int] | None = None,
-        ):
-            super().__init__(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                lora_capture_cases=lora_capture_cases,
-            )
-            self.model_runner = model_runner
-            self.update_stream = self.model_runner.update_stream
-            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-            if super().needs_capture():
-                set_graph_params(self.capture_sizes)
-
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            cudagraph_mode: CUDAGraphMode,
-            decode_query_len: int,
-            model_runner: Any,
-            lora_capture_cases: list[int] | None = None,
-            varlen_decode: bool = False,
-        ):
-            super().__init__(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                lora_capture_cases=lora_capture_cases,
-                varlen_decode=varlen_decode,
-            )
-            self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
-            self.model_runner = model_runner
-            self.update_stream = self.model_runner.update_stream
-            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-            if super().needs_capture():
-                set_graph_params(self.capture_sizes)
+    def __init__(  # type: ignore[misc]
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        model_runner: Any,
+        lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
+    ):
+        super().__init__(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
+        )
+        self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
+        self.model_runner = model_runner
+        self.update_stream = self.model_runner.update_stream
+        self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
+        if super().needs_capture():
+            set_graph_params(self.capture_sizes)
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:

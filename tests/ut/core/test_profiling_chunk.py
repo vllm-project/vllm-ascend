@@ -332,7 +332,7 @@ class TestProfilingChunkScheduler(TestBase):
             cache_config=cache_config,
         )
         vllm_config.parallel_config.pipeline_parallel_size = 2
-        vllm_config.model_config.hf_config.is_encoder_decoder = False
+vllm_config.model_config.hf_config.is_encoder_decoder = False
 
         kv_cache_config = KVCacheConfig(
             num_blocks=10000,

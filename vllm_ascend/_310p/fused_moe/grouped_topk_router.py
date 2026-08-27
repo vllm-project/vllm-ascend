@@ -18,7 +18,6 @@ import torch
 import torch_npu
 
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendGroupedTopKRouter310(AscendGroupedTopKRouter):
@@ -42,12 +41,11 @@ class AscendGroupedTopKRouter310(AscendGroupedTopKRouter):
                 input_ids=input_ids,
             )
 
-        if not vllm_version_is("0.27.1"):
-            # vLLM main recomputes router_logits as fp32 in _forward_impl,
-            # but the resulting tensor may be in FRACTAL_NZ format on 310P.
-            # npu_moe_gating_top_k_softmax only supports DT_FLOAT16 + ND,
-            # so cast the router_logits accordingly.
-            router_logits = router_logits.to(torch.float16)
+        # vLLM recomputes router_logits as fp32 in _forward_impl,
+        # but the resulting tensor may be in FRACTAL_NZ format on 310P.
+        # npu_moe_gating_top_k_softmax only supports DT_FLOAT16 + ND,
+        # so cast the router_logits accordingly.
+        router_logits = router_logits.to(torch.float16)
 
         if router_logits.shape[0] > self.MAX_TOKENS_PER_GATING_CALL:
             topk_results = [
