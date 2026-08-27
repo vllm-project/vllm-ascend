@@ -228,7 +228,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
-        if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
+        if self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
             self.block_table_tensor_clone = torch.zeros(
                 (
                     self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
@@ -416,10 +416,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             common_attn_metadata.query_start_loc = self.runner.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.runner.query_start_loc.cpu[: num_reqs_padded + 1]
             slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
-            common_attn_metadata.block_table_tensor = self._adjust_tensor(
+            common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
-            common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+            common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(self.runner.seq_lens, num_reqs_padded, 0)
             common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                 self.runner.optimistic_seq_lens_cpu, num_reqs_padded
             )
@@ -433,7 +433,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         else:
             num_reqs_padded = common_attn_metadata.num_reqs
             if not self.vllm_config.model_config.use_mla and self.dcp_size == 1:
-                common_attn_metadata.block_table_tensor = self._adjust_tensor(
+                common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
@@ -452,9 +452,9 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             : common_attn_metadata.num_actual_tokens
         ]
 
-        self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
-        self.seq_lens_group[0][num_reqs_padded:].fill_(0)
-        common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs_padded]
+        common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+            common_attn_metadata.seq_lens, num_reqs_padded, 0
+        )
 
         self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
         self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)
@@ -550,8 +550,10 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
             max_num_reqs_across_dp = (
                 self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
             )
-            token_indices_to_sample = torch.nn.functional.pad(
-                token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
+            token_indices_to_sample = self._pad_lmhead_tp_tensor(
+                "token_indices_to_sample",
+                token_indices_to_sample,
+                max_num_reqs_across_dp,
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]

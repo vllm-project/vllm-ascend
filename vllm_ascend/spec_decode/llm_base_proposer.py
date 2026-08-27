@@ -215,6 +215,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32, device=device
         )
+        self._lmhead_tp_pad_buffers: dict[str, torch.Tensor] = {}
         metadata_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
         num_mtp_draft_slots = max(self.num_speculative_tokens - 1, 0) * self.runner.max_num_reqs
         slot_mapping_lens = self.runner.max_num_tokens + num_mtp_draft_slots
@@ -233,8 +234,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             for _ in range(self.num_speculative_tokens)
         ]
 
-        # DCP needs independent block-table tensors for the first and later steps.
-        # since final block table tensor is not ready in __init__, it is delayed until dummy_run
+        # The final block-table width is only available after profile run, so
+        # initialize the reusable graph-mode buffer in dummy_run.
         self.block_table_tensor_clone: torch.Tensor | None = None
 
         self._runnable = self._run_merged_draft
@@ -256,6 +257,29 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_eagle = self.runner.use_eagle
         self.draft_window_size = None
         self.sliding_window = None
+
+    def _pad_lmhead_tp_tensor(
+        self,
+        key: str,
+        tensor: torch.Tensor,
+        target_size: int,
+        pad_value: float = 0,
+    ) -> torch.Tensor:
+        buffer = self._lmhead_tp_pad_buffers.get(key)
+        if (
+            buffer is None
+            or buffer.shape[0] < target_size
+            or buffer.shape[1:] != tensor.shape[1:]
+            or buffer.dtype != tensor.dtype
+            or buffer.device != tensor.device
+        ):
+            buffer = tensor.new_empty((target_size,) + tensor.shape[1:])
+            self._lmhead_tp_pad_buffers[key] = buffer
+
+        copy_size = min(tensor.shape[0], target_size)
+        buffer[:copy_size].copy_(tensor[:copy_size])
+        buffer[copy_size:target_size].fill_(pad_value)
+        return buffer[:target_size]
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -569,7 +593,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
         # init block table tensor clone is only available after profile run and is only used for graph mode
-        if self.dcp_size > 1 and self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
+        if self.use_cuda_graph and not is_profile and self.block_table_tensor_clone is None:
             self.block_table_tensor_clone = torch.zeros(
                 (
                     self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
@@ -873,13 +897,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
             slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
-            common_attn_metadata.block_table_tensor = self._adjust_tensor(
+            common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
             )
             if self.method == "dflash":
-                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+                    common_attn_metadata.seq_lens, num_reqs_padded, 0
+                )
             else:
-                common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
+                common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+                    self.runner.seq_lens, num_reqs_padded, 0
+                )
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     self.runner.optimistic_seq_lens_cpu, num_reqs_padded
                 )
@@ -901,7 +929,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # In the below scenario, padding has been applied by _pad_query_start_loc_for_fia in the model runner.
             # We need to unpad here for eager mode to maintain compatibility.
             if not self.vllm_config.model_config.use_mla and self.dcp_size == 1:
-                common_attn_metadata.block_table_tensor = self._adjust_tensor(
+                common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
@@ -918,19 +946,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             inputs_embeds = None
 
-        # Update slot_mapping for different speculative.
-        # NOTE: Currently, we only remake the slot_mapping, because it's the
-        # only tensor which will be used in current FIA.
-        # Strictly speaking, `query_start_loc`, `seq_lens` should also have
-        # their memory allocated separately for each step just like `slot_mapping`.
+        # Keep step-0 attention inputs in their persistent metadata buffers.
         slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
         self.slot_mapping_group[0][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
         self.slot_mapping_group[0][slot_mapping_lens:].fill_(-1)
         common_attn_metadata.slot_mapping = self.slot_mapping_group[0]
 
-        self.seq_lens_group[0][:num_reqs_padded].copy_(common_attn_metadata.seq_lens)
-        self.seq_lens_group[0][num_reqs_padded:].fill_(0)
-        common_attn_metadata.seq_lens = self.seq_lens_group[0][:num_reqs_padded]
+        common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+            common_attn_metadata.seq_lens, num_reqs_padded, 0
+        )
 
         self.query_start_loc_group[0][: num_reqs_padded + 1].copy_(common_attn_metadata.query_start_loc)
         self.query_start_loc_group[0][num_reqs_padded + 1 :].fill_(0)
@@ -953,12 +977,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # FIXME(lilinsiman)
         if self.dcp_size > 1 and self.use_cuda_graph:
             assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
-            self.block_table_tensor_clone[: common_attn_metadata.block_table_tensor.shape[0]] = (
-                common_attn_metadata.block_table_tensor
-            )
-            common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[
-                : common_attn_metadata.block_table_tensor.shape[0]
-            ]
+            src = common_attn_metadata.block_table_tensor
+            n = src.shape[0]
+            if src.data_ptr() != self.block_table_tensor_clone.data_ptr():
+                self.block_table_tensor_clone[:n].copy_(src, non_blocking=True)
+            common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:n]
         else:
             common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
@@ -1179,8 +1202,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 ori_token_indices_to_sample = None
 
         if lmhead_tp_enable():
-            token_indices_to_sample = nn.functional.pad(
-                token_indices_to_sample, (0, max_num_reqs_across_dp - num_indices)
+            token_indices_to_sample = self._pad_lmhead_tp_tensor(
+                "token_indices_to_sample",
+                token_indices_to_sample,
+                max_num_reqs_across_dp,
             )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
@@ -1426,9 +1451,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 max_num_reqs_across_dp = (
                     self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
                 )
-                token_indices_to_sample = nn.functional.pad(
+                token_indices_to_sample = self._pad_lmhead_tp_tensor(
+                    "token_indices_to_sample",
                     token_indices_to_sample,
-                    (0, max_num_reqs_across_dp - num_indices),
+                    max_num_reqs_across_dp,
                 )
 
             sample_hidden_states = last_hidden_states[token_indices_to_sample]
@@ -1685,10 +1711,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 common_attn_metadata.num_reqs = input_batch_size
-                common_attn_metadata.block_table_tensor = self._adjust_tensor(
+                common_attn_metadata.block_table_tensor = self._adjust_block_table_tensor(
                     common_attn_metadata.block_table_tensor, input_batch_size
                 )
-                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, input_batch_size)
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
                     common_attn_metadata.seq_lens_cpu, input_batch_size
                 )
@@ -1733,10 +1758,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # The loop part
         used_update_positions += 1
 
-        # Clone the data so that when calculating the data at position 2 and position 3
-        # in the merged graph, it does not affect position 1
+        seq_lens_size = (
+            input_batch_size
+            if draft_index == 1 and aclgraph_runtime_mode == CUDAGraphMode.FULL
+            else common_attn_metadata.seq_lens.shape[0]
+        )
+        common_attn_metadata.seq_lens = self._copy_seq_lens_to_step_buffer(
+            common_attn_metadata.seq_lens, seq_lens_size, draft_index
+        )
+
+        # Clone the remaining data so that when calculating the data at position
+        # 2 and position 3 in the merged graph, it does not affect position 1.
         # FIXME(lilinsiman)
-        common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
         if common_attn_metadata.seq_lens_cpu is not None:
             common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu.clone()
         if common_attn_metadata._seq_lens_cpu is not None:
@@ -1832,10 +1865,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.slot_mapping_group[draft_index][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
             # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
             common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
-
-        self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
-        self.seq_lens_group[draft_index][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
-        common_attn_metadata.seq_lens = self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]]
 
         self.query_start_loc_group[draft_index][: common_attn_metadata.query_start_loc.shape[0]].copy_(
             common_attn_metadata.query_start_loc
@@ -2194,6 +2223,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             tensor = tensor[:desired_size]
         return tensor
 
+    def _copy_seq_lens_to_step_buffer(self, tensor, desired_size, draft_index):
+        buf = self.seq_lens_group[draft_index]
+        copy_size = min(tensor.shape[0], desired_size)
+        if tensor.data_ptr() != buf.data_ptr():
+            buf[:copy_size].copy_(tensor[:copy_size])
+        buf[copy_size:].zero_()
+        return buf[:desired_size]
+
+    def _adjust_block_table_tensor(self, tensor, desired_size):
+        if desired_size <= tensor.shape[0]:
+            return tensor[:desired_size]
+
+        buf = self.block_table_tensor_clone
+        if (
+            buf is None
+            or desired_size > buf.shape[0]
+            or tensor.shape[1:] != buf.shape[1:]
+            or tensor.dtype != buf.dtype
+            or tensor.device != buf.device
+        ):
+            return self._adjust_tensor(tensor, desired_size)
+        if tensor.data_ptr() == buf.data_ptr():
+            buf[tensor.shape[0] : desired_size].zero_()
+            return buf[:desired_size]
+        cur = tensor.shape[0]
+        buf[:cur].copy_(tensor, non_blocking=True)
+        buf[cur:desired_size].zero_()
+        return buf[:desired_size]
+
     def maybe_pad_and_reduce(
         self,
         hidden_states: torch.Tensor,
@@ -2257,13 +2315,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             token_indices_to_sample = token_indices_to_sample[:num_indices]
         else:
             # Padding to the target length.
-            pad_size = num_indices - tensor.shape[0]
             if is_logits:
                 # logits: shape [seq_len, vocab_size], Padding at the end of the seq dimension.
-                tensor = nn.functional.pad(tensor, (0, 0, 0, pad_size), value=-1e9)
+                tensor = self._pad_lmhead_tp_tensor("logits", tensor, num_indices, -1e9)
             else:
                 # draft_token_ids: shape [seq_len], Padding at the end
-                tensor = nn.functional.pad(tensor, (0, pad_size))
+                tensor = self._pad_lmhead_tp_tensor("draft_token_ids", tensor, num_indices)
             token_indices_to_sample = ori_token_indices_to_sample
 
         return tensor, token_indices_to_sample

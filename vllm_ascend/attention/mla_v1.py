@@ -257,6 +257,23 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 got {self.decode_threshold}"
             )
 
+        max_num_reqs = scheduler_config.max_num_seqs
+        num_mtp_draft_slots = max(self.decode_threshold - 2, 0) * max_num_reqs
+        disable_padded_drafter_batch = (
+            self.speculative_config is not None
+            and self.speculative_config.disable_padded_drafter_batch
+        )
+        max_graph_pad_size = vllm_config.compilation_config.max_cudagraph_capture_size
+        if not isinstance(max_graph_pad_size, int):
+            max_graph_pad_size = scheduler_config.max_num_batched_tokens
+        self._max_pad_num_reqs = (
+            max_graph_pad_size
+            if disable_padded_drafter_batch
+            else max_graph_pad_size // self.decode_threshold
+        )
+        self._max_pad_num_tokens = scheduler_config.max_num_batched_tokens + num_mtp_draft_slots
+        self._pad_buffers: dict[str, torch.Tensor] = {}
+
         self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
@@ -278,6 +295,26 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+
+    def _pad_to_max_buffer(
+        self,
+        key: str,
+        tensor: torch.Tensor,
+        target_size: int,
+        max_size: int,
+        pad_value: int,
+    ) -> torch.Tensor:
+        assert target_size <= max_size, (
+            f"Padding target size {target_size} exceeds "
+            f"the {key} buffer capacity {max_size}"
+        )
+        buffer = self._pad_buffers.get(key)
+        if buffer is None:
+            buffer = tensor.new_empty((max_size,) + tensor.shape[1:])
+            self._pad_buffers[key] = buffer
+        buffer[: tensor.shape[0]].copy_(tensor)
+        buffer[tensor.shape[0] : target_size].fill_(pad_value)
+        return buffer[:target_size]
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -603,35 +640,39 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q
                 )
                 seq_lens_list = seq_lens_list + [0] * (self.graph_pad_size - self.num_decodes)
-                num_block_pad_size = self.graph_pad_size - self.block_table.shape[0]
-                if num_block_pad_size > 0:
-                    block_table_padding = torch.zeros(
-                        (num_block_pad_size,) + self.block_table.shape[1:],
-                        dtype=self.block_table.dtype,
-                        device=self.block_table.device,
+                if self.graph_pad_size > self.block_table.shape[0]:
+                    self.block_table = self._pad_to_max_buffer(
+                        "block_table",
+                        self.block_table,
+                        self.graph_pad_size,
+                        self._max_pad_num_reqs,
+                        0,
                     )
-                    self.block_table = torch.cat([self.block_table, block_table_padding], dim=0)
             else:
-                num_token_pad_size = self.graph_pad_size - self.num_decode_tokens
                 num_reqs_pad_size = self.graph_pad_size // common_attn_metadata.decode_token_per_req - num_reqs
-                num_block_table_pad_size = (
-                    self.graph_pad_size // common_attn_metadata.decode_token_per_req - self.num_decodes
-                )
+                block_table_size = self.graph_pad_size // common_attn_metadata.decode_token_per_req
                 seq_lens_list = self.seq_lens.tolist() + [0] * num_reqs_pad_size
-                slot_padding = torch.full(
-                    (num_token_pad_size,), PAD_SLOT_ID, dtype=self.slot_mapping.dtype, device=self.slot_mapping.device
+                self.slot_mapping = self._pad_to_max_buffer(
+                    "slot_mapping",
+                    self.slot_mapping,
+                    self.graph_pad_size,
+                    self._max_pad_num_tokens,
+                    PAD_SLOT_ID,
                 )
-                self.slot_mapping = torch.cat([self.slot_mapping, slot_padding])
-                block_table_padding = torch.zeros(
-                    (num_block_table_pad_size,) + self.block_table.shape[1:],
-                    dtype=self.block_table.dtype,
-                    device=self.block_table.device,
+                self.block_table = self._pad_to_max_buffer(
+                    "block_table",
+                    self.block_table,
+                    block_table_size,
+                    self._max_pad_num_reqs,
+                    0,
                 )
-                self.block_table = torch.cat([self.block_table, block_table_padding], dim=0)
-                position_padding = torch.zeros(
-                    num_token_pad_size, dtype=input_positions.dtype, device=input_positions.device
+                input_positions = self._pad_to_max_buffer(
+                    "input_positions",
+                    input_positions,
+                    self.graph_pad_size,
+                    self._max_pad_num_tokens,
+                    0,
                 )
-                input_positions = torch.cat([input_positions, position_padding])
                 actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_enable_pad(
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
                 )

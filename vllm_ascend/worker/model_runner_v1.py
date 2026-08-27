@@ -542,6 +542,7 @@ class NPUModelRunner(GPUModelRunner):
             reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
         )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self._lmhead_tp_logits_indices_buffer: torch.Tensor | None = None
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -584,6 +585,26 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_enabled:
             self._offload_req_ids_tensor = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
             self._offload_token_to_req = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+
+    def _pad_lmhead_tp_logits_indices(
+        self,
+        logits_indices: torch.Tensor,
+        target_size: int,
+    ) -> torch.Tensor:
+        buffer = self._lmhead_tp_logits_indices_buffer
+        if (
+            buffer is None
+            or buffer.shape[0] < target_size
+            or buffer.dtype != logits_indices.dtype
+            or buffer.device != logits_indices.device
+        ):
+            buffer = logits_indices.new_empty(target_size)
+            self._lmhead_tp_logits_indices_buffer = buffer
+
+        copy_size = min(logits_indices.shape[0], target_size)
+        buffer[:copy_size].copy_(logits_indices[:copy_size])
+        buffer[copy_size:target_size].zero_()
+        return buffer[:target_size]
 
     @property
     def use_dcp(self) -> bool:
@@ -1285,7 +1306,7 @@ class NPUModelRunner(GPUModelRunner):
             self.set_active_loras(self.input_batch, num_scheduled_tokens, num_sampled_tokens)
         if lmhead_tp_enable():
             max_num_reqs_across_dp = self.max_num_reqs * self.uniform_decode_query_len
-            logits_indices = nn.functional.pad(logits_indices, (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+            logits_indices = self._pad_lmhead_tp_logits_indices(logits_indices, max_num_reqs_across_dp)
 
         return (
             logits_indices,
