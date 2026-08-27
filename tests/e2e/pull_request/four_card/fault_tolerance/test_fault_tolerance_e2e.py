@@ -6,9 +6,12 @@ Requires 4 NPUs (DP=4); gated behind ``has_npu_ft_capability()``.
 """
 
 import contextlib
+import http.server
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -23,12 +26,24 @@ MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
 DP_SIZE = 4
 
 # Fault-detection timeout budget:
-# - CPU: Gloo DP allreduce timeout  detects the dead peer.
+# - CPU: Gloo DP allreduce timeout detects the dead peer.
 # - NPU: HCSP operator timeout detects the dead peer.
-# - Deadline : slowest fallback + margin.
+# - Deadline: slowest fallback + margin.
 CPU_DISTRIBUTED_TIMEOUT_S = 15
 FT_COMMUNICATION_ABORT_TIMEOUT_S = 10
 FAULT_DETECTION_DEADLINE_S = 45
+
+BENCHMARK_HOME = "./benchmark"
+_GSM8K_CASE = {
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/gsm8k-lite",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+    "max_out_len": 32768,
+    "batch_size": 32,
+    "baseline": 95,
+    "threshold": 5,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +137,7 @@ def _ft_server_args() -> list[str]:
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "2048",
+        "37364",
         "--max-num-seqs",
         "128",
         "--enable-expert-parallel",
@@ -233,6 +248,107 @@ def _server_for_rank(servers: list[tuple[RemoteOpenAIServer, list[str]]], rank: 
 
 
 # ---------------------------------------------------------------------------
+# Round-robin proxy
+# ---------------------------------------------------------------------------
+
+
+class RoundRobinProxy:
+    """Tiny standard-library HTTP proxy that round-robins requests across
+    the DP rank server ports.
+
+    Listens on ``listen_port`` and forwards every request (method, path,
+    headers, body) verbatim to one of ``backend_ports``, chosen by a
+    thread-safe round-robin counter, so requests are spread evenly across
+    the ranks. Responses are passed back unchanged.
+
+    Usage::
+
+        with _ft_manager() as servers:
+            backend_ports = [server.port for server, _ in servers]
+            with RoundRobinProxy(backend_ports=backend_ports, listen_port=8100) as proxy:
+                resp = requests.post(f"{proxy.url}/v1/completions", json={...})
+    """
+
+    def __init__(
+        self,
+        backend_ports: list[int],
+        listen_port: int,
+        host: str = "127.0.0.1",
+    ):
+        self._backend_ports = list(backend_ports)
+        self._host = host
+        self._listen_port = listen_port
+        self._next = 0
+        self._lock = threading.Lock()
+        self._httpd: http.server.ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "RoundRobinProxy":
+        self._httpd = http.server.ThreadingHTTPServer((self._host, self._listen_port), self._make_handler())
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._httpd is not None:
+            self._httpd.shutdown()
+            self._httpd.server_close()
+            self._httpd = None
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    @property
+    def url(self) -> str:
+        return f"http://{self._host}:{self._listen_port}"
+
+    @property
+    def port(self) -> int:
+        """Proxy listen port; makes ``RoundRobinProxy`` interchangeable with a
+        ``RemoteOpenAIServer`` for helpers that only need ``.port``."""
+        return self._listen_port
+
+    def _pick_backend(self) -> int:
+        with self._lock:
+            port = self._backend_ports[self._next % len(self._backend_ports)]
+            self._next += 1
+            return port
+
+    def _make_handler(self):
+        proxy = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _forward(self) -> None:
+                length = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(length) if length else b""
+                port = proxy._pick_backend()
+                url = f"http://127.0.0.1:{port}{self.path}"
+                req = urllib.request.Request(url, data=body, method=self.command)
+                for key, value in self.headers.items():
+                    if key.lower() not in ("host", "content-length", "accept-encoding"):
+                        req.add_header(key, value)
+                try:
+                    with urllib.request.urlopen(req, timeout=300) as resp:
+                        status, resp_headers, resp_body = resp.status, dict(resp.headers), resp.read()
+                except urllib.error.HTTPError as exc:
+                    status, resp_headers, resp_body = exc.code, dict(exc.headers), exc.read()
+                self.send_response(status)
+                for key, value in resp_headers.items():
+                    if key.lower() not in ("transfer-encoding", "connection", "content-length"):
+                        self.send_header(key, value)
+                self.send_header("Content-Length", str(len(resp_body)))
+                self.end_headers()
+                self.wfile.write(resp_body)
+
+            do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _forward
+
+            def log_message(self, *args):  # silence request logging
+                pass
+
+        return Handler
+
+
+# ---------------------------------------------------------------------------
 # Test primitives
 # ---------------------------------------------------------------------------
 
@@ -278,6 +394,29 @@ def _assert_serving_and_healthy(
     healthy = _wait_for_engines(list(servers), match_key="status", match_values={"healthy"})
     assert all(healthy), healthy
     _in_parallel(lambda s: _complete(s.get_client()), servers)
+
+
+def _run_gsm8k_eval(server: Any, stage: str) -> float:
+    """Run GSM8K accuracy evaluation using aisbench.
+
+    ``server`` is any object exposing ``.port`` — either a
+    ``RemoteOpenAIServer`` or a ``RoundRobinProxy``.
+
+    Returns the measured accuracy percentage.
+    """
+
+    os.environ.setdefault("BENCHMARK_HOME", BENCHMARK_HOME)
+    from tools.aisbench import AisbenchRunner
+
+    with AisbenchRunner(
+        model=MODEL_NAME,
+        port=server.port,
+        aisbench_config=_GSM8K_CASE,
+        verify=True,
+    ) as aisbench:
+        accuracy = aisbench.result
+        print(f"[{stage}] GSM8K accuracy: {accuracy:.2f}")
+        return accuracy
 
 
 def _kill_worker_process(server: RemoteOpenAIServer) -> None:
@@ -389,6 +528,10 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
     All 4 being UNHEALTHY is the precondition for ``retry``.  The fault
     is patched via a generated ``sitecustomize.py``.
+
+    After recovery, the serving cluster must still meet the GSM8K accuracy
+    standard used by tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+    (baseline=95, threshold=5, i.e. accuracy >= 90%).
     """
     fault_step = int(os.getenv("FT_FAULT_STEP", "100"))
     _install_fault_injection(monkeypatch, tmp_path, rank=3, step=fault_step)
@@ -396,34 +539,50 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     with _ft_manager() as servers:
         assert len(servers) == DP_SIZE
         all_ranks = tuple(_server_for_rank(servers, r) for r in range(DP_SIZE))
+        backend_ports = [server.port for server, _ in servers]
 
-        # 1. All engines healthy and serving.
-        _assert_serving_and_healthy(all_ranks)
+        # Requests through the round-robin proxy are spread evenly across
+        # the DP rank ports; the proxy stays alive for the whole test so the
+        # GSM8K accuracy evaluation is also driven through it.
+        with RoundRobinProxy(backend_ports=backend_ports, listen_port=8100) as proxy:
+            # 1. All engines healthy and serving.
+            _assert_serving_and_healthy(all_ranks)
 
-        # 2. Drive all ranks so rank 3 accumulates steps and trips the
-        #    injected fault; ranks 0,1,2 then time out on DP allreduce.
-        with _driving(*all_ranks):
-            faulted = _wait_for_engines(
-                list(all_ranks),
-                match_key="status",
-                match_values={"unhealthy"},
+            # 2. Drive all ranks so rank 3 accumulates steps and trips the
+            #    injected fault; ranks 0,1,2 then time out on DP allreduce.
+            with _driving(*all_ranks):
+                faulted = _wait_for_engines(
+                    list(all_ranks),
+                    match_key="status",
+                    match_values={"unhealthy"},
+                )
+
+            for rank, engine_status in enumerate(faulted):
+                assert engine_status is not None, (
+                    f"rank {rank} did not report UNHEALTHY within {FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
+                )
+
+            # The rank that raised carries the fault info from its own exception.
+            assert faulted[3] is not None
+            assert faulted[3].get("fault_info"), faulted[3]
+
+            # 3. retry all engines.
+            for server in all_ranks:
+                _apply_ft(server, "retry")
+
+            # 4. Recovery completes: all engines return to healthy and serve again.
+            _assert_serving_and_healthy(all_ranks)
+
+            # 5. The recovered cluster must still meet the GSM8K accuracy
+            #    standard (>= 90%); AisbenchRunner raises otherwise. The injected
+            #    fault is a one-shot step guard, so this dataset run does not
+            #    re-trigger it. The evaluation runs through the proxy, which
+            #    spreads the requests across all DP ranks.
+            recovered_acc = _run_gsm8k_eval(proxy, "post-retry")
+            print(
+                f"[GSM8K acc] recovered={recovered_acc:.2f}% "
+                f"(standard: >= {_GSM8K_CASE['baseline'] - _GSM8K_CASE['threshold']}%)"
             )
-
-        for rank, engine_status in enumerate(faulted):
-            assert engine_status is not None, (
-                f"rank {rank} did not report UNHEALTHY within {FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
-            )
-
-        # The rank that raised carries the fault info from its own exception.
-        assert faulted[3] is not None
-        assert faulted[3].get("fault_info"), faulted[3]
-
-        # 3. retry all engines.
-        for server in all_ranks:
-            _apply_ft(server, "retry")
-
-        # 4. Recovery completes: all engines return to healthy and serve again.
-        _assert_serving_and_healthy(all_ranks)
 
 
 @pytest.mark.skipif(
