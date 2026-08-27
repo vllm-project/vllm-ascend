@@ -35,6 +35,19 @@ DEVICE_TYPE = current_platform.device_type
 FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ut", "_fake_weight")
 
 
+def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
+    """Build the lane-specific descriptor changed by vLLM #51718."""
+    if "shared_by" in KVCacheTensor.__dataclass_fields__:
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=page_size,
+        block_stride=page_size,
+        offset=0,
+    )
+
+
 def initialize_kv_cache(runner: NPUModelRunner):
     """
     Only perform necessary steps in NPUModelRunner.initialize_kv_cache()
@@ -49,7 +62,11 @@ def initialize_kv_cache(runner: NPUModelRunner):
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+            _make_kv_cache_tensor(
+                size=tensor_size,
+                layer_names=["layer.0"],
+                page_size=attn_spec.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)],
     )
