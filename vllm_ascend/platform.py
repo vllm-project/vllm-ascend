@@ -867,18 +867,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     """Validate Ascend-specific options.
 
-    Covers the fused-MC2 / hierarchy-communication exclusivity and the scheduler
-    extension policies (enable_balance_scheduling / short_request_first_config /
+    Covers the scheduler extension policies (enable_balance_scheduling / short_request_first_config /
     dyntra_lb_config / recompute_scheduler_enable). Reads from the AscendConfig singleton
     initialized from vllm_config; env fallbacks are handled inside AscendConfig.
     """
-    # Fused MC2 and hierarchy communication are mutually exclusive.
-    if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
-        raise ValueError(
-            "fused mc2 op cannot be used with hierarchy communication. "
-            "Please set additional_config.enable_fused_mc2 to 0."
-        )
-
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
     from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
