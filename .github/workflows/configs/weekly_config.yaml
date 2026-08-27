@@ -273,7 +273,7 @@ a3:
         os: linux-aarch64-a3-2
         tests: tests/e2e/weekly/single_node/features/structured_output
       - name: test_qwen3_grid_exceed_65536
-        os: linux-aarch64-a3-1
+        os: linux-aarch64-a3-2
         tests: tests/e2e/weekly/single_node/features/test_qwen3_grid_exceed_65536.py
       - name: deepseek-v3-2-w8a8
         os: linux-aarch64-a3-16
