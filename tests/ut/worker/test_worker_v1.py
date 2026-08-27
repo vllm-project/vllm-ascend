@@ -235,7 +235,7 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
 
     @unittest.skipIf(vllm_version_is("0.27.1"), "vLLM #51718 only changed the main planner")
-    def test_hybrid_shared_backing_layout_does_not_scale_budget(self):
+    def test_hybrid_budget_scaling_follows_runner_backing_capability(self):
         from vllm_ascend.worker.worker import NPUWorker
 
         attn_spec = FullAttentionSpec(
@@ -261,11 +261,17 @@ class TestNPUWorker(TestBase):
             cache_config=cache_config,
             kv_transfer_config=None,
         )
-        worker.model_runner = SimpleNamespace(use_sparse=False, use_compress=False)
         worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
 
-        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
-            self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
+        for supports_shared_backing, expected_budget in ((True, 12345), (False, 6172)):
+            with self.subTest(supports_shared_backing=supports_shared_backing):
+                worker.model_runner = SimpleNamespace(
+                    use_sparse=False,
+                    use_compress=False,
+                    supports_standardized_shared_kv_backing=supports_shared_backing,
+                )
+                with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+                    self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")

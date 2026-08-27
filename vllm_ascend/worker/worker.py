@@ -643,7 +643,7 @@ class NPUWorker(WorkerBase):
         """Scale the KV cache budget for vllm main's multi-group layout.
 
         vLLM #51718 derives num_blocks from the largest KV cache group's
-        bytes-per-block, but the Ascend runner keeps per-layer contiguous
+        bytes-per-block, but some Ascend runners keep per-layer contiguous
         buffers for every group. Per-layer sizing then totals
         num_blocks * (sum of ALL groups' pages), which exceeds available
         memory whenever more than one group is non-trivial. Scale the
@@ -693,6 +693,7 @@ class NPUWorker(WorkerBase):
             and layout.is_layer_compact
             and layout.is_block_compact
             and self.vllm_config.kv_transfer_config is None
+            and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
             and not getattr(model_runner, "use_sparse", False)
             and not getattr(model_runner, "use_compress", False)
         ):

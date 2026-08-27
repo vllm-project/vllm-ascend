@@ -91,6 +91,10 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
     torch.testing.assert_close(hidden_states, torch.ones(1))
 
 
+def test_310p_runner_does_not_advertise_standardized_shared_kv_backing() -> None:
+    assert NPUModelRunner310.supports_standardized_shared_kv_backing is False
+
+
 class TestNPUModelRunner310(TestBase):
     def test_may_reinitialize_input_batch_expands_prefix_mamba_block_table(self):
         runner = object.__new__(NPUModelRunner310)
