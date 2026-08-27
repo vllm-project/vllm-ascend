@@ -61,6 +61,11 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
+# Install _rust_tool_parser for the Rust frontend.
+RUN cd /vllm-workspace/vllm && \
+    pip install setuptools-rust && \
+    ./build_rust.sh
+
 # Install vllm-ascend
 ARG SOC_VERSION="ascend310p1"
 ARG COMPILE_CUSTOM_KERNELS=1
