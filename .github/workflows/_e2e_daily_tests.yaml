@@ -59,7 +59,7 @@ on:
       timeout_minutes:
         required: false
         type: string
-        default: '360'
+        default: '3600'
         description: 'Per-job hard timeout. Default 60 min guards the 90 min daily budget.'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be
