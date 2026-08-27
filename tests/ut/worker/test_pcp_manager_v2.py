@@ -16,6 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -26,9 +27,15 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
+    AscendAutoRegressiveSpeculator,
+)
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -313,6 +320,17 @@ def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> Non
 
     expected = torch.tensor([[10, 11, 12, 13, -1, -1, -1, -1, 20, 21, 22, 23, -1, -1, -1, -1]])
     assert torch.equal(result, expected)
+
+
+def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
+    """Lock the keyword contracts added by vLLM #53694 and #53869."""
+    for speculator_cls in (
+        AscendAutoRegressiveSpeculator,
+        AscendDFlashSpeculator,
+        AscendDSparkSpeculator,
+    ):
+        assert "dp_sync" in signature(speculator_cls.propose).parameters
+    assert "pcp_manager" in signature(ModelAclGraphManager.capture).parameters
 
 
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
