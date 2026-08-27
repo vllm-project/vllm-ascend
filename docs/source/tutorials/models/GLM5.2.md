@@ -560,9 +560,8 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        # 每个 DP rank 使用独立的 KV 端口与 engine_id,避免端口冲突与 KV 路由混淆
-        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → KV 端口 30200-30203
-        KV_PORT=$((30200 + $4 % 4))
+        # 每个 DP rank 使用独立的 engine_id,避免 KV 路由混淆
+        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → engine_id 100-103
         ENGINE_ID=$((100 + $4))
 
         export HCCL_OP_EXPANSION_MODE="AIV"
@@ -619,7 +618,7 @@ Before you start, please
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
-            "kv_port": "'"$KV_PORT"'",
+            "kv_port": "30200",
             "engine_id": "'"$ENGINE_ID"'",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
@@ -635,9 +634,8 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        # 每个 DP rank 使用独立的 KV 端口与 engine_id,避免端口冲突与 KV 路由混淆
-        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → KV 端口 30200-30203
-        KV_PORT=$((30200 + $4 % 4))
+        # 每个 DP rank 使用独立的 engine_id,避免 KV 路由混淆
+        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → engine_id 100-103
         ENGINE_ID=$((100 + $4))
 
         export HCCL_OP_EXPANSION_MODE="AIV"
@@ -694,7 +692,7 @@ Before you start, please
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
-            "kv_port": "'"$KV_PORT"'",
+            "kv_port": "30200",
             "engine_id": "'"$ENGINE_ID"'",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
