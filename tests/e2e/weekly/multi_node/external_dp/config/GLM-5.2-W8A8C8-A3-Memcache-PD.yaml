@@ -61,6 +61,7 @@ config:
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
@@ -199,6 +200,28 @@ templates:
     server_cmd_template: *decode_server_cmd
 
 benchmarks:
+  perf_warmup:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 16
+    max_out_len: 1024
+    batch_size: 4
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in131072-bs500-prefix90-glm51
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 256
+    max_out_len: 1024
+    batch_size: 64
+    request_rate: 1.52
+    baseline: 0
+    threshold: 0.97
   acc:
     case_type: accuracy
     dataset_path: vllm-ascend/gsm8k-lite
