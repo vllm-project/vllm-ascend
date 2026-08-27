@@ -113,9 +113,9 @@ const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
     {WGATE_NAME,              {ge::DT_BF16, ge::DT_FLOAT16}},
     {STATE_CACHE_NAME,        {ge::DT_FLOAT}},
     {APE_NAME,                {ge::DT_FLOAT}},
-    {NORM_WEIGHT_NAME,        {ge::DT_BF16, ge::DT_FLOAT16}},
-    {ROPE_SIN_NAME,           {ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT}},
-    {ROPE_COS_NAME,           {ge::DT_BF16, ge::DT_FLOAT16, ge::DT_FLOAT}},
+    {NORM_WEIGHT_NAME,        {ge::DT_FLOAT}},
+    {ROPE_SIN_NAME,           {ge::DT_FLOAT}},
+    {ROPE_COS_NAME,           {ge::DT_FLOAT}},
     {STATE_BLOCK_TABLE_NAME,  {ge::DT_INT32}},
     {CU_SEQLENS_NAME,         {ge::DT_INT32}},
     {SEQUSED_NAME,            {ge::DT_INT32}},
@@ -132,7 +132,7 @@ const std::map<std::string, std::vector<uint32_t>> DIM_NUM_MAP = {
     {NORM_WEIGHT_NAME,        {COMPRESSOR_DIM_NUM_1}},
     {ROPE_SIN_NAME,           {COMPRESSOR_DIM_NUM_2, COMPRESSOR_DIM_NUM_3}},
     {ROPE_COS_NAME,           {COMPRESSOR_DIM_NUM_2, COMPRESSOR_DIM_NUM_3}},
-    {STATE_BLOCK_TABLE_NAME,  {COMPRESSOR_DIM_NUM_2, COMPRESSOR_DIM_NUM_1}},
+    {STATE_BLOCK_TABLE_NAME,  {COMPRESSOR_DIM_NUM_2}},
     {CU_SEQLENS_NAME,         {COMPRESSOR_DIM_NUM_1}},
     {SEQUSED_NAME,            {COMPRESSOR_DIM_NUM_1}},
     {START_POS_NAME,          {COMPRESSOR_DIM_NUM_1}},
@@ -203,7 +203,7 @@ enum class LayoutType {
 enum class TemplateId:uint8_t {
     NORMAL = 0,
     EMPTY_X = 1,
-    PERF = 2
+    FULL_LOAD = 2
 };
 
 CMP_EXTERN_C ge::graphStatus TilingCompressor(gert::TilingContext *context);
@@ -345,7 +345,6 @@ private:
     ge::graphStatus CheckShapeConsistency() const;
     ge::graphStatus CheckShapeConsistencyRope() const;
     ge::graphStatus CheckDtypeConsistencyX(const gert::CompileTimeTensorDesc *desc, const std::string &name) const;
-    ge::graphStatus CheckDtypeConsistencyRope() const;
     ge::graphStatus CheckDtypeConsistency() const;
     ge::graphStatus CheckMultiParaConsistency() const;
     ge::graphStatus CheckDimNumConsistency() const;
