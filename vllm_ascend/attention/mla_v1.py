@@ -44,10 +44,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.ops.rotary_embedding import (
-    get_cos_and_sin_mla,
-    get_identity_cos_and_sin_mla,
-)
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -271,9 +268,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         static_forward_context = vllm_config.compilation_config.static_forward_context
-        layer_rope_modes = {static_forward_context[layer_name].impl.use_mla_rope for layer_name in layer_names}
-        assert len(layer_rope_modes) <= 1, "MLA layers with and without RoPE must use separate KV cache groups."
-        self.use_mla_rope = layer_rope_modes.pop() if layer_rope_modes else True
+        # MLA layers are grouped by RoPE mode before metadata builders are created.
+        self.use_mla_rope = static_forward_context[layer_names[0]].impl.use_mla_rope if layer_names else True
         self.cos_cache = None
         self.sin_cache = None
 
@@ -568,8 +564,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         prefill_query_start_loc = query_start_loc[reqs_start:] - query_start_loc[reqs_start]
 
         prefill_input_positions = input_positions[tokens_start:]
-        cos_sin_getter = get_cos_and_sin_mla if self.use_mla_rope else get_identity_cos_and_sin_mla
-        cos, sin = cos_sin_getter(prefill_input_positions)
+        if self.use_mla_rope:
+            cos, sin = get_cos_and_sin_mla(prefill_input_positions)
+        else:
+            cos = sin = None
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
         actual_seq_lengths_q = torch.cumsum(prefill_query_lens, dim=0).tolist()
         return AscendMLAPrefillMetadata(
@@ -653,8 +651,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
                 )
 
-        cos_sin_getter = get_cos_and_sin_mla if self.use_mla_rope else get_identity_cos_and_sin_mla
-        cos, sin = cos_sin_getter(input_positions, use_cache=True)
+        if self.use_mla_rope:
+            cos, sin = get_cos_and_sin_mla(input_positions, use_cache=True)
+            cos = cos[: self.num_decode_tokens, ...]
+            sin = sin[: self.num_decode_tokens, ...]
+        else:
+            cos = sin = None
         decode_metadata = self.decode_metadata_cls(
             input_positions=input_positions,
             block_table=self.block_table,
@@ -663,8 +665,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             max_seq_lens=max_seq_lens,
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             actual_seq_lengths_q=actual_seq_lengths_q,
-            sin=sin[: self.num_decode_tokens, ...],
-            cos=cos[: self.num_decode_tokens, ...],
+            sin=sin,
+            cos=cos,
         )
         return decode_metadata
 
