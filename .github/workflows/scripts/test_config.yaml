@@ -187,6 +187,14 @@
     - vllm_ascend/compilation/passes/noop_elimination.py
   tests: []
 
+# Common
+- name: common
+  optional: false
+  source_file_dependencies:
+    - vllm_ascend/common
+  tests:
+    - tests/ut/common
+
 # Core
 - name: core
   optional: false
