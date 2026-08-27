@@ -209,7 +209,7 @@ def load_val_label(path):
     return gt
 
 llm = LLM(
-    model="google/siglip2-so400m-patch14-384",
+    model="google/siglip2-base-patch16-224",
     runner="pooling",
     limit_mm_per_prompt={"image": 1},
     max_model_len=64,
@@ -246,7 +246,7 @@ Reference Top-1 on ImageNet val (approximate):
 
 | Model | Top-1 |
 |-------|-------|
-| `siglip2-so400m-patch14-384` | ~69% |
+| `siglip2-base-patch16-224` | ~69% |
 
 ## 8 Performance Evaluation
 
