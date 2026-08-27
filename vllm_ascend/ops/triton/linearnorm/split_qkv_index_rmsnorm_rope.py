@@ -93,8 +93,8 @@ def split_qkv_index_rmsnorm_rope_kernel(
     k_bias_ptr,  # main K optional bias (unused when BIAS=False)
     index_q_weight_ptr,  # indexer Q Gemma RMSNorm weight (1+w)
     index_k_weight_ptr,  # indexer K Gemma RMSNorm weight (1+w)
-    positions_gm_ptr,  # token positions, used to index cos_sin_cache
-    cos_sin_cache_gm_ptr,  # RoPE cache [max_pos, ROPE_DIM] = concat(cos, sin)
+    cos_gm_ptr,  # pre-gathered cos [batch, max(ATTN_HALF, IDX_HALF)]
+    sin_gm_ptr,  # pre-gathered sin [batch, max(ATTN_HALF, IDX_HALF)]
     batch_size,  # number of tokens
     q_hidden_size: tl.constexpr,  # q_size = q_head_num * HEAD_DIM
     kv_hidden_size: tl.constexpr,  # kv_size = kv_head_num * HEAD_DIM
@@ -150,21 +150,16 @@ def split_qkv_index_rmsnorm_rope_kernel(
     mblk_idx = tl.arange(0, batch_size_per_iter_per_vec) + input_batch_offset
     nblk_idx = tl.arange(0, q_hidden_size + kv_hidden_size)
     nmask = nblk_idx < total_hidden_size
-    pos_indices = input_batch_offset + tl.arange(0, batch_size_per_iter_per_vec)
+    # pos_indices removed (cos/sin pre-gathered)
     output_q_nblk_idx = tl.arange(0, q_hidden_size)
     output_q_nmask = output_q_nblk_idx < q_hidden_size
     output_kv_nblk_idx = tl.arange(0, kv_hidden_size)
     output_kv_nmask = output_kv_nblk_idx < kv_hidden_size
-    sin_cos_range = tl.arange(0, ROPE_DIM)
-    cos_sin_cache_offset = cos_sin_cache_gm_ptr + sin_cos_range
+    # cos/sin pre-gathered in Python, loaded by row offset in loop
     # Section 1: main QK: load [q|k] -> Gemma RMSNorm -> NeoX RoPE
     for iter in tl.range(iter_num_per_vec):
         pos_offset = iter * batch_size_per_iter_per_vec
         mmask = (mblk_idx + pos_offset) < input_batch_offset_end
-        x = tl.load(
-            positions_gm_ptr + pos_indices + pos_offset,
-            mask=(pos_indices + pos_offset) < input_batch_offset_end,
-        )
         mask = (mmask[:, None]) & (nmask[None, :])
         # T * hidden can exceed int32 at 64x16k; use int64 for GM offsets
         row64 = (mblk_idx + pos_offset).to(tl.int64)
@@ -173,35 +168,14 @@ def split_qkv_index_rmsnorm_rope_kernel(
             qk_head_nums_per_iter_per_vec, HEAD_DIM
         )
 
-        cache_rows = tl.zeros(
-            (batch_size_per_iter_per_vec, ROPE_DIM), dtype=tl.float32
-        )
-        # Gather cos/sin rows by token position (scalar indexing, cannot vector load)
-        for i in tl.range(batch_size_per_iter_per_vec):
-            pos = get_element(x, (i,))
-            cache_rows = insert_slice(
-                cache_rows,
-                tl.load(pos * ROPE_DIM + cos_sin_cache_offset[:, None])
-                .reshape(1, ROPE_DIM)
-                .to(tl.float32),
-                offsets=(i, 0),
-                sizes=(1, ROPE_DIM),
-                strides=(1, 1),
-            )
-        cache_rows = cache_rows.reshape(batch_size_per_iter_per_vec, 1, ROPE_DIM)
-        # cache=concat(cos,sin); partial RoPE only takes first ATTN_HALF
-        cos = extract_slice(
-            cache_rows,
-            offsets=(0, 0, 0),
-            sizes=(batch_size_per_iter_per_vec, 1, ATTN_HALF),
-            strides=(1, 1, 1),
-        )
-        sin = extract_slice(
-            cache_rows,
-            offsets=(0, 0, HALF_CACHE),
-            sizes=(batch_size_per_iter_per_vec, 1, ATTN_HALF),
-            strides=(1, 1, 1),
-        )
+        # Load pre-gathered cos/sin (deterministic, no get_element loop)
+        cos_qk_range = tl.arange(0, ATTN_HALF)
+        cos = tl.load(cos_gm_ptr + row64[:, None] * ATTN_HALF + cos_qk_range[None, :],
+                      mask=mmask[:, None]).to(tl.float32)
+        sin = tl.load(sin_gm_ptr + row64[:, None] * ATTN_HALF + cos_qk_range[None, :],
+                      mask=mmask[:, None]).to(tl.float32)
+        cos = cos.reshape(batch_size_per_iter_per_vec, 1, ATTN_HALF)
+        sin = sin.reshape(batch_size_per_iter_per_vec, 1, ATTN_HALF)
 
         # Gemma RMSNorm: reduce over HEAD_DIM, Q/K heads computed together for rstd
         x32 = values_tmp1.to(tl.float32)
@@ -341,7 +315,7 @@ def split_qkv_index_rmsnorm_rope_kernel(
     idx_mblk = tl.arange(0, idx_batch_size_per_iter_per_vec) + input_batch_offset
     idx_nblk = index_offset + tl.arange(0, index_qk_hidden)
     idx_nmask = idx_nblk < total_hidden_size
-    idx_pos = input_batch_offset + tl.arange(0, idx_batch_size_per_iter_per_vec)
+    # idx_pos removed (cos/sin pre-gathered)
     out_iq_nblk = tl.arange(0, index_q_size)
     out_iq_nmask = out_iq_nblk < index_q_size
     out_ik_nblk = tl.arange(0, IDX_HEAD_DIM)
@@ -351,10 +325,6 @@ def split_qkv_index_rmsnorm_rope_kernel(
     for iter in tl.range(idx_iter_num_per_vec):
         pos_offset = iter * idx_batch_size_per_iter_per_vec
         mmask = (idx_mblk + pos_offset) < input_batch_offset_end
-        x = tl.load(
-            positions_gm_ptr + idx_pos + pos_offset,
-            mask=(idx_pos + pos_offset) < input_batch_offset_end,
-        )
         mask = (mmask[:, None]) & (idx_nmask[None, :])
         row64 = (idx_mblk + pos_offset).to(tl.int64)
         idx = row64[:, None] * total_hidden_size + idx_nblk[None, :]
@@ -362,35 +332,14 @@ def split_qkv_index_rmsnorm_rope_kernel(
             idx_qk_heads_per_iter, IDX_HEAD_DIM
         )
 
-        cache_rows = tl.zeros(
-            (idx_batch_size_per_iter_per_vec, ROPE_DIM), dtype=tl.float32
-        )
-        # same as main: gather cache rows by position
-        for i in tl.range(idx_batch_size_per_iter_per_vec):
-            pos = get_element(x, (i,))
-            cache_rows = insert_slice(
-                cache_rows,
-                tl.load(pos * ROPE_DIM + cos_sin_cache_offset[:, None])
-                .reshape(1, ROPE_DIM)
-                .to(tl.float32),
-                offsets=(i, 0),
-                sizes=(1, ROPE_DIM),
-                strides=(1, 1),
-            )
-        cache_rows = cache_rows.reshape(idx_batch_size_per_iter_per_vec, 1, ROPE_DIM)
-        # indexer partial RoPE half width = idx_rope_dim/2; sin starts at HALF_CACHE
-        cos = extract_slice(
-            cache_rows,
-            offsets=(0, 0, 0),
-            sizes=(idx_batch_size_per_iter_per_vec, 1, IDX_HALF),
-            strides=(1, 1, 1),
-        )
-        sin = extract_slice(
-            cache_rows,
-            offsets=(0, 0, HALF_CACHE),
-            sizes=(idx_batch_size_per_iter_per_vec, 1, IDX_HALF),
-            strides=(1, 1, 1),
-        )
+        # Load pre-gathered cos/sin for indexer (deterministic)
+        cos_idx_range = tl.arange(0, IDX_HALF)
+        cos = tl.load(cos_gm_ptr + row64[:, None] * IDX_HALF + cos_idx_range[None, :],
+                      mask=mmask[:, None]).to(tl.float32)
+        sin = tl.load(sin_gm_ptr + row64[:, None] * IDX_HALF + cos_idx_range[None, :],
+                      mask=mmask[:, None]).to(tl.float32)
+        cos = cos.reshape(idx_batch_size_per_iter_per_vec, 1, IDX_HALF)
+        sin = sin.reshape(idx_batch_size_per_iter_per_vec, 1, IDX_HALF)
 
         # Gemma RMSNorm: index_q multi-head + index_k single head computed together, reduce by IDX_HEAD_DIM
         x32 = values_idx.to(tl.float32)
@@ -530,6 +479,15 @@ def split_qkv_index_rmsnorm_rope_impl(
     index_k_weight = index_k_weight.contiguous()
     cos_sin_cache = cos_sin_cache.contiguous()
 
+    # Pre-gather cos/sin in Python (deterministic, avoids get_element loop in kernel)
+    cos_sin_gathered = cos_sin_cache[positions]  # [batch, cache_dim]
+    attn_half = attn_rope_dim // 2
+    idx_half = idx_rope_dim // 2
+    # Use the larger half for both cos and sin tensors
+    max_half = max(attn_half, idx_half)
+    cos_gathered = cos_sin_gathered[:, :max_half].contiguous()   # [batch, max_half]
+    sin_gathered = cos_sin_gathered[:, cache_dim // 2: cache_dim // 2 + max_half].contiguous()
+
     num_vectorcore = get_vectorcore_num()
     batch_size = input.shape[0]
     cache_dim = int(cos_sin_cache.shape[-1])
@@ -584,8 +542,8 @@ def split_qkv_index_rmsnorm_rope_impl(
         k_bias,
         index_q_weight,
         index_k_weight,
-        positions,
-        cos_sin_cache,
+        cos_gathered,
+        sin_gathered,
         batch_size,
         q_hidden_size,
         kv_hidden_size,
