@@ -388,6 +388,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             return
         if attn_metadata is not None:
             for attn_meta in attn_metadata.values():
+                # Hybrid models mix full-attention layers with linear-attention
+                # ones (e.g. GDN), whose metadata tracks recurrent state via
+                # indices and has no seq_lens to bump.
+                if not hasattr(attn_meta, "seq_lens"):
+                    continue
                 attn_meta.seq_lens = attn_meta.seq_lens + 1
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
 
