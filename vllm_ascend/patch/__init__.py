@@ -106,7 +106,27 @@
 #       engine-core plugin interfaces, or equivalent dynamic intra-decoder DP
 #       load balancing that vllm-ascend can use without monkey-patching.
 #
-# ** 6. File: platform/patch_eplb.py**
+# ** 6. File: platform/patch_engine_watchdog.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
+#      `vllm.v1.engine.core.DPEngineCoreProc._has_global_unfinished_reqs`
+#    Why:
+#       Engine processes may hang or stall without visibility into the cause.
+#       Upstream vLLM provides no built-in mechanism to detect or report
+#       prolonged step execution delays across DP ranks.
+#    How:
+#       When engine_watchdog is enabled, replace the DP engine-core process with
+#       a WatchdogDPEngineCoreProc that tracks step execution timing via the
+#       busy loop's ``_has_global_unfinished_reqs`` hook. Slow steps exceeding
+#       ``warning_threshold_seconds`` trigger warnings; steps exceeding
+#       ``max_step_time_seconds`` trigger error logs indicating potential hangs.
+#    Related PR (if no, explain why):
+#       No, vllm-ascend-specific engine health monitoring.
+#    Future Plan:
+#       Remove this patch once upstream vLLM provides a built-in engine
+#       watchdog / health monitoring mechanism.
+#
+# ** 7. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.current_platform`
 #   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`

@@ -17,8 +17,8 @@ What is guarded here (everything reachable from CPU UT):
 * upstream ``run_engine_core`` still instantiates ``DPEngineCoreProc`` by
   module-global name -- the whole reason we can swap the module-level symbol
   instead of copying ``run_engine_core``;
-* the module-level class swaps and the DyntraLB -> balance wrapper chain
-  actually took effect;
+* the module-level class swaps and the watchdog -> DyntraLB -> balance
+  wrapper chain actually took effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
 * the 3 balance deltas remain present in ``schedule()`` (intent lock);
@@ -77,6 +77,7 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 #   vllm.v1.engine.core.DPEngineCoreProc = BalanceDPEngineCoreProc       (DEFERRED:
 #       swapped inside _balance_run_engine_core only when balance is enabled)
 from vllm_ascend.patch.platform import patch_dyntra_lb_core as _dyntra_patch  # noqa: E402
+from vllm_ascend.patch.platform import patch_engine_watchdog as _watchdog_patch  # noqa: E402
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
     _balance_run_engine_core,
@@ -445,12 +446,13 @@ def test_upstream_run_engine_core_instantiates_dp_proc_by_name():
 
 def test_module_level_swaps_and_wrapper_chain_take_effect():
     """The balance patch rebinds ``Scheduler`` eagerly and installs its
-    ``run_engine_core`` wrapper, while the subsequently loaded DyntraLB patch
-    becomes the outer wrapper. DyntraLB delegates to the balance wrapper when
-    disabled; the two features are rejected by configuration validation when
-    both are enabled. The ``DPEngineCoreProc`` swap remains deferred until the
-    selected wrapper runs, so at import time the engine-core class must still
-    be the pristine upstream one.
+    ``run_engine_core`` wrapper, the subsequently loaded DyntraLB patch wraps
+    on top of it, and the engine watchdog patch (loaded last) becomes the
+    outer wrapper. DyntraLB delegates to the balance wrapper when disabled;
+    the two features are rejected by configuration validation when both are
+    enabled. The ``DPEngineCoreProc`` swap remains deferred until the selected
+    wrapper runs, so at import time the engine-core class must still be the
+    pristine upstream one.
     (``Scheduler`` propagating into ``vllm.v1.engine.core.Scheduler``
     additionally depends on the platform patch loading before engine.core is
     imported -- that ordering is enforced by the platform patch system and is
@@ -465,8 +467,11 @@ def test_module_level_swaps_and_wrapper_chain_take_effect():
         "patch swapped vllm.v1.engine.core.DPEngineCoreProc at import time; "
         "the swap must be deferred to run_engine_core entry (conditional)."
     )
-    assert _UpstreamEngineCoreProc.run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
-        "DyntraLB must be the outer EngineCoreProc.run_engine_core wrapper"
+    assert _UpstreamEngineCoreProc.run_engine_core is _watchdog_patch._patched_run_engine_core, (
+        "watchdog must be the outer EngineCoreProc.run_engine_core wrapper"
+    )
+    assert _watchdog_patch._original_run_engine_core is _dyntra_patch._dyntra_lb_run_engine_core, (
+        "watchdog must delegate to the DyntraLB wrapper"
     )
     assert _dyntra_patch._PreviousRunEngineCore is _balance_run_engine_core, (
         "DyntraLB must delegate to the balance wrapper when DyntraLB is disabled"
