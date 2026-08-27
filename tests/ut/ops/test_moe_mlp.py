@@ -121,13 +121,15 @@ class TestSwigluOaiDynamicMxQuant(unittest.TestCase):
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
     def test_unquant_situ_matches_upstream_without_config_context(self):
         for dtype in (torch.bfloat16, torch.float16, torch.float32):
-            for linear_beta in (None, 25.0):
-                with self.subTest(dtype=dtype, linear_beta=linear_beta):
+            for beta, linear_beta in ((None, None), (None, 25.0), (4.0, None), (4.0, 25.0)):
+                with self.subTest(dtype=dtype, beta=beta, linear_beta=linear_beta):
                     hidden_states = torch.randn(2, 8, dtype=dtype)
                     gate_up_out = torch.linspace(-40, 40, 32).reshape(2, 16).to(dtype)
                     expected_output = torch.randn(2, 8, dtype=dtype)
                     with set_current_vllm_config(VllmConfig()):
-                        expected_activation = SituAndMul(beta=4.0, linear_beta=linear_beta).forward_native(gate_up_out)
+                        expected_activation = SituAndMul(
+                            beta=1.0 if beta is None else beta, linear_beta=linear_beta
+                        ).forward_native(gate_up_out)
 
                     # The worker forward runs outside the model-init config context.
                     with patch(
@@ -141,7 +143,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                             w2=torch.randn(1, 8, 8),
                             group_list=torch.tensor([1, 1]),
                             activation=MoEActivation.SITU,
-                            activation_situ_beta=4.0,
+                            activation_situ_beta=beta,
                             activation_situ_linear_beta=linear_beta,
                             need_trans=False,
                         )
