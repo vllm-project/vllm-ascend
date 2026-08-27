@@ -64,8 +64,10 @@ class _GDNForwardWrapper(nn.Module):
         self.norm = _Norm()
         self.out_proj = _OutputProjection()
         self.conv1d = nn.Conv1d(1, 2, kernel_size=2)
+        self.num_k_heads = 1
         self.num_v_heads = 1
         self.tp_size = 1
+        self.head_k_dim = 1
         self.head_v_dim = 2
         self.activation = None
         self.register_buffer("A_log", torch.zeros(1))
@@ -121,6 +123,9 @@ def _make_prefill_metadata(device: torch.device | str = "cpu") -> GDNAttentionMe
             query_start_loc=torch.tensor([0, 2], dtype=torch.int32, device=device),
             cache_indices=torch.tensor([0], dtype=torch.int32, device=device),
             initial_state_mode=torch.tensor([1], dtype=torch.int32, device=device),
+            query_start_loc_host=(0, 2),
+            cache_indices_host=(0,),
+            initial_state_mode_host=(1,),
         ),
         chunk=Mock(),
     )
@@ -152,10 +157,10 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
 
     connector.save_kv_layer.side_effect = record_ready_state
 
-    def causal_conv1d(output_tensor, mixed_qkv, conv_weights, **kwargs):
-        del conv_weights, kwargs
-        output_tensor.copy_(mixed_qkv)
+    def causal_conv1d(x, weight, **kwargs):
+        del weight, kwargs
         model.kv_cache[0].add_(1)
+        return x
 
     def chunk_attention(**kwargs):
         initial_state = kwargs["initial_state"]
@@ -174,12 +179,7 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
         patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
-        patch.object(
-            torch.ops._C_ascend,
-            "npu_causal_conv1d_custom",
-            side_effect=causal_conv1d,
-            create=True,
-        ),
+        patch("vllm_ascend.ops.gdn.fla_npu_ascendc.causal_conv1d", causal_conv1d),
         patch("vllm_ascend.attention.utils.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),

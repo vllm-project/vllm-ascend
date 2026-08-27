@@ -263,6 +263,10 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
 
+    # CPU mirror of block_table_tensor. GDN uses this to build Host int[]
+    # metadata for FLA-NPU causal conv without synchronizing the NPU tensor.
+    block_table_tensor_cpu: torch.Tensor = None
+
     # Number of decode tokens per request, used for speculative decoding.
     # E.g., 1 for normal decoding, >1 for speculative decoding.
     decode_token_per_req: int = 1
@@ -316,6 +320,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # there will be error about shape mismatch during reshape and cache.
             # This is really strange since vLLM slices them as well
             block_table_tensor=self.block_table_tensor,
+            block_table_tensor_cpu=_slice_reqs(self.block_table_tensor_cpu),
             slot_mapping=self.slot_mapping,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
