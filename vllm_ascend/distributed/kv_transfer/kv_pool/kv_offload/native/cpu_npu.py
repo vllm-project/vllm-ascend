@@ -18,12 +18,11 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
+    OffloadingWorker,
     TransferResult,
 )
-from vllm.v1.kv_offload.cpu.gpu_worker import (
-    CPUOffloadingWorker,
-    compute_sub_block_ptrs,
-)
+from vllm.v1.kv_offload.cpu.gpu_worker import compute_sub_block_ptrs
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 # Direction codes shared with csrc/torch_binding.cpp::swap_blocks_batch.
 DIRECTION_H2D = 0
@@ -74,10 +73,10 @@ class SingleDirectionNPUOffloadingHandler:
             assert cpu_tensor.dtype == torch.int8
             assert cpu_tensor.ndim == 2
             assert cpu_tensor.device.type == "cpu"
-            assert cpu_tensor.shape[1] == (npu_tensor.shape[1] * blocks_per_chunk)
+            assert cpu_tensor.shape[1] == npu_tensor.shape[1] * blocks_per_chunk
 
-        # Keep independent lists in each handler so one direction can be shut
-        # down without releasing tensors still referenced by the other.
+        # Each direction owns its list containers. Clearing one handler during
+        # shutdown must not release tensors still used by the other direction.
         self.src_tensors = list(npu_tensors if npu_to_cpu else cpu_tensors)
         self.dst_tensors = list(cpu_tensors if npu_to_cpu else npu_tensors)
         self.npu_to_cpu = npu_to_cpu
@@ -189,8 +188,8 @@ class SingleDirectionNPUOffloadingHandler:
         end_event = self._event_pool.pop() if self._event_pool else torch.npu.Event(enable_timing=True)
 
         if self.npu_to_cpu:
-            # KV writes happen on the model stream. D2H must not read a block
-            # until those writes are complete.
+            # KV writes happen on the model stream. D2H must not observe a
+            # partially written block.
             stream.wait_stream(torch.npu.current_stream())
         if self._transfers:
             stream.wait_event(self._transfers[-1].end_event)
@@ -254,17 +253,16 @@ class SingleDirectionNPUOffloadingHandler:
 
     def shutdown(self) -> None:
         while self._transfers:
-            transfer = self._transfers.popleft()
-            transfer.end_event.synchronize()
+            self._transfers.popleft().end_event.synchronize()
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
-        self.src_tensors.clear()
-        self.dst_tensors.clear()
+        self.src_tensors = []
+        self.dst_tensors = []
 
 
-class NPUOffloadingWorker(CPUOffloadingWorker):
+class NPUOffloadingWorker(OffloadingWorker):
     """Native CPU offloading worker backed by Ascend batched DMA."""
 
     def __init__(
@@ -272,57 +270,112 @@ class NPUOffloadingWorker(CPUOffloadingWorker):
         kv_caches: CanonicalKVCaches,
         blocks_per_chunk: int,
         num_cpu_blocks: int,
+        mmap_region: SharedOffloadRegion | None = None,
     ) -> None:
+        self._mmap_region = mmap_region
         pin_memory = is_pin_memory_available()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
 
         npu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
-        for kv_cache_tensor in kv_caches.tensors:
-            npu_page_size_bytes = kv_cache_tensor.page_size_bytes
-            npu_tensor = kv_cache_tensor.tensor
-            if npu_tensor.dtype != torch.int8 or npu_tensor.ndim != 2:
-                raise ValueError(
-                    "Canonical NPU KV cache tensors must be two-dimensional "
-                    f"int8 views, got shape={tuple(npu_tensor.shape)}, "
-                    f"dtype={npu_tensor.dtype}"
-                )
-            if npu_tensor.shape[1] != npu_page_size_bytes:
-                raise ValueError(
-                    "Canonical NPU KV cache page size mismatch: "
-                    f"shape[1]={npu_tensor.shape[1]}, "
-                    f"page_size_bytes={npu_page_size_bytes}"
-                )
-            cpu_page_size_bytes = npu_page_size_bytes * blocks_per_chunk
+        try:
+            for kv_cache_tensor in kv_caches.tensors:
+                npu_page_size_bytes = kv_cache_tensor.page_size_bytes
+                npu_tensor = kv_cache_tensor.tensor
+                if npu_tensor.dtype != torch.int8 or npu_tensor.ndim != 2:
+                    raise ValueError(
+                        "Canonical NPU KV cache tensors must be two-dimensional "
+                        f"int8 views, got shape={tuple(npu_tensor.shape)}, "
+                        f"dtype={npu_tensor.dtype}"
+                    )
+                if npu_tensor.shape[1] != npu_page_size_bytes:
+                    raise ValueError(
+                        "Canonical NPU KV cache page size mismatch: "
+                        f"shape[1]={npu_tensor.shape[1]}, "
+                        f"page_size_bytes={npu_page_size_bytes}"
+                    )
+                cpu_page_size_bytes = npu_page_size_bytes * blocks_per_chunk
 
-            start_time = time.monotonic()
-            cpu_tensor = torch.zeros(
-                (num_cpu_blocks, cpu_page_size_bytes),
-                dtype=torch.int8,
-                device="cpu",
-                pin_memory=pin_memory,
-            )
-            logger.debug(
-                "Allocated pinned CPU tensor %d x %d (%.2f GB): %.3f s",
-                num_cpu_blocks,
-                cpu_page_size_bytes,
-                num_cpu_blocks * cpu_page_size_bytes / 1e9,
-                time.monotonic() - start_time,
-            )
-            npu_tensors.append(npu_tensor)
-            cpu_tensors.append(cpu_tensor)
+                if mmap_region is not None:
+                    cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
+                else:
+                    start_time = time.monotonic()
+                    cpu_tensor = torch.zeros(
+                        (num_cpu_blocks, cpu_page_size_bytes),
+                        dtype=torch.int8,
+                        device="cpu",
+                        pin_memory=pin_memory,
+                    )
+                    logger.debug(
+                        "Allocated pinned CPU tensor %d x %d (%.2f GB): %.3f s",
+                        num_cpu_blocks,
+                        cpu_page_size_bytes,
+                        num_cpu_blocks * cpu_page_size_bytes / 1e9,
+                        time.monotonic() - start_time,
+                    )
 
-        self._store_handler = SingleDirectionNPUOffloadingHandler(
-            npu_tensors=npu_tensors,
-            cpu_tensors=cpu_tensors,
-            blocks_per_chunk=blocks_per_chunk,
-            kv_cache_groups_data_refs=kv_caches.group_data_refs,
-            npu_to_cpu=True,
-        )
-        self._load_handler = SingleDirectionNPUOffloadingHandler(
-            npu_tensors=npu_tensors,
-            cpu_tensors=cpu_tensors,
-            blocks_per_chunk=blocks_per_chunk,
-            kv_cache_groups_data_refs=kv_caches.group_data_refs,
-            npu_to_cpu=False,
-        )
+                npu_tensors.append(npu_tensor)
+                cpu_tensors.append(cpu_tensor)
+
+            self._store_handler = SingleDirectionNPUOffloadingHandler(
+                npu_tensors=npu_tensors,
+                cpu_tensors=cpu_tensors,
+                blocks_per_chunk=blocks_per_chunk,
+                kv_cache_groups_data_refs=kv_caches.group_data_refs,
+                npu_to_cpu=True,
+            )
+            self._load_handler = SingleDirectionNPUOffloadingHandler(
+                npu_tensors=npu_tensors,
+                cpu_tensors=cpu_tensors,
+                blocks_per_chunk=blocks_per_chunk,
+                kv_cache_groups_data_refs=kv_caches.group_data_refs,
+                npu_to_cpu=False,
+            )
+        except Exception:
+            # Construction failed before worker ownership became visible to
+            # the connector. Drop any handler-owned tensor views before
+            # closing the mapping, otherwise mmap.close() can fail with an
+            # exported-buffer error and leave a stale shm file behind.
+            for handler_name in ("_store_handler", "_load_handler"):
+                handler = getattr(self, handler_name, None)
+                if handler is not None:
+                    handler.shutdown()
+            if mmap_region is not None:
+                mmap_region.cleanup()
+                self._mmap_region = None
+            raise
+
+    def submit_store(
+        self,
+        job_id: int,
+        src_spec: GPULoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+    ) -> bool:
+        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
+
+    def submit_load(
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+    ) -> bool:
+        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+
+    def get_finished(self) -> list[TransferResult]:
+        return self._store_handler.get_finished() + self._load_handler.get_finished()
+
+    def wait(self, job_ids: set[int]) -> None:
+        self._store_handler.wait(job_ids)
+        self._load_handler.wait(job_ids)
+
+    def shutdown(self) -> None:
+        try:
+            self._store_handler.shutdown()
+        finally:
+            try:
+                self._load_handler.shutdown()
+            finally:
+                # Drop all mmap-backed tensor views before closing the mapping.
+                if self._mmap_region is not None:
+                    self._mmap_region.cleanup()
+                    self._mmap_region = None
