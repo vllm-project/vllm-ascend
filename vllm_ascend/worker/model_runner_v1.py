@@ -817,6 +817,63 @@ class NPUModelRunner(GPUModelRunner):
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
         return super()._update_states(scheduler_output)
 
+    def _update_states_after_model_execute(
+        self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        if not self.use_async_scheduling:
+            return super()._update_states_after_model_execute(output_token_ids, scheduler_output)
+        if not self.speculative_config or not self.model_config.is_hybrid:
+            return
+
+        # InputBatch can be condensed/reordered before the next input preparation.
+        # Keep the asynchronous D2H result in the previous iteration's row order,
+        # independently of InputBatch, until the existing event is synchronized.
+        num_reqs = output_token_ids.size(0)
+        self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
+        if self.cache_config.mamba_cache_mode == "align":
+            mamba_utils.postprocess_mamba_align_gpu(
+                bufs=self._get_mamba_bufs(),
+                num_reqs=num_reqs,
+                num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
+                num_accepted_tokens_cpu_tensor=self.num_accepted_tokens.cpu,
+                input_batch=self.input_batch,
+                kv_cache_config=self.kv_cache_config,
+                forward_context=self.compilation_config.static_forward_context,
+                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+            )
+        else:
+            self.num_accepted_tokens.copy_to_cpu(num_reqs)
+            if self.cache_config.mamba_cache_mode == "all":
+                mamba_utils.postprocess_mamba_all(
+                    scheduler_output,
+                    self.kv_cache_config,
+                    self.input_batch,
+                    self.requests,
+                    self.mamba_state_idx,
+                    self.num_spec_tokens,
+                    num_reqs,
+                )
+        assert self.num_accepted_tokens_event is not None
+        self.num_accepted_tokens_event.record()
+
+    def _sync_num_accepted_tokens(self, num_reqs: int, has_prev_mapping: bool) -> None:
+        """Publish accepted counts in current request order after the D2H event."""
+        accepted = self.num_accepted_tokens.np
+        if not self.use_async_scheduling:
+            # Synchronous scheduling already updates counts in current batch order.
+            accepted[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            return
+
+        if has_prev_mapping:
+            prev_idx = self.prev_positions.np[:num_reqs]
+            new_mask = prev_idx < 0
+            # Advanced indexing reads the snapshot before overwriting its rows.
+            accepted[:num_reqs] = accepted[np.where(new_mask, 0, prev_idx)]
+            accepted[:num_reqs][new_mask] = 1
+        else:
+            accepted[:num_reqs].fill(1)
+        self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
+
     def _pad_query_start_loc_for_fia(
         self,
         query_start_loc: torch.Tensor,
@@ -1088,24 +1145,7 @@ class NPUModelRunner(GPUModelRunner):
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            # Async mode: condense() reordered indices, use prev_positions mapping
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[
-                        np.where(new_mask, 0, prev_idx)
-                    ]
-                )
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
-                    self.num_accepted_tokens.np[:num_reqs]
-                )
-            else:
-                # Non-async mode: use values directly
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                )
+            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
@@ -1988,10 +2028,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
-                # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
-                # there should be a corresponding 'postprocess_mamba'. However, it is called inside
-                # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
-                # We simply utilize the implementation in vLLM.
+                # postprocess_mamba runs later in _update_states_after_model_execute.
                 if self.cache_config.mamba_cache_mode == "align":
                     # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                     # to decide copy operations, so we must apply deferred
