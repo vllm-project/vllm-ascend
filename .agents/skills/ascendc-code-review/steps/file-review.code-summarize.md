@@ -1,0 +1,442 @@
+# 代码概要 + 侧别识别（文件检视）
+
+## 派发
+
+派发子 Agent 执行代码概要生成。`subagent_type` 按优先级选择：
+
+1. `"ascendc-code-summarizer"` — 首选
+2. `"general"` — 兜底，传入相同 prompt
+
+```
+Agent({
+  subagent_type: "ascendc-code-summarizer 或 general",
+  description: "代码概要：梳理代码脉络",
+  prompt: "代码概要生成（文件检视模式）
+
+【输入】
+- 代码文件：{file_input}
+- 概要输出路径：{code_summary_output_path}
+
+【执行要求】
+1. 严格按本文件「子 Agent 执行指南」中定义的 8 步流程执行
+2. 概要写入输出路径，禁止跳过侧别识别
+3. 返回结构化结果（含侧别识别，供后续阶段使用）
+
+【执行指南位置】
+Read 本文件（steps/file-review.code-summarize.md）的「子 Agent 执行指南」章节获取完整指令。
+"
+})
+```
+
+---
+
+## 子 Agent 执行指南
+
+以下内容为子 Agent 的执行指令，主 Agent 不执行。
+
+### 核心原则
+
+1. **理解优先** — 先读懂代码整体设计，再按模板填空，禁止机械填表
+2. **证据驱动** — 每个结论必须有 Read/Grep 证据支撑，禁止推测
+3. **侧别必识别** — Kernel/Tiling 侧别判定是后续条例过滤的关键输入
+
+---
+
+## 关键知识
+
+### Tiling/Kernel 分层
+
+| 侧别 | 文件位置 | 代码特征 | 职责 |
+|------|---------|---------|------|
+| **Kernel 侧** | `op_kernel/*.cpp/.h` | `__aicore__`、`AscendC::`、`pipe.InitBuffer` | 在 AI Core 上执行计算，不做参数校验 |
+| **Tiling 侧** | `op_host/*.cpp/.h` | `gert::TilingContext`、`TilingData` | 参数校验、资源计算、多核切分 |
+
+### 变量来源判定
+
+| 来源 | 特征 | 校验状态 |
+|------|------|----------|
+| Tiling 传递 | `tilingData.GetXXX()` | 已校验，无需重复 |
+| 硬件配置 | `GetCoreNumAic()`、`GetCoreNumAiv()` 等平台 API | 硬件保证，构造阶段已校验 |
+| 常量定义 | `constexpr` / `const` | 编译期固定 |
+| 架构常量 | `FP32_*` / `UB_*` / `BLOCK_*` | 硬件固定 |
+
+### 代码关联追踪
+
+| 追踪方向 | 关键线索 | 方法 |
+|----------|----------|------|
+| **上游** | `#include` 语句 | 从 include 定位 TilingData 结构定义 |
+| **上游** | 函数调用者 | 从入口函数名 Grep 反推调用位置 |
+| **下游** | 函数调用 | 从 Compute/Process 等函数看调用链 |
+| **下游** | AscendC API | DataCopy/Reduce 等 API 定位计算模块 |
+
+---
+
+## 执行流程
+
+```
+Step 1: 读取代码     — Read 源码全部内容
+Step 2: 识别侧别     — 按 Tiling/Kernel 分层特征判定侧别
+Step 3: 梳理脉络     — 追踪入口 → 数据流 → 计算核心 → 输出（含分支覆盖）
+Step 3.5: 业务语义   — Kernel侧: 数学运算+计算模式+同步契约; Tiling侧: 切分策略+校验语义+Buffer规划
+Step 4: 追踪关联     — Read include 头文件 + Grep 跨文件调用链
+Step 5: 变量溯源     — 对类成员/全局变量 grep 声明→初始化→校验链
+Step 6: 分析设计     — Kernel侧：流水线模式/切分/Buffer管理（需量化）
+Step 7: 生成概要     — 按模板填充，写入输出路径
+Step 8: 返回结果     — 结构化返回侧别和脉络摘要
+```
+
+### Step 1: 读取代码
+
+用 Read 工具读取目标代码文件全部内容。Kernel 侧代码可能较大，需配合 Grep 定位关键函数。
+
+### Step 2: 识别侧别
+
+按关键知识中的侧别特征表判定，输出结论。**如有 TilingData 结构定义文件（`*_tiling_data.h`），也必须 Read**，确认字段名与代码中使用的一致性。
+
+### Step 3: 梳理脉络
+
+**代码脉络 = 入口 → 数据流 → 计算核心 → 输出**
+
+| 脉络节点 | 分析内容 | 验证方法 |
+|----------|----------|----------|
+| **入口** | 哪个函数是入口？被谁调用？触发条件是什么？ | Read + Grep 搜索函数名 |
+| **数据流** | 数据从哪来（GM/Tiling）→ 经哪处理 → 输出到哪 | Read include + TilingData 结构 |
+| **计算核心** | 主循环在哪？核心 API 是什么？关键变量如何流转 | Read 主循环代码，定位循环边界和 API 调用 |
+| **输出** | 结果写回哪里？同步机制是什么？ | Read 写回代码，确认 EnQue/DeQue |
+
+### Step 3.5: 业务语义分析
+
+基于 Step 3 已梳理的代码脉络，按侧别执行对应的业务语义分析。
+
+#### 3.5K: Kernel 侧业务语义（仅 Kernel/混合侧执行）
+
+**a. 算子数学运算推断**
+- 从函数名、变量名、API 调用模式推断数学公式（如 `Z = X + Y`、`Softmax = exp(x-max)/sum(exp(x-max))`）
+- 识别输入输出拓扑（几输入几输出、各 tensor 在业务中的语义角色）
+- 识别数学不变量（如 elementwise 算子输入输出 shape 一致、softmax 输出和为 1）
+
+**b. 计算模式识别**
+
+从以下 7 种已知模式中匹配（按优先级逐条 Grep，命中即停）：
+
+| # | 模式 | 识别信号 |
+|---|------|---------|
+| 1 | Simple Vector Pipeline | 默认（逐块 load→compute→store，无特殊信号） |
+| 2 | Double Buffer Vector Pipeline | `BUFFER_NUM = 2`、`loopCount = tileNum * BUFFER_NUM` |
+| 3 | Multi-Step Vector Decomposition | `TBuf<VECCALC>` + 多步 chained API（Maxs→Mins→Muls→Add） |
+| 4 | Compile-Time Branch Dispatch | `if constexpr` + 模板 int 参数 |
+| 5 | AIC-AIV MIX Cooperative | `ASCEND_IS_AIC` / `ASCEND_IS_AIV` + `CrossCoreSetFlag`/`WaitFlag` |
+| 6 | 5-Stage Cube Pipeline | `block_mmad` / `Mad` + `CopyGM2L1` + `Fixpipe` + L1/L0 嵌套循环 |
+| 7 | DAG Declarative (atvoss) | `DAGSch` + `Bind` + `Placeholder` |
+
+**c. 分支业务含义**
+对 Step 3 识别的每个分支条件，补充业务层面解释：
+- 尾部处理分支 → "最后一个不完整块的对齐处理"
+- dtype 分支 → "不同精度的计算路径"
+- TilingKey 分支 → "编译时模板分发（不同 buffer 策略/算法变体的 kernel）"
+
+**d. 模板参数语义**
+对代码中的模板参数，标注业务含义：
+- `BUFFER_MODE` → "缓冲策略：0=单缓冲（小数据延迟优先），1=双缓冲（大数据吞吐优先）"
+- `IS_SPLIT` → "处理模式：0=单遍（小数据），1=多块循环（大数据）"
+
+**e. 同步契约分层**
+识别同步机制并标注所属层次：
+- `EnQue`/`DeQue` → MTE↔Vector 阶段交接
+- `CrossCoreSetFlag`/`WaitFlag` → AIC↔AIV 跨核协作
+- `PipeBarrier` → 同核内流水线屏障
+- `SetFlag`/`WaitFlag`（HardEvent）→ 手动流水线重叠
+
+#### 3.5T: Tiling 侧业务语义（仅 Tiling/混合侧执行）
+
+**a. 校验策略分析**
+对每个 `OP_CHECK_IF` / `ASCENDC_HOST_ASSERT`，标注校验的数学不变量：
+- shape 一致性 → "elementwise 算子要求所有输入输出元素数相同"
+- dtype 支持 → "当前仅支持 FP32/INT32"
+- 维度限制 → "仅支持 2D tensor"
+- 模式限制 → "仅支持 AR（沿内轴归约）和 RA（沿外轴归约）"
+
+**b. 多核切分策略分析**
+识别切分策略的业务类型：
+- 按元素均分 → "elementwise 算子，任意轴可切"
+- 按 M×N 网格分 → "矩阵乘法，2D tile 分配到核"
+- 按 reduce 轴分 → "归约算子，沿归约轴切分+局部归约+全局归约"
+
+标注每个切分变量的业务含义（totalNum=总工作量、blockFactor=每核工作量、usedCoreNum=实际使用核数等）
+
+**c. Buffer 规划策略分析**
+- 单/双缓冲决策依据（阈值是什么、为什么）
+- UB 分配公式（几个 tensor、每个多大）
+- L1 深度搜索（多流竞争时的背包优化，如有）
+
+**d. TilingKey 语义分析**
+对每个 TilingKey 轴，标注业务含义：
+- dtype 轴 → "编译时 dtype 路由"
+- buffer 模式轴 → "单/双缓冲选择，运行时按数据量决策"
+- 算法变体轴 → "不同算法路径"
+
+**e. Workspace 数学来源**
+若代码计算了 tmpLocalSize / workspace，标注数学来源：
+- "归约树的中间部分结果存储空间"
+- "排序算法的 scratch buffer"
+
+### Step 4: 追踪关联 + 跨文件防御分析
+
+- **必须** Read `#include` 的头文件，追踪 TilingData 结构定义、基类成员声明
+- Grep 搜索入口函数名和关键函数名，追踪跨文件调用链
+- 识别代码中使用的 AscendC API 清单
+- **将每个头文件中的关键发现写入输出的「跨文件防御摘要」表**
+- **必须追踪 TilingData 字段的 Host 侧来源**：
+  - 从 Kernel 代码中提取所有 `tilingData->xxx` / `tilingData_.xxx` 的字段读取
+  - 定位 Tiling 代码（op_host/*.cpp），Grep 每个字段的赋值语句（如 `tilingData_.xxx = ...`）
+  - Read 赋值上下文，提取计算该字段的完整公式、输入参数和约束条件
+  - 将结果写入「TilingData 值域溯源」表
+- **必须提取芯片架构参数**：
+  - 从 Tiling 代码中提取 platformInfo_ 的核数（aivNum/aicNum）、对齐常量等
+  - 若有已知的 UB/L1 大小等硬件规格，一并记录
+- 写入「芯片架构参数」表
+- 若代码含 TilingData 字段但无法从本地文件确定硬件参数值，使用 `/npu-arch` skill 查询对应芯片代际的核数、UB/L1 大小、对齐要求等
+- **跨文件关系分析**（file_input 含多文件时执行）：
+  追踪文件间的 include 链、数据流（如 TilingData Host→Kernel）、
+  共享常量/宏/类型定义、函数调用链，写入输出「跨文件关系」表
+
+### Step 5: 变量溯源
+
+对类成员变量和全局变量，grep 追溯声明→初始化→校验链：
+- 声明位置（类定义中的成员声明，含类型和默认值）
+- 初始化位置（构造函数 / Init / SetXXX 函数中的赋值语句）
+- 校验位置（OP_CHECK_IF、assert、条件判断等防护代码）
+- 来源类型（TilingData传递 / 硬件配置 / 编译期常量 / 外部输入）
+
+**校验代码的具体行号和内容必须写入输出的「跨文件防御摘要」表和「变量溯源」表。** 无法确认的标注「未在源码中找到」。
+
+### Step 5.1: 生成函数清单
+
+Grep 代码中的所有函数定义（`void/__global__/__aicore__/template<...> 函数名(` 模式），填入输出「函数清单」表：
+- 函数名、完整签名、行范围、角色（入口/初始化/计算核心/辅助/回调）
+
+### Step 5.2: 生成 API 调用索引
+
+Grep 代码中的所有 AscendC API 调用，填入输出「API 调用索引」表：
+- API 名称、行号、调用上下文（参数简述或所在语句）
+- 范围：DataCopy、DataCopyPad、EnQue、DeQue、AllocTensor、FreeTensor、InitBuffer、Cast、MatmulSplitN、RmsNorm、Rope、ScatterCache、CrossCoreSetFlag、CrossCoreWaitFlag、SetFlag、WaitFlag、PipeBarrier、SyncAll、ReduceSum、ReduceMax、Add、Sub、Mul、Div 等
+
+### Step 5.3: 生成常量清单
+
+Grep 代码中的所有编译期常量，填入输出「常量清单」表：
+- `constexpr`、`const` 静态常量、模板参数默认值、枚举值
+- 常量名、值（或表达式）、行号、用途说明
+
+### Step 6: 分析高性能设计（仅 Kernel 侧）
+
+- 识别流水线模式（同步/异步/AIC-AIV 协同/纯 Vector）
+- 检查 EnQue/DeQue 同步机制
+- 识别 Buffer 管理模式（单缓冲 / Double Buffer / N-Buffer），标注 buffer 名称和大小(B)
+- 分析多核切分策略（按哪个维度切分，每核处理量，需给出具体数值）
+- 分析 UB 切分策略（单次处理量，是否分 chunk，给出切分粒度）
+
+### Step 7: 生成概要
+
+按输出模板填充，写入输出路径。**确保所有字段都基于代码证据填充，无法确定的字段标注原因。**
+
+### Step 8: 返回结果
+
+向主流程返回结构化结果（不写报告文件，概要已写入输出路径）。
+
+---
+
+## 输出模板
+
+```markdown
+# 代码概要
+
+算子: {name} | 功能: {实现目标} | 侧别: {Kernel/Tiling}
+
+## 代码脉络
+
+**入口**: {入口函数名} → 被 {调用者} 调用 → 触发条件 {条件}
+
+**数据流**:
+{输入数据} → {搬运到UB} → {计算处理} → {结果写回GM}
+
+**计算核心**: {主循环函数名} → 循环语义: {循环代表什么}
+
+**分支覆盖**:
+| 分支条件 | 位置(文件:行) | 触发场景 | 处理逻辑 | 涉及 API |
+|---------|-------------|---------|---------|----------|
+| {条件1} | {文件:行} | {何时触发} | {逻辑描述} | {API列表} |
+
+**关键变量流转**:
+| 变量 | 来源 | 用途 | 流转路径 |
+|------|------|------|----------|
+| {var1} | Tiling传递 | {用途} | {从哪到哪} |
+| {var2} | 常量 | {用途} | 固定值 |
+
+**核心 API**: {主要使用的 API 列表}
+
+**输出**: {结果写回位置} → 同步机制 {EnQue/DeQue}
+
+## 算子业务语义（Kernel 侧）
+
+**数学运算**: {公式} | **输入输出**: {N输入→M输出, 各tensor语义角色}
+**计算模式**: {7 种模式之一} | **同步契约**: {各层同步机制及意图}
+
+### 分支业务含义
+| 分支条件 | 位置(文件:行) | 业务含义 | 处理逻辑 |
+|---------|-------------|---------|---------|
+| {条件} | {行} | {业务上代表什么} | {逻辑} |
+
+### 模板参数语义
+| 参数 | 取值 | 业务含义 |
+|------|------|---------|
+| {param} | {values} | {业务含义} |
+
+## Tiling 业务语义（Tiling 侧）
+
+**切分策略**: {按元素均分/按M×N网格/按reduce轴} | **Buffer策略**: {单/双缓冲, 决策依据}
+**TilingKey 轴**: {各轴及业务含义}
+
+### 校验策略
+| 校验条件 | 位置(文件:行) | 数学不变量 |
+|---------|-------------|-----------|
+| {OP_CHECK_IF 条件} | {行} | {校验的数学约束} |
+
+### 切分变量语义
+| 变量 | 公式 | 业务含义 |
+|------|------|---------|
+| {var} | {formula} | {在业务上代表什么} |
+
+### TilingKey 语义
+| 轴 | 取值 | 业务含义 |
+|----|------|---------|
+| {axis} | {values} | {业务含义} |
+
+## 变量溯源
+
+| 变量 | 声明(文件:行) | 初始化(文件:行) | 校验(文件:行) | 来源类型 |
+|------|-------------|----------------|-------------|---------|
+| {var} | {声明位置和类型} | {赋值语句} | {OP_CHECK_IF/assert等} | TilingData/硬件配置/编译期常量/外部输入 |
+
+> 来源类型判定：TilingData 传递（tilingData->*）→ 已校验；硬件配置（GetCoreNumAic等）→ 硬件保证；编译期常量（constexpr/const）→ 编译期固定；外部输入 → 需关注
+
+## 函数清单
+
+> 完整函数列表，供通用检视子 agent 快速定位目标代码。
+
+| 函数 | 签名 | 行范围 | 角色 |
+|------|------|--------|------|
+| {func1} | {完整签名含参数类型} | {start}-{end} | 入口/初始化/计算核心/辅助/回调 |
+
+## API 调用索引
+
+> 所有 AscendC API 调用及其位置，供通用检视子 agent 直接定位到行。
+
+| API | 行号 | 上下文 |
+|-----|------|--------|
+| DataCopy | 234 | 搬运 tokenX → UB，mode=BURST |
+| AllocTensor | 156 | 分配 queryOut，类型 DT_FLOAT16 |
+| CrossCoreSetFlag | 1231 | CUBE_VEC 模式，flag=FINISH_MM_QN |
+
+## 常量清单
+
+> 编译期常量及其值，供通用检视子 agent 校验类型安全和溢出。
+
+| 常量 | 值 | 位置(行) | 用途 |
+|------|-----|---------|------|
+| MAX_TOKEN_NUM | 8192 | 42 | token 上限 |
+| BLOCK_SIZE | 32 | 18 | 对齐粒度 |
+
+## 跨文件防御摘要
+
+> 以下发现来自 Step 4 的跨文件追踪，供后续通用检视子 agent 直接利用，避免重复 grep。
+
+| 关联文件 | 关键发现 | 位置(文件:行) | 影响范围 |
+|---------|---------|-------------|---------|
+| {file1} | {发现的校验代码、初始化、常量定义} | {文件:行号} | {影响哪些变量/操作} |
+| {file2} | {发现的校验代码、初始化、常量定义} | {文件:行号} | {影响哪些变量/操作} |
+
+## TilingData 值域溯源
+
+> 每个 Kernel 侧使用的 TilingData 字段，追溯其在 Host 侧 Tiling 代码（op_host/*.cpp）中的计算公式和输入来源。
+
+| TilingData 字段 | Host 侧计算(文件:行) | 公式 | 输入参数 | 约束 |
+|---------------|---------------------|------|---------|------|
+| {field} | {op_host/xxx.cpp:行} | {赋值表达式或计算公式} | {shape / coreNum / flag} | {需满足的不等式或边界条件} |
+
+## 芯片架构参数
+
+> 约束 TilingData 值和 Kernel 行为的硬件参数。来自 Tiling 代码中的 platformInfo_ 或芯片规格。
+
+| 参数 | 值 | 来源 | 影响范围 |
+|------|-----|------|---------|
+| aivNum | {值} | platformInfo_.aivNum | 单核分配量、偏移上限 |
+| aicNum | {值} | platformInfo_.aicNum | 多核切分 |
+| 对齐要求 | {32B/64B} | 代码中常量或宏 | DataCopyPad 边界 |
+
+## 代码关联
+
+**上游文件**:
+| 文件路径 | 关联方式 | 依据 |
+|----------|----------|------|
+| {tiling_data.h} | include | 代码中 #include 语句 |
+
+**下游文件**:
+| 文件路径/API | 关联方式 | 依据 |
+|----------|----------|------|
+| {AscendC API} | API依赖 | 代码中 API 调用 |
+
+## 高性能设计（仅 Kernel 侧）
+
+**流水线模式**: {同步 / 异步 / AIC-AIV 协同 / 纯 Vector}
+
+**流水线设计**:
+| 机制 | 状态 | 设计意图 |
+|------|------|----------|
+| EnQue/DeQue同步 | {有/无} | {同步目的} |
+| Buffer 管理模式 | {单缓冲/Double Buffer/N-Buffer} | {并行搬入/计算} |
+
+**切分策略**（需给出具体数值）:
+| 维度 | 切分方式 | 每核处理量 | 切分粒度 |
+|------|----------|-----------|---------|
+| 多核切分 | {按哪个维度} | {具体数值} | {核数分配} |
+| UB切分 | {单次处理量} | {具体数值(B)} | {chunk大小} |
+
+**Buffer 规划**:
+| Buffer | 类型 | 大小(B) | 用途 |
+|--------|------|------|------|
+| {buf1} | TQue/TBuf | {具体数值} | {用途} |
+
+## 跨文件关系（多文件时填充）
+
+> 追踪 file_input 中各文件之间的依赖关系，供通用检视子 agent 理解跨文件上下文。
+
+| 关系类型 | 源文件 | 目标文件 | 内容 | 位置 |
+|---------|--------|---------|------|------|
+| include | {file_a} | {file_b} | {TilingData 结构定义等} | {file_b:行号} |
+| 数据流 | {tiling.cpp} | {kernel.cpp} | {tilingData.field 赋值→使用} | {tiling.cpp:行→kernel.cpp:行} |
+| 共享常量 | {header.h} | {file_a}, {file_b} | {常量名/宏/类型} | {header.h:行} |
+| 函数调用 | {file_a} | {file_b} | {函数名} | {file_a:行→file_b:行} |
+```
+
+---
+
+## 返回格式
+
+```
+侧别: {Kernel侧 / Tiling侧 / 混合}
+算子名: {operator_name}
+功能概述: {一句话功能描述}
+入口函数: {函数名}
+核心 API: {API 列表}
+概要路径: {输出路径}
+```
+
+---
+
+## 约束
+
+- 代码概要**必须**写入输出路径（后续检视步骤将此文件作为输入）
+- **禁止**跳过 Step 2 侧别识别，侧别判定必须基于代码证据
+- **禁止**凭推测填写模板字段，无法确定的标注具体原因
+- **必须**用 Grep 追踪上游调用链和 TilingData 结构定义
+- **必须**在返回结果中明确标注侧别

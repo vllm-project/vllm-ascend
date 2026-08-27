@@ -1,0 +1,10 @@
+Op Name=moe_lora_prefill_scatter_a2a_fp16_int32_bool_34
+Block Dim=40
+Run Soc Version=Ascend910B3
+Device Id=0
+Pid=804625
+Current Freq=1800
+Rated Freq=1800
+Is MC2=0
+Is Lccl=0
+Has Simt=0

@@ -1,0 +1,26 @@
+# 检视模式阈值与指导 — 单一来源,scripts/review_mode.py 读取
+# code-fetch / file-review 入口调 review_mode.py 拿 mode+routing+guidance
+# 调阈值或档位指导改本文件,不改提示词
+
+# 检视模式分档（按变更行数；large 需同时满足文件数条件）
+review_modes:
+  minimal:
+    max_lines: 100            # 变更行数 < 100
+    routing: pr-review        # 走标准 PR 流程
+    guidance: "极简模式：只发射一个波次，≤6 个子 agent 并行检视。红线(red-line)/topK 必进第一波，独立成组不参与 Step 6.2 合并。cpp-style 专项并入第一波。"
+  compact:
+    min_lines: 100
+    max_lines: 300            # 100-300
+    routing: pr-review
+    guidance: "紧凑模式：正常合并，优先挤在同一波；≤6 组单波，超过分波。红线/topK 必进第一波，独立成组。cpp-style 专项并入第一波。"
+  standard:
+    min_lines: 300            # > 300（且未达 large 双高条件）
+    routing: pr-review
+    guidance: "标准模式：直接用 Step 6 合并结果。侧别标签：全[适用:Kernel]→[仅Kernel]；全[适用:Tiling]/[适用:Host]→[仅Tiling]；含[适用:All]或混合→[全部]。优先级：1.数值安全+内存安全+输入验证 2.API使用+数据搬运 3.领域规则 4.性能 5.通用规范 6.Python。每波 ≤6 组。红线/topK 必进第一波，独立成组。cpp-style 专项并入第一波。"
+
+# 大型 PR 触发（双高，轻易不触发）
+large_pr:
+  min_files: 20               # 文件数 >
+  min_lines: 3000             # 且 变更行数 ≥
+  routing: pr-large-review    # 切大型 PR 流程
+  guidance: "大型 PR：切换 workflows/pr-large-review.md，走 file-split 分组并行流程（global-pre-scan + clause-grouping + synthesize）。"

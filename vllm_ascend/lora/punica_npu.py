@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 
 import torch
 from vllm.distributed import (
@@ -8,10 +9,55 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY
 
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+
+@dataclass(frozen=True)
+class DSASGMVMetadata:
+    """Segment-local routing metadata consumed by the DSA SGMV kernels."""
+
+    seq_start_locs: torch.Tensor
+    seq_lengths: torch.Tensor
+    lora_indices: torch.Tensor
+    batches: int
+    max_seq_length: int
+    token_nums: int
+    token_offset: int
+    no_lora: bool
+    op_args: tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "op_args",
+            (
+                self.seq_start_locs,
+                self.seq_lengths,
+                self.lora_indices,
+                self.batches,
+                self.max_seq_length,
+                self.token_nums,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class _HostSGMVMetadata:
+    """Run-length encoded LoRA routing shared by Punica and DSA."""
+
+    seq_start_locs: tuple[int, ...]
+    seq_lengths: tuple[int, ...]
+    lora_indices: tuple[int, ...]
+    token_nums: int
+    max_seq_length: int
+    no_lora: bool
+
+    @property
+    def batches(self) -> int:
+        return len(self.seq_lengths)
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -25,14 +71,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int, device: torch.device | str, **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
-        # The stable mapping buffer is also used by DSA's padded o-projection.
-        # Initialize the tail once and only clear rows that become stale after
-        # a batch shrinks, instead of allocating torch.full/copy tensors in
-        # every transformer layer.
-        self._token_lora_indices.fill_(-1)
-        self._dsa_previous_token_count = 0
-        self._dsa_lora_indices_cpu: tuple[int, ...] = ()
-        self._dsa_lora_routing_cache: dict[tuple[int, int, int, bool, int], object] = {}
+        self._init_prefill_sgmv_metadata_buffers(max_batches)
+        self._init_dsa_sgmv_metadata_buffers(max_batches)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
         if get_ascend_device_type() == AscendDeviceType._310P or (
@@ -62,6 +102,225 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
 
+    def _init_prefill_sgmv_metadata_buffers(self, max_batches: int) -> None:
+        # PunicaWrapperBase allocates these as three independent tensors. Use
+        # views of one stable allocation so the host RLE can be transferred by
+        # one H2D copy without temporary device tensors.
+        shape = (3, max_batches)
+        self._prefill_sgmv_metadata_buffer = torch.empty(
+            shape,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._prefill_sgmv_metadata_cpu = torch.empty(
+            shape,
+            dtype=torch.long,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
+        )
+        self._prefill_sgmv_metadata_cpu_array = self._prefill_sgmv_metadata_cpu.numpy()
+        self._seq_start_locs = self._prefill_sgmv_metadata_buffer[0]
+        self._seq_lengths = self._prefill_sgmv_metadata_buffer[1]
+        self._lora_indices_per_batch = self._prefill_sgmv_metadata_buffer[2]
+        self._host_sgmv_metadata = self._encode_sgmv_metadata(())
+        self._sgmv_max_batches = max_batches
+
+    def _init_dsa_sgmv_metadata_buffers(self, max_batches: int) -> None:
+        # Decode and prefill execute independently in DSA. Keep two stable
+        # buffers so metadata can be refreshed before model forward and shared
+        # read-only by every layer (including the two DSA overlap streams).
+        shape = (2, 3, max_batches)
+        self._dsa_sgmv_metadata_buffer = torch.empty(
+            shape,
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._dsa_sgmv_metadata_cpu = torch.empty(
+            shape,
+            dtype=torch.long,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
+        )
+        self._dsa_sgmv_metadata_cpu_array = self._dsa_sgmv_metadata_cpu.numpy()
+        self._dsa_max_batches = max_batches
+        self._dsa_sgmv_metadata: tuple[DSASGMVMetadata | None, DSASGMVMetadata | None] = (None, None)
+        self._dsa_actual_tokens = 0
+
+    @staticmethod
+    def _encode_sgmv_metadata(lora_indices: Iterable[int]) -> _HostSGMVMetadata:
+        """Run-length encode token-to-LoRA routing in one host pass."""
+
+        seq_start_locs: list[int] = []
+        seq_lengths: list[int] = []
+        lora_indices_per_batch: list[int] = []
+        token_nums = 0
+        no_lora = True
+        for token_offset, lora_index in enumerate(lora_indices):
+            token_nums = token_offset + 1
+            no_lora = no_lora and lora_index < 0
+            if lora_indices_per_batch and lora_index == lora_indices_per_batch[-1]:
+                seq_lengths[-1] += 1
+            else:
+                seq_start_locs.append(token_offset)
+                seq_lengths.append(1)
+                lora_indices_per_batch.append(lora_index)
+
+        return _HostSGMVMetadata(
+            seq_start_locs=tuple(seq_start_locs),
+            seq_lengths=tuple(seq_lengths),
+            lora_indices=tuple(lora_indices_per_batch),
+            token_nums=token_nums,
+            max_seq_length=max(seq_lengths, default=0),
+            no_lora=no_lora,
+        )
+
+    @staticmethod
+    def _slice_sgmv_metadata(
+        metadata: _HostSGMVMetadata,
+        token_offset: int,
+        token_nums: int,
+    ) -> _HostSGMVMetadata:
+        """Return group metadata for a token range without rescanning tokens."""
+
+        if token_offset < 0 or token_nums < 0 or token_offset + token_nums > metadata.token_nums:
+            raise ValueError(
+                f"Invalid SGMV metadata range: offset={token_offset}, tokens={token_nums}, total={metadata.token_nums}."
+            )
+        if token_nums == 0:
+            return _HostSGMVMetadata((), (), (), 0, 0, True)
+
+        segment_end = token_offset + token_nums
+        seq_start_locs: list[int] = []
+        seq_lengths: list[int] = []
+        lora_indices: list[int] = []
+        for group_start, group_length, lora_index in zip(
+            metadata.seq_start_locs,
+            metadata.seq_lengths,
+            metadata.lora_indices,
+        ):
+            group_end = group_start + group_length
+            overlap_start = max(group_start, token_offset)
+            overlap_end = min(group_end, segment_end)
+            if overlap_start >= overlap_end:
+                continue
+            seq_start_locs.append(overlap_start - token_offset)
+            seq_lengths.append(overlap_end - overlap_start)
+            lora_indices.append(lora_index)
+
+        return _HostSGMVMetadata(
+            seq_start_locs=tuple(seq_start_locs),
+            seq_lengths=tuple(seq_lengths),
+            lora_indices=tuple(lora_indices),
+            token_nums=token_nums,
+            max_seq_length=max(seq_lengths, default=0),
+            no_lora=all(lora_index < 0 for lora_index in lora_indices),
+        )
+
+    @staticmethod
+    def _write_sgmv_metadata(host_buffer, metadata: _HostSGMVMetadata) -> None:
+        """Write RLE values into a fixed-size host buffer without tensors."""
+
+        host_buffer[0].fill(0)
+        host_buffer[1].fill(0)
+        host_buffer[2].fill(-1)
+        if metadata.batches:
+            host_buffer[0, : metadata.batches] = metadata.seq_start_locs
+            host_buffer[1, : metadata.batches] = metadata.seq_lengths
+            host_buffer[2, : metadata.batches] = metadata.lora_indices
+
+    @staticmethod
+    def _validate_sgmv_batches(metadata: _HostSGMVMetadata, max_batches: int, name: str) -> None:
+        if metadata.batches > max_batches:
+            raise ValueError(
+                f"{name} SGMV routing contains more consecutive LoRA groups "
+                f"than the configured maximum batch size: {metadata.batches} > {max_batches}."
+            )
+
+    def _make_dsa_sgmv_metadata(
+        self,
+        segment_index: int,
+        host_metadata: _HostSGMVMetadata,
+        token_offset: int,
+    ) -> DSASGMVMetadata:
+        device_metadata = self._dsa_sgmv_metadata_buffer[segment_index]
+        return DSASGMVMetadata(
+            seq_start_locs=device_metadata[0],
+            seq_lengths=device_metadata[1],
+            lora_indices=device_metadata[2],
+            batches=host_metadata.batches,
+            max_seq_length=host_metadata.max_seq_length,
+            token_nums=host_metadata.token_nums,
+            token_offset=token_offset,
+            no_lora=host_metadata.no_lora,
+        )
+
+    def prepare_dsa_sgmv_metadata(
+        self,
+        num_decode_tokens: int,
+        num_actual_tokens: int,
+    ) -> None:
+        """Prepare decode/prefill SGMV routing once before all DSA layers."""
+
+        if not 0 <= num_decode_tokens <= num_actual_tokens:
+            raise ValueError(f"Invalid DSA LoRA token split: decode={num_decode_tokens}, actual={num_actual_tokens}.")
+        if num_actual_tokens > self._host_sgmv_metadata.token_nums:
+            raise ValueError(
+                "DSA LoRA mapping is shorter than the attention input: "
+                f"mapping={self._host_sgmv_metadata.token_nums}, actual={num_actual_tokens}."
+            )
+
+        decode_host_metadata = self._slice_sgmv_metadata(
+            self._host_sgmv_metadata,
+            token_offset=0,
+            token_nums=num_decode_tokens,
+        )
+        prefill_host_metadata = self._slice_sgmv_metadata(
+            self._host_sgmv_metadata,
+            token_offset=num_decode_tokens,
+            token_nums=num_actual_tokens - num_decode_tokens,
+        )
+        self._validate_sgmv_batches(decode_host_metadata, self._dsa_max_batches, "DSA decode")
+        self._validate_sgmv_batches(prefill_host_metadata, self._dsa_max_batches, "DSA prefill")
+        self._write_sgmv_metadata(self._dsa_sgmv_metadata_cpu_array[0], decode_host_metadata)
+        self._write_sgmv_metadata(self._dsa_sgmv_metadata_cpu_array[1], prefill_host_metadata)
+
+        # ACLGraph requires fixed tensor shapes. Transfer both segments in one
+        # H2D copy; zero-length trailing groups are ignored by SGMV.
+        self._dsa_sgmv_metadata_buffer.copy_(
+            self._dsa_sgmv_metadata_cpu,
+            non_blocking=True,
+        )
+        decode_metadata = self._make_dsa_sgmv_metadata(
+            0,
+            decode_host_metadata,
+            token_offset=0,
+        )
+        prefill_metadata = self._make_dsa_sgmv_metadata(
+            1,
+            prefill_host_metadata,
+            token_offset=num_decode_tokens,
+        )
+        self._dsa_sgmv_metadata = (decode_metadata, prefill_metadata)
+        self._dsa_actual_tokens = num_actual_tokens
+
+    def get_dsa_sgmv_metadata(self, token_lora_indices: torch.Tensor) -> DSASGMVMetadata:
+        """Select already-prepared metadata for a DSA token-mapping view."""
+
+        decode_metadata, prefill_metadata = self._dsa_sgmv_metadata
+        if decode_metadata is None or prefill_metadata is None:
+            raise RuntimeError("DSA SGMV metadata was not prepared before model forward.")
+
+        token_offset = token_lora_indices.storage_offset() - self._token_lora_indices.storage_offset()
+        token_nums = token_lora_indices.shape[0]
+        if decode_metadata.token_offset == token_offset and decode_metadata.token_nums == token_nums:
+            return decode_metadata
+        if prefill_metadata.token_offset == token_offset and prefill_metadata.token_nums == token_nums:
+            return prefill_metadata
+        raise ValueError(
+            "DSA LoRA token mapping does not match the prepared decode/prefill segments: "
+            f"offset={token_offset}, tokens={token_nums}, actual={self._dsa_actual_tokens}."
+        )
+
     def update_metadata(
         self,
         mapping,
@@ -70,20 +329,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         vocab_size,
         **kwargs,
     ) -> None:
-        index_mapping = tuple(mapping.index_mapping)
+        index_mapping = mapping.index_mapping
         lora_id_to_index = {lora_id: index for index, lora_id in enumerate(lora_index_to_id) if lora_id is not None}
-        self._dsa_lora_indices_cpu = tuple(
+        self._host_sgmv_metadata = self._encode_sgmv_metadata(
             lora_id_to_index.get(lora_id, -1) if lora_id > 0 else -1 for lora_id in index_mapping
         )
-        routing_cache = getattr(self, "_dsa_lora_routing_cache", None)
-        if routing_cache is None:
-            self._dsa_lora_routing_cache = {}
-        else:
-            routing_cache.clear()
-
-        # Preserve PunicaWrapperBase's common metadata handling. The overridden
-        # prefill hook below consumes the host mapping prepared above, avoiding
-        # compute_meta's device unique/item synchronization.
         super().update_metadata(
             mapping,
             lora_index_to_id,
@@ -91,54 +341,34 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             vocab_size,
             **kwargs,
         )
-
-        current_token_count = len(index_mapping)
-        previous_token_count = getattr(self, "_dsa_previous_token_count", 0)
-        if current_token_count < previous_token_count and hasattr(self, "_token_lora_indices"):
-            self._token_lora_indices[current_token_count:previous_token_count].fill_(-1)
-        self._dsa_previous_token_count = current_token_count
-
-        loaded_lora_ids = {lora_id for lora_id in lora_index_to_id if lora_id is not None}
+        # Keep only the active-LoRA count on the host. The concrete slot and
+        # base-token mask stay in device tensors so ACLGraph replay can switch
+        # requests without fixing batch-local routing values.
+        self._dsa_sgmv_metadata = (None, None)
+        self._dsa_actual_tokens = 0
+        loaded_lora_ids = set(lora_id for lora_id in lora_index_to_id if lora_id is not None)
         self.num_active_moe_loras = len(
             set(lora_id for lora_id in index_mapping if lora_id > 0 and lora_id in loaded_lora_ids)
         )
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
-        self.no_lora = not any(lora_id > 0 for lora_id in index_mapping)
+        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
 
     def _update_prefill_metadata(self, token_lora_tensor: torch.Tensor) -> None:
+        """Reuse host RLE and avoid device unique/item synchronization."""
+
         del token_lora_tensor
-        self._update_prefill_metadata_from_cpu(self._dsa_lora_indices_cpu)
-
-    def _update_prefill_metadata_from_cpu(self, token_lora_indices: tuple[int, ...]) -> None:
-        """Build SGMV metadata without NPU unique/item synchronization."""
-
-        starts: list[int] = []
-        lengths: list[int] = []
-        slots: list[int] = []
-        for row, slot in enumerate(token_lora_indices):
-            if not slots or slot != slots[-1]:
-                starts.append(row)
-                lengths.append(1)
-                slots.append(slot)
-            else:
-                lengths[-1] += 1
-
-        self.batch_size = len(slots)
-        self.max_length = max(lengths, default=0)
-        self.token_nums = len(token_lora_indices)
-        self.no_lora = not any(slot >= 0 for slot in token_lora_indices)
-        if not slots:
-            return
-
-        metadata = async_tensor_h2d(
-            [starts, lengths, slots],
-            dtype=torch.long,
-            device=self.device,
+        metadata = self._host_sgmv_metadata
+        self._validate_sgmv_batches(metadata, self._sgmv_max_batches, "Punica prefill")
+        self._write_sgmv_metadata(self._prefill_sgmv_metadata_cpu_array, metadata)
+        self._prefill_sgmv_metadata_buffer.copy_(
+            self._prefill_sgmv_metadata_cpu,
+            non_blocking=True,
         )
-        self._seq_start_locs[: self.batch_size].copy_(metadata[0])
-        self._seq_lengths[: self.batch_size].copy_(metadata[1])
-        self._lora_indices_per_batch[: self.batch_size].copy_(metadata[2])
+        self.batch_size = metadata.batches
+        self.max_length = metadata.max_seq_length
+        self.token_nums = metadata.token_nums
+        self.no_lora = metadata.no_lora
 
     def _shrink_prefill(
         self,
@@ -241,158 +471,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     def get_token_lora_indices(self, num_tokens: int) -> torch.Tensor:
         """Return device-side adapter slots for the requested token rows."""
         return torch.narrow(self._token_lora_indices, 0, 0, num_tokens)
-
-    def get_dsa_lora_routing(
-        self,
-        offset: int,
-        num_tokens: int,
-        *,
-        num_rows: int | None = None,
-        prefer_grouped_matmul: bool = False,
-        group_multiplier: int = 1,
-    ):
-        """Return cached DSA routing for one decode/prefill token segment."""
-
-        from vllm_ascend.lora.dsa import DSALoRARouting
-
-        if num_rows is None:
-            num_rows = num_tokens
-        if offset < 0 or num_tokens < 0 or num_rows < num_tokens:
-            raise ValueError(
-                f"Invalid DSA LoRA routing range: offset={offset}, num_tokens={num_tokens}, num_rows={num_rows}."
-            )
-        if offset + num_tokens > len(self._dsa_lora_indices_cpu):
-            raise ValueError(
-                "DSA LoRA routing exceeds the current token mapping: "
-                f"offset={offset}, num_tokens={num_tokens}, "
-                f"mapping_size={len(self._dsa_lora_indices_cpu)}."
-            )
-        if num_rows != num_tokens and offset != 0:
-            raise ValueError("Only a zero-offset DSA LoRA segment may contain padded rows.")
-        if group_multiplier < 1:
-            raise ValueError(f"DSA LoRA group multiplier must be positive, got {group_multiplier}.")
-
-        cache_key = (offset, num_tokens, num_rows, prefer_grouped_matmul, group_multiplier)
-        cached = self._dsa_lora_routing_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        logical_slots = self._dsa_lora_indices_cpu[offset : offset + num_tokens]
-        group_lengths: list[int] = []
-        segment_slots: list[int] = []
-        segment_starts: list[int] = []
-        for row, slot in enumerate(logical_slots):
-            if not segment_slots or slot != logical_slots[row - 1]:
-                segment_starts.append(row)
-                group_lengths.append(1)
-                segment_slots.append(max(slot, 0))
-            else:
-                group_lengths[-1] += 1
-
-        routing_indices = torch.narrow(
-            self._token_lora_indices,
-            0,
-            offset if num_rows == num_tokens else 0,
-            num_rows,
-        )
-        group_list = None
-        segment_lora_indices = None
-        if group_lengths:
-            segment_metadata = async_tensor_h2d(
-                [group_lengths, segment_slots],
-                dtype=torch.long,
-                device=self.device,
-            )
-            group_list = segment_metadata[0]
-            segment_lora_indices = segment_metadata[1]
-
-        has_lora = any(slot >= 0 for slot in logical_slots)
-        has_base = any(slot < 0 for slot in logical_slots)
-        active_mask = None
-        if has_base:
-            active_mask = async_tensor_h2d(
-                [slot >= 0 for slot in logical_slots],
-                dtype=torch.bool,
-                device=self.device,
-            ).unsqueeze(1)
-
-        expanded_group_list = None
-        grouped_group_list = None
-        segment_group_lora_indices = None
-        segment_group_lora_indices_cpu: tuple[int, ...] = ()
-        grouped_row_indices = None
-        if group_lengths:
-            expanded_group_list = async_tensor_h2d(
-                [length * group_multiplier for length in group_lengths],
-                dtype=torch.long,
-                device=self.device,
-            )
-            if group_multiplier > 1:
-                grouped_lengths = [length for length in group_lengths for _ in range(group_multiplier)]
-                grouped_slots = [
-                    slot * group_multiplier + group for slot in segment_slots for group in range(group_multiplier)
-                ]
-                grouped_rows = [
-                    token * group_multiplier + group
-                    for start, length in zip(segment_starts, group_lengths)
-                    for group in range(group_multiplier)
-                    for token in range(start, start + length)
-                ]
-                grouped_metadata = async_tensor_h2d(
-                    [grouped_lengths, grouped_slots],
-                    dtype=torch.long,
-                    device=self.device,
-                )
-                grouped_group_list = grouped_metadata[0]
-                segment_group_lora_indices = grouped_metadata[1]
-                segment_group_lora_indices_cpu = tuple(grouped_slots)
-                grouped_row_indices = async_tensor_h2d(
-                    grouped_rows,
-                    dtype=torch.long,
-                    device=self.device,
-                )
-
-        full_slots = (*logical_slots, *([-1] * (num_rows - num_tokens)))
-        expanded_slots = [slot for slot in full_slots for _ in range(group_multiplier)]
-        combined_slots = [
-            slot * group_multiplier + group if slot >= 0 else -1
-            for slot in full_slots
-            for group in range(group_multiplier)
-        ]
-        expanded_metadata = async_tensor_h2d(
-            [expanded_slots, combined_slots],
-            dtype=torch.long,
-            device=self.device,
-        )
-        expanded_active_mask = None
-        if has_base:
-            expanded_active_mask = async_tensor_h2d(
-                [slot >= 0 for slot in logical_slots for _ in range(group_multiplier)],
-                dtype=torch.bool,
-                device=self.device,
-            ).unsqueeze(1)
-
-        routing = DSALoRARouting(
-            token_lora_indices=routing_indices,
-            num_tokens=num_tokens,
-            prefer_grouped_matmul=prefer_grouped_matmul,
-            has_lora=has_lora,
-            has_base=has_base,
-            segment_lora_indices_cpu=tuple(segment_slots),
-            group_list=group_list,
-            segment_lora_indices=segment_lora_indices,
-            active_mask=active_mask,
-            expanded_group_list=expanded_group_list,
-            grouped_group_list=grouped_group_list,
-            segment_group_lora_indices=segment_group_lora_indices,
-            segment_group_lora_indices_cpu=segment_group_lora_indices_cpu,
-            grouped_row_indices=grouped_row_indices,
-            expanded_active_mask=expanded_active_mask,
-            expanded_token_lora_indices=expanded_metadata[0],
-            expanded_combined_indices=expanded_metadata[1],
-        )
-        self._dsa_lora_routing_cache[cache_key] = routing
-        return routing
 
     def _apply_expand(
         self,

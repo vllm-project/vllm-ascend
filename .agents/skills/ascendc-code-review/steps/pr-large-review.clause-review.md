@@ -1,0 +1,174 @@
+# 逐条检视 prompt 模板（大型 PR 检视）
+
+workflow 按全局波次规划逐波派发子 Agent。每组使用以下 prompt 模板。
+与标准 `pr-review.clause-review.md` 的核心差异：增加文件组标注和文件列表约束，限制子 Agent 上下文范围。
+
+## prompt 模板
+
+```
+【已由上游完成】
+- 文件组：{group_name}
+- 代码侧别：{Kernel侧/Tiling侧/混合}
+- 条款过滤：已按侧别过滤
+- 代码概要：{code_summary_path}
+- API 预研报告：{api_prestudy_path}（仅 Kernel 侧，若存在）
+- yaml 提交端点：http://127.0.0.1:{collector_port}/submit（每条条例结果通过 curl 提交到此端点，**禁止使用 Write 工具写 yaml 文件，禁止读取 yaml 输出目录中的已有文件**）
+
+检视 PR diff：{diff_file_path}
+检视文件列表（仅读取以下文件）：{group_file_list}
+完整源码路径：{repo_path}
+
+检视条款：{条例ID-1} {条例标题} (references/{file}.md:{line})、{条例ID-2} {条例标题} (references/{file}.md:{line})
+
+【执行要求】
+- 第一步加载 ascendc-code-review skill，然后 Read skill 目录下的 `core/methodology.md` 掌握假设检验方法、置信度标准、红线问题和 PR 交叉验证规则
+- 若提供了代码概要，Read 获取本文件组的函数清单和 API 调用索引
+- API 约束信息：若已提供 API 预研报告，以其为主要来源。若预研报告未覆盖当前条款涉及的 API，使用 `/ascendc-docs-search` 补充查阅
+- 对每条分配的条例：若检视条款中已附带行号（references/{file}.md:{line}），从该行号起 Read 到下一个 `^####` 标题为止；否则 Grep `^{条例ID}` 定位起始行号 + 下一标题定位结束行号，Read offset={start} limit={end-start}。**只读该条例章节，禁止 Read 整个规则文档**。若条例包含专属检视方法，必须严格按该指引执行（如 cpp-style 声明全文 Read 且不走假设检验，则覆盖本条逐条 Grep 与下方的假设检验要求）
+- 若检视条款来自 ascendc-api / ascendc-perf / simt-api-analysis / mc2-specific 且预研报告未覆盖，使用 `/ascendc-docs-search` 查阅对应 API 的最新官方文档
+- 若分配的条款包含 RB-\*（RegBase 路线专项），需额外加载 `ascendc-regbase-best-practice` skill 获取 API 白名单和参考实现文档
+- **严格约束**：只读取「检视文件列表」中的文件，不越界读取其他文件组的文件
+- 先 Read diff 中本组文件的变更部分，再按需 Read 完整源码追溯变量来源
+- 大 PR 模式下深度分析（变量溯源、TilingData 值域）需自行按需 grep，summary 不提供
+- 严格按假设检验驱动流程执行（H0/H1、证据收集、自信值计算）。**例外**：若条例的专属检视方法已声明不走假设检验（如 cpp-style），按专属方法执行，不收集证据分值
+- 所有条款检视完成后，**将每条结果按下方 yaml schema 通过 curl 提交到 collector 端点**。提交命令模板：
+  ```
+  curl -s -X POST "http://127.0.0.1:{collector_port}/submit?group={group_name}&clause={条例ID}" --data-binary @- <<'YAML_EOF'
+  <yaml 内容>
+  YAML_EOF
+  ```
+  collector 自动处理文件命名和 `group_name` 字段。**禁止使用 Write 工具写 yaml 文件，禁止以文本消息返回结果**（仅返回「已完成，共提交 N 个 yaml」即可）
+
+【⚠️ 逃逸信号检测】
+一旦发现自己即将输出以下内容，立即停止并重新从第一条条款开始：
+- "批量处理多个任务"/"合并处理" → 每条必须独立经过完整假设检验流程
+- "直接生成检视报告"/"总结所有结果" → 必须完成所有分配条款后才能输出
+- "提高效率"/"节省时间"/"简化流程" → 效率不是跳过步骤的理由
+触发时输出 `⚠️ 检测到逃逸信号，重置到第一条条款` → 立即重新执行
+```
+
+## 输出格式
+
+每条条例结果通过 `curl -X POST "http://127.0.0.1:{collector_port}/submit?group={group_name}&clause={条例ID}"` 提交。collector 自动生成文件名 `{group_name}_{条例ID}.yaml` 并写入最终目录（子 Agent 不接触目录路径）。`group_name` 字段由 collector 强制覆盖为提交参数中的 group 值；`[STYLE]` 前缀标记改为 yaml 的 `category: style` 字段。
+
+**文件路径硬约束**：yaml 中 `code_snippet.file_path` 必须是相对于 repo_path 的完整路径，禁止只写短文件名或仅标注 group_name。
+
+### PASS 条例 yaml
+
+```yaml
+type: clause
+group_name: kernel_G1_安全_01
+clause_id: SEC-2.1
+clause_title: 有符号整数运算不溢出
+category: clause          # clause | style
+status: PASS
+```
+
+### FAIL/SUSPICIOUS 条例 yaml（clause 类）
+
+```yaml
+type: clause
+group_name: kernel_G1_安全_01
+clause_id: SEC-2.1
+clause_title: 有符号整数运算不溢出
+category: clause
+status: FAIL              # FAIL | SUSPICIOUS
+confidence: HIGH          # HIGH | MED | LOW
+problem_desc: {问题描述}
+code_snippet:
+  file_path: {完整文件路径，相对 repo_path}
+  start_line: {N}
+  end_line: {M}
+  code: |
+    {至少 10 行代码，含上下文}
+evidence:
+  positive:
+    - type: {证据类型}
+      score: {+X%}
+      desc: {证据描述}
+  negative:
+    - type: {证据类型}
+      score: {-X%}
+      desc: {证据描述}
+  confidence_value: {累计}%    # Σ正向 + Σ负向
+fix_suggestion: {修复建议}
+```
+
+### style 条例 yaml（专项检视子 agent，style_global 组，不走假设检验）
+
+PASS：
+```yaml
+type: clause
+group_name: style_global
+clause_id: STYLE-1.1
+clause_title: C++文件使用小写+下划线命名
+category: style
+status: PASS
+```
+
+FAIL：
+```yaml
+type: clause
+group_name: style_global
+clause_id: STYLE-1.1
+clause_title: C++文件使用小写+下划线命名
+category: style
+status: FAIL
+severity: 中               # 原快速索引中的严重级别（中/低）
+problem_desc: {问题描述}
+code_snippet:
+  file_path: {完整文件路径，相对 repo_path}
+  start_line: {N}
+  end_line: {M}
+  code: |
+    {至少 10 行代码，含上下文}
+fix_suggestion: {修复建议}
+```
+
+**字段对照**（原文本输出 → yaml 字段）：
+- `[{group_name}] {条例ID} FAIL 置信度:HIGH` → `group_name` + `clause_id` + `status` + `confidence`
+- `问题描述` → `problem_desc`
+- `代码片段（完整文件路径 行 N-M）` → `code_snippet.file_path` + `start_line` + `end_line` + `code`
+- `假设检验证据` → `evidence.positive` + `evidence.negative` + `evidence.confidence_value`
+- `修复建议` → `fix_suggestion`
+- `[{group_name}]` 前缀 → `group_name` 字段
+- `[STYLE]` 前缀 → `category: style`
+
+禁止为 PASS 条例输出 confidence 或 evidence 字段。禁止生成报告文件。
+
+### ⚠️ code_snippet / evidence 字段填写规范
+
+collector 会校验 yaml schema，格式错误将返回 400 拒绝提交。提交后检查 curl 返回值，若返回 400，按错误信息修正后重新提交。以下写法均会导致校对失败或被拒绝：
+
+1. **file_path 必须是纯路径，不含行号、不含注释**
+   - ✅ 正确写法：纯文件路径，如 `conversion/dynamic_stitch/op_kernel/arch35/file.h`
+   - ❌ 错误写法1：路径末尾带行号，如 `conversion/dynamic_stitch/op_kernel/arch35/file.h:95-119`
+   - ❌ 错误写法2：空值，如 `file_path:` 后面什么都不写
+
+2. **start_line / end_line 必须是实际行号（≥1 的整数），禁止 0 或缺失**
+   - ✅ 正确写法：源码中的真实行号，如 `start_line: 113` `end_line: 125`
+   - ❌ 错误写法1：值为 0，如 `start_line: 0`
+   - ❌ 错误写法2：不写 start_line / end_line 字段
+
+3. **code 字段只放源码原文，禁止行号前缀、禁止文件路径注释**
+   - ✅ 正确写法：code 字段下直接是源码行，如 `int64_t totalTensorSum_{0};`
+   - ❌ 错误写法1：每行源码前带行号前缀，如 `113: int64_t totalTensorSum_{0};`
+   - ❌ 错误写法2：首行放文件路径注释，如 `// file.h:113-125`
+
+4. **code_snippet 必须是 mapping，禁止写成字符串**
+   - ✅ 正确写法：code_snippet 下面缩进写 file_path / start_line / end_line / code 四个子字段
+   - ❌ 错误写法：整个 code_snippet 写成一段字符串描述
+
+5. **evidence 必须是 mapping，positive / negative 必须是 list**
+   - ✅ 正确写法：evidence 下面缩进写 positive（列表）/ negative（列表）/ confidence_value
+   - ❌ 错误写法：整个 evidence 写成一段字符串描述
+
+## 与标准 clause-review 的差异速查
+
+| 维度 | 标准 | 大型 PR |
+|------|------|---------|
+| 文件组标注 | 无 | yaml 含 `group_name` 字段 |
+| 文件范围 | 全部变更文件 | 显式文件列表，禁止越界 |
+| 深度分析 | summary 已提供 | 子 Agent 自行按需 grep |
+| 文件名 | `{条例ID}.yaml` | collector 自动生成 `{group_name}_{条例ID}.yaml` |
+| yaml 提交 | Write 工具写文件 | curl POST 到 collector 端点 |

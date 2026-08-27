@@ -9,13 +9,11 @@ from vllm_ascend.lora.dsa import (
     DSA_LORA_CONTEXT_ATTR,
     AscendDSAReplicatedLinearWithLoRA,
     DSALoRAContext,
-    DSALoRARouting,
     apply_grouped_dsa_lora,
     apply_prepared_dsa_lora,
     forward_with_dsa_lora,
     prepare_dsa_lora,
 )
-from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 
 
@@ -25,6 +23,27 @@ class FakePunica:
 
     def get_token_lora_indices(self, num_tokens: int) -> torch.Tensor:
         return self.token_lora_indices[:num_tokens]
+
+    @staticmethod
+    def get_dsa_sgmv_metadata(token_lora_indices: torch.Tensor):
+        lora_indices, seq_lengths = torch.unique_consecutive(
+            token_lora_indices,
+            return_counts=True,
+        )
+        seq_start_locs = torch.zeros_like(seq_lengths)
+        if seq_lengths.shape[0] > 1:
+            seq_start_locs[1:] = torch.cumsum(seq_lengths, dim=0)[:-1]
+        return SimpleNamespace(
+            no_lora=bool(torch.all(lora_indices < 0)),
+            op_args=(
+                seq_start_locs,
+                seq_lengths,
+                lora_indices,
+                lora_indices.shape[0],
+                int(seq_lengths.max()) if seq_lengths.numel() else 0,
+                token_lora_indices.shape[0],
+            ),
+        )
 
     @staticmethod
     def bgmv_shrink(x, weights, output, indices, scale):
@@ -56,59 +75,51 @@ class FakePunica:
         target = output[:, offset : offset + output_size]
         cls.bgmv_expand(x, weights, target, indices, add_inputs)
 
+    @classmethod
+    def sgmv_shrink(
+        cls,
+        x,
+        weights,
+        output,
+        seq_start_locs,
+        seq_lengths,
+        lora_indices,
+        batches,
+        max_seq_length,
+        token_nums,
+        scale,
+    ):
+        del seq_start_locs, batches, max_seq_length, token_nums
+        indices = torch.repeat_interleave(lora_indices, seq_lengths)
+        cls.bgmv_shrink(x, weights, output, indices, scale)
 
-def _fake_grouped_matmul(*, x, weight, group_list, **kwargs):
-    del kwargs
-    inputs = x[0]
-    weights = weight[0]
-    outputs = []
-    offset = 0
-    for group, length in enumerate(group_list.tolist()):
-        outputs.append(inputs[offset : offset + length] @ weights[group])
-        offset += length
-    return [torch.cat(outputs)]
-
-
-def _make_grouped_routing(slots: list[int], num_groups: int = 1) -> DSALoRARouting:
-    group_lengths: list[int] = []
-    segment_slots: list[int] = []
-    segment_starts: list[int] = []
-    for row, slot in enumerate(slots):
-        if row == 0 or slot != slots[row - 1]:
-            segment_starts.append(row)
-            group_lengths.append(1)
-            segment_slots.append(max(slot, 0))
-        else:
-            group_lengths[-1] += 1
-
-    grouped_lengths = [length for length in group_lengths for _ in range(num_groups)]
-    grouped_slots = [slot * num_groups + group for slot in segment_slots for group in range(num_groups)]
-    grouped_rows = [
-        token * num_groups + group
-        for start, length in zip(segment_starts, group_lengths)
-        for group in range(num_groups)
-        for token in range(start, start + length)
-    ]
-    has_base = any(slot < 0 for slot in slots)
-    return DSALoRARouting(
-        token_lora_indices=torch.tensor(slots),
-        num_tokens=len(slots),
-        prefer_grouped_matmul=True,
-        has_lora=any(slot >= 0 for slot in slots),
-        has_base=has_base,
-        segment_lora_indices_cpu=tuple(segment_slots),
-        group_list=torch.tensor(group_lengths),
-        segment_lora_indices=torch.tensor(segment_slots),
-        active_mask=torch.tensor([slot >= 0 for slot in slots]).unsqueeze(1) if has_base else None,
-        expanded_group_list=torch.tensor([length * num_groups for length in group_lengths]),
-        grouped_group_list=torch.tensor(grouped_lengths) if num_groups > 1 else None,
-        segment_group_lora_indices=torch.tensor(grouped_slots) if num_groups > 1 else None,
-        segment_group_lora_indices_cpu=tuple(grouped_slots) if num_groups > 1 else (),
-        grouped_row_indices=torch.tensor(grouped_rows) if num_groups > 1 else None,
-        expanded_active_mask=(
-            torch.tensor([slot >= 0 for slot in slots for _ in range(num_groups)]).unsqueeze(1) if has_base else None
-        ),
-    )
+    @classmethod
+    def sgmv_expand_slice(
+        cls,
+        x,
+        weights,
+        output,
+        seq_start_locs,
+        seq_lengths,
+        lora_indices,
+        batches,
+        max_seq_length,
+        token_nums,
+        offset,
+        output_size,
+        add_inputs,
+    ):
+        del seq_start_locs, batches, max_seq_length, token_nums
+        indices = torch.repeat_interleave(lora_indices, seq_lengths)
+        cls.bgmv_expand_slice(
+            x,
+            weights,
+            output,
+            indices,
+            offset,
+            output_size,
+            add_inputs,
+        )
 
 
 def _attach_context(
@@ -136,46 +147,11 @@ def _attach_context(
     return context
 
 
-def test_punica_caches_dsa_segment_and_group_routing() -> None:
-    wrapper = object.__new__(PunicaWrapperNPU)
-    wrapper.device = torch.device("cpu")
-    wrapper._token_lora_indices = torch.full((8,), -1, dtype=torch.long)
-    wrapper._token_lora_indices[:5].copy_(torch.tensor([0, 0, -1, 1, 1]))
-    wrapper._dsa_lora_indices_cpu = (0, 0, -1, 1, 1)
-    wrapper._dsa_lora_routing_cache = {}
-
-    routing = wrapper.get_dsa_lora_routing(
-        0,
-        5,
-        num_rows=8,
-        prefer_grouped_matmul=True,
-        group_multiplier=2,
-    )
-    cached = wrapper.get_dsa_lora_routing(
-        0,
-        5,
-        num_rows=8,
-        prefer_grouped_matmul=True,
-        group_multiplier=2,
-    )
-
-    assert cached is routing
-    assert routing.segment_lora_indices_cpu == (0, 0, 1)
-    assert routing.group_list.tolist() == [2, 1, 2]
-    assert routing.segment_lora_indices.tolist() == [0, 0, 1]
-    assert routing.active_mask.squeeze(1).tolist() == [True, True, False, True, True]
-    assert routing.expanded_group_list.tolist() == [4, 2, 4]
-    assert routing.grouped_group_list.tolist() == [2, 2, 1, 1, 2, 2]
-    assert routing.segment_group_lora_indices.tolist() == [0, 1, 0, 1, 2, 3]
-    assert routing.grouped_row_indices.tolist() == [0, 2, 1, 3, 4, 5, 6, 8, 7, 9]
-    assert routing.expanded_token_lora_indices.tolist() == [0, 0, 0, 0, -1, -1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1]
-    assert routing.expanded_combined_indices.tolist() == [0, 1, 0, 1, -1, -1, 2, 3, 2, 3, -1, -1, -1, -1, -1, -1]
-
-
 def test_replicated_projection_publishes_unsharded_context() -> None:
     wrapper = object.__new__(AscendDSAReplicatedLinearWithLoRA)
     torch.nn.Module.__init__(wrapper)
     wrapper.base_layer = torch.nn.Module()
+    wrapper.base_layer.prefix = "model.layers.0.self_attn.wq_a"
     wrapper.lora_config = SimpleNamespace(fully_sharded_loras=True)
     wrapper.lora_a_stacked = (torch.zeros(2, 1, 4, 8),)
     wrapper.lora_b_stacked = (torch.zeros(2, 1, 16, 4),)
@@ -190,6 +166,7 @@ def test_replicated_projection_publishes_unsharded_context() -> None:
     assert context.punica_wrapper is punica
     assert context.parallel_mode == "replicated"
     assert context.fully_sharded is False
+    assert punica.has_dsa_qkv_lora
 
 
 def test_dsa_lora_registry_refresh_is_idempotent() -> None:
@@ -227,54 +204,17 @@ def test_cv_lora_uses_explicit_multi_adapter_token_indices() -> None:
 
     x = torch.tensor([[1.0, 10.0], [2.0, 20.0], [3.0, 4.0]])
     output = torch.ones(3, 2)
-    intermediate = prepare_dsa_lora(linear, x, token_indices)
-    actual = apply_prepared_dsa_lora(linear, output, intermediate)
+    with (
+        patch.object(punica, "sgmv_shrink", wraps=punica.sgmv_shrink) as sgmv_shrink,
+        patch.object(punica, "sgmv_expand_slice", wraps=punica.sgmv_expand_slice) as sgmv_expand_slice,
+    ):
+        intermediate = prepare_dsa_lora(linear, x, token_indices)
+        actual = apply_prepared_dsa_lora(linear, output, intermediate)
 
     expected = torch.tensor([[3.0, 4.0], [1.0, 1.0], [17.0, 21.0]])
     torch.testing.assert_close(actual, expected)
-
-
-def test_cv_lora_uses_cube_gmm_for_long_prefill_segments() -> None:
-    linear = torch.nn.Module()
-    slots = [0] * 400 + [-1] * 200 + [1] * 424
-    routing = _make_grouped_routing(slots)
-    punica = FakePunica(routing.token_lora_indices)
-    lora_a = torch.tensor(
-        [
-            [[[1.0, 0.0]]],
-            [[[0.0, 1.0]]],
-        ],
-        dtype=torch.bfloat16,
-    )
-    lora_b = torch.tensor(
-        [
-            [[[2.0], [3.0]]],
-            [[[4.0], [5.0]]],
-        ],
-        dtype=torch.bfloat16,
-    )
-    _attach_context(linear, punica, lora_a, lora_b)
-
-    x = torch.arange(2048, dtype=torch.bfloat16).view(1024, 2) / 128
-    output = torch.ones(1024, 2, dtype=torch.bfloat16)
-    with (
-        patch("vllm_ascend.lora.dsa._DSA_LORA_GMM_MIN_CUBE_RANK", 0),
-        patch("vllm_ascend.lora.dsa._DSA_LORA_GMM_MIN_TOKENS", 0),
-        patch(
-            "vllm_ascend.lora.dsa.torch_npu.npu_grouped_matmul",
-            side_effect=_fake_grouped_matmul,
-        ) as grouped_matmul,
-    ):
-        intermediate = prepare_dsa_lora(linear, x, routing)
-        actual = apply_prepared_dsa_lora(linear, output, intermediate)
-
-    assert intermediate is not None
-    assert intermediate.used_grouped_matmul
-    assert grouped_matmul.call_count == 2
-    expected = torch.ones_like(output)
-    expected[:400] += x[:400, :1] * torch.tensor([2.0, 3.0], dtype=torch.bfloat16)
-    expected[600:] += x[600:, 1:] * torch.tensor([4.0, 5.0], dtype=torch.bfloat16)
-    torch.testing.assert_close(actual, expected)
+    sgmv_shrink.assert_called_once()
+    sgmv_expand_slice.assert_called_once()
 
 
 def test_cv_lora_segment_mapping_does_not_restart_from_batch_zero() -> None:
@@ -305,6 +245,31 @@ def test_cv_lora_segment_mapping_does_not_restart_from_batch_zero() -> None:
     actual = apply_prepared_dsa_lora(linear, torch.zeros(1, 1), intermediate)
 
     torch.testing.assert_close(actual, torch.tensor([[20.0]]))
+
+
+def test_cv_lora_skips_sgmv_for_base_only_segment() -> None:
+    linear = torch.nn.Module()
+    token_indices = torch.tensor([-1, -1])
+    punica = FakePunica(token_indices)
+    lora_a = torch.tensor([[[[1.0, 0.0]]]])
+    lora_b = torch.tensor([[[[2.0], [3.0]]]])
+    _attach_context(linear, punica, lora_a, lora_b)
+    output = torch.ones(2, 2)
+
+    with (
+        patch.object(punica, "sgmv_shrink", wraps=punica.sgmv_shrink) as sgmv_shrink,
+        patch.object(punica, "sgmv_expand_slice", wraps=punica.sgmv_expand_slice) as sgmv_expand_slice,
+    ):
+        intermediate = prepare_dsa_lora(
+            linear,
+            torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+            token_indices,
+        )
+        actual = apply_prepared_dsa_lora(linear, output, intermediate)
+
+    torch.testing.assert_close(actual, output)
+    sgmv_shrink.assert_not_called()
+    sgmv_expand_slice.assert_not_called()
 
 
 def test_fully_sharded_column_gathers_lora_rank_before_expand() -> None:
@@ -377,54 +342,6 @@ def test_grouped_wo_a_routes_by_adapter_and_group() -> None:
     )
 
     expected = torch.tensor([[[3.0], [7.0]], [[1.0], [1.0]], [[17.0], [31.0]]])
-    torch.testing.assert_close(actual, expected)
-
-
-def test_grouped_wo_a_uses_cached_group_major_cube_routing() -> None:
-    linear = torch.nn.Module()
-    slots = [0] * 512 + [1] * 512
-    routing = _make_grouped_routing(slots, num_groups=2)
-    punica = FakePunica(routing.token_lora_indices)
-    lora_a = torch.tensor(
-        [
-            [[[1.0, 0.0]]],
-            [[[0.0, 1.0]]],
-        ],
-        dtype=torch.bfloat16,
-    )
-    lora_b = torch.tensor(
-        [
-            [[[2.0], [3.0]]],
-            [[[4.0], [5.0]]],
-        ],
-        dtype=torch.bfloat16,
-    )
-    _attach_context(
-        linear,
-        punica,
-        lora_a,
-        lora_b,
-        parallel_mode="grouped_column",
-    )
-
-    x = torch.arange(4096, dtype=torch.bfloat16).view(1024, 2, 2) / 256
-    output = torch.ones(1024, 2, 1, dtype=torch.bfloat16)
-    with (
-        patch("vllm_ascend.lora.dsa._DSA_LORA_GMM_MIN_CUBE_RANK", 0),
-        patch("vllm_ascend.lora.dsa._DSA_LORA_GMM_MIN_TOKENS", 0),
-        patch(
-            "vllm_ascend.lora.dsa.torch_npu.npu_grouped_matmul",
-            side_effect=_fake_grouped_matmul,
-        ) as grouped_matmul,
-    ):
-        actual = apply_grouped_dsa_lora(linear, output, x, routing)
-
-    assert grouped_matmul.call_count == 2
-    expected = torch.ones_like(output)
-    expected[:512, 0, 0] += x[:512, 0, 0] * 2
-    expected[:512, 1, 0] += x[:512, 1, 0] * 3
-    expected[512:, 0, 0] += x[512:, 0, 1] * 4
-    expected[512:, 1, 0] += x[512:, 1, 1] * 5
     torch.testing.assert_close(actual, expected)
 
 

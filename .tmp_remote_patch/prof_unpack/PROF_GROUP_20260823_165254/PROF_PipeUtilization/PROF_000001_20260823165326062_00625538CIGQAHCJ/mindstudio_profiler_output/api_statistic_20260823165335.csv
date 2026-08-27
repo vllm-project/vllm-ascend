@@ -1,0 +1,25 @@
+Device_id,Level,API Name,Time(us),Count,Avg(us),Min(us),Max(us),Variance
+host,acl,GroupedMatmul_Tiling,222.36,2,111.18,2.12,220.24,11894.084
+host,acl,OnesLike_Tiling,71.23,2,35.615,28.29,42.94,53.656
+host,acl,aclnnGroupedMatmulV5,1643.5,1,1643.5,1643.5,1643.5,0
+host,acl,aclnnGroupedMatmulV5GetWorkspaceSize,7688.77,1,7688.77,7688.77,7688.77,0
+host,acl,aclnnInplaceOne,1630.85,2,815.425,99.92,1530.93,511947.405
+host,acl,aclnnInplaceOneGetWorkspaceSize,137830.13,2,68915.065,39.54,137790.59,4743837944.026
+host,acl,aclrtBinaryLoadFromData,516.05,2,258.025,112.11,403.94,21291.187
+host,acl,aclrtCreateStreamWithConfig,3612.34,2,1806.17,1460.11,2152.23,119757.524
+host,acl,aclrtCtxGetSysParamOpt,44,36,1.222,0.59,7.32,1.481
+host,acl,aclrtCtxSetSysParamOpt,3.31,2,1.655,0.63,2.68,1.051
+host,acl,aclrtDestroyStreamForce,1205.5,1,1205.5,1205.5,1205.5,0
+host,acl,aclrtGetCurrentContext,1.47,1,1.47,1.47,1.47,0
+host,acl,aclrtGetHardwareSyncAddr,8.43,1,8.43,8.43,8.43,0
+host,acl,aclrtGetResInCurrentThread,8.66,6,1.443,0.34,2.82,1.214
+host,acl,aclrtGetStreamAttribute,7.74,3,2.58,1.51,4.49,1.833
+host,acl,aclrtLaunchKernelWithHostArgs,586.37,3,195.457,13.72,511.28,50250.609
+host,acl,aclrtMemcpy,52.25,1,52.25,52.25,52.25,0
+host,acl,aclrtResetDevice,6.02,1,6.02,6.02,6.02,0
+host,acl,aclrtSetDevice,55.34,1,55.34,55.34,55.34,0
+host,acl,aclrtSetOpExecuteTimeOutV2,1241.38,1,1241.38,1241.38,1241.38,0
+host,acl,aclrtSetStreamFailureMode,6.62,2,3.31,2.81,3.81,0.25
+host,acl,aclrtSynchronizeDeviceWithTimeout,40.75,3,13.583,10.4,18.46,12.261
+host,acl,aclrtSynchronizeStream,21.86,1,21.86,21.86,21.86,0
+host,node,launch,1169.94,3,389.98,37.96,842.4,112894.032

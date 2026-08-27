@@ -1,0 +1,127 @@
+{
+  "eval_mode": "text",
+  "evals": [
+    {
+      "id": 1,
+      "title": "创建 Vector 算子直调工程的方法",
+      "config": {
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "请介绍如何使用 ascendc-direct-invoke-template 技能创建一个 Ascend C Kernel 直调工程。我想开发一个 Vector 算子（比如 Add），应该使用什么模板？需要遵循哪些步骤？不需要执行任何工具调用。",
+      "expected_output": "回复应说明创建 Vector 算子直调工程的方法：使用 add_custom 样例工程作为模板，修改 kernel.cpp/kernel.h 中的核函数实现和 host.cpp 中的调用参数，调整 CMakeLists.txt。该模板包含完整的 Vector 直调流程（<<<>>> 内核调用、数据搬入搬出、结果比对）。",
+      "files": [],
+      "expectations": []
+    },
+    {
+      "id": 3,
+      "title": "创建 Kernel 直调工程（正向看护）",
+      "config": {
+        "max_tokens": 320000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 576000,
+          "glm-5": 544000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "distractor_skills": [
+          "ascendc-registry-invoke-template",
+          "ascendc-api-best-practices"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我要创建一个 Ascend C Kernel 直调工程来快速验证一个 Vector Add 算子，请加载 ascendc-direct-invoke-template 技能指导我完成工程搭建。",
+      "expected_output": "回复应指导使用 add_custom 样例工程作为模板创建 Kernel 直调工程，说明需要修改的核心文件（kernel.cpp、host.cpp、CMakeLists.txt）和关键步骤。",
+      "files": [],
+      "expectations": []
+    },
+    {
+      "id": 4,
+      "title": "Python 数据处理咨询（负向看护）",
+      "config": {
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我有一个包含缺失值的 CSV 数据集，想用 Python 做数据清洗和预处理，请问 pandas 有哪些好用的函数可以用？",
+      "expected_output": "回复应介绍 Python 数据清洗的常见思路和方法，不涉及 Ascend C 算子开发相关内容。",
+      "files": [],
+      "expectations": []
+    },
+    {
+      "id": 5,
+      "title": "Blaze Matmul 直调工程模板选择",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "请使用 ascendc-direct-invoke-template skill。我要在昇腾上开发一个 MatMul 类算子的 Kernel 直调工程做快速原型验证，应该走哪条模板路线？模板放在哪里、开发指南在哪里？有哪些典型业务场景可以参考？",
+      "expected_output": "回复应说明 MatMul 类算子走 Blaze Matmul 路线：复制 references/matmul_blaze_template/ 工程，按 references/matmul_blaze_guide.md 改造，适用架构为 DAV_3510（A5 平台）；覆盖纯 MatMul、BatchMatMul、matmul+bias、mxfp8 matmul、matmul+vector 融合、GroupMatmul 等典型场景。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 6,
+      "title": "Kirin Vector 端侧算子模板",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "请使用 ascendc-direct-invoke-template skill。我要在 Kirin SoC 上开发一个端侧 Vector 算子（逐元素算子），应该用哪个模板？开发步骤和运行方式是什么？",
+      "expected_output": "回复应说明端侧开发走 Kirin Vector 模板：复制 references/kirin_add_template/ 工程，参考 references/kirin_vector_guide.md；适用平台为 KirinX90/Kirin9030，仅支持 sim 仿真和 NPU 模式；开发时全局替换 add_custom 算子名，并修改核函数实现、Tiling 结构、main.cpp 与 run.sh 等文件。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 7,
+      "title": "Kernel 直调工程的 PyTorch 对接",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "请使用 ascendc-direct-invoke-template skill。我用 add_custom 模板建好了 Vector 算子直调工程并编译出了动态库，现在想把这个算子注册进 PyTorch，在 Python 侧用 torch.ops 调用它，应该怎么做？",
+      "expected_output": "回复应说明模板已内置 PyTorch 对接：编译后在 Python 中通过 torch.ops.load_library(\"build/libadd_custom_ops.so\") 加载动态库，再用 torch.ops.npu.add_custom(x1, x2) 调用；op_extension/ 目录包含 add_custom_torch.cpp（Tiling 计算 + kernel launch）、register.cpp（TORCH_LIBRARY 注册，含 Meta backend）与 ops.h 函数声明；run.sh 支持 --torch 参数跑 PyTorch 通路。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 8,
+      "title": "基于 add_custom 改造新算子与关键模式",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "请使用 ascendc-direct-invoke-template skill。我准备基于 add_custom 模板开发一个自定义 Vector 算子（比如 Mul），除了替换算子名，还要按哪些标记改哪些文件？模板里内存分配、数据流和同步是怎么组织的？编译运行验证用什么命令？",
+      "expected_output": "回复应说明基于 add_custom 模板改造新算子的方法：先复制 references/add_custom 工程，全局替换 add_custom 为 <your_op>（_kernel/_torch/_tiling 是固定后缀），再按 [MODIFY] 标记改造类名与 kernel 函数名、Tiling 结构体（add_custom_tiling.h）、计算逻辑（add_custom_kernel.asc）、输入/输出数量及 CMakeLists.txt 目标名；关键模式为 TPipe+TQue 管理 UB Buffer、CopyIn→Compute→CopyOut 三段数据流、EnQue/DeQue 同步、Host 流程 ACL 初始化→KernelCall→资源释放；用 bash run.sh 编译运行，bash run.sh --skip-build 可复用编译产物。",
+      "expectations": [],
+      "files": []
+    }
+  ],
+  "skill_name": "ascendc-direct-invoke-template"
+}

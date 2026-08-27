@@ -259,3 +259,119 @@ def test_metadata_tracks_host_known_active_moe_lora_count(is_prefill, index_mapp
         wrapper.update_metadata(mapping, [7, 42, None], 3, 100)
 
     assert wrapper.num_active_moe_loras == expected_count
+
+
+def test_dsa_sgmv_metadata_splits_mixed_batch_once_per_step() -> None:
+    class CopyCountingBuffer:
+        def __init__(self, tensor):
+            self.tensor = tensor
+            self.copy_count = 0
+
+        def copy_(self, source, *, non_blocking=False):
+            self.copy_count += 1
+            self.tensor.copy_(source, non_blocking=non_blocking)
+            return self
+
+        def __getitem__(self, index):
+            return self.tensor[index]
+
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.device = torch.device("cpu")
+    wrapper._token_lora_indices = torch.tensor([0, 0, 1, 1, 1, -1])
+    with patch("vllm_ascend.lora.punica_npu.PIN_MEMORY", False):
+        wrapper._init_dsa_sgmv_metadata_buffers(max_batches=4)
+    wrapper._host_sgmv_metadata = wrapper._encode_sgmv_metadata((0, 0, 1, 1, 1, -1))
+    wrapper._dsa_sgmv_metadata_buffer = CopyCountingBuffer(wrapper._dsa_sgmv_metadata_buffer)
+
+    wrapper.prepare_dsa_sgmv_metadata(
+        num_decode_tokens=2,
+        num_actual_tokens=6,
+    )
+
+    decode_metadata = wrapper.get_dsa_sgmv_metadata(wrapper._token_lora_indices[:2])
+    prefill_indices = wrapper._token_lora_indices[2:6]
+    prefill_metadata = wrapper.get_dsa_sgmv_metadata(prefill_indices)
+
+    assert decode_metadata.token_offset == 0
+    assert decode_metadata.token_nums == 2
+    assert decode_metadata.seq_start_locs[: decode_metadata.batches].tolist() == [0]
+    assert decode_metadata.seq_lengths[: decode_metadata.batches].tolist() == [2]
+    assert decode_metadata.lora_indices[: decode_metadata.batches].tolist() == [0]
+
+    assert prefill_metadata.token_offset == 2
+    assert prefill_metadata.token_nums == 4
+    assert prefill_metadata.seq_start_locs[: prefill_metadata.batches].tolist() == [0, 3]
+    assert prefill_metadata.seq_lengths[: prefill_metadata.batches].tolist() == [3, 1]
+    assert prefill_metadata.lora_indices[: prefill_metadata.batches].tolist() == [1, -1]
+    assert torch.count_nonzero(prefill_metadata.seq_lengths[prefill_metadata.batches :]) == 0
+    assert wrapper.get_dsa_sgmv_metadata(prefill_indices) is prefill_metadata
+    assert wrapper._dsa_sgmv_metadata_buffer.copy_count == 1
+
+
+def test_prefill_and_dsa_reuse_one_host_rle_across_split_group() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.device = torch.device("cpu")
+    wrapper._token_lora_indices = torch.tensor([0, 0, 0, 0, 1, -1])
+    with patch("vllm_ascend.lora.punica_npu.PIN_MEMORY", False):
+        wrapper._init_prefill_sgmv_metadata_buffers(max_batches=4)
+        wrapper._init_dsa_sgmv_metadata_buffers(max_batches=4)
+
+    def fake_base_update_metadata(self, mapping, *_args, **_kwargs):
+        self._update_prefill_metadata(torch.empty(0, dtype=torch.long))
+        self.is_prefill = mapping.is_prefill
+
+    mapping = SimpleNamespace(
+        is_prefill=True,
+        index_mapping=(7, 7, 7, 7, 42, 0),
+    )
+    with (
+        patch.object(
+            PunicaWrapperNPU,
+            "_encode_sgmv_metadata",
+            wraps=PunicaWrapperNPU._encode_sgmv_metadata,
+        ) as encode_sgmv_metadata,
+        patch.object(
+            PunicaWrapperBase,
+            "update_metadata",
+            new=fake_base_update_metadata,
+        ),
+    ):
+        wrapper.update_metadata(mapping, [7, 42, None], 3, 100)
+        wrapper.prepare_dsa_sgmv_metadata(
+            num_decode_tokens=2,
+            num_actual_tokens=6,
+        )
+
+    assert encode_sgmv_metadata.call_count == 1
+    seq_start_locs, seq_lengths, lora_indices, batches, max_length, token_nums = wrapper.prefill_metadata
+    assert seq_start_locs.tolist() == [0, 4, 5]
+    assert seq_lengths.tolist() == [4, 1, 1]
+    assert lora_indices.tolist() == [0, 1, -1]
+    assert (batches, max_length, token_nums) == (3, 4, 6)
+
+    decode_metadata = wrapper.get_dsa_sgmv_metadata(wrapper._token_lora_indices[:2])
+    prefill_metadata = wrapper.get_dsa_sgmv_metadata(wrapper._token_lora_indices[2:])
+    assert decode_metadata.seq_lengths[: decode_metadata.batches].tolist() == [2]
+    assert decode_metadata.lora_indices[: decode_metadata.batches].tolist() == [0]
+    assert prefill_metadata.seq_start_locs[: prefill_metadata.batches].tolist() == [0, 2, 3]
+    assert prefill_metadata.seq_lengths[: prefill_metadata.batches].tolist() == [2, 1, 1]
+    assert prefill_metadata.lora_indices[: prefill_metadata.batches].tolist() == [0, 1, -1]
+
+
+def test_dsa_sgmv_metadata_marks_base_only_segment() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.device = torch.device("cpu")
+    wrapper._token_lora_indices = torch.tensor([-1, -1, 0, 0])
+    with patch("vllm_ascend.lora.punica_npu.PIN_MEMORY", False):
+        wrapper._init_dsa_sgmv_metadata_buffers(max_batches=2)
+    wrapper._host_sgmv_metadata = wrapper._encode_sgmv_metadata((-1, -1, 0, 0))
+
+    wrapper.prepare_dsa_sgmv_metadata(
+        num_decode_tokens=2,
+        num_actual_tokens=4,
+    )
+
+    decode_metadata = wrapper.get_dsa_sgmv_metadata(wrapper._token_lora_indices[:2])
+    prefill_metadata = wrapper.get_dsa_sgmv_metadata(wrapper._token_lora_indices[2:])
+    assert decode_metadata.no_lora
+    assert not prefill_metadata.no_lora

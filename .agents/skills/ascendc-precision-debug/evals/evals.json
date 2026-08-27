@@ -1,0 +1,161 @@
+{
+  "eval_mode": "text",
+  "evals": [
+    {
+      "id": 1,
+      "title": "精度调试的核心流程与哲学",
+      "config": {
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "在 Ascend C 算子开发中，遇到精度问题时应该如何调试？精度调试的核心方法论是什么？请介绍精度调试的四个主要步骤，以及为什么 FP16 在累加时容易出现精度损失（Catastrophic Cancellation）。",
+      "expected_output": "回复应说明 Ascend C 精度调试的核心方法论是\"逐层缩小、分阶段验证、定位首个异常点\"。四个主要步骤为数据比对导出、分阶段验证、流水线同步检查和精度损失修复。还应解释 FP16 Catastrophic Cancellation 的原因。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 2,
+      "title": "精度调试的前置条件",
+      "config": {
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "在进行 Ascend C 算子精度调试之前，需要满足哪些前置条件？为什么必须准备可复现的最小用例和黄金数据？需要检查哪些步骤才能确保可以开始调试？",
+      "expected_output": "回复应说明精度调试的前置条件：环境就绪、算子工程可编译运行、精度比对工具可用、准备标杆数据（Golden Data）和最小用例。还应说明最小用例和黄金数据的重要性。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 3,
+      "title": "算子精度比对调试请求（正向看护）",
+      "config": {
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 170000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "distractor_skills": [
+          "ascendc-runtime-debug",
+          "ascendc-crash-debug"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我的 Ascend C FP16 算子的计算结果和 Golden 数据有偏差，误差约 5%。我已经用数据比对工具确认了异常输出的位置。我怀疑是 FP16 累加时的 Catastrophic Cancellation 导致的精度损失。请加载 ascendc-precision-debug 技能帮我确认并给出修复建议。",
+      "expected_output": "回复应针对 FP16 精度偏差问题进行分析，给出精度修复的一般建议。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 4,
+      "title": "算子性能调优咨询（负向看护）",
+      "config": {
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我的 Ascend C 算子运行速度偏低，AIC 利用率只有 20%，如何分析流水瓶颈并进行优化？",
+      "expected_output": "回复应聚焦于性能分析和流水优化方法，不涉及精度调试相关内容。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 5,
+      "title": "输出全为0或随机错误的流水线同步排查（关键能力）",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我在写一个 Ascend C 算子，输入和输出都用 DataCopy 从 Global Memory 搬运到 LocalTensor，搬运完我直接在 LocalTensor 上做 Vector 计算，但计算结果要么全为 0，要么偶尔是随机错误值。我用数据比对工具确认了异常输出的位置。请阅读 ascendc-precision-debug 技能文档获取规范，帮我定位这类输出全 0 或随机错误问题的常见根因和排查方向，但不要实际执行 profiling 或修改我的代码。",
+      "expected_output": "回复应指出输出全为 0 或随机错误的常见根因是流水线同步缺失：DataCopy/DataCopyPad 是异步 DMA，直接在其后的数据上做 Vector 计算会读到未完成搬运的数据。关键要点：1. DataCopy 后应通过 EnQue/DeQue 同步，临时可用 PipeBarrier<PIPE_ALL> 验证是否为同步问题；2. 检查 DataCopy 是否 32 字节对齐，非对齐应改用 DataCopyPad；3. 检查是否误用 GlobalTensor.SetValue，应改用 LocalTensor.SetValue + DataCopyPad 搬出到 GM。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 6,
+      "title": "FP32 通过但 FP16/BF16 失败的升精度排查",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我的 Ascend C 算子做累加计算，用 FP32 输入验证完全通过，但换成同一 shape、同一数据的 FP16 后误差明显偏大，rtol/atol 不达标。我已经按调试前置要求固定了最小可复现用例并检索了 API 文档。请阅读 ascendc-precision-debug 技能文档获取规范，帮我分析 FP32 通过但 FP16/BF16 失败的诊断思路和排查方向，但不要实际执行 profiling 或修改我的代码。",
+      "expected_output": "回复应说明 FP32 通过但 FP16/BF16 失败说明核心算法正确、问题在半精度转换环节，属于半精度精度不足。关键要点：1. 检查 FP16/BF16 路径中间计算精度，是否有未升精度的中间运算，应将中间计算 Cast→FP32 计算后再 Cast 回半精度；2. 检查 Cast RoundMode，half→float 应使用 CAST_NONE，float→half 应使用 CAST_ROUND；3. 检查 Cast 后是否 EnQue/DeQue 同步以及 Cast buffer 大小（2×innerDim×sizeof(float)）。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 7,
+      "title": "Cast 后数据错误的 RoundMode 排查",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我的 Ascend C 算子需要在 FP16 和 FP32 之间做类型转换，我用 Cast 指令转换后输出数据是乱的，数值和预期完全对不上。代码里我没有显式指定 RoundMode。请阅读 ascendc-precision-debug 技能文档获取规范，帮我定位 Cast 后数据错误的最可能原因，说明正确的 RoundMode 用法，并告诉我如何通过对比 Cast 前后的数值来验证确认，以及除了 RoundMode 外还应该排查哪些方向，但不要实际执行 profiling 或修改我的代码。",
+      "expected_output": "回复应指出 Cast 后数据混乱的最常见原因是 Cast RoundMode 使用错误。关键要点：1. half→float 转换应使用 CAST_NONE，float→half 转换应使用 CAST_ROUND；2. 验证方法是对比 Cast 前后的数值来确认转换是否正确；3. 除 RoundMode 外还应检查 Cast 后是否 EnQue/DeQue 同步，以及 FP16 中间计算是否需升精度到 FP32。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 8,
+      "title": "修改代码后输出完全不变的编译缓存排查",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我在修一个 Ascend C 算子的精度问题，改了公式和常量后重新编译运行，输出和之前一模一样，像是修改完全没有生效。我已经固定了最小可复现用例并检索了 API 文档。请阅读 ascendc-precision-debug 技能文档获取规范，帮我判断修改代码后输出完全不变的根因和处理方法，但不要实际执行 profiling 或修改我的代码。",
+      "expected_output": "回复应说明修改代码后输出完全不变的根因是二进制未更新或编译器缓存。关键要点：1. 清理 build/ 目录和 $HOME/atc_data/kernel_cache/ 编译缓存后重试；2. 可通过验证修改后二进制的 sha256 是否改变来确认修改是否生效；3. 若清理后仍不变，应检查修改是否真正落入编译路径。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 9,
+      "title": "DumpTensor 7步法定位 NaN/Inf 出现阶段",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我的 Ascend C 算子输出里有 NaN 和 Inf，不确定异常出现在 CopyIn、Compute 还是 CopyOut 阶段。我有 CPU 上的 golden 参考实现，也已经按前置要求固定了最小用例并检索了官方文档。请阅读 ascendc-precision-debug 技能文档获取规范，告诉我该用什么调试方法来追踪异常出现在数据流的哪一阶段，但不要实际执行 profiling 或修改我的代码。",
+      "expected_output": "回复应推荐 DumpTensor 7步法进行 kernel 内插桩调试。关键要点：1. 在 CopyIn / Compute / CopyOut 关键点插入 DumpTensor；2. 配合 CPU golden 使用同 desc 编号（如 100/200/300）逐段对比；3. 该方法适用于输出错误、NaN/Inf 以及需要追踪 CopyIn → Compute → CopyOut 各阶段数据的场景。",
+      "expectations": [],
+      "files": []
+    }
+  ],
+  "skill_name": "ascendc-precision-debug"
+}
