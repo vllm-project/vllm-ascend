@@ -8,6 +8,8 @@ from vllm.distributed.parallel_state import _groups
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+
 
 @triton.jit
 def _pack_sfa_dcp_output_lse_kernel(
@@ -25,52 +27,82 @@ def _pack_sfa_dcp_output_lse_kernel(
     send_stride_d,
     local_scatter_size,
     head_dim,
+    num_heads,
+    total_rows,
     SCATTER_TOKENS: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    token_idx = tl.program_id(0).to(tl.int64)
-    head_idx = tl.program_id(1).to(tl.int64)
+    program_idx = tl.program_id(0)
+    num_programs = tl.num_programs(0)
     d_offsets = tl.arange(0, BLOCK_D)
 
-    if SCATTER_TOKENS:
-        rank_idx = token_idx // local_scatter_size
-        scatter_idx = token_idx % local_scatter_size
-        replicated_idx = head_idx
-    else:
-        rank_idx = head_idx // local_scatter_size
-        scatter_idx = head_idx % local_scatter_size
-        replicated_idx = token_idx
+    for linear_idx in range(program_idx, total_rows, num_programs):
+        token_idx = (linear_idx // num_heads).to(tl.int64)
+        head_idx = (linear_idx % num_heads).to(tl.int64)
 
-    send_base = (
-        rank_idx * send_stride_rank + scatter_idx * send_stride_scatter + replicated_idx * send_stride_replicated
-    )
-    output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
-    d_mask = d_offsets < head_dim
-    output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
-    tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
+        if SCATTER_TOKENS:
+            rank_idx = token_idx // local_scatter_size
+            scatter_idx = token_idx % local_scatter_size
+            replicated_idx = head_idx
+        else:
+            rank_idx = head_idx // local_scatter_size
+            scatter_idx = head_idx % local_scatter_size
+            replicated_idx = token_idx
 
-    lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h).to(tl.float32)
-    if LSE_PACK_DIM == 1:
-        tl.store(
-            send_ptr + send_base + head_dim * send_stride_d,
-            lse.to(send_ptr.dtype.element_ty),
+        send_base = (
+            rank_idx * send_stride_rank + scatter_idx * send_stride_scatter + replicated_idx * send_stride_replicated
         )
-    else:
-        # Arbitrary uint16 bit patterns are not reliably preserved when they
-        # are bit-cast through an Ascend activation tensor. A two-term
-        # numerical expansion survives HCCL while retaining almost all FP32
-        # LSE precision.
-        lse_hi = lse.to(send_ptr.dtype.element_ty)
-        lse_residual = (lse - lse_hi.to(tl.float32)).to(send_ptr.dtype.element_ty)
-        tl.store(
-            send_ptr + send_base + head_dim * send_stride_d,
-            lse_hi,
-        )
-        tl.store(
-            send_ptr + send_base + (head_dim + 1) * send_stride_d,
-            lse_residual,
-        )
+        output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
+        d_mask = d_offsets < head_dim
+        output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
+        tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
+
+        lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h).to(tl.float32)
+        if LSE_PACK_DIM == 1:
+            tl.store(
+                send_ptr + send_base + head_dim * send_stride_d,
+                lse.to(send_ptr.dtype.element_ty),
+            )
+        else:
+            # Store a finite FP32 LSE as a signed exponent code plus three
+            # base-256 significand digits. Every stored value is an integer in
+            # [-255, 255], so FP16 and BF16 preserve it exactly.
+            finite_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
+            abs_lse = tl.abs(lse)
+            nonzero_lse = abs_lse != 0.0
+            safe_abs_lse = tl.where(finite_lse & nonzero_lse, abs_lse, 1.0)
+            lse_exponent = tl.floor(tl.log2(safe_abs_lse))
+            lse_exponent = tl.maximum(-126.0, tl.minimum(lse_exponent, 127.0))
+            lse_exponent = tl.where(nonzero_lse, lse_exponent, 0.0)
+            significand = tl.where(
+                finite_lse & nonzero_lse,
+                abs_lse * tl.exp2(23.0 - lse_exponent),
+                0.0,
+            )
+            significand_hi = tl.floor(significand / 65536.0)
+            significand_remainder = significand - significand_hi * 65536.0
+            significand_mid = tl.floor(significand_remainder / 256.0)
+            significand_lo = significand_remainder - significand_mid * 256.0
+            exponent_code = lse_exponent + 128.0
+            exponent_code = tl.where(lse < 0.0, -exponent_code, exponent_code)
+            exponent_code = tl.where(finite_lse, exponent_code, 0.0)
+            tl.store(
+                send_ptr + send_base + head_dim * send_stride_d,
+                exponent_code.to(send_ptr.dtype.element_ty),
+            )
+            tl.store(
+                send_ptr + send_base + (head_dim + 1) * send_stride_d,
+                significand_hi.to(send_ptr.dtype.element_ty),
+            )
+            tl.store(
+                send_ptr + send_base + (head_dim + 2) * send_stride_d,
+                significand_mid.to(send_ptr.dtype.element_ty),
+            )
+            tl.store(
+                send_ptr + send_base + (head_dim + 3) * send_stride_d,
+                significand_lo.to(send_ptr.dtype.element_ty),
+            )
 
 
 @triton.jit
@@ -85,76 +117,102 @@ def _fused_sfa_dcp_lse_combine_kernel(
     output_stride_h,
     output_stride_d,
     head_dim,
+    num_heads,
+    total_rows,
     DCP_SIZE: tl.constexpr,
     SCATTER_TOKENS: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    token_idx = tl.program_id(0).to(tl.int64)
-    head_idx = tl.program_id(1).to(tl.int64)
+    program_idx = tl.program_id(0)
+    num_programs = tl.num_programs(0)
     d_offsets = tl.arange(0, BLOCK_D)
 
-    if SCATTER_TOKENS:
-        scatter_idx = token_idx
-        replicated_idx = head_idx
-    else:
-        scatter_idx = head_idx
-        replicated_idx = token_idx
+    for linear_idx in range(program_idx, total_rows, num_programs):
+        token_idx = (linear_idx // num_heads).to(tl.int64)
+        head_idx = (linear_idx % num_heads).to(tl.int64)
 
-    # Keep only scalar LSE state and one D-vector accumulator live. A
-    # [DCP_SIZE, BLOCK_D] reduction causes excessive register/UB pressure on
-    # Ascend for the GLM-5.2 D=256 path.
-    lse_max = -float("inf")
-    for rank_idx in tl.static_range(DCP_SIZE):
-        recv_base = (
-            rank_idx * recv_stride_rank + scatter_idx * recv_stride_scatter + replicated_idx * recv_stride_replicated
-        )
-        if LSE_PACK_DIM == 1:
-            lse = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
+        if SCATTER_TOKENS:
+            scatter_idx = token_idx
+            replicated_idx = head_idx
         else:
-            lse_hi = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
-            lse_residual = tl.load(recv_ptr + recv_base + (head_dim + 1) * recv_stride_d).to(tl.float32)
-            lse = lse_hi + lse_residual
-        valid_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
-        lse_max = tl.maximum(lse_max, tl.where(valid_lse, lse, -float("inf")))
+            scatter_idx = head_idx
+            replicated_idx = token_idx
 
-    any_valid_lse = lse_max != -float("inf")
-    safe_lse_max = tl.where(any_valid_lse, lse_max, 0.0)
-    weight_sum = 0.0
-    merged = tl.zeros([BLOCK_D], dtype=tl.float32)
-    d_mask = d_offsets < head_dim
-    for rank_idx in tl.static_range(DCP_SIZE):
-        recv_base = (
-            rank_idx * recv_stride_rank + scatter_idx * recv_stride_scatter + replicated_idx * recv_stride_replicated
-        )
-        if LSE_PACK_DIM == 1:
-            lse = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
-        else:
-            lse_hi = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
-            lse_residual = tl.load(recv_ptr + recv_base + (head_dim + 1) * recv_stride_d).to(tl.float32)
-            lse = lse_hi + lse_residual
-        valid_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
-        weight = tl.where(valid_lse, tl.exp(lse - safe_lse_max), 0.0)
-        partial_output = tl.load(
-            recv_ptr + recv_base + d_offsets * recv_stride_d,
-            mask=d_mask,
-            other=0.0,
-        ).to(tl.float32)
-        # Select before multiplication: multiplying a zero weight by a NaN
-        # from an invalid rank would otherwise contaminate the result.
-        partial_output = tl.where(valid_lse, partial_output, 0.0)
-        merged += partial_output * weight
-        weight_sum += weight
+        # Keep only scalar LSE state and one D-vector accumulator live. A
+        # [DCP_SIZE, BLOCK_D] reduction causes excessive register/UB pressure
+        # on Ascend for the GLM-5.2 D=256 path.
+        lse_max = -float("inf")
+        for rank_idx in tl.static_range(DCP_SIZE):
+            recv_base = (
+                rank_idx * recv_stride_rank
+                + scatter_idx * recv_stride_scatter
+                + replicated_idx * recv_stride_replicated
+            )
+            if LSE_PACK_DIM == 1:
+                lse = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
+                valid_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
+            else:
+                exponent_code = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
+                significand_hi = tl.load(recv_ptr + recv_base + (head_dim + 1) * recv_stride_d).to(tl.float32)
+                significand_mid = tl.load(recv_ptr + recv_base + (head_dim + 2) * recv_stride_d).to(tl.float32)
+                significand_lo = tl.load(recv_ptr + recv_base + (head_dim + 3) * recv_stride_d).to(tl.float32)
+                packed_valid = exponent_code != 0.0
+                sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
+                exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
+                safe_exponent = exponent_magnitude - 128.0
+                significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
+                lse = sign * significand * tl.exp2(safe_exponent - 23.0)
+                valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
+            lse_max = tl.maximum(lse_max, tl.where(valid_lse, lse, -float("inf")))
 
-    denominator = tl.where(weight_sum > 0.0, weight_sum, 1.0)
-    merged /= denominator
-    output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
-    tl.store(output_ptr + output_offsets, merged, mask=d_mask)
+        any_valid_lse = lse_max != -float("inf")
+        safe_lse_max = tl.where(any_valid_lse, lse_max, 0.0)
+        weight_sum = 0.0
+        merged = tl.zeros([BLOCK_D], dtype=tl.float32)
+        d_mask = d_offsets < head_dim
+        for rank_idx in tl.static_range(DCP_SIZE):
+            recv_base = (
+                rank_idx * recv_stride_rank
+                + scatter_idx * recv_stride_scatter
+                + replicated_idx * recv_stride_replicated
+            )
+            if LSE_PACK_DIM == 1:
+                lse = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
+                valid_lse = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
+            else:
+                exponent_code = tl.load(recv_ptr + recv_base + head_dim * recv_stride_d).to(tl.float32)
+                significand_hi = tl.load(recv_ptr + recv_base + (head_dim + 1) * recv_stride_d).to(tl.float32)
+                significand_mid = tl.load(recv_ptr + recv_base + (head_dim + 2) * recv_stride_d).to(tl.float32)
+                significand_lo = tl.load(recv_ptr + recv_base + (head_dim + 3) * recv_stride_d).to(tl.float32)
+                packed_valid = exponent_code != 0.0
+                sign = tl.where(exponent_code < 0.0, -1.0, 1.0)
+                exponent_magnitude = tl.where(exponent_code < 0.0, -exponent_code, exponent_code)
+                safe_exponent = exponent_magnitude - 128.0
+                significand = significand_hi * 65536.0 + significand_mid * 256.0 + significand_lo
+                lse = sign * significand * tl.exp2(safe_exponent - 23.0)
+                valid_lse = packed_valid & (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
+            weight = tl.where(valid_lse, tl.exp(lse - safe_lse_max), 0.0)
+            partial_output = tl.load(
+                recv_ptr + recv_base + d_offsets * recv_stride_d,
+                mask=d_mask,
+                other=0.0,
+            ).to(tl.float32)
+            # Select before multiplication: multiplying a zero weight by a
+            # NaN from an invalid rank would otherwise contaminate the result.
+            partial_output = tl.where(valid_lse, partial_output, 0.0)
+            merged += partial_output * weight
+            weight_sum += weight
+
+        denominator = tl.where(weight_sum > 0.0, weight_sum, 1.0)
+        merged /= denominator
+        output_offsets = token_idx * output_stride_t + head_idx * output_stride_h + d_offsets * output_stride_d
+        tl.store(output_ptr + output_offsets, merged, mask=d_mask)
 
 
 def _lse_pack_dim(output_dtype: torch.dtype) -> int:
     if output_dtype in (torch.bfloat16, torch.float16):
-        return 2
+        return 4
     if output_dtype == torch.float32:
         return 1
     raise TypeError(f"SFA DCP fused A2A supports bfloat16, float16, or float32 output, got {output_dtype}.")
@@ -220,7 +278,10 @@ def pack_sfa_dcp_output_lse(
         dtype=sfa_output.dtype,
         device=sfa_output.device,
     )
-    _pack_sfa_dcp_output_lse_kernel[(num_tokens, num_heads)](
+    total_rows = num_tokens * num_heads
+    init_device_properties_triton()
+    grid_size = min(total_rows, get_vectorcore_num())
+    _pack_sfa_dcp_output_lse_kernel[(grid_size,)](
         sfa_output,
         softmax_lse,
         send,
@@ -230,6 +291,8 @@ def pack_sfa_dcp_output_lse(
         *send.stride(),
         local_scatter_size,
         head_dim,
+        num_heads,
+        total_rows,
         SCATTER_TOKENS=scatter_dim == 0,
         LSE_PACK_DIM=lse_pack_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
@@ -269,12 +332,17 @@ def fused_sfa_dcp_lse_combine(
         dtype=recv.dtype,
         device=recv.device,
     )
-    _fused_sfa_dcp_lse_combine_kernel[(num_tokens, num_heads)](
+    total_rows = num_tokens * num_heads
+    init_device_properties_triton()
+    grid_size = min(total_rows, get_vectorcore_num())
+    _fused_sfa_dcp_lse_combine_kernel[(grid_size,)](
         recv,
         output,
         *recv.stride(),
         *output.stride(),
         head_dim,
+        num_heads,
+        total_rows,
         DCP_SIZE=dcp_size,
         SCATTER_TOKENS=scatter_dim == 0,
         LSE_PACK_DIM=lse_pack_dim,
@@ -318,8 +386,7 @@ def sfa_dcp_a2a_fused(
         raise RuntimeError(f"SFA DCP fused A2A group {group_name!r} is unavailable.")
     if group.world_size != dcp_size:
         raise RuntimeError(
-            "SFA DCP fused A2A group size does not match dcp_size: "
-            f"group={group.world_size}, dcp_size={dcp_size}."
+            f"SFA DCP fused A2A group size does not match dcp_size: group={group.world_size}, dcp_size={dcp_size}."
         )
     return sfa_dcp_a2a_fused_combine(
         sfa_output,
@@ -337,6 +404,12 @@ def sfa_dcp_a2a_fused_fake(
     scatter_dim: int,
     group_name: str,
 ) -> torch.Tensor:
+    """Propagate output metadata for torch.compile without running HCCL.
+
+    PyTorch invokes this FakeTensor implementation while tracing the custom
+    operator. It must only describe the local output shape, dtype, and device;
+    the real implementation performs the collective at execution time.
+    """
     del softmax_lse, group_name
     output_shape = list(sfa_output.shape)
     output_shape[scatter_dim] //= dcp_size
