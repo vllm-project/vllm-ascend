@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import A3_MEGA_MOE_TOKENS_PER_RANK_LIMIT, get_ascend_config
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 
     from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEFusedExpertsInput
 
-A3_MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _A3_MEGA_MOE_EP_SIZE_LIMIT = 64
 _A3_MEGA_MOE_HIDDEN_SIZE_MIN = 1024
 _A3_MEGA_MOE_HIDDEN_SIZE_MAX = 8192

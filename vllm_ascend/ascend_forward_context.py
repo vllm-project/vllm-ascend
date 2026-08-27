@@ -11,10 +11,10 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import compute_mega_moe_buffer_tokens_per_rank, get_ascend_config
-from vllm_ascend.ops.fused_moe.a3_mega_moe import (
+from vllm_ascend.ascend_config import (
     A3_MEGA_MOE_TOKENS_PER_RANK_LIMIT,
-    is_a3_mega_moe_enabled,
+    compute_mega_moe_buffer_tokens_per_rank,
+    get_ascend_config,
 )
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -34,6 +34,15 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     FUSED_MC2 = 3
+
+
+def is_a3_mega_moe_enabled(vllm_config: VllmConfig | None = None) -> bool:
+    # Importing a submodule first initializes vllm_ascend.ops, whose fused MoE
+    # registration imports this module for _EXTRA_CTX and MoECommType.
+    # Delay the capability import until after this module is fully initialized.
+    from vllm_ascend.ops.fused_moe.a3_mega_moe import is_a3_mega_moe_enabled as _is_enabled
+
+    return _is_enabled(vllm_config)
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)

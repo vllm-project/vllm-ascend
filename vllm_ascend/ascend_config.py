@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+A3_MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
+
+
 def compute_mega_moe_buffer_tokens_per_rank(
     mega_moe_max_tokens: int,
     mc2_tokens_capacity: int,

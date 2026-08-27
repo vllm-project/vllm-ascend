@@ -1,3 +1,5 @@
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -6,6 +8,17 @@ import pytest
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.quantization.quant_type import QuantType
+
+
+def test_a3_mega_moe_backend_is_not_imported_at_module_scope():
+    module = ast.parse(Path(afc.__file__).read_text())
+    module_scope_imports = [node for node in module.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+
+    for node in module_scope_imports:
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("vllm_ascend.ops")
+        else:
+            assert all(not alias.name.startswith("vllm_ascend.ops") for alias in node.names)
 
 
 @pytest.fixture(autouse=True)
