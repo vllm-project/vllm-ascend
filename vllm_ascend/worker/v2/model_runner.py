@@ -18,6 +18,7 @@
 #
 
 from contextlib import contextmanager
+from typing import Any
 
 import numpy as np
 import torch
@@ -51,10 +52,18 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_mask,
     set_mc2_tokens_capacity,
 )
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.logger import logger
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.worker.gpu.async_utils import AsyncOutput
+
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
 )
+from vllm_ascend.dfx.async_output import AscendAsyncOutput
+from vllm_ascend.dfx.processor import DfxProcessor
+from vllm_ascend.dfx.runner_hooks import need_pre_sample_hook, wrap_compute_logits_for_pre_sample
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import set_potential_max_tokens, vllm_version_is
 
@@ -180,14 +189,18 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
-    def sample_tokens(self, grammar_output):
-        output = super().sample_tokens(grammar_output)
+        # Dumper expects these attributes (aligned with v1 NPUModelRunner).
+        try:
+            self.tp_rank = get_tp_group().rank_in_group
+        except Exception:
+            self.tp_rank = 0
+        # Finalized in initialize_kv_cache (same stage as v1).
+        self.need_accepted_tokens = False
 
-        if self.use_spec_pp and self.is_last_pp_rank:
-            assert self.pp_handler is not None
-            # Wait until propose() has populated this step's draft tokens.
-            self.pp_handler.broadcast_draft_tokens()
-        return output
+        self.dfx = DfxProcessor(self)
+        # Stashed for V2 ``sample()`` DFX pre-sample hooks (ExecuteModelState
+        # does not carry scheduler_output / logits / positions).
+        self._dfx_scheduler_output: SchedulerOutput | None = None
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
@@ -198,6 +211,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.pcp_manager = self.pcp_manager
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+        # Hybrid + speculative decoding needs accepted-token tracking for MTP dumps.
+        self.need_accepted_tokens = bool(self.model_config.is_hybrid and self.speculative_config is not None)
 
     @torch.inference_mode()
     def execute_model(
@@ -216,28 +231,118 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
         )
 
-        if vllm_version_is("0.27.1"):
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-            )
+        # Split intentionally: sync_dfx_config on ALL ranks of this EngineCore
+        # (per-DP broadcast or file poll); sync_dump_pending_or only on last-PP
+        # TP. Idle DP must mirror via execute_dummy_batch → sync_for_step.
+        logger.debug(
+            "DFX sync: tp_group.world_size=%s tp_rank=%s pp_last=%s",
+            get_tp_group().world_size,
+            get_tp_group().rank_in_group,
+            get_pp_group().is_last_rank,
+        )
+        self.dfx.sync_for_step(
+            allow_arm=not dummy_run,
+            scheduler_output=scheduler_output,
+        )
+        # Visible to ``sample()`` DFX hooks after execute_model returns.
+        self._dfx_scheduler_output = None if dummy_run else scheduler_output
+        # start/finalize wrap the forward path; sample_tokens runs afterwards.
+        self.dfx.start_dump_data()
+        try:
+            if vllm_version_is("0.27.1"):
+                output = super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                )
+            else:
+                output = super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                    context_len=context_len,
+                )
+        except Exception:
+            # Do not record KV writes for a failed forward (avoids stale
+            # execute_model_state + new scheduler_output false positives).
+            self._dfx_scheduler_output = None
+            raise
         else:
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-            )
+            # Only after a successful forward: KV slots for this step exist.
+            if not dummy_run:
+                state = self.execute_model_state
+                self.dfx.note_kv_block_writes(
+                    scheduler_output,
+                    input_batch=getattr(state, "input_batch", None),
+                )
+        finally:
+            # dummy/capture must not consume the pending dump-forward window.
+            self.dfx.finalize_dump_data(dump=not dummy_run)
+            if dummy_run:
+                self._dfx_scheduler_output = None
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
             execution_start_time,
         )
+        return output
+
+    def sample(self, hidden_states, input_batch, grammar_output):
+        """Delegate to upstream ``sample``; optionally wrap ``compute_logits`` for DFX.
+
+        When ``logits_finite`` / ``position_alignment`` are enabled **and**
+        anomaly detection is not gated off this step, temporarily wrap
+        ``model.compute_logits`` so ``check_before_sample`` runs on the
+        returned logits (still before grammar ``-inf``). Avoids copying the
+        upstream ``sample()`` body. No-op when detectors are off or the
+        detection gate skips (wrong rank / dump busy / no detector).
+        """
+        if need_pre_sample_hook(self.dfx):
+            with wrap_compute_logits_for_pre_sample(self, input_batch):
+                return super().sample(hidden_states, input_batch, grammar_output)
+        return super().sample(hidden_states, input_batch, grammar_output)
+
+    def sample_tokens(self, grammar_output=None):
+        finished_req_ids = None
+        state = self.execute_model_state
+        if state is not None:
+            finished_req_ids = getattr(state, "finished_req_ids", None)
+
+        # TokenLogprobDetector needs top-k logprobs even when the client
+        # did not set sampling_params.logprobs.
+        self.dfx.ensure_logprobs_for_detection()
+        try:
+            output = super().sample_tokens(grammar_output)
+        finally:
+            self._dfx_scheduler_output = None
+
+        if self.use_spec_pp and self.is_last_pp_rank:
+            assert self.pp_handler is not None
+            # Wait until propose() has populated this step's draft tokens.
+            self.pp_handler.broadcast_draft_tokens()
+
+        self.dfx.mark_finished(finished_req_ids)
+
+        if isinstance(output, AsyncOutput):
+            # Async: defer token/logprob check until D2H in get_output().
+            # Stamp wave on the main thread before the output-copy thread runs.
+            mro = getattr(output, "model_runner_output", None)
+            req_ids = getattr(mro, "req_ids", None) if mro is not None else None
+            self.dfx.record_sample_waves(req_ids)
+            return AscendAsyncOutput(output, self)
+
+        if isinstance(output, ModelRunnerOutput):
+            # Sync: super() already called get_output(); check immediately.
+            self.dfx.record_sample_waves(output.req_ids)
+            self.dfx.check_after_sample(
+                sampled_token_ids=output.sampled_token_ids,
+                logprobs_lists=output.logprobs,
+                req_ids=output.req_ids,
+            )
         return output
 
     @torch.inference_mode()
@@ -707,6 +812,11 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
             query_start_loc,
         )
+        if self.dfx.should_check_after_spec():
+            self.dfx.check_after_spec(
+                sampled_tokens=sampled_tokens,
+                accepted_token_nums=num_sampled,
+            )
 
         # Skip D2H copy without MTP: num_computed_tokens_cpu is synced
         # from num_computed_tokens_np in _update_seq_lens_cpu instead.
