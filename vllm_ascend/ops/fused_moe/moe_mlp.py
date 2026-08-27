@@ -18,7 +18,6 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
-from vllm.model_executor.layers.activation import SituAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
@@ -119,6 +118,22 @@ def _prepare_swigluoai_grouped_matmul_scales(
 ) -> list[torch.Tensor]:
     scales = weight_scale if isinstance(weight_scale, list) else [weight_scale]
     return [scale.to(output_dtype) if scale.dtype != output_dtype else scale for scale in scales]
+
+
+def _apply_situ(
+    hidden_states: torch.Tensor,
+    *,
+    beta: float,
+    linear_beta: float | None,
+) -> torch.Tensor:
+    """Match SituAndMul.forward_native without constructing a CustomOp in forward."""
+    gate, up = hidden_states.chunk(2, dim=-1)
+    gate = gate.float()
+    up = up.float()
+    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    if linear_beta is not None:
+        up = linear_beta * torch.tanh(up / linear_beta)
+    return (gate * up).to(hidden_states.dtype)
 
 
 def _apply_clipped_swiglu(
@@ -406,10 +421,11 @@ def quant_apply_mlp(
             approximate = "tanh" if activation == MoEActivation.GELU_TANH else "none"
             hidden_states = torch.nn.functional.gelu(gate, approximate=approximate) * up
         elif activation == MoEActivation.SITU:
-            hidden_states = SituAndMul(
+            hidden_states = _apply_situ(
+                hidden_states,
                 beta=situ_beta,
                 linear_beta=activation_situ_linear_beta,
-            )(hidden_states)
+            )
         elif is_swigluoai_uninterleave:
             hidden_states = _apply_clipped_swiglu(
                 hidden_states,
@@ -573,10 +589,11 @@ def quant_apply_mlp(
                         quant_mode="dynamic",
                     )
                 else:
-                    hidden_states = SituAndMul(
+                    hidden_states = _apply_situ(
+                        hidden_states,
                         beta=situ_beta,
                         linear_beta=activation_situ_linear_beta,
-                    )(hidden_states)
+                    )
                     swiglu_out_scale = None
             elif is_swigluoai_uninterleave:
                 if use_mxfp_quant:
@@ -703,10 +720,11 @@ def unquant_apply_mlp(
 
     act_name = getattr(activation, "value", activation)
     if activation == MoEActivation.SITU:
-        gate_up_out = SituAndMul(
+        gate_up_out = _apply_situ(
+            gate_up_out,
             beta=activation_situ_beta,
             linear_beta=activation_situ_linear_beta,
-        )(gate_up_out)
+        )
     elif activation == MoEActivation.SWIGLUOAI:
         num_experts, _, hidden_size = w1.shape
         gate_up_out = AscendSwigluOAIAndMul.swiglu_oai_forward(gate_up_out.view(-1, hidden_size))
