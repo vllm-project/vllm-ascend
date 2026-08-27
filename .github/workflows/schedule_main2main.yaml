@@ -159,7 +159,7 @@ jobs:
       run:
         shell: bash -el {0}
     env:
-      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
