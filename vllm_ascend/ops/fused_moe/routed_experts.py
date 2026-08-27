@@ -588,11 +588,29 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             else:
                 self.moe_load.add_(local_load)
 
-        routed_out = _EXTRA_CTX.moe_comm_method.finalize(
-            hidden_states=fused_experts_results.routed_out,
-            reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
-            padded_hidden_states_shape=padded_hidden_states_shape,
+        routed_out: torch.Tensor | None = None
+
+        def finish_routed_out() -> torch.Tensor:
+            nonlocal routed_out
+            if routed_out is None:
+                raw_routed_out = fused_experts_results.routed_out
+                if raw_routed_out is None:
+                    assert fused_experts_results.finish_routed_out is not None
+                    raw_routed_out = fused_experts_results.finish_routed_out()
+                routed_out = _EXTRA_CTX.moe_comm_method.finalize(
+                    hidden_states=raw_routed_out,
+                    reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
+                    padded_hidden_states_shape=padded_hidden_states_shape,
+                )
+            return routed_out
+
+        defer_routed_out = (
+            self.return_with_event
+            and getattr(self, "defer_dsa_cp_moe_dbo_final_combine", False)
+            and fused_experts_results.finish_routed_out is not None
         )
+        if not defer_routed_out:
+            routed_out = finish_routed_out()
 
         # Clear per-forward LoRA state from long-lived singletons.
         if lora_context is not None:
@@ -605,7 +623,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
                 before_dispatch=fused_experts_results.before_dispatch_evt,
                 before_gmm2=fused_experts_results.before_gmm2_evt,
                 before_combine=fused_experts_results.before_combine_evt,
+                finish_routed_out=finish_routed_out if defer_routed_out else None,
             )
 
         # The vLLM FusedMoE forward_impl does not return events.
+        assert routed_out is not None
         return routed_out

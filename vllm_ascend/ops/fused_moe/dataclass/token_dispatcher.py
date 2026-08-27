@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import numpy as np
 import torch
@@ -61,6 +61,38 @@ class MoEAllToAllCombineMetadata:
     reversed_global_input_permutation_mapping: torch.Tensor | None
     hidden_shape: torch.Size
     hidden_shape_before_permute: torch.Size
+
+
+@dataclass(frozen=True, slots=True)
+class MoEAllToAllDispatchHandle:
+    """Per-micro-batch state kept alive until dispatch completion."""
+
+    token_dispatch_input: MoETokenDispatchInput
+    hidden_input: torch.Tensor
+    global_input_tokens: torch.Tensor
+    hidden_work: Any
+    scale_input: torch.Tensor | None
+    dynamic_scale_after_all2all: torch.Tensor | None
+    scale_work: Any | None
+    reversed_local_input_permutation_mapping: torch.Tensor
+    tokens_per_expert: torch.Tensor
+    input_splits: np.ndarray
+    output_splits: np.ndarray
+    global_input_tokens_local_experts_indices: torch.Tensor | None
+    hidden_shape: torch.Size
+    hidden_shape_before_permute: torch.Size
+    with_quant: bool
+    dst_type: torch.dtype | None
+
+
+@dataclass(frozen=True, slots=True)
+class MoEAllToAllCombineHandle:
+    """Per-micro-batch state kept alive until combine completion."""
+
+    hidden_input: torch.Tensor
+    permutated_local_input_tokens: torch.Tensor
+    work: Any
+    combine_metadata: MoEAllToAllCombineMetadata
 
 
 @dataclass(frozen=True, slots=True)
