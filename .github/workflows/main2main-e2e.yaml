@@ -118,12 +118,8 @@ jobs:
       matrix:
         include:
           - chip: a2
-            runner: linux-aarch64-a2-4
+            runner: linux-aarch64-a2-1
             image_tag: 9.1.0-910b-ubuntu22.04-py3.12
-            max_jobs: '184'
-          - chip: a3
-            runner: linux-aarch64-a3-4
-            image_tag: ${{ inputs.image_tag_a3 }}
             max_jobs: '184'
           - chip: 310p
             runner: linux-aarch64-310p-1
@@ -451,12 +447,8 @@ jobs:
       matrix:
         include:
           - chip: a2
-            runner: linux-aarch64-a2-4
+            runner: linux-aarch64-a2-1
             image_tag: 9.1.0-910b-ubuntu22.04-py3.12
-            max_jobs: '184'
-          - chip: a3
-            runner: linux-aarch64-a3-4
-            image_tag: ${{ inputs.image_tag_a3 }}
             max_jobs: '184'
             # Dual-die package: dies 0-1, 2-3, ... must be used as whole
             # pairs — run_tests.py enforces pair-aligned device assignment.
