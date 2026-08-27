@@ -14,10 +14,43 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Fused MiniMax-M3 sparse prepare: split + Gemma RMSNorm + Neox RoPE.
+"""Fused MiniMax-M3 sparse prepare: split + Gemma RMSNorm + NeoX RoPE.
 
 Concat layout ``[q | k | v | index_q | index_k]``.
-With ``attn_out_fp8=True``, main Q/K/V are clamped to +-448 and stored as e4m3; ``indexer_out_fp8=True`` does the same for indexer Q/K.
+With ``attn_out_fp8=True``, main Q/K/V are clamped to +-448 and stored as
+e4m3; ``indexer_out_fp8=True`` does the same for indexer Q/K.
+
+Determinism note
+----------------
+An earlier version gathered cos/sin rows inside the Triton kernel using a
+scalar ``get_element`` / ``insert_slice`` loop, i.e. for each token the
+position index was read with ``get_element`` and the corresponding
+cos/sin row was loaded via indirect addressing (``tl.load(ptr + pos *
+stride)``) then written back with ``insert_slice``.
+
+This approach was **non-deterministic** under real inference workloads
+(even in eager mode, without torch.compile or graph capture). Root cause:
+Ascend NPU hardware scheduling of scalar indirect-address loads is
+sensitive to concurrent memory traffic from other operators. When other
+ops compete for memory bandwidth / DMA channels, the completion order of
+the per-token scalar loads may vary across runs, producing tiny
+floating-point differences that propagate and amplify through
+autoregressive generation (greedy decoding diverges after enough tokens).
+
+Key evidence from ablation and reproduction:
+1. Ablation B (tl.sum RMSNorm + C++ RoPE) = deterministic; Ablation A
+   (C++ RMSNorm + Triton RoPE with get_element) = non-deterministic.
+2. Standalone single-op test = deterministic (no concurrent traffic).
+3. Standalone test with a background memory-heavy stream = reproduces
+   non-determinism, and the probability increases with num_tokens (more
+   scalar loop iterations).
+
+Fix: cos/sin rows are pre-gathered in Python via a single
+``cos_sin_cache[positions]`` (one ``aclnnIndex`` op) before the kernel.
+The kernel then reads cos/sin with a **vectorized contiguous offset**
+(``ptr + block_offset``), which is immune to hardware scheduling jitter.
+The entire gathered tensor is passed directly (no extra Slice ops) and
+the kernel selects cos from offset 0 and sin from ``HALF_CACHE``.
 """
 
 from __future__ import annotations
@@ -26,11 +59,11 @@ from functools import lru_cache
 
 import torch
 from vllm.triton_utils import tl, triton
+from triton.language import constexpr
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ops.triton.triton_utils import (
     extract_slice,
-    get_element,
     get_vectorcore_num,
     insert_slice,
 )
@@ -40,12 +73,16 @@ _A5_UB_RESERVE = 8 * 1024
 _UB_KB_A2 = 192
 _UB_KB_A5 = 256
 
+# FP8 E4M3 max value for clamping.
+_FP8_E4M3_MAX = constexpr(448.0)
+
 
 @lru_cache(maxsize=1)
 def _ub_size_bytes() -> int:
     """Get available UB size in bytes for the current NPU.
 
-    A2 / 910B / 910_93: 192KB. A5 / 910_95 / 950: 256KB - 8KB compiler reserve.
+    A2 / 910B / 910_93: 192KB.
+    A5 / 910_95 / 950: 256KB - 8KB compiler reserve.
     Prefers Triton runtime ``ub_size_in_kbytes`` (same source as compiler).
     """
     kb: int | None = None
@@ -106,8 +143,8 @@ def split_qkv_index_rmsnorm_rope_kernel(
     BIAS: tl.constexpr,  # whether to apply bias to main Q/K
     HEAD_DIM: tl.constexpr,  # main head dimension; RoPE views by this
     IDX_HEAD_DIM: tl.constexpr,  # indexer head dimension; RMSNorm reduces by this
-    ROPE_DIM: tl.constexpr,  # cache last dim (cos||sin concat length)
-    HALF_CACHE: tl.constexpr,  # ROPE_DIM/2, sin starts here
+    ROPE_DIM: tl.constexpr,  # cache last dim (cos||sin concat length) [unused]
+    HALF_CACHE: tl.constexpr,  # ROPE_DIM/2, sin starts here [unused]
     ATTN_HALF: tl.constexpr,  # main partial RoPE half width = attn_rope_dim/2
     IDX_HALF: tl.constexpr,  # indexer partial RoPE half width = idx_rope_dim/2
     num_vectorcore: tl.constexpr,  # number of Vector Cores (grid)
@@ -121,12 +158,12 @@ def split_qkv_index_rmsnorm_rope_kernel(
     idx_qk_heads_per_iter: tl.constexpr,  # tile * index_qk_head_num, for reshape
     index_q_head_num: tl.constexpr,  # indexer Q head count
     index_qk_head_num: tl.constexpr,  # indexer Q head count + 1 (shared index_k)
-    ATTN_OUT_FP8: tl.constexpr,  # main Q/K/V clamp -> e4m3 (attn_out forced bf16 by empty_like)
+    ATTN_OUT_FP8: tl.constexpr,  # main Q/K/V clamp -> e4m3
     INDEX_OUT_FP8: tl.constexpr,  # indexer output clamp -> e4m3
 ):
     row_pid = tl.program_id(0)
 
-    # Gemma 1+w(and optional bias)into registers, shared across all loops
+    # Load Gemma 1+w (and optional bias) into registers, shared across all loops
     q_weight_values = tl.load(q_weight_ptr + tl.arange(0, HEAD_DIM)).to(tl.float32)
     k_weight_values = tl.load(k_weight_ptr + tl.arange(0, HEAD_DIM)).to(tl.float32)
     index_q_weight_values = tl.load(index_q_weight_ptr + tl.arange(0, IDX_HEAD_DIM)).to(
@@ -138,6 +175,7 @@ def split_qkv_index_rmsnorm_rope_kernel(
     if BIAS:
         q_bias_values = tl.load(q_bias_ptr + tl.arange(0, HEAD_DIM)).to(tl.float32)
         k_bias_values = tl.load(k_bias_ptr + tl.arange(0, HEAD_DIM)).to(tl.float32)
+
     # Partition tokens across Vector Cores; QK / V / indexer each have own tile
     batch_size_per_vec = tl.cdiv(batch_size, num_vectorcore)
     iter_num_per_vec = tl.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
@@ -146,17 +184,15 @@ def split_qkv_index_rmsnorm_rope_kernel(
     input_batch_offset = row_pid * batch_size_per_vec
     input_batch_offset_end = min(input_batch_offset + batch_size_per_vec, batch_size)
 
-    # main QK column range: concat prefix [q|k]
+    # --- Section 1: main QK — load [q|k] -> Gemma RMSNorm -> NeoX RoPE ---
     mblk_idx = tl.arange(0, batch_size_per_iter_per_vec) + input_batch_offset
     nblk_idx = tl.arange(0, q_hidden_size + kv_hidden_size)
     nmask = nblk_idx < total_hidden_size
-    # pos_indices removed (cos/sin pre-gathered)
     output_q_nblk_idx = tl.arange(0, q_hidden_size)
     output_q_nmask = output_q_nblk_idx < q_hidden_size
     output_kv_nblk_idx = tl.arange(0, kv_hidden_size)
     output_kv_nmask = output_kv_nblk_idx < kv_hidden_size
-    # cos/sin pre-gathered in Python, loaded by row offset in loop
-    # Section 1: main QK: load [q|k] -> Gemma RMSNorm -> NeoX RoPE
+
     for iter in tl.range(iter_num_per_vec):
         pos_offset = iter * batch_size_per_iter_per_vec
         mmask = (mblk_idx + pos_offset) < input_batch_offset_end
@@ -168,16 +204,16 @@ def split_qkv_index_rmsnorm_rope_kernel(
             qk_head_nums_per_iter_per_vec, HEAD_DIM
         )
 
-        # Load pre-gathered cos/sin (deterministic, no get_element loop)
+        # Load pre-gathered cos/sin (deterministic, no scalar loop)
         cos_qk_range = tl.arange(0, ATTN_HALF)
-        cos = tl.load(cos_gm_ptr + row64[:, None] * ATTN_HALF + cos_qk_range[None, :],
+        cos = tl.load(cos_gm_ptr + row64[:, None] * ROPE_DIM + cos_qk_range[None, :],
                       mask=mmask[:, None]).to(tl.float32)
-        sin = tl.load(sin_gm_ptr + row64[:, None] * ATTN_HALF + cos_qk_range[None, :],
+        sin = tl.load(sin_gm_ptr + row64[:, None] * ROPE_DIM + HALF_CACHE + cos_qk_range[None, :],
                       mask=mmask[:, None]).to(tl.float32)
         cos = cos.reshape(batch_size_per_iter_per_vec, 1, ATTN_HALF)
         sin = sin.reshape(batch_size_per_iter_per_vec, 1, ATTN_HALF)
 
-        # Gemma RMSNorm: reduce over HEAD_DIM, Q/K heads computed together for rstd
+        # Gemma RMSNorm: reduce over HEAD_DIM, Q/K heads computed together
         x32 = values_tmp1.to(tl.float32)
         rstd = tl.rsqrt(tl.sum(x32 * x32, axis=1) / HEAD_DIM + eps).reshape(
             qk_head_nums_per_iter_per_vec, 1
@@ -186,7 +222,7 @@ def split_qkv_index_rmsnorm_rope_kernel(
             batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM
         )
 
-        # Q: x(1+w) -> NeoX [x1*cos-x2*sin | x2*cos+x1*sin], tail dim not rotated
+        # Q: multiply by (1+w) -> NeoX RoPE [x1*cos-x2*sin | x2*cos+x1*sin]
         q_heads = extract_slice(
             normalized_values,
             offsets=(0, 0, 0),
@@ -224,9 +260,9 @@ def split_qkv_index_rmsnorm_rope_kernel(
             sizes=(batch_size_per_iter_per_vec, q_head_num, ATTN_HALF),
             strides=(1, 1, 1),
         )
-        # FP8: clamp after RoPE +-448, then store as output dtype
+        # FP8: clamp after RoPE, cast on store
         if ATTN_OUT_FP8:
-            q_heads = tl.minimum(tl.maximum(q_heads, -448.0), 448.0)
+            q_heads = tl.minimum(tl.maximum(q_heads, -_FP8_E4M3_MAX), _FP8_E4M3_MAX)
         q_output_idx = output_q_nblk_idx[None, :] + row64[:, None] * q_hidden_size
         q_store_mask = (mmask[:, None]) & (output_q_nmask[None, :])
         tl.store(
@@ -237,7 +273,7 @@ def split_qkv_index_rmsnorm_rope_kernel(
             mask=q_store_mask,
         )
 
-        # K: same norm result as Q, slice from q_head_num
+        # K: shares same norm result, sliced from q_head_num onward
         k_heads = extract_slice(
             normalized_values,
             offsets=(0, q_head_num, 0),
@@ -276,7 +312,7 @@ def split_qkv_index_rmsnorm_rope_kernel(
             strides=(1, 1, 1),
         )
         if ATTN_OUT_FP8:
-            k_heads = tl.minimum(tl.maximum(k_heads, -448.0), 448.0)
+            k_heads = tl.minimum(tl.maximum(k_heads, -_FP8_E4M3_MAX), _FP8_E4M3_MAX)
         kv_output_idx = output_kv_nblk_idx[None, :] + row64[:, None] * kv_hidden_size
         k_store_mask = (mmask[:, None]) & (output_kv_nmask[None, :])
         tl.store(
@@ -287,7 +323,7 @@ def split_qkv_index_rmsnorm_rope_kernel(
             mask=k_store_mask,
         )
 
-    # V: concat middle copy as-is, no norm / no RoPE
+    # --- Section 2: V — copy from concat middle, no norm / no RoPE ---
     mblk_idx = tl.arange(0, v_batch_size_per_iter_per_vec) + input_batch_offset
     nblk_idx = (q_hidden_size + kv_hidden_size) + tl.arange(0, kv_hidden_size)
     nmask = nblk_idx < total_hidden_size
@@ -299,9 +335,9 @@ def split_qkv_index_rmsnorm_rope_kernel(
         row64 = mblk_idx.to(tl.int64)
         idx = row64[:, None] * total_hidden_size + nblk_idx[None, :]
         values = tl.load(input_gm_ptr + idx, mask=mask)
-        # V no RoPE, FP8 still clamp then store as output dtype
+        # V has no RoPE; still clamp for FP8 before cast on store
         if ATTN_OUT_FP8:
-            values = tl.minimum(tl.maximum(values.to(tl.float32), -448.0), 448.0)
+            values = tl.minimum(tl.maximum(values.to(tl.float32), -_FP8_E4M3_MAX), _FP8_E4M3_MAX)
         out_idx = row64[:, None] * kv_hidden_size + out_nblk_idx[None, :]
         out_mask = (mmask[:, None]) & (out_nmask[None, :])
         tl.store(
@@ -311,11 +347,10 @@ def split_qkv_index_rmsnorm_rope_kernel(
         )
         mblk_idx += v_batch_size_per_iter_per_vec
 
-    # indexer: concat tail [index_q | index_k], index_k is shared single head
+    # --- Section 3: indexer — concat tail [index_q | index_k], index_k is shared single head ---
     idx_mblk = tl.arange(0, idx_batch_size_per_iter_per_vec) + input_batch_offset
     idx_nblk = index_offset + tl.arange(0, index_qk_hidden)
     idx_nmask = idx_nblk < total_hidden_size
-    # idx_pos removed (cos/sin pre-gathered)
     out_iq_nblk = tl.arange(0, index_q_size)
     out_iq_nmask = out_iq_nblk < index_q_size
     out_ik_nblk = tl.arange(0, IDX_HEAD_DIM)
@@ -334,14 +369,14 @@ def split_qkv_index_rmsnorm_rope_kernel(
 
         # Load pre-gathered cos/sin for indexer (deterministic)
         cos_idx_range = tl.arange(0, IDX_HALF)
-        cos = tl.load(cos_gm_ptr + row64[:, None] * IDX_HALF + cos_idx_range[None, :],
+        cos = tl.load(cos_gm_ptr + row64[:, None] * ROPE_DIM + cos_idx_range[None, :],
                       mask=mmask[:, None]).to(tl.float32)
-        sin = tl.load(sin_gm_ptr + row64[:, None] * IDX_HALF + cos_idx_range[None, :],
+        sin = tl.load(sin_gm_ptr + row64[:, None] * ROPE_DIM + HALF_CACHE + cos_idx_range[None, :],
                       mask=mmask[:, None]).to(tl.float32)
         cos = cos.reshape(idx_batch_size_per_iter_per_vec, 1, IDX_HALF)
         sin = sin.reshape(idx_batch_size_per_iter_per_vec, 1, IDX_HALF)
 
-        # Gemma RMSNorm: index_q multi-head + index_k single head computed together, reduce by IDX_HEAD_DIM
+        # Gemma RMSNorm: index_q multi-head + index_k single head, reduce over IDX_HEAD_DIM
         x32 = values_idx.to(tl.float32)
         rstd = tl.rsqrt(tl.sum(x32 * x32, axis=1) / IDX_HEAD_DIM + eps).reshape(
             idx_qk_heads_per_iter, 1
@@ -350,7 +385,7 @@ def split_qkv_index_rmsnorm_rope_kernel(
             idx_batch_size_per_iter_per_vec, index_qk_head_num, IDX_HEAD_DIM
         )
 
-        # index_q: x(1+w) + NeoX RoPE
+        # index_q: multiply by (1+w) + NeoX RoPE
         iq_heads = extract_slice(
             normalized_idx,
             offsets=(0, 0, 0),
@@ -385,7 +420,7 @@ def split_qkv_index_rmsnorm_rope_kernel(
             strides=(1, 1, 1),
         )
 
-        # index_k: shared single head, RoPE shares cos/sin with index_q
+        # index_k: shared single head, RoPE uses same cos/sin as index_q
         ik_heads = extract_slice(
             normalized_idx,
             offsets=(0, index_q_head_num, 0),
@@ -420,11 +455,10 @@ def split_qkv_index_rmsnorm_rope_kernel(
             strides=(1, 1, 1),
         )
 
-        # FP8: indexer clamp after RoPE +-448 then store as output dtype
+        # FP8: clamp after RoPE, cast on store
         if INDEX_OUT_FP8:
-            iq_heads = tl.minimum(tl.maximum(iq_heads, -448.0), 448.0)
-            ik_heads = tl.minimum(tl.maximum(ik_heads, -448.0), 448.0)
-
+            iq_heads = tl.minimum(tl.maximum(iq_heads, -_FP8_E4M3_MAX), _FP8_E4M3_MAX)
+            ik_heads = tl.minimum(tl.maximum(ik_heads, -_FP8_E4M3_MAX), _FP8_E4M3_MAX)
 
         iq_idx = out_iq_nblk[None, :] + row64[:, None] * index_q_size
         ik_idx = out_ik_nblk[None, :] + row64[:, None] * IDX_HEAD_DIM
@@ -465,11 +499,12 @@ def split_qkv_index_rmsnorm_rope_impl(
     q_bias: torch.Tensor | None = None,
     k_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused split -> Gemma RMSNorm -> Neox RoPE (attn + indexer).
+    """Fused split -> Gemma RMSNorm -> NeoX RoPE (attn + indexer).
 
     Concat layout ``[q | k | v | index_q | index_k]``.
-    With ``attn_out_fp8=True``, main Q/K/V are clamped to +-448 and stored as
-    e4m3; ``indexer_out_fp8=True`` does the same for indexer Q/K.
+    With ``attn_out_fp8=True``, main Q/K/V are clamped to +-448 and stored
+    as e4m3; ``indexer_out_fp8=True`` does the same for indexer Q/K.
+    Cos/sin are pre-gathered in Python for deterministic RoPE.
     """
     input = input.contiguous()
     positions = positions.contiguous()
@@ -479,20 +514,39 @@ def split_qkv_index_rmsnorm_rope_impl(
     index_k_weight = index_k_weight.contiguous()
     cos_sin_cache = cos_sin_cache.contiguous()
 
-    # Pre-gather cos/sin in Python (deterministic, avoids get_element loop in kernel)
-    cos_sin_gathered = cos_sin_cache[positions]  # [batch, cache_dim]
-    attn_half = attn_rope_dim // 2
-    idx_half = idx_rope_dim // 2
-    # Use the larger half for both cos and sin tensors
-    max_half = max(attn_half, idx_half)
-    cos_gathered = cos_sin_gathered[:, :max_half].contiguous()   # [batch, max_half]
-    sin_gathered = cos_sin_gathered[:, cache_dim // 2: cache_dim // 2 + max_half].contiguous()
-
     num_vectorcore = get_vectorcore_num()
     batch_size = input.shape[0]
     cache_dim = int(cos_sin_cache.shape[-1])
     attn_rope_dim = min(cache_dim, int(head_dim))
     idx_rope_dim = min(cache_dim, int(idx_head_dim))
+
+    # ---- Determinism-critical section --------------------------------
+    # Pre-gather cos/sin rows by position in Python (one aclnnIndex op).
+    #
+    # The original implementation gathered cos/sin *inside* the kernel using
+    # a scalar loop:
+    #
+    #   for i in tl.range(batch):
+    #       pos = get_element(positions, (i,))
+    #       cache_rows = insert_slice(cache_rows,
+    #           tl.load(pos * ROPE_DIM + cos_offset[:, None])...)
+    #
+    # This caused non-deterministic output under real inference workloads
+    # because Ascend NPU hardware scheduling of scalar indirect-address
+    # loads is unstable when other operators compete for memory bandwidth.
+    # The effect is probabilistic: more tokens (more scalar iterations) →
+    # higher chance of triggering non-determinism.
+    #
+    # Fix: gather here in Python via tensor indexing (aclnnIndex, a single
+    # deterministic op), then pass the *entire* gathered tensor to the
+    # kernel.  The kernel reads cos from offset 0 and sin from HALF_CACHE
+    # using a vectorized contiguous load (``ptr + block_offset``), which is
+    # immune to hardware scheduling jitter.
+    #
+    # We pass the full tensor instead of pre-slicing cos/sin separately to
+    # avoid two extra Slice + contiguous ops (only 1 aclnnIndex remains).
+    # ------------------------------------------------------------------
+    cos_sin_gathered = cos_sin_cache[positions].contiguous()  # [batch, cache_dim]
     bias = q_bias is not None
     attn_dtype = torch.float8_e4m3fn if attn_out_fp8 else input.dtype
     index_dtype = torch.float8_e4m3fn if indexer_out_fp8 else input.dtype
@@ -542,8 +596,8 @@ def split_qkv_index_rmsnorm_rope_impl(
         k_bias,
         index_q_weight,
         index_k_weight,
-        cos_gathered,
-        sin_gathered,
+        cos_sin_gathered,
+        cos_sin_gathered,
         batch_size,
         q_hidden_size,
         kv_hidden_size,

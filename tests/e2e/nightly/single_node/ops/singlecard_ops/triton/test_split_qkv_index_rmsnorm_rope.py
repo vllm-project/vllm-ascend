@@ -18,8 +18,10 @@ DTYPES = [torch.bfloat16]
 SEEDS = [0]
 DEVICES = [f"npu:{0}"]
 HAS_BIAS = [False, True]
+FP8_MODES = [(False, False), (True, True)]
 DEFAULT_ATOL = 5e-2
 DEFAULT_RTOL = 5e-3
+_FP8_E4M3_MAX = 448.0
 
 
 def _build_cos_sin_cache(max_position_embeddings, rope_dim, dtype, device):
@@ -49,6 +51,11 @@ def _rms_norm(x, weight, eps):
     return x * rstd * weight.to(torch.float32)
 
 
+def _to_fp8(x):
+    """Clamp to +-448 and cast to float8_e4m3fn, matching the kernel's FP8 path."""
+    return x.clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+
+
 def _reference_impl(
     qkv,
     cos_sin_cache,
@@ -63,6 +70,8 @@ def _reference_impl(
     head_dim,
     idx_head_dim,
     eps,
+    attn_out_fp8=False,
+    indexer_out_fp8=False,
     q_bias=None,
     k_bias=None,
 ):
@@ -141,6 +150,15 @@ def _reference_impl(
     iq_out = iq_out.reshape(num_tokens, index_q_size)
     ik_out = ik_out.reshape(num_tokens, idx_head_dim)
 
+    # FP8: clamp +-448 and cast to e4m3fn (matches kernel's attn_out_fp8 / indexer_out_fp8)
+    if attn_out_fp8:
+        q_out = _to_fp8(q_out)
+        k_out = _to_fp8(k_out)
+        v_out = _to_fp8(v_out)
+    if indexer_out_fp8:
+        iq_out = _to_fp8(iq_out)
+        ik_out = _to_fp8(ik_out)
+
     return q_out, k_out, v_out, iq_out, ik_out
 
 
@@ -156,6 +174,7 @@ def _reference_impl(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("has_bias", HAS_BIAS)
+@pytest.mark.parametrize("attn_out_fp8, indexer_out_fp8", FP8_MODES)
 @torch.inference_mode()
 def test_split_qkv_index_rmsnorm_rope(
     max_position_embeddings,
@@ -171,6 +190,8 @@ def test_split_qkv_index_rmsnorm_rope(
     seed,
     device,
     has_bias,
+    attn_out_fp8,
+    indexer_out_fp8,
 ):
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -217,8 +238,8 @@ def test_split_qkv_index_rmsnorm_rope(
         head_dim=head_dim,
         idx_head_dim=idx_head_dim,
         eps=eps,
-        attn_out_fp8=False,
-        indexer_out_fp8=False,
+        attn_out_fp8=attn_out_fp8,
+        indexer_out_fp8=indexer_out_fp8,
         q_bias=q_bias,
         k_bias=k_bias,
     )
@@ -237,15 +258,17 @@ def test_split_qkv_index_rmsnorm_rope(
         head_dim=head_dim,
         idx_head_dim=idx_head_dim,
         eps=eps,
+        attn_out_fp8=attn_out_fp8,
+        indexer_out_fp8=indexer_out_fp8,
         q_bias=q_bias,
         k_bias=k_bias,
     )
 
-    torch.testing.assert_close(q_fused.to(torch.float32).cpu(), q_ref, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(k_fused.to(torch.float32).cpu(), k_ref, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(v_fused.to(torch.float32).cpu(), v_ref, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(iq_fused.to(torch.float32).cpu(), iq_ref, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(ik_fused.to(torch.float32).cpu(), ik_ref, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(q_fused.to(torch.float32).cpu(), q_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(k_fused.to(torch.float32).cpu(), k_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(v_fused.to(torch.float32).cpu(), v_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(iq_fused.to(torch.float32).cpu(), iq_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(ik_fused.to(torch.float32).cpu(), ik_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
 
     gc.collect()
     torch.npu.empty_cache()
