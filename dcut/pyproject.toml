@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dcut-adaptive-verify"
+version = "0.2.0"
+description = "D-Cut adaptive verifier step-length for DFlash/PARD speculative decoding on Ascend NPU with vLLM 0.23.0."
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+# Loaded automatically by vLLM in every engine/worker process at startup.
+# This is what makes the monkey patch take effect under tensor parallelism
+# (a plain `import dcut` would only patch the main process, not TP workers).
+[project.entry-points."vllm.general_plugins"]
+dcut_adaptive_verify = "dcut:install"
+
+# Flat layout: the package `dcut` lives in this directory (next to pyproject).
+[tool.setuptools]
+packages = ["dcut"]
+package-dir = { "dcut" = "." }
