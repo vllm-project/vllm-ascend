@@ -17,13 +17,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from copy import copy
 from dataclasses import dataclass, replace
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
+from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 
@@ -42,20 +42,47 @@ class AscendPCPAttentionContext:
 class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
+    vllm_config: VllmConfig
+
     @staticmethod
     def validate_config(
         vllm_config: VllmConfig,
         supports_mm_inputs: bool,
     ) -> None:
-        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
-        if cudagraph_mode.has_full_cudagraphs():
-            if cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
-                raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
-            vllm_config = copy(vllm_config)
-            vllm_config.compilation_config = copy(vllm_config.compilation_config)
-            vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        """Validate the graph-safe Ascend MRV2 PCP configuration."""
+        parallel_config = vllm_config.parallel_config
+        model_config = vllm_config.model_config
+        pcp_size = parallel_config.prefill_context_parallel_size
+        if pcp_size <= 1:
+            return
 
-        PCPManager.validate_config(vllm_config, supports_mm_inputs)
+        if not model_config.use_mla:
+            raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
+        if parallel_config.pipeline_parallel_size > 1:
+            raise NotImplementedError("MRV2 PCP does not support PP yet.")
+        if model_config.is_encoder_decoder:
+            raise NotImplementedError("MRV2 PCP does not support encoder-decoder models yet.")
+        if supports_mm_inputs:
+            raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
+        if vllm_config.lora_config is not None:
+            raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
+        if vllm_config.speculative_config is not None:
+            raise NotImplementedError("MRV2 PCP does not support speculative decoding yet.")
+
+        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        if is_sparse_mla and cudagraph_mode not in {
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        }:
+            raise NotImplementedError(
+                "MRV2 sparse MLA PCP supports eager mode or FULL_DECODE_ONLY CUDA graphs only."
+            )
+        if (
+            cudagraph_mode.has_full_cudagraphs()
+            and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
+        ):
+            raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
@@ -107,6 +134,16 @@ class AscendPCPManager(PCPManager):
             )
 
         local_batch.seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
+        num_valid_tokens = local_batch.num_scheduled_tokens
+        if local_batch.num_draft_tokens_per_req is not None:
+            num_valid_tokens = num_valid_tokens - local_batch.num_draft_tokens_per_req
+        local_batch.attn_state = build_attn_state(
+            self.vllm_config,
+            local_batch.seq_lens_np,
+            local_batch.num_reqs,
+            local_batch.num_scheduled_tokens,
+            num_valid_tokens,
+        )
         return local_batch
 
     def prepare_slot_mappings(self) -> torch.Tensor:

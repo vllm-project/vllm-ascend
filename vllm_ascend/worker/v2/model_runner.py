@@ -489,16 +489,6 @@ class NPUModelRunner(GPUModelRunner):
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 
-            if self.pcp_manager is not None:
-                input_batch.attn_state = build_attn_state(
-                    self.vllm_config,
-                    input_batch.seq_lens_np,
-                    input_batch.num_reqs,
-                    input_batch.num_scheduled_tokens,
-                    input_batch.num_scheduled_tokens
-                    - (input_batch.num_draft_tokens_per_req if input_batch.num_draft_tokens_per_req is not None else 0),
-                )
-
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
 
@@ -717,16 +707,6 @@ class NPUModelRunner(GPUModelRunner):
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
 
-            if self.pcp_manager is not None:
-                input_batch.attn_state = build_attn_state(
-                    self.vllm_config,
-                    input_batch.seq_lens_np,
-                    input_batch.num_reqs,
-                    input_batch.num_scheduled_tokens,
-                    input_batch.num_scheduled_tokens
-                    - (input_batch.num_draft_tokens_per_req if input_batch.num_draft_tokens_per_req is not None else 0),
-                )
-
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
 
@@ -912,7 +892,10 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        if (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        ):
             num_reqs_padded = num_reqs
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs

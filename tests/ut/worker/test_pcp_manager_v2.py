@@ -20,7 +20,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -41,6 +43,53 @@ def _mock_async_copy_to_cpu(value, out=None, device=None):
         return out
 
     return value.to(device="cpu")
+
+
+def _make_pcp_config(cudagraph_mode: CUDAGraphMode, *, sparse_mla: bool = True):
+    hf_text_config = SimpleNamespace(index_topk=2048) if sparse_mla else SimpleNamespace()
+    return SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            pipeline_parallel_size=1,
+        ),
+        model_config=SimpleNamespace(
+            use_mla=True,
+            is_encoder_decoder=False,
+            hf_text_config=hf_text_config,
+        ),
+        lora_config=None,
+        speculative_config=None,
+        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+    )
+
+
+def test_validate_config_allows_sparse_mla_full_decode_only():
+    vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+
+    with patch.object(
+        vllm_model_runner.pcp.PCPManager,
+        "validate_config",
+        side_effect=AssertionError("Ascend validation must not delegate to the upstream implementation."),
+    ) as upstream_validate_config:
+        AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+
+    upstream_validate_config.assert_not_called()
+    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+
+
+@pytest.mark.parametrize("cudagraph_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
+def test_validate_config_rejects_unsupported_sparse_mla_graph_modes(cudagraph_mode):
+    vllm_config = _make_pcp_config(cudagraph_mode)
+
+    with pytest.raises(NotImplementedError, match="sparse MLA PCP supports"):
+        AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+
+
+def test_validate_config_rejects_full_graph_for_non_sparse_mla():
+    vllm_config = _make_pcp_config(CUDAGraphMode.FULL, sparse_mla=False)
+
+    with pytest.raises(NotImplementedError, match="FULL_DECODE_ONLY"):
+        AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
 def _make_local_pcp_batch():
@@ -134,6 +183,8 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
         max_num_reqs=1,
         max_num_tokens=18,
     )
+    manager.vllm_config = object()
+    local_attn_state = object()
 
     with (
         # This Triton helper is unrelated to PCP partitioning and has no CPU
@@ -151,6 +202,10 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             "vllm.v1.worker.gpu.pcp_manager.async_copy_to_gpu",
             side_effect=_mock_async_copy_to_cpu,
         ),
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.build_attn_state",
+            return_value=local_attn_state,
+        ) as build_attn_state,
     ):
         result = manager.partition_batch(global_batch)
 
@@ -174,7 +229,14 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     # the override must refresh them from real PCP-local CPU rows.
     expected_seq_lens = np.array([18, 5], dtype=np.int32)
     np.testing.assert_array_equal(result.seq_lens_np, expected_seq_lens)
-    assert result.attn_state == "global-attn-state"
+    assert result.attn_state is local_attn_state
+    build_attn_state.assert_called_once()
+    args = build_attn_state.call_args.args
+    assert args[0] is manager.vllm_config
+    np.testing.assert_array_equal(args[1], expected_seq_lens)
+    assert args[2] == result.num_reqs
+    np.testing.assert_array_equal(args[3], result.num_scheduled_tokens)
+    np.testing.assert_array_equal(args[4], result.num_scheduled_tokens)
 
 
 def test_dummy_attention_context_uses_rank_local_identity_view():
