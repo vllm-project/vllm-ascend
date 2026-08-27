@@ -76,18 +76,10 @@ def layer_norm_gated_ref(
         "use_out",
     ),
     [
-        pytest.param(
-            (1, 128), None, True, False, True, False, torch.float32, False, id="layer-norm-bias"
-        ),
-        pytest.param(
-            (67, 192), 96, False, True, True, True, torch.float16, True, id="group-rms-post-gate"
-        ),
-        pytest.param(
-            (5, 256), 128, True, True, False, True, torch.bfloat16, False, id="group-rms-pre-gate"
-        ),
-        pytest.param(
-            (7, 180), 60, True, True, False, False, torch.float16, False, id="group-layer-norm-pre-gate"
-        ),
+        pytest.param((1, 128), None, True, False, True, False, torch.float32, False, id="layer-norm-bias"),
+        pytest.param((67, 192), 96, False, True, True, True, torch.float16, True, id="group-rms-post-gate"),
+        pytest.param((5, 256), 128, True, True, False, True, torch.bfloat16, False, id="group-rms-pre-gate"),
+        pytest.param((7, 180), 60, True, True, False, False, torch.float16, False, id="group-layer-norm-pre-gate"),
     ],
 )
 @torch.inference_mode()
@@ -104,11 +96,7 @@ def test_layer_norm_fwd_npu_correctness(
     torch.manual_seed(42)
     x = (torch.randn(shape, dtype=torch.float32) * 0.5).to(dtype=dtype, device=DEVICE)
     weight = (torch.randn(shape[-1], dtype=torch.float32) * 0.2 + 1.0).to(dtype=dtype, device=DEVICE)
-    bias = (
-        (torch.randn(shape[-1], dtype=torch.float32) * 0.1).to(dtype=dtype, device=DEVICE)
-        if has_bias
-        else None
-    )
+    bias = (torch.randn(shape[-1], dtype=torch.float32) * 0.1).to(dtype=dtype, device=DEVICE) if has_bias else None
     z = (torch.randn(shape, dtype=torch.float32) * 0.5).to(dtype=dtype, device=DEVICE) if has_gate else None
     out = torch.empty_like(x) if use_out else None
     eps = 1e-5
