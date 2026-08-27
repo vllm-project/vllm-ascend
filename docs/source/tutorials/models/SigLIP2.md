@@ -24,7 +24,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 For ImageNet val zero-shot Top-1 evaluation, prepare:
 
-- [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login and agree to terms; ILSVRC 2012 val subset is also on [Kaggle](https://www.kaggle.com/c/imagenet-object-localization-challenge/data))
+- [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login and agree to terms)
 - `val_label.txt` in PyTorch index format (0–999), for example from [simple-imagenet-test](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)
 - `imagenet1000_clsidx_to_labels.txt` from [yrevar gist](https://gist.github.com/yrevar/942d3a0ac09ec9e5eb3a)
 
