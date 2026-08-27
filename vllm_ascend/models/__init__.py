@@ -32,3 +32,11 @@ def register_model():
         "K3DSparkModel",
         "vllm_ascend.models.kimi_k3_dspark:K3DSparkForCausalLM",
     )
+    ModelRegistry.register_model(
+        "Qwen4ExpForCausalLM",
+        "vllm_ascend.models.qwen4_exp:Qwen4ExpForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "Qwen4ExpForConditionalGeneration",
+        "vllm_ascend.models.qwen4_exp:Qwen4ExpForConditionalGeneration",
+    )
