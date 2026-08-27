@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -241,6 +242,7 @@ class AscendDSAReqMetadata:
     ori_win_left: int | None = None
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
+    cu_seqlens_ori_kv: torch.Tensor | None = None
 
 
 @dataclass
@@ -722,6 +724,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
         max_seqlen_kv = torch.max(seq_lens_cpu[:num_reqs]).item()
         has_prefill = self.num_prefills > 0
+        # The SAS metadata operator needs the per-request query token counts to
+        # partition FA/FD work correctly when a batch mixes decode requests
+        # (query length != KV length) with prefill requests.
+        self.seqused_q = seq_lens_q.to(torch.int32)
 
         self.start_pos_prefill.fill_(0)
         self.start_pos_prefill[:num_reqs] = seq_lens - seq_lens_q
@@ -767,7 +773,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         elif has_prefill:
-            cu_seqlens_ori_kv = query_start_loc
+            if self.num_decodes > 0:
+                # Mixed decode + prefill: decode requests carry historical KV
+                # (sequence length exceeds the current query length), so the
+                # original-KV boundaries must be the cumulative sequence
+                # lengths rather than query_start_loc, which only accounts for
+                # the current query tokens.
+                cu_seqlens_ori_kv = torch.cat(
+                    [self._zero_i32, torch.cumsum(seq_lens[:num_reqs], dim=0).to(torch.int32)]
+                )
+            else:
+                cu_seqlens_ori_kv = query_start_loc
 
         sas_metadata = self._build_sas_metadata(
             metadata_cache=self.common_ratio_to_sas_metadata,
@@ -816,6 +832,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
         )
 
     def build_for_drafting(
@@ -879,6 +896,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         seq_lens = self.seq_lens[:num_reqs]
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
+        self.seqused_q = seq_lens_q.to(torch.int32)
         if common_attn_metadata._seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu
         elif common_attn_metadata.seq_lens_cpu is not None:
@@ -905,10 +923,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
-        cu_seqlens_ori_kv = (
-            query_start_loc
-            if has_prefill
-            else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+        if has_prefill:
+            # Mixed decode + prefill: decode requests carry historical KV, so
+            # the original-KV boundaries must be the cumulative sequence
+            # lengths rather than query_start_loc (see build_req_metadata).
+            cu_seqlens_ori_kv = (
+                torch.cat([self._zero_i32, torch.cumsum(seq_lens[:num_reqs], dim=0).to(torch.int32)])
+                if self.num_decodes > 0
+                else query_start_loc
+            )
+        else:
+            cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
                 None,
                 "draft_cu_seqlens_ori_kv",
                 seq_lens,
@@ -916,7 +941,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self._zero_i32,
                 self.cu_seqlens_ori_kv,
             )
-        )
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
@@ -975,6 +999,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
         )
 
     def build_for_graph_capture(
