@@ -144,4 +144,4 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_thinking_budget.py: 80
   tests/e2e/pull_request/one_card/test_model_runner_v1_with_device.py: 70
   tests/e2e/pull_request/one_card/test_msa_index_score.py: 20
-  tests/e2e/pull_request/four_card/fault_tolerance/test_fault_tolerance_e2e.py: 1200
+  tests/e2e/pull_request/four_card/fault_tolerance/test_fault_tolerance_e2e.py: 1800
