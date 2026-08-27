@@ -80,7 +80,7 @@ def tensor_sum(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
     keepdim = args[1] if len(args) > 1 else kwargs.get("keepdim", kwargs.get("keepdims", False))
     dtype = kwargs.get("dtype")
     if x.device.type == "npu" and dim == -1 and keepdim and dtype is None:
-        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
+        return reduce_sum(x, dim, keepdim)
     return torch_tensor_sum(x, *args, **kwargs)
 
 

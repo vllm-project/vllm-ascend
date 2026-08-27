@@ -27,30 +27,43 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
-    def test_tensor_sum_uses_batch_invariant_operator_for_moe_normalization(self):
+    @pytest.mark.parametrize(
+        ("args", "kwargs"),
+        [
+            ((), {"dim": -1, "keepdim": True}),
+            ((-1,), {"keepdim": True}),
+            ((-1, True), {}),
+        ],
+    )
+    def test_tensor_sum_reuses_reduce_sum(self, args, kwargs):
         x = MagicMock(spec=torch.Tensor)
         x.device.type = "npu"
         expected = MagicMock(spec=torch.Tensor)
 
-        with patch.object(
-            batch_invariant.torch.ops.batch_invariant_ops,
-            "npu_reduce_sum_batch_invariant",
-            return_value=expected,
-        ) as mock_reduce:
-            result = batch_invariant.tensor_sum(x, dim=-1, keepdim=True)
+        with patch("vllm_ascend.batch_invariant.reduce_sum", return_value=expected) as mock_reduce:
+            result = batch_invariant.tensor_sum(x, *args, **kwargs)
 
         mock_reduce.assert_called_once_with(x, -1, True)
         assert result is expected
 
-    def test_tensor_sum_falls_back_to_native_sum_for_other_calls(self):
+    @pytest.mark.parametrize(
+        ("device_type", "args", "kwargs"),
+        [
+            ("npu", (), {"dim": 0, "keepdim": True}),
+            ("npu", (), {}),
+            ("npu", (), {"dim": -1, "keepdim": True, "dtype": torch.float32}),
+            ("cpu", (), {"dim": -1, "keepdim": True}),
+        ],
+    )
+    def test_tensor_sum_falls_back_to_native_sum_for_other_calls(self, device_type, args, kwargs):
         x = MagicMock(spec=torch.Tensor)
-        x.device.type = "npu"
+        x.device.type = device_type
         expected = MagicMock(spec=torch.Tensor)
 
         with patch("vllm_ascend.batch_invariant.torch_tensor_sum", return_value=expected) as native_sum:
-            result = batch_invariant.tensor_sum(x, dim=0, keepdim=True)
+            result = batch_invariant.tensor_sum(x, *args, **kwargs)
 
-        native_sum.assert_called_once_with(x, dim=0, keepdim=True)
+        native_sum.assert_called_once_with(x, *args, **kwargs)
         assert result is expected
 
     def test_override_envs_for_invariance(self):
