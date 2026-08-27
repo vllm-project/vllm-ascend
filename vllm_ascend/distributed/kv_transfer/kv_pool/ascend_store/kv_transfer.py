@@ -50,16 +50,14 @@ class PreparedStore:
 PreparedRequest = tuple[ReqMeta, list[PreparedStore]]
 
 
-@dataclass(eq=False)
+@dataclass
 class KVCacheStoreBatch:
     requests: list[ReqMeta]
     force_current_step: bool = False
-    prepared: threading.Event = field(default_factory=threading.Event)
     committed: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     current_event: Any = None
     pending_keys: set[str] = field(default_factory=set)
-    error: BaseException | None = None
 
 
 class LayerBatchBuilder:
@@ -677,8 +675,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
-        self._pending_batches: list[KVCacheStoreBatch] = []
-        self._pending_batches_lock = threading.Lock()
         self.put_thread = KVCacheStorePutThread(self)
 
     def run(self):
@@ -694,8 +690,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         batch = KVCacheStoreBatch(requests=requests, force_current_step=force_current_step)
         for request in requests:
             self.add_stored_request(request.req_id)
-        with self._pending_batches_lock:
-            self._pending_batches.append(batch)
         self.add_request(batch)  # type: ignore[arg-type]
         return batch
 
@@ -708,32 +702,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         while not batch.done.wait(timeout=1.0):
             self.raise_if_failed()
             self.put_thread.raise_if_failed()
-        if batch.error is not None:
-            raise RuntimeError("AscendStore save batch failed") from batch.error
-
-    def wait_for_requests(self, req_ids: set[str]) -> None:
-        if not req_ids:
-            return
-        with self._pending_batches_lock:
-            batches = [
-                batch for batch in self._pending_batches if any(request.req_id in req_ids for request in batch.requests)
-            ]
-        for batch in batches:
-            if not batch.committed.is_set():
-                raise RuntimeError("Preempted request reached an uncommitted AscendStore save batch")
-            self.wait_for_batch(batch)
-
-    def _remove_pending_batch(self, batch: KVCacheStoreBatch) -> None:
-        with self._pending_batches_lock:
-            if batch in self._pending_batches:
-                self._pending_batches.remove(batch)
-
-    def _fail_batch(self, batch: KVCacheStoreBatch, error: BaseException) -> None:
-        if batch.error is None:
-            batch.error = error
-        batch.prepared.set()
-        self._remove_pending_batch(batch)
-        batch.done.set()
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -791,21 +759,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             for request in batch.requests:
                 try:
                     stores = self._prepare_stored_request(request, batch)
-                except Exception as error:
+                except Exception:
                     logger.exception("Failed to prepare KV cache save for request %s", request.req_id)
-                    if batch.error is None:
-                        batch.error = error
                     stores = []
                 prepared_requests.append((request, stores))
                 for store in stores:
                     batch.pending_keys.update(store.keys)
-            batch.prepared.set()
             self.put_thread.add_request((batch, prepared_requests))  # type: ignore[arg-type]
-        except Exception as error:
-            logger.exception("Failed to prepare AscendStore save batch")
-            for request in batch.requests:
-                self._complete_request(request)
-            self._fail_batch(batch, error)
         finally:
             self.request_queue.task_done()
 
@@ -877,7 +837,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
         finally:
             for request, _ in prepared_requests:
                 self._complete_request(request)
-            self._remove_pending_batch(batch)
             batch.done.set()
 
     def _prepare_stored_request(

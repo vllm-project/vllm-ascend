@@ -1815,9 +1815,6 @@ class KVPoolWorker:
         if not isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
             return
 
-        if self._prepared_save_batch is None:
-            self.prepare_save(connector_metadata)
-
         current_batch = self._prepared_save_batch
         self._prepared_save_batch = None
         previous_batch = self._previous_save_batch
@@ -2174,8 +2171,14 @@ class KVPoolWorker:
 
     def wait_for_preempted_saves(self, req_ids: set[str]) -> None:
         """Fence saves whose source KV blocks are about to be reused."""
-        if isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
-            self.kv_send_thread.wait_for_requests(req_ids)
+        batch = self._previous_save_batch
+        if (
+            isinstance(self.kv_send_thread, KVCacheStoreSendingThread)
+            and batch is not None
+            and any(request.req_id in req_ids for request in batch.requests)
+        ):
+            self.kv_send_thread.wait_for_batch(batch)
+            self._previous_save_batch = None
 
     def ensure_store_initialized(self) -> None:
         ensure_initialized = getattr(self.m_store, "ensure_initialized", None)

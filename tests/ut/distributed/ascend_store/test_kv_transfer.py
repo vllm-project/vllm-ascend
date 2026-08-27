@@ -573,7 +573,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
 
         batch = t.prepare_save_batch([req])
-        self.assertTrue(batch.prepared.wait(timeout=1))
+        t.request_queue.join()
         self.assertEqual(store.put_calls, [])
 
         event = MagicMock()
@@ -597,7 +597,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         ]
 
         batch = t.prepare_save_batch(requests)
-        self.assertTrue(batch.prepared.wait(timeout=1))
         t.commit_save_batch(batch, MagicMock())
         t.wait_for_batch(batch)
 
@@ -617,7 +616,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             block_hashes=[b"h0"],  # type: ignore[arg-type]
         )
         batch = t.prepare_save_batch([req])
-        self.assertTrue(batch.prepared.wait(timeout=1))
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger.exception"
         ) as log_exception:
@@ -628,6 +626,21 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             "RuntimeError",
             error,
         )
+        self.assertTrue(batch.done.is_set())
+        self.assertNotIn("r1", t.stored_requests)
+
+    def test_save_batch_prepare_failure_is_nonfatal(self):
+        t, _ = self._make_thread()
+        t._prepare_stored_request = MagicMock(side_effect=RuntimeError("prepare failed"))
+        t.start()
+        self.assertTrue(t.ready_event.wait(timeout=1))
+        request = MagicMock(req_id="r1", event_id=None)
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger.exception"):
+            batch = t.prepare_save_batch([request])
+            t.commit_save_batch(batch, MagicMock())
+            t.wait_for_batch(batch)
+
         self.assertTrue(batch.done.is_set())
         self.assertNotIn("r1", t.stored_requests)
 

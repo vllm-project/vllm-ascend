@@ -755,6 +755,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
             block_hashes=["h1"],
             can_save=True,
         )
+        second_batch.requests = [second_req]
         second_meta = AscendConnectorMetadata(set(), set())
         second_meta.add_request(second_req)
         worker.prepare_save(second_meta)
@@ -766,6 +767,11 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
         send_thread.wait_for_batch.assert_called_once_with(first_batch)
         self.assertIs(worker._previous_save_batch, second_batch)
+
+        send_thread.wait_for_batch.reset_mock()
+        worker.wait_for_preempted_saves({"r2"})
+        send_thread.wait_for_batch.assert_called_once_with(second_batch)
+        self.assertIsNone(worker._previous_save_batch)
 
     def test_partial_save_forces_current_step_fence(self):
         worker = self._make_worker()
