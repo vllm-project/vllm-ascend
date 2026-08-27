@@ -556,6 +556,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             DeviceOperator.get_dspark_sparse_flash_mla_metadata_op() if dspark_swa_indices is not None else None
         )
         if sparse_metadata_op is not None:
+            assert dspark_swa_indices is not None
             assert dspark_swa_topk_lengths is not None
             # A2/A3 sparse SWA with PA_BBND requires logical KV lengths in
             # addition to the per-query topk lengths.
