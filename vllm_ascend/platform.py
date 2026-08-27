@@ -1193,6 +1193,9 @@ def _setup_worker_and_scheduler(
     # Select worker class and refresh block size
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
+        additional_config = vllm_config.additional_config or {}
+        if ("enable_flashcomm1" not in additional_config) and (not os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1")):
+            parallel_config.all2all_backend = "flashinfer_all2allv"  # a trikky way to disable SP moe.
         if is_310p():
             parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
         elif ascend_config.xlite_graph_config.enabled:

@@ -10,7 +10,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1536"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_NZ: "2"
-  VLLM_ASCEND_BALANCE_SCHEDULING: "1"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -65,6 +64,6 @@ test_cases:
       - "--compilation_config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,24,32]}'
       - --additional-config
-      - '{"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true}}'
     benchmarks:
       <<: *benchmarks

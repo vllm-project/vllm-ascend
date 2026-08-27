@@ -48,7 +48,6 @@
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
-#include "attention/sparse_attention_score_prefill/sparse_attention_score_prefill_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include <c10/core/Device.h>
@@ -1879,6 +1878,46 @@ at::Tensor chunk_fwd_o(
         o
     );
     return o;
+}
+
+at::Tensor npu_sparse_attention_score_prefill(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &block_table,
+    const at::Tensor &k2q_row_ptr,
+    const at::Tensor &k2q_q_indices,
+    const at::Tensor &k2q_slot_indices,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv)
+{
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
+
+    EXEC_NPU_CMD(
+        aclnnMinimaxSparseAttentionSplitKv,
+        query,
+        key,
+        value,
+        block_table,
+        k2q_row_ptr,
+        k2q_q_indices,
+        k2q_slot_indices,
+        actual_seq_lengths,
+        actual_seq_lengths_kv,
+        num_key_value_heads,
+        scale_value,
+        block_size,
+        top_k,
+        inner_precise,
+        output
+    );
+
+    return output;
 }
 
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)

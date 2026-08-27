@@ -146,7 +146,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
 export HCCL_BUFFSIZE=600
-export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
@@ -169,19 +168,19 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --additional-config '{"enable_balance_scheduling": true}' \
+    --additional-config '{"scheduler_config":{"enable_balance_scheduling":false}}' \
     --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try increasing `--max-num-seqs` to improve system throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -715,7 +714,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 }
 ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -858,7 +857,7 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: What transformer version is required for tool_calls feature?**
 
