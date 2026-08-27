@@ -6,7 +6,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.utils import global_stream, npu_stream_switch

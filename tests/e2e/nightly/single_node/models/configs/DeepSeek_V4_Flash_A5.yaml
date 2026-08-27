@@ -81,7 +81,7 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method":"deepseek_mtp","enforce_eager":"true"}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"enable_reduce_sample":false,"rejection_sampler_config":{"enable_block_verify":false,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"rejection_sampler_config":{"enable_block_verify":false,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
     benchmarks:
       <<: *benchmarks_acc
   - name: "Refuse_sampling_acceptance_rate_test_06"
@@ -95,7 +95,7 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 4, "method":"deepseek_mtp","enforce_eager":"true"}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"enable_reduce_sample":false,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":true,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":true,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
     benchmarks:
       <<: *benchmarks_per
   - name: "Refuse_sampling_acceptance_rate_test_05"
@@ -109,7 +109,7 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 4, "method":"deepseek_mtp","enforce_eager":"true"}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"enable_reduce_sample":false,"rejection_sampler_config":{"enable_block_verify":false,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"rejection_sampler_config":{"enable_block_verify":false,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
     benchmarks:
       <<: *benchmarks_per
   - name: "Refuse_sampling_acceptance_rate_test_04"
@@ -123,7 +123,7 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 4, "method":"deepseek_mtp","enforce_eager":"true"}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"enable_reduce_sample":false,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":"true","enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
     benchmarks:
       <<: *benchmarks_per
   - name: "DeepSeek_V4_flash_FULL_DECODE_OMLY_A5_Single_Accrancy_Test_01"
@@ -137,7 +137,7 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 4, "method":"deepseek_mtp","enforce_eager":"true"}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"enable_reduce_sample":false,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
   - name: "DeepSeek_V4_flash_A5_Single_Maximum_Context_Test_01"
     model: "/root/.cache/modelscope/hub/models/models--deepseek-ai--DeepSeek-V4-Flash"
     envs:
@@ -149,4 +149,4 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 4, "method":"deepseek_mtp","enforce_eager":"true"}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"enable_reduce_sample":false,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"enable_shared_expert_dp":true,"multistream_overlap_shared_expert":true,"rejection_sampler_config":{"enable_block_verify":true,"enable_entropy_verify":false,"posterior_threshold":0.95,"posterior_alpha":0.4}}'
