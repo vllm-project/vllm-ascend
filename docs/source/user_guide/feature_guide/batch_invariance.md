@@ -55,18 +55,21 @@ VLLM_BATCH_INVARIANT=1 pip install \
 Enter the vllm-ascend installation directory and build and install the `batch_invariant_ops` wheel:
 
 **A2:**
+
 ```bash
 cd <vllm-ascend-install-dir>
 bash csrc/build_batch_invariant_ops.sh ascend910b
 ```
 
 **A3:**
+
 ```bash
 cd <vllm-ascend-install-dir>
 bash csrc/build_batch_invariant_ops.sh ascend910_93
 ```
 
 ### Quick Check
+
 After installation, verify the ops are available:
 
 ```bash
