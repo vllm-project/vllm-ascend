@@ -84,6 +84,8 @@ def _remap_mtp_weight_name(name: str) -> str | None:
             name = name.removeprefix(checkpoint_prefix)
             break
 
+    if ".self_attn.indexer." in name:
+        return None
     if name.startswith("embed_tokens."):
         name = f"model.{name}"
     if name.startswith("model.mtp."):
@@ -285,11 +287,15 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             # on the first step; subsequent steps reuse the prior draft
             # step's multi stream).
             num_tokens = hidden_states.shape[0]
+            if hidden_states.shape[-1] == hidden_size:
+                hidden_states = hidden_states.unsqueeze(-2).expand(
+                    num_tokens, hc_count, hidden_size
+                )
             hidden_states = hidden_states.view(num_tokens, hc_count, hidden_size)
-            hidden_states = self.pre_fc_norm_hidden(hidden_states.flatten(-2)).view(
-                num_tokens, hc_count, hidden_size
-            )
-            hidden_states = self.fc_hidden(hidden_states)
+            hidden_states = self.pre_fc_norm_hidden(hidden_states.flatten(-2))
+            hidden_states = self.fc_hidden(
+                hidden_states.reshape(-1, hidden_size)
+            ).reshape(num_tokens, hc_count, hidden_size)
             # Add the embedding residual to every branch, then fold back
             # to [T, hc_count*H] (HC outer, HS inner) for the HC decoder.
             hidden_states = inputs_embeds.unsqueeze(-2) + hidden_states

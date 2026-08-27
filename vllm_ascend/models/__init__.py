@@ -39,3 +39,7 @@ def register_model():
         "Qwen4ExpForConditionalGeneration",
         "vllm_ascend.models.qwen4_exp:Qwen4ExpForConditionalGeneration",
     )
+    ModelRegistry.register_model(
+        "Qwen4ExpMTP",
+        "vllm_ascend.models.qwen4_exp:Qwen4ExpMTP",
+    )

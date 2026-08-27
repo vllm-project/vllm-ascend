@@ -1652,13 +1652,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
             if vllm_version_is("0.27.1"):
-                return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
+                return bool({"DeepSeekMTPModel", "KimiK3MTPModel", "Qwen4ExpMTP"}.intersection(architectures))
             else:
                 return bool(
                     {
                         "DeepSeekMTPModel",
                         "DeepseekV32MTPModel",
                         "KimiK3MTPModel",
+                        "Qwen4ExpMTP",
                     }.intersection(architectures)
                 )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
