@@ -13,7 +13,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -112,9 +111,7 @@ def test_block_ids_are_not_overwritten_while_copy_is_in_flight():
     blocker_stream = torch.npu.Stream()
     stream = torch.npu.Stream()
     with torch.npu.stream(blocker_stream):
-        blocker = torch.full(
-            (2048, 2048), 1 / 2048, dtype=torch.float16, device=device
-        )
+        blocker = torch.full((2048, 2048), 1 / 2048, dtype=torch.float16, device=device)
         blocker_result = torch.mm(blocker, blocker)
         for _ in range(15):
             blocker_result = torch.mm(blocker_result, blocker)
@@ -187,9 +184,7 @@ def test_packed_segment_zeros_only_its_last_block_page():
     block_stride_el = 12
     page_size_el = 4
     page_offset_el = 3
-    backing = torch.ones(
-        (num_blocks, block_stride_el), dtype=torch.int32, device=device
-    )
+    backing = torch.ones((num_blocks, block_stride_el), dtype=torch.int32, device=device)
 
     zeroer = AscendKVBlockZeroer.__new__(AscendKVBlockZeroer)
     zeroer.device = device
@@ -227,10 +222,7 @@ def test_large_dsv4_launch_geometry(monkeypatch):
         dtype=torch.int32,
         sliding_window=1,
     )
-    storages = {
-        name: torch.ones((1, page_size), dtype=torch.int32)
-        for name, page_size in zip(layer_names, page_sizes)
-    }
+    storages = {name: torch.ones((1, page_size), dtype=torch.int32) for name, page_size in zip(layer_names, page_sizes)}
     zeroer = AscendKVBlockZeroer(
         device,
         attn_groups_iter=[
@@ -342,9 +334,7 @@ def _torch_zero_kv_blocks_golden(
         "first-middle-last-blocks-in-nonmonotonic-order",
     ],
 )
-def test_zero_kv_blocks_matches_torch_golden(
-    num_blocks, page_sizes, paddings, block_ids
-):
+def test_zero_kv_blocks_matches_torch_golden(num_blocks, page_sizes, paddings, block_ids):
     """Compare the Triton kernel with a Torch golden across boundary layouts."""
     device = torch.device("npu")
     storages = []

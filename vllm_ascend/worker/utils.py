@@ -88,18 +88,12 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
             group_id = group.kv_cache_group_id
-            if (
-                not isinstance(spec, AttentionSpec)
-                or group_id >= len(kernel_block_sizes)
-            ):
+            if not isinstance(spec, AttentionSpec) or group_id >= len(kernel_block_sizes):
                 adapted_attn_groups.append(group)
                 continue
             pseudo_layer_names: list[str] = []
             for layer_name in group.layer_names:
-                if (
-                    runner_only_attn_layers is not None
-                    and layer_name in runner_only_attn_layers
-                ):
+                if runner_only_attn_layers is not None and layer_name in runner_only_attn_layers:
                     pseudo_layer_names.append(layer_name)
                     continue
                 kv_tuple = static_forward_context[layer_name].kv_cache
