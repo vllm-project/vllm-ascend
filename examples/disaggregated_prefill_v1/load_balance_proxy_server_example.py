@@ -1099,8 +1099,14 @@ async def open_stream_service_response_with_retry(
             response, chunk_iterator, first_chunk = await _open_decode_response_once(
                 client, endpoint, req_data, headers
             )
-            # 5xx is transient -> retry; 4xx is deterministic -> return immediately.
-            if not response.is_success and response.status_code >= 500 and attempt < max_retries:
+            # 5xx 与 429(限流)是瞬时错误 -> 重试；其余 4xx(400/401/403 等)是确定性错误 -> 立即返回。
+            # 429 保持与原版 stream_service_response 一致（原版重试所有非 400 的 4xx，此处仅对
+            # 瞬时的 429 恢复重试，401/403 等鉴权类错误仍不重试）。
+            if (
+                not response.is_success
+                and (response.status_code >= 500 or response.status_code == 429)
+                and attempt < max_retries
+            ):
                 logger.warning(
                     "Attempt %s failed for streaming %s with status %s",
                     attempt,
