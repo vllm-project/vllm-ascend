@@ -326,7 +326,7 @@ Run the following scripts on two nodes respectively.
 
 We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance.
 
-In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [Prefill-Decode Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the Mooncake configuration.
+In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_pool.md) for the Mooncake configuration.
 
 Before you start, please
 
