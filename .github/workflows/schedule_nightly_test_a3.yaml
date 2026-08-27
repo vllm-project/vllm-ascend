@@ -190,16 +190,12 @@ jobs:
       target: a3
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
-      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
       cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
       base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+      SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+      SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   multi-node-tests:
     name: multi-node
