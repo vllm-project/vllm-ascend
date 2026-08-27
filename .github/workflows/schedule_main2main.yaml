@@ -185,6 +185,10 @@ jobs:
       # E2E runner envs" step so the flow reuses that run.
       MAIN2MAIN_E2E_REPO: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_E2E_BRANCH: main2main_e2e
+      # Identifies this main run in the e2e workflow: prep dispatch inputs,
+      # the prepare-<chip>-<main_run_id> job names, and the hold guard's
+      # exec-dispatch detection all key on it.
+      MAIN2MAIN_E2E_MAIN_RUN_ID: ${{ github.run_id }}
       # Pin the flow revision the install step clones.  Kept on
       # feature/e2e-external while the 3-runner E2E change is under
       # validation (main2main_flow PR #3); remove once that PR merges.
@@ -262,88 +266,144 @@ jobs:
           gh --version
 
       - name: Pre-start E2E runner envs
-        continue-on-error: true
         run: |
           set -euo pipefail
-          # Dispatch the A2/A3/310P environment prep NOW (in parallel with the
-          # remaining CPU installs) so the first E2E round does not wait for
-          # csrc builds / dependency installs.  The flow reuses this run id
-          # (MAIN2MAIN_E2E_PREP_RUN_ID) instead of dispatching again.
+          # Dispatch the A2/A3/310P environment prep NOW (in parallel with
+          # the remaining CPU installs), then WAIT until all three NPU
+          # runners pick up their prepare jobs (machine resources
+          # allocated, pod up, runner online) before the main flow
+          # proceeds — fail fast if the machines cannot come up.  The flow
+          # reuses this run id (MAIN2MAIN_E2E_PREP_RUN_ID) instead of
+          # dispatching again.
           VLLM_COMMIT="${TARGET_COMMIT}"
           if [ -z "${VLLM_COMMIT}" ]; then
             VLLM_COMMIT=$(git -C vllm-upstream rev-parse HEAD)
           fi
           echo "Pre-starting main2main E2E env prep for vllm=${VLLM_COMMIT} (A2/A3/310P)..."
-          # Reuse the most recent completed+successful run whose vllm input
-          # matches: the NPU runners' env persists across runs (.ready
-          # marker keyed by vllm/base_ref/image_tag), so a matching run
-          # means the env is already prepared — dispatching again would
-          # only queue an idempotent no-op.  Falls back to a fresh prep
-          # dispatch when nothing matches (first run, vllm bump).
-          REUSED_ID=""
-          for rid in $(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main&per_page=10" \
+          # Reuse an existing prep run whose run-name encodes the same vllm
+          # commit (the runs API does not expose workflow_dispatch inputs):
+          #   m2m prep <main_run_id> <vllm>
+          # An in-progress run is preferred — its hold guard still occupies
+          # the runners, so the machines are not released.  Otherwise reuse
+          # a completed+successful run (env persists via .ready on the
+          # runner workspaces; machines get re-queued by ARC on demand).
+          # Falls back to a fresh prep dispatch when nothing matches.
+          SCAN=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main&per_page=50" \
             | python3 -c "
           import json, sys
           runs = json.load(sys.stdin).get('workflow_runs', [])
-          for r in runs:
-              if r.get('path', '').endswith('main2main-e2e.yaml') \
-                      and r.get('status') == 'completed' \
-                      and r.get('conclusion') == 'success':
-                  print(r['id'])
-          " 2>/dev/null | head -5); do
-            RV=$(gh api "repos/${HEAD_FORK}/actions/runs/${rid}" \
-              | python3 -c "
-          import json, sys
-          r = json.load(sys.stdin).get('inputs') or {}
-          print(r.get('vllm', ''))
-          print(r.get('base_ref', ''))
-          " 2>/dev/null || true)
-            if [ "$(echo "$RV" | sed -n 1p)" = "${VLLM_COMMIT}" ] \
-               && [ "$(echo "$RV" | sed -n 2p)" = "main" ]; then
-              REUSED_ID=${rid}
-              break
-            fi
-          done
-          if [ -n "${REUSED_ID:-}" ]; then
+          vllm = sys.argv[1]
+          for want in ('in_progress', 'completed'):
+              for r in runs:
+                  parts = (r.get('name') or '').split()
+                  if len(parts) >= 4 and parts[0] == 'm2m' and parts[1] == 'prep' \
+                          and parts[2] != '-' and parts[3] == vllm \
+                          and r.get('status') == want:
+                      if want == 'completed' and r.get('conclusion') != 'success':
+                          continue
+                      print(r['id'], parts[2])
+                      sys.exit(0)
+          " "${VLLM_COMMIT}" 2>/dev/null || true)
+          if [ -n "${SCAN:-}" ]; then
+            REUSED_ID=$(echo "$SCAN" | awk '{print $1}')
+            REUSED_OWNER=$(echo "$SCAN" | awk '{print $2}')
             echo "MAIN2MAIN_E2E_PREP_RUN_ID=${REUSED_ID}" >> "$GITHUB_ENV"
-            echo "Reusing prep run ${REUSED_ID} — env for vllm=${VLLM_COMMIT} already prepared"
+            echo "MAIN2MAIN_E2E_PREP_OWNER_ID=${REUSED_OWNER}" >> "$GITHUB_ENV"
+            echo "PREP_RUN_OWNED=false" >> "$GITHUB_ENV"
+            echo "Reusing prep run ${REUSED_ID} (owner ${REUSED_OWNER}) — env for vllm=${VLLM_COMMIT} already prepared"
           else
             echo "No matching prep run — dispatching fresh prep"
-            # gh 2.4.0 on this runner has no `run list --jq` (silently no-op);
-            # dispatch time is captured first so the API poll below can
-            # reject stale runs from earlier prep dispatches.
-            DISPATCH_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            echo "PREP_RUN_OWNED=true" >> "$GITHUB_ENV"
+            echo "MAIN2MAIN_E2E_PREP_OWNER_ID=${GITHUB_RUN_ID}" >> "$GITHUB_ENV"
             gh workflow run main2main-e2e.yaml \
               --repo "${HEAD_FORK}" \
               --ref main \
               -f "vllm=${VLLM_COMMIT}" -f "base_ref=main" -f "round=prep" \
-              -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}"
-            POLL_ERR=""
-            for i in $(seq 1 12); do
-              RUN_ID=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main" 2>/tmp/prep-poll.err \
+              -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}" \
+              -f "main_run_id=${GITHUB_RUN_ID}" \
+              -f "main_run_repo=${GITHUB_REPOSITORY}"
+            # Phase 1: find our run id (list API indexing can lag ~1 min).
+            RUN_ID=""
+            for i in $(seq 1 30); do
+              RUN_ID=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main&per_page=50" 2>/tmp/prep-poll.err \
                 | python3 -c "
             import json, sys
             runs = json.load(sys.stdin).get('workflow_runs', [])
-            cutoff = sys.argv[1]
+            main_run = sys.argv[1]
+            vllm = sys.argv[2]
             for r in runs:
-                if r.get('path', '').endswith('main2main-e2e.yaml') and r.get('created_at', '') >= cutoff:
+                parts = (r.get('name') or '').split()
+                if len(parts) >= 4 and parts[0] == 'm2m' and parts[1] == 'prep' \
+                        and parts[2] == main_run and parts[3] == vllm:
                     print(r['id'])
-                    break
-            " "$DISPATCH_AT" || true)
+                    sys.exit(0)
+            " "${GITHUB_RUN_ID}" "${VLLM_COMMIT}" || true)
               if [ -n "${RUN_ID:-}" ]; then
                 break
               fi
-              POLL_ERR=$(tail -1 /tmp/prep-poll.err 2>/dev/null || true)
-              echo "prep run not found (poll ${i}/12)${POLL_ERR:+ — gh api: ${POLL_ERR}}"
-              sleep 5
+              echo "prep run not found (poll ${i}/30)"
+              sleep 10
             done
-            if [ -n "${RUN_ID:-}" ]; then
-              echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
-              echo "Prep run ${RUN_ID} started"
-            else
-              echo "::warning::prep run id not found after 12 polls (gh $(gh --version 2>/dev/null | head -1)) — the flow will dispatch prep itself"
+            if [ -z "${RUN_ID:-}" ]; then
+              echo "::error::prep run id not found after 30 polls — the three NPU runners were never dispatched"
+              exit 1
             fi
+            echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+            echo "Prep run ${RUN_ID} started"
           fi
+          # Phase 2: wait until all three NPU runners picked up their
+          # prepare jobs (status left queued).  Job names carry the owning
+          # main run's id (prepare-<chip>-<owner>) so we match exactly the
+          # three runners this main run started.
+          PREP_RUN_ID=${MAIN2MAIN_E2E_PREP_RUN_ID}
+          PREP_OWNER=${MAIN2MAIN_E2E_PREP_OWNER_ID}
+          WAIT_MIN=${MAIN2MAIN_E2E_READY_TIMEOUT_MIN:-120}
+          echo "Waiting for the three NPU runners (prepare-a2/a3/310p, owner ${PREP_OWNER}) — up to ${WAIT_MIN} min..."
+          DEADLINE=$(( $(date +%s) + WAIT_MIN * 60 ))
+          while :; do
+            READY_STATE=$(gh api "repos/${HEAD_FORK}/actions/runs/${PREP_RUN_ID}/jobs" \
+              | python3 -c "
+            import json, sys
+            jobs = json.load(sys.stdin).get('jobs', [])
+            owner = sys.argv[1]
+            suffix = f'-{owner}' if owner else ''
+            want = [f'prepare-{c}{suffix}' for c in ('a2', 'a3', '310p')]
+            state = {}
+            for j in jobs:
+                if j.get('name') in want:
+                    state[j['name']] = (j.get('status'), j.get('conclusion') or '')
+            out = []
+            for w in want:
+                if w in state:
+                    st, con = state[w]
+                    out.append(f'{w}|{st}|{con}')
+                else:
+                    out.append(f'{w}|missing|')
+            print(';'.join(out))
+            " "${PREP_OWNER}")
+            echo "  runners: ${READY_STATE}"
+            ALL_READY=true
+            for entry in $(echo "${READY_STATE}" | tr ';' '\n'); do
+              IFS='|' read -r jname jstatus jconclusion <<< "${entry}"
+              case "${jstatus}" in
+                in_progress|completed) ;;
+                failed|skipped|cancelled|timed_out)
+                  echo "::error::${jname} reached terminal state ${jstatus} (${jconclusion}) — cannot wait for it"
+                  exit 1
+                  ;;
+                *) ALL_READY=false ;;
+              esac
+            done
+            if [ "${ALL_READY}" = "true" ]; then
+              echo "All three NPU runners are ready (prepare jobs in progress/completed)"
+              break
+            fi
+            if [ "$(date +%s)" -gt "${DEADLINE}" ]; then
+              echo "::error::timed out after ${WAIT_MIN} min waiting for the three NPU runners (last state: ${READY_STATE})"
+              exit 1
+            fi
+            sleep 30
+          done
 
       - name: Install opencode + main2main-flow
         env:
@@ -657,6 +717,23 @@ jobs:
             --repo "${UPSTREAM_REPO}" \
             --title "[main2main] main2main manual review required (${SHORT_NEW})" \
             --body-file /tmp/main2main-manual-review.md
+
+      # Stop the prep run's hold guard so the three NPU runners are
+      # released (pod reclaimed / runner freed for other CI).  Placed
+      # before "Chain next run": a chained run scanning for an in-progress
+      # prep to reuse must not have its guard killed by this run's cancel.
+      # Only the run that dispatched the prep may cancel it — a reuser
+      # sharing the hold must not kill the owner's guard.  Cancel is
+      # idempotent (409 on an already-completed run is harmless).
+      - name: Release E2E runners
+        if: always()
+        run: |
+          if [ "${PREP_RUN_OWNED:-false}" = "true" ] && [ -n "${MAIN2MAIN_E2E_PREP_RUN_ID:-}" ]; then
+            gh api -X POST "repos/${MAIN2MAIN_E2E_REPO}/actions/runs/${MAIN2MAIN_E2E_PREP_RUN_ID}/cancel" || true
+            echo "Released E2E runners: cancelled prep run ${MAIN2MAIN_E2E_PREP_RUN_ID}"
+          else
+            echo "Prep run not owned by this run (owned=${PREP_RUN_OWNED:-unset}) — not cancelling"
+          fi
 
       - name: Chain next run
         if: steps.final-status.outputs.status == 'completed' && steps.final-status.outputs.steps_completed != '0'
