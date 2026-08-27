@@ -315,12 +315,18 @@ at::Tensor npu_sparse_attention_score_meta(
     const c10::optional<at::Tensor> &v_dequant_scale,
     const c10::optional<at::Tensor> &actual_seq_lengths,
     const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    const c10::optional<at::Tensor> &cu_seq_lengths_q,
+    const c10::optional<at::Tensor> &cu_seq_lengths_kv,
     c10::string_view q_input_layout, c10::string_view kv_input_layout,
     int64_t num_key_value_heads, double scale_value, int64_t block_size,
-    int64_t top_k, int64_t inner_precise)
+    int64_t top_k, int64_t inner_precise, int64_t softmax_precision)
 {
     TORCH_CHECK(std::string(q_input_layout) == "TND",
                 "npu_sparse_attention_score only supports query TND layout");
+    TORCH_CHECK(std::string(kv_input_layout) == "PAGED_BBND",
+                "npu_sparse_attention_score only supports PAGED_BBND KV layout");
+    TORCH_CHECK(softmax_precision == 0 || softmax_precision == 1,
+                "softmax_precision must be 0 or 1");
     at::ScalarType out_dtype = (query.scalar_type() == at::kFloat8_e4m3fn)
                                    ? at::kHalf
                                    : query.scalar_type();
