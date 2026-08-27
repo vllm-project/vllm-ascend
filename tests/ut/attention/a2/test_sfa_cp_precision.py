@@ -6,7 +6,8 @@ import torch
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
 try:
-    import torch_npu
+    import torch_npu  # noqa: F401
+
     HAS_NPU = torch.npu.is_available()
 except ImportError:
     HAS_NPU = False
