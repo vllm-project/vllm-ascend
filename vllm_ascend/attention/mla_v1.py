@@ -1170,7 +1170,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # memory for stability.
         ascend_config = get_ascend_config()
         if (
-            get_ascend_device_type() != AscendDeviceType.A5
+            not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
             and self.enable_mlapo
             and self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
@@ -1729,7 +1729,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         hidden_states = hidden_states[:bsz]
 
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
             if self.mlapo_weight_quant_mode == 0:
                 quantized_x = hidden_states
                 dequant_scale_x = None

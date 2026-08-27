@@ -1564,7 +1564,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(hasattr(self.impl, "quant_kscale"))
         self.assertTrue(hasattr(self.impl, "fak_descale_float"))
 
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    @patch("vllm_ascend.attention.mla_v1.get_current_hardware_profile")
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_for_fused_mlapo_a5(self, mock_format_cast, mock_get_ascend_device_type):
         mock_format_cast.return_value = torch.randn(128, 128)
@@ -1580,9 +1580,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl._mlapo_quant_type = object
         self.impl._mlapo_uses_native_weights = False
 
-        from vllm_ascend.attention.mla_v1 import AscendDeviceType
-
-        mock_get_ascend_device_type.return_value = AscendDeviceType.A5
+        mock_get_ascend_device_type.return_value = get_hardware_profile(AscendDeviceType.A5)
         self.impl._process_weights_for_fused(torch.float16)
         self.assertTrue(hasattr(self.impl, "weight_dq"))
         self.assertTrue(hasattr(self.impl, "weight_uq_qr"))
