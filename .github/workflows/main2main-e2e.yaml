@@ -36,10 +36,13 @@
 #   them with parse_exec_artifacts (e2e_dispatch.py).
 name: main2main E2E
 
-# run-name encodes the run kind, the dispatching main run's id and the vllm
-# commit — the runs API does not expose workflow_dispatch inputs, so all
-# cross-run matching (pre-start reuse scan, hold exec detection) decodes it.
-run-name: m2m ${{ inputs.round == 'prep' && 'prep' || format('exec-{0}', inputs.round) }} ${{ inputs.main_run_id || '-' }} ${{ inputs.vllm }}
+# run-name identifies the main run (Main2Main-E2E-<main_run_id>): the
+# prepared env belongs to one main run (one fixed vllm commit), and every
+# prep/exec round of that run shares the name.  The runs API does not
+# expose workflow_dispatch inputs, so the hold guards match exec rounds of
+# this main run by this exact name; the vllm commit hash is deliberately
+# NOT in the run title (it changes every main2main run).
+run-name: Main2Main-E2E-${{ inputs.main_run_id || '-' }}
 
 on:
   workflow_dispatch:
@@ -389,20 +392,19 @@ jobs:
           warn_404 = False
           while time.time() < deadline:
               if main_run_id:
-                  # a) exec dispatch from our main run.  Run ids are
-                  # globally monotonic, so id > self_id reliably rejects
-                  # runs created before this prep (created_at is
-                  # second-truncated and unsafe for same-second runs).
+                  # a) the next exec round of this main run.  Run ids are
+                  # globally monotonic, so id > self_id rejects runs created
+                  # before this one; the name Main2Main-E2E-<main_run_id>
+                  # is shared by every round of this main run (created_at
+                  # is second-truncated and unsafe for same-second runs).
                   try:
                       runs = gh_get(
                           f"https://api.github.com/repos/{repo}/actions/runs"
                           "?event=workflow_dispatch&branch=main&per_page=50") \
                           .get("workflow_runs", [])
+                      want_name = f"Main2Main-E2E-{main_run_id}"
                       for r in runs:
-                          parts = (r.get("name") or "").split()
-                          if len(parts) >= 3 and parts[0] == "m2m" \
-                                  and parts[1].startswith("exec-") \
-                                  and parts[2] == main_run_id \
+                          if (r.get("name") or "") == want_name \
                                   and int(r["id"]) > self_id:
                               print(f"[hold] exec run {r['id']} dispatched "
                                     f"by main run {main_run_id} — releasing "
@@ -662,20 +664,16 @@ jobs:
           warn_404 = False
           while time.time() < deadline:
               if main_run_id:
-                  # a) next exec round dispatched by our main run.  Run ids
-                  # are globally monotonic, so id > self_id reliably rejects
-                  # runs created before this one (created_at is
-                  # second-truncated and unsafe for same-second runs).
+                  # a) the next exec round of this main run (run-name
+                  # Main2Main-E2E-<main_run_id>, id > self_id).
                   try:
                       runs = gh_get(
                           f"https://api.github.com/repos/{repo}/actions/runs"
                           "?event=workflow_dispatch&branch=main&per_page=50") \
                           .get("workflow_runs", [])
+                      want_name = f"Main2Main-E2E-{main_run_id}"
                       for r in runs:
-                          parts = (r.get("name") or "").split()
-                          if len(parts) >= 3 and parts[0] == "m2m" \
-                                  and parts[1].startswith("exec-") \
-                                  and parts[2] == main_run_id \
+                          if (r.get("name") or "") == want_name \
                                   and int(r["id"]) > self_id:
                               print(f"[hold] next exec run {r['id']} "
                                     f"dispatched by main run {main_run_id} — "
