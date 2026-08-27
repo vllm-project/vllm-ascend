@@ -183,7 +183,7 @@ Static kernel compilation is an **optional** feature that pre-compiles operator 
 
     Enabling static kernel triggers a compilation pass during the graph capture phase at service startup. This may add **several minutes to tens of minutes** to the startup time depending on the number of operators to compile and model complexity. Once completed, subsequent request processing is not affected.
 
-    Super Kernel optimization follows `enable_static_kernel` by default. To use static kernel without Super Kernel, set `enable_super_kernel` to `false` explicitly. Super Kernel cannot be enabled when static kernel is disabled.
+    [Super kernel](https://www.hiascend.com/document/detail/zh/Pytorch/latest/devguide/TorchAir/docs/zh/npugraph_ex/advanced/superkernel.md) optimization follows `enable_static_kernel` by default. To use static kernel without super kernel, set `enable_super_kernel` to `false` explicitly. Super kernel cannot be enabled when static kernel is disabled.
 
 Offline example:
 

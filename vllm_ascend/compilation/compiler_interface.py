@@ -132,7 +132,6 @@ def _configure_backend(
                 options["super_kernel_optimize_options"] = {
                     "dcci_after_kernel_end": [".*"],
                 }
-                options["super_kernel_debug_options"] = {}
         process_kwargs_options(config, {"options": options})
     else:
         # torchair (reduce-overhead): use nested config structure directly.
