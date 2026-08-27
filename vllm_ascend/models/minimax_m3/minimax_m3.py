@@ -62,6 +62,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.triton_utils import HAS_TRITON
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -401,6 +402,36 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qkv, _ = self.qkv_proj(hidden_states)
         main_qkv_size = self.q_size + 2 * self.kv_size
+
+        # Fused path: split + RMSNorm + RoPE in one kernel (concat layout)
+        if (
+            HAS_TRITON
+            and self.indexer_proj is None
+            and qkv.device.type == "npu"
+            and qkv.dtype == torch.bfloat16
+            and positions.ndim == 1
+            and getattr(self.rotary_emb, "is_neox_style", True)
+        ):
+            return torch.ops.vllm.qkv_index_rmsnorm_rope(
+                input=qkv.contiguous(),
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                positions=positions,
+                q_weight=1.0 + self.q_norm.weight,
+                k_weight=1.0 + self.k_norm.weight,
+                index_q_weight=1.0 + self.index_q_norm.weight,
+                index_k_weight=1.0 + self.index_k_norm.weight,
+                q_hidden_size=self.q_size,
+                kv_hidden_size=self.kv_size,
+                index_q_size=self.index_q_size,
+                head_dim=self.head_dim,
+                idx_head_dim=self.idx_head_dim,
+                eps=self.q_norm.variance_epsilon,
+                attn_out_fp8=False,
+                indexer_out_fp8=False,
+                q_bias=None,
+                k_bias=None,
+            )
+
         if self.indexer_proj is None:
             main_qkv = qkv.narrow(-1, 0, main_qkv_size)
             index_q = qkv.narrow(-1, main_qkv_size, self.index_q_size)
