@@ -78,6 +78,8 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    # Disable MegaMoE pending related bug fixes
+    return False
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         _CANN_OPS_TRANSFORMER_AVAILABLE
