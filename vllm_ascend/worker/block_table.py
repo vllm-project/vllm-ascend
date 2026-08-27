@@ -1,6 +1,12 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
 import numpy as np
 import torch
 from vllm.distributed import get_dcp_group
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import (
@@ -15,6 +21,10 @@ from vllm_ascend.ops.triton.compute_slot_mapping import (
     _compute_slot_mapping_kernel,
     _next_power_of_2,
 )
+
+# Lazy-imported reference to the fused Triton kernel.
+# Cached after first successful import; `None` if Triton is unavailable.
+_compute_slot_mapping_fused_fn: Callable[..., Any] | None = None
 
 
 class BlockTable:
@@ -318,7 +328,11 @@ class BlockTable:
 
 
 class MultiGroupBlockTable:
-    """The BlockTables for each KV cache group."""
+    """The BlockTables for each KV cache group.
+    Supports two compute_slot_mapping strategies:
+    - Fused:   Single Triton kernel launch for all non-mamba groups (default).
+    - Sequential: Original per-group sequential launches (fallback).
+    """
 
     def __init__(
         self,
@@ -333,7 +347,17 @@ class MultiGroupBlockTable:
         kernel_sizes: list[list[int]] | None = None,
         cp_kv_cache_interleave_size: int = 1,
         kv_cache_groups: KVCacheGroupSpec = None,
+        *,
+        use_fused_slot_mapping: bool = True,
     ) -> None:
+        """Initialize MultiGroupBlockTable.
+
+        Args:
+            use_fused_slot_mapping: When True, use the fused multi-group
+                Triton kernel to process all groups in a single launch.
+                Falls back to sequential when CP (context parallelism)
+                is active or Triton is unavailable.
+        """
         if kernel_sizes is None:
             kernel_sizes = [[0]] * len(block_sizes)
         # Ensure kernel_sizes matches block_sizes length
@@ -356,6 +380,9 @@ class MultiGroupBlockTable:
             raise ValueError(
                 f"max_num_blocks length ({len(max_num_blocks)}) must match block_sizes length ({len(block_sizes)})"
             )
+
+        self._device = device
+        self._use_fused_slot_mapping = use_fused_slot_mapping
 
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         if kv_cache_groups is not None:
@@ -394,6 +421,236 @@ class MultiGroupBlockTable:
                 )
             ]
 
+        # Cache non-mamba block_tables list for fast access.
+        self._non_mamba_tables: list[BlockTable] = [bt for bt in self.block_tables if not bt.is_mamba_group]
+
+        # Pre-build per-group parameter tensors for the fused kernel.
+        # These values are static after construction — data_ptr(),
+        # block_size, physical_block_size, etc. never change per step.
+        # Pre-caching avoids ~5 ms of torch.tensor(…) construction
+        # overhead on every decode call.
+        self._fused_params: dict[str, torch.Tensor] | None = None
+        if use_fused_slot_mapping and len(self._non_mamba_tables) > 1:
+            self._build_fused_params()
+
+    # -- helpers -------------------------------------------------------
+
+    def _is_cp_enabled(self) -> bool:
+        """Check whether context parallelism is active across any group."""
+        return any(bt.dcp_world_size > 1 for bt in self._non_mamba_tables)
+
+    @staticmethod
+    def _get_fused_slot_mapping_kernel():
+        """Lazy-import the fused Triton kernel function.
+
+        Returns the Triton-jitted kernel directly (not the wrapper), or
+        ``None`` if Triton is not available / import fails.
+        """
+        global _compute_slot_mapping_fused_fn
+        if _compute_slot_mapping_fused_fn is not None:
+            return _compute_slot_mapping_fused_fn
+        try:
+            from vllm_ascend.ops.triton.slot_mapping import (
+                compute_slot_mapping_fused_kernel,
+            )
+
+            _compute_slot_mapping_fused_fn = compute_slot_mapping_fused_kernel
+        except ImportError as e:
+            logger.warning(
+                "Fused slot-mapping Triton kernel not available (%s).Falling back to sequential execution.",
+                e,
+            )
+            _compute_slot_mapping_fused_fn = None
+        return _compute_slot_mapping_fused_fn
+
+    def _build_fused_params(self) -> None:
+        """Pre-allocate per-group parameter tensors for the fused kernel.
+
+        Called once during ``__init__``.  The following values are
+        static after construction and never change per decode step:
+          * ``block_table.gpu.data_ptr()`` — the buffer is pre-allocated.
+          * ``block_table.gpu.stride(0)`` — shape never changes.
+          * ``block_size``, ``physical_block_size``, ``blocks_per_phys_block``.
+          * ``slot_mapping.gpu.data_ptr()`` — buffer is pre-allocated.
+        """
+        bt_list = self._non_mamba_tables
+        device = self._device
+        self._fused_params = {
+            "block_table_ptrs": torch.tensor(
+                [bt.block_table.gpu.data_ptr() for bt in bt_list],
+                dtype=torch.int64,
+                device=device,
+            ),
+            "block_table_strides": torch.tensor(
+                [bt.block_table.gpu.stride(0) for bt in bt_list],
+                dtype=torch.int32,
+                device=device,
+            ),
+            "block_sizes": torch.tensor(
+                [bt.block_size for bt in bt_list],
+                dtype=torch.int32,
+                device=device,
+            ),
+            "slot_mapping_ptrs": torch.tensor(
+                [bt.slot_mapping.gpu.data_ptr() for bt in bt_list],
+                dtype=torch.int64,
+                device=device,
+            ),
+            "kv_cache_block_sizes": torch.tensor(
+                [bt.physical_block_size for bt in bt_list],
+                dtype=torch.int32,
+                device=device,
+            ),
+            "blocks_per_kv": torch.tensor(
+                [bt.blocks_per_phys_block for bt in bt_list],
+                dtype=torch.int32,
+                device=device,
+            ),
+        }
+
+    def _launch_fused_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        """Launch the 2D-grid fused slot-mapping kernel with pre-cached params.
+
+        Uses the pre-built ``self._fused_params`` tensors (zero per-call
+        construction overhead).
+        """
+        kernel = self._get_fused_slot_mapping_kernel()
+        if kernel is None or self._fused_params is None:
+            raise RuntimeError("Fused kernel or pre-built params not available.")
+
+        bt0 = self._non_mamba_tables[0]
+        num_groups = len(self._non_mamba_tables)
+        num_reqs_plus_one = num_reqs + 1
+        num_tokens = positions.shape[0]
+
+        total_cp_world_size = bt0.dcp_world_size
+        total_cp_rank = bt0.dcp_rank
+
+        # BLOCK_TABLE_WINDOW_SIZE must be a compile-time constant large
+        # enough for the smallest block_size among all groups, so a single
+        # value covers every group (loads are masked by block_table_stride).
+        tile_block_size = 1024
+        min_block_size = min(bt.block_size for bt in self._non_mamba_tables)
+        window_size = _next_power_of_2(((tile_block_size + min_block_size - 1) // min_block_size) + 1)
+
+        p = self._fused_params
+        kernel[(num_reqs_plus_one, num_groups)](
+            num_tokens,
+            bt0.max_num_batched_tokens,
+            query_start_loc,
+            positions,
+            p["block_table_ptrs"],
+            p["block_table_strides"],
+            p["block_sizes"],
+            p["slot_mapping_ptrs"],
+            p["kv_cache_block_sizes"],
+            p["blocks_per_kv"],
+            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+            TOTAL_CP_RANK=total_cp_rank,
+            CP_KV_CACHE_INTERLEAVE_SIZE=bt0.cp_kv_cache_interleave_size,
+            PAD_ID=PAD_SLOT_ID,
+            TILE_BLOCK_SIZE=tile_block_size,
+            BLOCK_TABLE_WINDOW_SIZE=window_size,
+        )
+
+    # -- core methods --------------------------------------------------
+
+    def compute_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        positions_compressed_list: list[np.ndarray] | None = None,
+        req_indices_compressed_list: list[np.ndarray] | None = None,
+    ) -> None:
+        """Compute slot mappings for all non-mamba KV cache groups.
+
+        Strategy selection (in order of preference):
+        1. If ``positions_compressed_list`` is provided → draft path
+           (per-group sequential, CPU-side numpy).
+        2. If fused mode is enabled *and* CP is inactive → fused
+           single-kernel launch.
+        3. Otherwise → original sequential per-group launch (fallback).
+        """
+        if not self._non_mamba_tables:
+            return
+
+        # -- draft path (CPU-side) ------------------------------------
+        # NOTE: positions_compressed_list is indexed by the ORIGINAL
+        # block_tables order (including mamba groups).  We iterate over
+        # the full list and skip mamba to keep the indices aligned.
+        if positions_compressed_list and req_indices_compressed_list:
+            for i, block_table in enumerate(self.block_tables):
+                if block_table.is_mamba_group:
+                    continue
+                block_table.compute_slot_mapping_draft(
+                    req_indices_compressed_list[i],
+                    positions_compressed_list[i],
+                )
+            return
+
+        # -- device-side paths ----------------------------------------
+        if not self._is_cp_enabled():
+            # Try fused kernel first (handles decode / non-CP prefill).
+            if self._use_fused_slot_mapping and self._fused_params is not None:
+                kernel = self._get_fused_slot_mapping_kernel()
+                if kernel is not None:
+                    self._launch_fused_slot_mapping(num_reqs, query_start_loc, positions)
+                    return
+
+        # -- fallback: sequential -------------------------------------
+        for block_table in self._non_mamba_tables:
+            block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
+
+    def compute_slot_mapping_fused(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> None:
+        """Explicitly invoke the fused multi-group slot-mapping kernel.
+
+        Raises ``RuntimeError`` if the kernel is not available.
+        """
+        if not self._non_mamba_tables:
+            return
+        if self._fused_params is None:
+            raise RuntimeError("Fused params not built (num_groups <= 1 or init skipped).")
+        self._launch_fused_slot_mapping(num_reqs, query_start_loc, positions)
+
+    def compute_slot_mapping_draft(
+        self,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
+        positions_compressed_list: list[np.ndarray] | None = None,
+        req_indices_compressed_list: list[np.ndarray] | None = None,
+    ) -> None:
+        """Compute draft slot mappings. Currently remains sequential
+        because the draft path operates on CPU numpy arrays and the
+        per-group compressed data may differ.
+
+        NOTE: positions_compressed_list is indexed by the ORIGINAL
+        block_tables order.  We iterate over the full list and skip
+        mamba groups to keep indices aligned with the caller.
+        """
+        for i, block_table in enumerate(self.block_tables):
+            if block_table.is_mamba_group:
+                continue
+            if positions_compressed_list and req_indices_compressed_list:
+                block_table.compute_slot_mapping_draft(
+                    req_indices_compressed_list[i],
+                    positions_compressed_list[i],
+                )
+            else:
+                block_table.compute_slot_mapping_draft(req_indices, positions)
+
+    # -- remaining methods (unchanged) --------------------------------
+
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:
         for i, block_table in enumerate(self.block_tables):
             block_table.append_row(block_ids[i], row_idx)
@@ -414,37 +671,6 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping(
-        self,
-        num_reqs: int,
-        query_start_loc: torch.Tensor,
-        positions: torch.Tensor,
-        positions_compressed_list: list[np.ndarray] | None = None,
-        req_indices_compressed_list: list[np.ndarray] | None = None,
-    ) -> None:
-        for i, block_table in enumerate(self.block_tables):
-            if block_table.is_mamba_group:
-                continue
-            if positions_compressed_list and req_indices_compressed_list:
-                block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
-            else:
-                block_table.compute_slot_mapping(num_reqs, query_start_loc, positions)
-
-    def compute_slot_mapping_draft(
-        self,
-        req_indices: np.ndarray | torch.Tensor,
-        positions: np.ndarray | torch.Tensor,
-        positions_compressed_list: list[np.ndarray] | None = None,
-        req_indices_compressed_list: list[np.ndarray] | None = None,
-    ) -> None:
-        for i, block_table in enumerate(self.block_tables):
-            if block_table.is_mamba_group:
-                continue
-            if positions_compressed_list and req_indices_compressed_list:
-                block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
-            else:
-                block_table.compute_slot_mapping_draft(req_indices, positions)
-
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
@@ -453,6 +679,6 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.clear()
 
-    def __getitem__(self, idx: int) -> "BlockTable":
+    def __getitem__(self, idx: int) -> BlockTable:
         """Returns the BlockTable for the i-th KV cache group."""
         return self.block_tables[idx]
