@@ -177,7 +177,7 @@ ImageNet val zero-shot Top-1 is a common accuracy benchmark for SigLIP2.
 
 ### Dataset and Labels
 
-1. Download [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login required; ILSVRC 2012 val subset is also on [Kaggle](https://www.kaggle.com/c/imagenet-object-localization-challenge/data)).
+1. Download [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login required).
 2. Download `val_label.txt` ([example](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)). Each line: `ILSVRC2012_val_00000001.JPEG 65` (PyTorch class id 0–999).
 3. Download `imagenet1000_clsidx_to_labels.txt` for the 1000 class text templates.
 
