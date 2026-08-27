@@ -302,6 +302,11 @@ class ExecuteModelState(NamedTuple):
 
 
 class NPUModelRunner(GPUModelRunner):
+    # vLLM #51718 describes compatible KV cache groups as views over one
+    # standardized backing allocation. The default runner preserves that
+    # contract for its layer/block-compact Attention+Mamba path.
+    supports_standardized_shared_kv_backing = True
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Must be set before super().__init__() because parent init may call
         # _allocate_kv_cache_tensors which accesses self.use_compress.
