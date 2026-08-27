@@ -33,6 +33,8 @@ def _method(path: Path, cls_name: str, method_name: str) -> ast.FunctionDef:
 def test_qwen4_exp_mtp_uses_local_drafter_inputs_on_last_pp_stage() -> None:
     source = ast.unparse(_method(MTP, "AscendQwen4ExpMultiTokenPredictor", "forward"))
     assert "get_pp_group().is_first_rank or intermediate_tensors is None" in source
+    assert "positions.ndim > 1" in source
+    assert "hidden_states.reshape(-1, hidden_size)" in source
 
 
 def test_qwen4_exp_mtp_accepts_multimodal_embedding_arguments() -> None:
@@ -76,3 +78,17 @@ def test_qwen4_exp_proposer_uses_local_backport() -> None:
     source = EAGLE.read_text()
     assert "from vllm_ascend.spec_decode.qwen4_exp import" in source
     assert "from vllm.v1.spec_decode.qwen4_exp import" not in source
+
+
+def test_qwen4_exp_proposer_bypasses_generic_tp_padding() -> None:
+    source = ast.unparse(_class(PROPOSER, "AscendQwen4ExpMTPProposer"))
+    assert "def maybe_pad_and_reduce" in source
+    assert "def maybe_all_gather_and_unpad" in source
+
+
+def test_qwen4_exp_mtp_type_is_registered_for_vllm_026() -> None:
+    patch = (
+        ROOT / "vllm_ascend" / "patch" / "platform" / "patch_speculative_config.py"
+    ).read_text()
+    assert "qwen4_exp_mtp" in patch
+    assert "MTPModelTypes" in patch

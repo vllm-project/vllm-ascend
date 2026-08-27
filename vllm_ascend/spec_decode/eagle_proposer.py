@@ -25,3 +25,12 @@ class AscendQwen4ExpMTPProposer(Qwen4ExpMTPProposer, AscendSpecDecodeBasePropose
         # Qwen3.8-Flash-Next. The MTP feedback is the text backbone's HC stream.
         text_config = self.draft_model_config.hf_text_config
         return int(text_config.hidden_size * text_config.hc_count)
+
+    def maybe_pad_and_reduce(self, hidden_states, positions):
+        # Qwen4Exp target and draft share the same TP group and HC width.
+        return hidden_states, positions
+
+    def maybe_all_gather_and_unpad(
+        self, last_hidden_states, positions, hidden_states=None
+    ):
+        return last_hidden_states, positions, hidden_states

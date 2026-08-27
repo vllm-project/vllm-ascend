@@ -38,6 +38,10 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | IntermediateTensors:
         hc_count = self.hc_count
         hidden_size = self.hidden_size
+        # The draft is text-only; M-RoPE rows are identical for text tokens.
+        if positions.ndim > 1:
+            positions = positions[0]
+
 
         # Ascend PP loads the local MTP drafter on the last target stage. It is
         # therefore the first logical draft stage even though the global PP
@@ -53,7 +57,9 @@ class AscendQwen4ExpMultiTokenPredictor(upstream_mtp.Qwen4ExpMultiTokenPredictor
             num_tokens = hidden_states.shape[0]
             hidden_states = hidden_states.view(num_tokens, hc_count, hidden_size)
             hidden_states = self.pre_fc_norm_hidden(hidden_states.flatten(-2)).view(num_tokens, hc_count, hidden_size)
-            hidden_states = self.fc_hidden(hidden_states)
+            hidden_states = self.fc_hidden(
+                hidden_states.reshape(-1, hidden_size)
+            ).view(num_tokens, hc_count, hidden_size)
             hidden_states = inputs_embeds.unsqueeze(-2) + hidden_states
             hidden_states = hidden_states.flatten(-2)
         else:

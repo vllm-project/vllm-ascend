@@ -1,5 +1,6 @@
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
+import vllm.config.speculative as vllm_speculative
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import algos as speculator_algos
 from vllm.utils.import_utils import LazyLoader
@@ -10,6 +11,13 @@ from vllm_ascend.transformers_utils.configs.kimi_k3 import (
 )
 
 _orig_post_init = SpeculativeConfig.__post_init__
+
+# vLLM 0.26 predates Qwen4Exp MTP. Extend its runtime validation list before
+# SpeculativeConfig normalizes the draft model returned by hf_config_override.
+if "qwen4_exp_mtp" not in get_args(vllm_speculative.MTPModelTypes):
+    vllm_speculative.MTPModelTypes = Literal.__getitem__(
+        get_args(vllm_speculative.MTPModelTypes) + ("qwen4_exp_mtp",)
+    )
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.quantization as me_quant
