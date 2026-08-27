@@ -1356,9 +1356,15 @@ ge::graphStatus SASTilingCheck::CheckFeatureShape() const
                 SASDataTypeToSerialString(oriKvType_).c_str()),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(*opParamInfo_.oriMaskMode != 4,
-                OP_LOGE(opName_, "ori_mask_mode should be 4, but got %d", *opParamInfo_.oriMaskMode),
-                return ge::GRAPH_FAILED);
+    if (sasInfo_.perfMode == SASTemplateMode::SWA_TEMPLATE_MODE) {
+        OP_CHECK_IF(*opParamInfo_.oriMaskMode != 4 && *opParamInfo_.oriMaskMode != 0,
+                    OP_LOGE(opName_, "ori_mask_mode should be 0 or 4 in SWA mode, but got %d", *opParamInfo_.oriMaskMode),
+                    return ge::GRAPH_FAILED);
+    } else {
+        OP_CHECK_IF(*opParamInfo_.oriMaskMode != 4,
+                    OP_LOGE(opName_, "ori_mask_mode should be 4, but got %d", *opParamInfo_.oriMaskMode),
+                    return ge::GRAPH_FAILED);
+    }
     OP_CHECK_IF(*opParamInfo_.cmpMaskMode != 3,
                 OP_LOGE(opName_, "cmp_mask_mode should be 3, but got %d", *opParamInfo_.cmpMaskMode),
                 return ge::GRAPH_FAILED);

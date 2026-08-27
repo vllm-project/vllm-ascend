@@ -1401,7 +1401,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
 
         q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        inplace_partial_rotary_mul(
             q.unsqueeze(1),
             local_cos,
             local_sin,
@@ -1415,7 +1415,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        inplace_partial_rotary_mul(
             kv.unsqueeze(1),
             cos[: kv.shape[0]],
             sin[: kv.shape[0]],
@@ -1549,7 +1549,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
         num_tokens = local_attn_output.shape[0]
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
             -cp_metadata.local_sin[layer_name],
@@ -1662,7 +1662,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         else:
             q = self.inderxer_wq_b(qr)
         q = q.view(-1, self.indexer_heads, self.indexcom_head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
+        inplace_partial_rotary_mul(
             q.unsqueeze(1),
             cos,
             sin,
