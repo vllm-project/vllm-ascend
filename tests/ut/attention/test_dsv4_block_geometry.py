@@ -35,7 +35,7 @@ def test_compressor_metadata_uses_physical_storage_geometry(
         block_table=logical_block_table,
         storage_block_size=128,
         num_compressed_tokens=2,
-        num_reqs_actual=1,
+        num_actual_reqs=1,
     )
     captured = {}
     expected = (

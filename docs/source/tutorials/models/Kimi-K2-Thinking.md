@@ -208,7 +208,7 @@ The following table covers the generated `model`, all `envs`, and all `server_cm
 | `--enable-expert-parallel` | enabled | Model-specific / Performance | Enables expert parallelism for Kimi-K2-Thinking MoE layers so experts can be distributed across NPUs. This document validates it as enabled; disabling it is not validated in this tutorial. |
 | `--no-enable-prefix-caching` | enabled | Performance | Disables prefix caching for the validated baseline and random-prompt benchmarks. Prefix caching is not validated in this tutorial. |
 
-**Common Issues Tip:** For common environment, installation, and general parameter issues during deployment, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). If the service runs under high concurrency, verify NPU health and HCCL status before increasing the request rate.
+**Common Issues Tip:** For common environment, installation, and general parameter issues during deployment, please refer to the [Public FAQs](../../faqs.md). If the service runs under high concurrency, verify NPU health and HCCL status before increasing the request rate.
 
 **Service Verification:**
 
@@ -362,7 +362,7 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-> For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+> For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: API returns `{"error":"Model not found"}` or `404` when requesting with `model: "Kimi-K2-Thinking"`?**
 

@@ -86,7 +86,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```bash
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -94,7 +94,6 @@ In addition, if you don't want to use the docker image as above, you can also bu
     sysctl -w kernel.numa_balancing=0
     sysctl -w kernel.sched_migration_cost_ns=50000
 
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -114,7 +113,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
         --max-num-seqs 32 \
         --gpu-memory-utilization 0.9 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4,32,64,128,192,256,512]}' \
-        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
+        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true,"enable_fused_mc2":1}' \
         --mm-processor-cache-gb 0 \
         --enable-chunked-prefill \
         --safetensors-load-strategy 'prefetch' \
@@ -128,7 +127,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```bash
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -136,7 +135,6 @@ In addition, if you don't want to use the docker image as above, you can also bu
     sysctl -w kernel.numa_balancing=0
     sysctl -w kernel.sched_migration_cost_ns=50000
 
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -157,7 +155,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
         --max-num-seqs 70 \
         --gpu-memory-utilization 0.9 \
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true}' \
+        --additional-config '{"enable_weight_nz_layout": true, "enable_cpu_binding": true,"enable_fused_mc2":1}' \
         --mm-processor-cache-gb 0 \
         --enable-chunked-prefill \
         --enable-expert-parallel \
@@ -169,7 +167,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 Some configurations for optimization are shown below:
 
-- `VLLM_ASCEND_ENABLE_FUSED_MC2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
+- `additional_config.enable_fused_mc2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
 - The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
 - For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 
@@ -245,4 +243,4 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 9 FAQ
 
-- Common Issues Tip: If you encounter issues, refer to [FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, refer to [Public FAQs](../../faqs.md).

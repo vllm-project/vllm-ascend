@@ -130,7 +130,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -147,7 +146,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --gpu-memory-utilization 0.9 \
   --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+  --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
 ```
 
 **Notice:**
@@ -179,7 +178,6 @@ While the previous documentation advises against multi-node deployment on the At
     export OMP_NUM_THREADS=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
     vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -205,7 +203,7 @@ While the previous documentation advises against multi-node deployment on the At
     --served-model-name glm47 \
     --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
     --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+    --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
     ```
 
 === "Node 1"
@@ -229,7 +227,6 @@ While the previous documentation advises against multi-node deployment on the At
     export OMP_NUM_THREADS=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
     vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -256,7 +253,7 @@ While the previous documentation advises against multi-node deployment on the At
     --served-model-name glm47 \
     --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
     --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+    --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
     ```
 
 ### 5.3 Prefill-Decode Disaggregation
@@ -520,7 +517,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -546,7 +542,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
-            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
+            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "enable_fused_mc2": 1, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
@@ -589,7 +585,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -615,7 +610,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
-            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
+            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "enable_fused_mc2": 1, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",

@@ -143,9 +143,8 @@ export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=800
 export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
   --host 0.0.0.0 \
   --port 8088 \
   --quantization ascend \
@@ -171,14 +170,14 @@ vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -272,9 +271,8 @@ Run the following scripts on two nodes respectively.
 
     export HCCL_BUFFSIZE=1024
     export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -339,9 +337,8 @@ Run the following scripts on two nodes respectively.
 
     export HCCL_BUFFSIZE=1024
     export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
 
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -380,7 +377,7 @@ Key Parameter Descriptions:
 - `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -893,7 +890,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 }
 ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -1030,7 +1027,7 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: What is the recommended TP/DP configuration for single-node deployment?**
 

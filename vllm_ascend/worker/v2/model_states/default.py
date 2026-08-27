@@ -57,6 +57,7 @@ class AscendModelState(DefaultModelState):
             num_reqs = input_batch.num_reqs
             num_input_tokens = input_batch.num_tokens
 
+        num_actual_reqs = input_batch.num_reqs
         num_actual_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
@@ -75,6 +76,7 @@ class AscendModelState(DefaultModelState):
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
+            num_actual_reqs=num_actual_reqs,
             num_tokens=num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             num_input_tokens=num_input_tokens,

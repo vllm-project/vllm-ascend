@@ -255,9 +255,8 @@ Single-node deployment runs both Prefill and Decode on the same node. The follow
     export OMP_NUM_THREADS=1
     export OMP_PROC_BIND=false
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+    vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct --additional-config '{"enable_fused_mc2":1}' \
       --host 0.0.0.0 \
       --port 8000 \
       --served-model-name qwen3-vl-30b \
@@ -292,7 +291,7 @@ Key Parameter Descriptions:
 - `--allowed-local-media-path /media` allows requests to use local files such as `file:///media/test.mp4`.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 

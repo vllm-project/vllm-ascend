@@ -466,4 +466,4 @@ The following optimizations are enabled by default and require no additional con
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, refer to the [Public FAQs](../../faqs.md).

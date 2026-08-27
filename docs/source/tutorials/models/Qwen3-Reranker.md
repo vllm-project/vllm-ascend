@@ -147,7 +147,7 @@ Key Parameter Descriptions:
 
 - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. For Atlas 300I DUO if automatic parsing resolves to a large context length, allocating this mask (O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set an explicit and conservative value, such as --max-model-len 1024.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -288,4 +288,4 @@ After about several minutes, you can get the performance evaluation result.
 
 ## 9 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).
