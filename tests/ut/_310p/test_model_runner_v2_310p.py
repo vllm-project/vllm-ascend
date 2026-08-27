@@ -230,10 +230,7 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
     expected = object()
 
     with patch.object(runner, "_prepare_inputs_310p", return_value=expected) as prepare_inputs_310p:
-        if model_runner_module.vllm_version_is("0.27.1"):
-            result = runner.prepare_inputs(scheduler_output, batch_desc)
-        else:
-            result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
+        result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
