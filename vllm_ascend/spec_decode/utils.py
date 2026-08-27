@@ -142,9 +142,7 @@ class SlidingWindowAdapter:
 
         gathered = torch.gather(self.full_block_table, 1, src_cols_clamped)
 
-        needed = torch.clamp(
-            (self._windowed_seq_lens + b - 1) // b, max=self.max_window_blocks
-        ).unsqueeze(1)
+        needed = torch.clamp((self._windowed_seq_lens + b - 1) // b, max=self.max_window_blocks).unsqueeze(1)
         valid_mask = (cols < needed) & (src_cols < full_cols)
         out[:num_reqs].copy_(gathered * valid_mask.to(gathered.dtype))
 
@@ -157,7 +155,6 @@ class SlidingWindowAdapter:
         k_future = self._future_offset
         w = self.window_size
         b = self.block_size
-
 
         self.compute_sliding_window_block_table(common_attn_metadata, self._block_table_clone)
         common_attn_metadata.block_table_tensor = self._block_table_clone[:num_reqs]

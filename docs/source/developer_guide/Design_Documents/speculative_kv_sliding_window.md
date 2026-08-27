@@ -35,7 +35,7 @@ Let `W` be the window size, `b` the kernel block size, `K = future_offset`
 the number of draft query positions lying beyond the `seq_lens` value the
 adapter sees. The adapter computes, entirely on device:
 
-```
+```text
 start        = floor(clamp(seq_lens + K - W, min=0) / b) * b   # block-aligned window start
 windowed_len = seq_lens - start                                # <= W + b - 1
 start_block  = start // b
