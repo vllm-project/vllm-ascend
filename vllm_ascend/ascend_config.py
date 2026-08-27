@@ -63,6 +63,8 @@ class AscendCompilationConfig:
     @classmethod
     def _default_super_kernel_to_static_kernel(cls, data: Any) -> Any:
         if isinstance(data, ArgsKwargs):
+            if data.kwargs is None:
+                return data
             kw = dict(data.kwargs)
             if "enable_super_kernel" not in kw and "enable_static_kernel" in kw:
                 kw["enable_super_kernel"] = kw["enable_static_kernel"]
