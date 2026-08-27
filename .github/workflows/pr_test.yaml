@@ -645,16 +645,6 @@ jobs:
       test_groups: >-
         [
           {
-            "num_npus": 4,
-            "npu_type": "a5",
-            "runner": "linux-aarch64-a5-4",
-            "tests": "tests/e2e/nightly/single_node/models/test_getting_started_models.py::test_qwen3_0_6b_offline tests/e2e/nightly/single_node/models/test_getting_started_models.py::test_qwen3_0_6b_online",
-            "image_tag": "9.1.0-950-ubuntu22.04-py3.12",
-            "csrc_cache_target": "a5-arm64-ubuntu",
-            "partition_name": "a5-getting-started",
-            "partition": "1-1"
-          },
-          {
             "num_npus": 1,
             "npu_type": "310p",
             "runner": "linux-aarch64-310p-1",
@@ -665,3 +655,117 @@ jobs:
             "partition": "1-1"
           }
         ]
+
+  a5-getting-started-release:
+    name: a5-getting-started-release
+    runs-on: linux-aarch64-a5-4
+    timeout-minutes: 60
+    container:
+      image: quay.io/ascend/vllm-ascend:v0.23.0-a5
+      env:
+        VLLM_USE_MODELSCOPE: "True"
+        HF_HUB_OFFLINE: "1"
+        VLLM_LOGGING_LEVEL: INFO
+        ASCEND_RT_VISIBLE_DEVICES: "0"
+    steps:
+      - name: Check A5 release environment
+        run: |
+          npu-smi info
+          python3 - <<'PY'
+          from importlib.metadata import PackageNotFoundError, version
+
+          for package in ("vllm", "vllm-ascend", "torch", "torch-npu"):
+              try:
+                  print(f"{package}={version(package)}")
+              except PackageNotFoundError:
+                  print(f"{package}=not-installed")
+
+          import torch
+          import torch_npu
+          import vllm
+          import vllm_ascend
+
+          print(f"NPU available: {torch.npu.is_available()}")
+          PY
+
+      - name: Run Qwen3-0.6B offline inference
+        run: |
+          python3 - <<'PY'
+          from vllm import LLM, SamplingParams
+
+          model = "Qwen/Qwen3-0.6B"
+          llm = LLM(model=model)
+          outputs = llm.generate(
+              ["Hello, my name is"],
+              SamplingParams(temperature=0, max_tokens=8),
+          )
+          generated_text = outputs[0].outputs[0].text
+          assert generated_text, "Offline inference returned empty text"
+          print(f"Offline output: {generated_text!r}")
+          PY
+
+      - name: Run Qwen3-0.6B online inference
+        run: |
+          set -euo pipefail
+
+          SERVER_LOG=/tmp/qwen3-0.6b-a5-server.log
+          vllm serve Qwen/Qwen3-0.6B --port 8000 >"$SERVER_LOG" 2>&1 &
+          SERVER_PID=$!
+
+          cleanup() {
+            if kill -0 "$SERVER_PID" 2>/dev/null; then
+              kill -INT "$SERVER_PID" 2>/dev/null || true
+              wait "$SERVER_PID" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+
+          READY=false
+          for _ in $(seq 1 120); do
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "::error::vLLM server exited before becoming ready"
+              tail -n 200 "$SERVER_LOG"
+              exit 1
+            fi
+            if python3 -c "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=2).read()"; then
+              READY=true
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$READY" != "true" ]; then
+            echo "::error::vLLM server did not become ready within 10 minutes"
+            tail -n 200 "$SERVER_LOG"
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          from urllib.request import Request, urlopen
+
+          with urlopen("http://127.0.0.1:8000/v1/models", timeout=30) as response:
+              models = json.load(response)
+          model = models["data"][0]["id"]
+
+          payload = json.dumps({
+              "model": model,
+              "prompt": "Beijing is a",
+              "max_tokens": 8,
+              "temperature": 0,
+          }).encode()
+          request = Request(
+              "http://127.0.0.1:8000/v1/completions",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+          )
+          with urlopen(request, timeout=120) as response:
+              completion = json.load(response)
+
+          generated_text = completion["choices"][0]["text"]
+          assert generated_text, "Online inference returned empty text"
+          print(f"Served model: {model}")
+          print(f"Online output: {generated_text!r}")
+          PY
+
+          tail -n 200 "$SERVER_LOG"
