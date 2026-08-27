@@ -22,7 +22,9 @@ from typing import Any, cast
 import torch
 import vllm
 from torch.distributed import Backend
+from torch.distributed.distributed_c10d import _set_pg_timeout
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
+from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
@@ -154,9 +156,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
             raise
 
     def _init_device_groups(self, create_cpu_group: bool) -> None:
-        from torch.distributed.distributed_c10d import _set_pg_timeout
-        from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
-
         timeout = get_cpu_distributed_timeout_or_none()
         reuse_domain = _resolve_reuse_domain(self.group_name)
         self_device_group = None
