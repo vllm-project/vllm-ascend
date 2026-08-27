@@ -483,7 +483,7 @@ additional guidance.
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, refer to
-the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+the [Public FAQs](../../faqs.md).
 
 - **Q: Which inputs are supported by the open-weight model?**
 
