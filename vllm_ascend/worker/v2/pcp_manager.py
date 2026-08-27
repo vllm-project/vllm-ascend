@@ -75,13 +75,8 @@ class AscendPCPManager(PCPManager):
             CUDAGraphMode.NONE,
             CUDAGraphMode.FULL_DECODE_ONLY,
         }:
-            raise NotImplementedError(
-                "MRV2 sparse MLA PCP supports eager mode or FULL_DECODE_ONLY CUDA graphs only."
-            )
-        if (
-            cudagraph_mode.has_full_cudagraphs()
-            and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY
-        ):
+            raise NotImplementedError("MRV2 sparse MLA PCP supports eager mode or FULL_DECODE_ONLY CUDA graphs only.")
+        if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
             raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
 
     def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
