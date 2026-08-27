@@ -378,14 +378,13 @@ def prepare_dsa_lora(
             dtype=torch.float32,
             device=x.device,
         )
-        for slice_idx, lora_a in enumerate(context.lora_a_stacked):
-            context.punica_wrapper.sgmv_shrink(
-                x_2d,
-                lora_a[:, 0].contiguous(),
-                buffers[slice_idx],
-                *sgmv_metadata.op_args,
-                1.0,
-            )
+        context.punica_wrapper.add_shrink(
+            buffers,
+            x_2d,
+            context.lora_a_stacked,
+            1.0,
+            sgmv_metadata=sgmv_metadata,
+        )
         buffers = tensor_model_parallel_all_gather(buffers)
         return LoRAIntermediate(buffers, sgmv_metadata)
 
@@ -397,14 +396,13 @@ def prepare_dsa_lora(
         )
         for lora_a in context.lora_a_stacked
     )
-    for buffer, lora_a in zip(buffers, context.lora_a_stacked):
-        context.punica_wrapper.sgmv_shrink(
-            x_2d,
-            lora_a[:, 0].contiguous(),
-            buffer,
-            *sgmv_metadata.op_args,
-            1.0,
-        )
+    context.punica_wrapper.add_shrink(
+        buffers,
+        x_2d,
+        context.lora_a_stacked,
+        1.0,
+        sgmv_metadata=sgmv_metadata,
+    )
     return LoRAIntermediate(buffers, sgmv_metadata)
 
 
@@ -423,19 +421,15 @@ def apply_prepared_dsa_lora(
     if intermediate.buffers is None:
         return output
 
-    output_2d = output.view(-1, output.shape[-1])
-    offset = 0
-    for slice_idx, (lora_b, output_slice) in enumerate(zip(context.lora_b_stacked, context.output_slices)):
-        context.punica_wrapper.sgmv_expand_slice(
-            intermediate.buffers[slice_idx],
-            lora_b[:, 0].contiguous(),
-            output_2d,
-            *intermediate.sgmv_metadata.op_args,
-            offset,
-            output_slice,
-            True,
-        )
-        offset += output_slice
+    context.punica_wrapper.add_expand(
+        output,
+        intermediate.buffers,
+        context.lora_b_stacked,
+        context.output_slices,
+        offset_start=0,
+        add_inputs=True,
+        sgmv_metadata=intermediate.sgmv_metadata,
+    )
     return output
 
 

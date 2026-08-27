@@ -14,6 +14,66 @@ from vllm.utils.torch_utils import PIN_MEMORY
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
+# Switch dense LoRA from per-token BGMV to Group GEMM only when enough tokens
+# amortize weight gathering and the Group GEMM launch overhead.
+GMM_TOKEN_THRESHOLD = 1024
+
+
+def _dispatch_lora_shrink(
+    y: list[torch.Tensor],
+    x: torch.Tensor,
+    lora_a_stacked: list[torch.Tensor],
+    lora_indices: torch.Tensor,
+    seq_lengths: torch.Tensor,
+    token_lora_indices: torch.Tensor,
+    scale: float,
+    use_gmm: torch.Tensor,
+    no_lora: torch.Tensor,
+) -> None:
+    """Call the external Group GEMM/BGMV shrink dispatcher."""
+
+    torch.ops._C_ascend.add_lora_shrink(
+        y,
+        x,
+        lora_a_stacked,
+        lora_indices,
+        seq_lengths,
+        token_lora_indices,
+        scale,
+        use_gmm,
+        no_lora,
+    )
+
+
+def _dispatch_lora_expand(
+    y: torch.Tensor,
+    x: list[torch.Tensor],
+    lora_b_stacked: list[torch.Tensor],
+    lora_indices: torch.Tensor,
+    seq_lengths: torch.Tensor,
+    token_lora_indices: torch.Tensor,
+    output_slices: list[int],
+    offset_start: int,
+    add_inputs: bool,
+    use_gmm: torch.Tensor,
+    no_lora: torch.Tensor,
+) -> None:
+    """Call the external Group GEMM/BGMV expand dispatcher."""
+
+    torch.ops._C_ascend.add_lora_expand(
+        y,
+        x,
+        lora_b_stacked,
+        lora_indices,
+        seq_lengths,
+        token_lora_indices,
+        output_slices,
+        offset_start,
+        add_inputs,
+        use_gmm,
+        no_lora,
+    )
+
 
 @dataclass(frozen=True)
 class DSASGMVMetadata:
@@ -101,6 +161,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+        self._init_group_gemm_dispatch_flags()
+
+    def _init_group_gemm_dispatch_flags(self) -> None:
+        # CPU tensors are live inputs to the opaque custom op, so torch.compile
+        # cannot bake one warm-up batch's GMM/BGMV choice into the graph.
+        self._use_gmm_shrink_cpu = torch.tensor(False, dtype=torch.bool)
+        self._use_gmm_expand_cpu = torch.tensor(False, dtype=torch.bool)
+        self._no_lora_cpu = torch.tensor(True, dtype=torch.bool)
 
     def _init_prefill_sgmv_metadata_buffers(self, max_batches: int) -> None:
         # PunicaWrapperBase allocates these as three independent tensors. Use
@@ -353,6 +421,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         # PunicaWrapperBase computes this only for prefill. Decode must also
         # choose between the active-LoRA and base-only quantized MoE paths.
         self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
+        if not hasattr(self, "_use_gmm_shrink_cpu"):
+            self._init_group_gemm_dispatch_flags()
+        use_gmm = self._host_sgmv_metadata.token_nums > GMM_TOKEN_THRESHOLD
+        self._use_gmm_shrink_cpu.fill_(use_gmm)
+        self._use_gmm_expand_cpu.fill_(use_gmm)
+        self._no_lora_cpu.fill_(self.no_lora)
 
     def _update_prefill_metadata(self, token_lora_tensor: torch.Tensor) -> None:
         """Reuse host RLE and avoid device unique/item synchronization."""
@@ -511,6 +585,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
+        *,
+        sgmv_metadata: DSASGMVMetadata | None = None,
         **kwargs,
     ):
         """
@@ -532,9 +608,32 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         x = x.view(-1, x.shape[-1])
-        # TODO fuse these kernels
-        for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
+        y_views = [y[slice_idx].view(-1, y[slice_idx].shape[-1]) for slice_idx in range(len(lora_a_stacked))]
+        if sgmv_metadata is not None:
+            if sgmv_metadata.no_lora:
+                return
+            for output, lora_a in zip(y_views, lora_a_stacked):
+                self.sgmv_shrink(
+                    x,
+                    lora_a[:, 0].contiguous(),
+                    output,
+                    *sgmv_metadata.op_args,
+                    scale,
+                )
+            return
+
+        _, seq_lengths, lora_indices, _, _, _ = self.prefill_metadata
+        _dispatch_lora_shrink(
+            y_views,
+            x,
+            list(lora_a_stacked),
+            lora_indices,
+            seq_lengths,
+            self._get_token_lora_indices(x),
+            scale,
+            self._use_gmm_shrink_cpu,
+            self._no_lora_cpu,
+        )
 
     def add_expand(
         self,
@@ -544,6 +643,8 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
+        *,
+        sgmv_metadata: DSASGMVMetadata | None = None,
         **kwargs,
     ) -> None:
         """
@@ -565,17 +666,38 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        offset_left = offset_start
-        for slice_idx in range(len(lora_b_stacked)):
-            self._apply_expand(
-                y,
-                x[slice_idx],
-                lora_b_stacked[slice_idx],
-                offset_left,
-                output_slices[slice_idx],
-                add_inputs=add_inputs,
-            )
-            offset_left += output_slices[slice_idx]
+        x_views = [x[slice_idx].view(-1, x[slice_idx].shape[-1]) for slice_idx in range(len(lora_b_stacked))]
+        if sgmv_metadata is not None:
+            if sgmv_metadata.no_lora:
+                return
+            offset_left = offset_start
+            for x_view, lora_b, output_slice in zip(x_views, lora_b_stacked, output_slices):
+                self.sgmv_expand_slice(
+                    x_view,
+                    lora_b[:, 0].contiguous(),
+                    y,
+                    *sgmv_metadata.op_args,
+                    offset_left,
+                    output_slice,
+                    add_inputs,
+                )
+                offset_left += output_slice
+            return
+
+        _, seq_lengths, lora_indices, _, _, _ = self.prefill_metadata
+        _dispatch_lora_expand(
+            y,
+            x_views,
+            list(lora_b_stacked),
+            lora_indices,
+            seq_lengths,
+            self._get_token_lora_indices(x_views[0]),
+            list(output_slices),
+            offset_start,
+            add_inputs,
+            self._use_gmm_expand_cpu,
+            self._no_lora_cpu,
+        )
         y = y.view_as(y_org)
 
     def add_lora_embedding(
