@@ -633,6 +633,8 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
+In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [Prefill-Decode Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the Mooncake configuration.
+
 #### 5.3.1 Prefill-Decode Disaggregation (Ascend950DT series)
 
 Before you start, please
