@@ -28,6 +28,8 @@ _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
+_orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
+_orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 
 
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
@@ -411,6 +413,66 @@ def _get_kv_cache_config_deepseek_v4(
     return num_blocks, kv_cache_tensors
 
 
+def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+    if not kv_cache_groups or not all(
+        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups
+    ):
+        return False
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        specs = group_spec.kv_cache_specs.values()
+        if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
+            return True
+    return False
+
+
+def _ascend_max_memory_usage_bytes_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+    if vllm_version_is("0.27.1") or not _is_deepseek_v4_groups(kv_cache_groups):
+        return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+
+    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
+    full_mla_spec = kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
+    layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
+    num_layer_tuples = max(
+        group.kv_cache_spec.get_num_layer_tuples()
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    )
+    return sum(
+        num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    )
+
+
+def _ascend_get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718."""
+    if vllm_version_is("0.27.1") or not _is_deepseek_v4_groups(kv_cache_groups):
+        return _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+
+    num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4(
+        vllm_config,
+        kv_cache_groups,
+        available_memory,
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+        prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
+    )
+
+
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
@@ -422,6 +484,8 @@ vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_d
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
+vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
+vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 
 # Also patch the reference used by engine/core.py which imports the function directly.
 import vllm.v1.engine.core  # noqa: E402

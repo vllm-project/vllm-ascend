@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
@@ -438,6 +439,50 @@ def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
 
     assert scheduler_block_size == 16384
     assert hash_block_size == 512
+
+
+@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #51718 only changed the main planner")
+def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> None:
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+    planned_tensor = _make_kv_cache_tensor(4096, ["c4_attn", "c128_attn"])
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(prefix_cache_retention_interval=None),
+        model_config=SimpleNamespace(max_model_len=4096),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        max_in_flight_tokens=1,
+    )
+
+    planner = MagicMock(return_value=(7, [planned_tensor]))
+    monkeypatch.setattr(kv_cache_utils_patch, "_get_kv_cache_config_deepseek_v4", planner)
+
+    result = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
+        vllm_config,
+        kv_cache_config.kv_cache_groups,
+        available_memory=1 << 30,
+    )
+
+    planner.assert_called_once_with(vllm_config, kv_cache_config.kv_cache_groups, 1 << 30)
+    assert result.num_blocks == 7
+    assert result.kv_cache_tensors == [planned_tensor]
+
+    needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
+        vllm_config,
+        kv_cache_config.kv_cache_groups,
+    )
+    full_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full_spec, UniformTypeKVCacheSpecs)
+    layer_tuple_bytes = sum(spec.page_size_bytes for spec in full_spec.kv_cache_specs.values())
+    num_layer_tuples = max(
+        group.kv_cache_spec.get_num_layer_tuples()
+        for group in kv_cache_config.kv_cache_groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    )
+    expected_memory = sum(
+        num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
+        for group in kv_cache_config.kv_cache_groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    )
+    assert needed_memory == expected_memory
 
 
 @pytest.mark.parametrize(
