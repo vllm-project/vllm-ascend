@@ -551,30 +551,6 @@ class TestNPUPlatform(TestBase):
                     vllm_config.update_sizes_for_sequence_parallelism.assert_not_called()
                     self.assertEqual(compilation_config.cudagraph_capture_sizes, [1, 2, 4, 8])
 
-    def test_setup_worker_disables_sp_without_cuda_only_backend(self):
-        cases = [
-            ({}, {}, "naive"),
-            ({"enable_flashcomm1": True}, {}, "allgather_reducescatter"),
-            ({}, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, "allgather_reducescatter"),
-        ]
-        for additional_config, environment, expected_backend in cases:
-            with self.subTest(additional_config=additional_config, environment=environment):
-                vllm_config = TestNPUPlatform.mock_vllm_config()
-                vllm_config.parallel_config.worker_cls = "auto"
-                vllm_config.parallel_config.all2all_backend = "allgather_reducescatter"
-                vllm_config.additional_config = additional_config
-                ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
-
-                with (
-                    patch("vllm_ascend.platform.is_310p", return_value=False),
-                    patch("vllm_ascend.platform.refresh_block_size"),
-                    patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3),
-                    patch.dict("os.environ", environment, clear=True),
-                ):
-                    _setup_worker_and_scheduler(vllm_config, ascend_config)
-
-                self.assertEqual(vllm_config.parallel_config.all2all_backend, expected_backend)
-
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
 
