@@ -283,8 +283,9 @@ jobs:
             --ref main \
             -f "vllm=${VLLM_COMMIT}" -f "base_ref=main" -f "round=prep" \
             -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}"
+          POLL_ERR=""
           for i in $(seq 1 12); do
-            RUN_ID=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main" \
+            RUN_ID=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main" 2>/tmp/prep-poll.err \
               | python3 -c "
           import json, sys
           runs = json.load(sys.stdin).get('workflow_runs', [])
@@ -293,13 +294,19 @@ jobs:
               if r.get('path', '').endswith('main2main-e2e.yaml') and r.get('created_at', '') >= cutoff:
                   print(r['database_id'])
                   break
-          " "$DISPATCH_AT" 2>/dev/null || true)
-            [ -n "${RUN_ID:-}" ] && break
+          " "$DISPATCH_AT" || true)
+            if [ -n "${RUN_ID:-}" ]; then
+              break
+            fi
+            POLL_ERR=$(tail -1 /tmp/prep-poll.err 2>/dev/null || true)
+            echo "prep run not found (poll ${i}/12)${POLL_ERR:+ — gh api: ${POLL_ERR}}"
             sleep 5
           done
           if [ -n "${RUN_ID:-}" ]; then
             echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
             echo "Prep run ${RUN_ID} started"
+          else
+            echo "::warning::prep run id not found after 12 polls (gh $(gh --version 2>/dev/null | head -1)) — the flow will dispatch prep itself"
           fi
 
       - name: Install opencode + main2main-flow
