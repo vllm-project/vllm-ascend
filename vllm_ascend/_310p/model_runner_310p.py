@@ -80,6 +80,10 @@ class NPUModelRunner310(NPUModelRunner):
     """
 
     # Inherited from parent runner; annotated here to satisfy strict type checks.
+    # 310P Attention requires private ACL NZ K/V buffers while Mamba uses
+    # separate contiguous state buffers, so it cannot overlay both cache groups
+    # on vLLM #51718's standardized shared backing allocation.
+    supports_standardized_shared_kv_backing = False
     uniform_decode_query_len: int
     _spec_dummy_capture: bool = False
 
