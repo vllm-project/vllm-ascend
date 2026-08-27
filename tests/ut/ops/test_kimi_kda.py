@@ -268,10 +268,26 @@ def test_overlapped_qkv_bfg_has_two_bidirectional_event_joins():
     quantized_qkv = object()
     qkv = object()
 
-    attention._project_bfg = MagicMock(side_effect=lambda _: (trace.append("project_bfg"), raw_bfg)[1])
-    attention._quantize_fused_qkv = MagicMock(side_effect=lambda _: (trace.append("dynamic_quant"), quantized_qkv)[1])
-    attention._matmul_fused_qkv = MagicMock(side_effect=lambda _: (trace.append("qkv_matmul"), qkv)[1])
-    attention._postprocess_bfg = MagicMock(side_effect=lambda *_: (trace.append("postprocess_bfg"), processed_bfg)[1])
+    def record_project_bfg(_hidden_states: object) -> tuple[_RecordingTensor, ...]:
+        trace.append("project_bfg")
+        return raw_bfg
+
+    def record_dynamic_quant(_hidden_states: object) -> object:
+        trace.append("dynamic_quant")
+        return quantized_qkv
+
+    def record_qkv_matmul(_qkv_input: object) -> object:
+        trace.append("qkv_matmul")
+        return qkv
+
+    def record_postprocess_bfg(*_args: object) -> tuple[_RecordingTensor, ...]:
+        trace.append("postprocess_bfg")
+        return processed_bfg
+
+    attention._project_bfg = MagicMock(side_effect=record_project_bfg)
+    attention._quantize_fused_qkv = MagicMock(side_effect=record_dynamic_quant)
+    attention._matmul_fused_qkv = MagicMock(side_effect=record_qkv_matmul)
+    attention._postprocess_bfg = MagicMock(side_effect=record_postprocess_bfg)
 
     with (
         patch("vllm_ascend.ops.kimi_kda.torch.npu.current_stream", return_value=main_stream),
