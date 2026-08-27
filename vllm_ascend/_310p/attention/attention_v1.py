@@ -31,6 +31,7 @@ from vllm_ascend._310p.attention.attention_mask import (
 from vllm_ascend._310p.attention.metadata_builder import (
     AscendAttentionMetadataBuilder310,
     get_query_lens_cpu,
+    get_splitfuse_mask_nz,
 )
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
@@ -219,7 +220,15 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         Returns:
             The output tensor after flash attention.
         """
-        real_tokens = int(attn_metadata.seq_lens.sum().item())
+        # seq_lens.sum().item() is a synchronous D2H copy, which ACL
+        # forbids inside a graph capture (the drafter is captured whole under FULL).
+        # num_actual_tokens is the same quantity already available on the host -- the
+        # sibling splitfuse path below reads it the same way.
+        _nat = getattr(attn_metadata, "num_actual_tokens", None)
+        if _nat is not None:
+            real_tokens = int(_nat)
+        else:
+            real_tokens = int(attn_metadata.seq_lens.sum().item())
         seq_len = attn_metadata.seq_lens
         aligned_tokens = int(query.shape[0])
         delta = aligned_tokens - real_tokens
@@ -289,8 +298,11 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             )
             return output
 
-        # Generate the specific mask for splitfuse
-        mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
+        # Prefer the mask precomputed in the metadata builder (capture-safe);
+        # building it here does sync copies that abort an ACL graph capture.
+        mask = get_splitfuse_mask_nz(attn_metadata)
+        if mask is None:
+            mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
         torch_npu._npu_paged_attention_splitfuse(
             query=query,
             key_cache=self.key_cache,
