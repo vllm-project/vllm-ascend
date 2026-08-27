@@ -723,6 +723,28 @@ jobs:
           else
             echo "Prep run not owned by this run (owned=${PREP_RUN_OWNED:-unset}) — not cancelling"
           fi
+          # Also stop any exec round still holding the machines: the exec
+          # guard (a) chain releases on main-run completion, but cancelling
+          # is faster and is the only prompt stop where the main-run probe
+          # 404s (cross-repo validation phase).  Scan for the newest
+          # in-progress exec run of this main run (run-name encodes the
+          # main run id — the runs API does not expose dispatch inputs).
+          LATEST_EXEC=$(gh api "repos/${MAIN2MAIN_E2E_REPO}/actions/runs?event=workflow_dispatch&branch=main&per_page=50" \
+            | python3 -c "
+          import json, sys
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          main_run = sys.argv[1]
+          cands = [r['id'] for r in runs
+                   if r.get('status') == 'in_progress'
+                   and (r.get('name') or '').startswith('m2m exec-')
+                   and len((r.get('name') or '').split()) >= 3
+                   and (r.get('name') or '').split()[2] == main_run]
+          print(max(cands) if cands else '')
+          " "${MAIN2MAIN_E2E_MAIN_RUN_ID}" 2>/dev/null || true)
+          if [ -n "${LATEST_EXEC:-}" ]; then
+            gh api -X POST "repos/${MAIN2MAIN_E2E_REPO}/actions/runs/${LATEST_EXEC}/cancel" || true
+            echo "Released E2E runners: cancelled exec run ${LATEST_EXEC}"
+          fi
 
       - name: Chain next run
         if: steps.final-status.outputs.status == 'completed' && steps.final-status.outputs.steps_completed != '0'
