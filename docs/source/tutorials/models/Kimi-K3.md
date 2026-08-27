@@ -33,7 +33,7 @@ for the project-wide feature matrix.
 
 ## 3 Choosing a Checkpoint
 
-Kimi K3 checkpoints serve different validation purposes. A reduced or dummy
+Kimi K3 checkpoints serve different validation purposes. A reduced
 checkpoint must not be used to report GPQA or other semantic accuracy.
 
 | Checkpoint | Typical storage | What it can validate | What it cannot validate |
@@ -41,14 +41,8 @@ checkpoint must not be used to report GPQA or other semantic accuracy.
 | Full 93-layer, 896-expert W4A8 | About 1.49 TB | Deployment and benchmark accuracy | Not applicable |
 | Full 93-layer, 16-expert derivative | About 113 GB | Single-node integration and long-context execution | Full-model semantics and full expert routing |
 | Five-layer, 16-expert W4A8 derivative | About 12.1 GiB | Real quantized loading, KDA/MLA/MoE execution, graph and cache parity | Full-depth behavior and benchmark accuracy |
-| Five-layer, 16-expert dummy | Configuration only | Model construction, TP16/EP, graph replay, cache-state parity, finite outputs | Real weight loading, W4A8 numerics, or semantic accuracy |
 
-The nightly test uses the last option so it does not depend on a large model
-cache. Its configuration preserves the production hidden size, head geometry,
-mixed KDA/MLA layout, attention residuals, and top-16 expert routing. It reduces
-only the layer and expert counts, then initializes BF16 dummy weights.
-
-For a storage-limited real-weight nightly artifact, derive the five-layer,
+For a storage-limited real-weight validation checkpoint, derive the five-layer,
 16-expert checkpoint from the W4A8 checkpoint as follows:
 
 1. Keep tokenizer and configuration metadata.
@@ -61,7 +55,7 @@ For a storage-limited real-weight nightly artifact, derive the five-layer,
    and log-probability parity. Do not create a task-accuracy baseline from it.
 
 :::{note}
-The reduced checkpoint is a CI fixture, not a model release. Keep the source
+The reduced checkpoint is a validation artifact, not a model release. Keep the source
 checkpoint revision and a manifest of retained tensors with the artifact so
 that it can be reproduced when the quantized weights change.
 :::
@@ -395,22 +389,18 @@ Run concurrency and benchmark requests from a host inside the trusted serving
 network. A developer workstation or VPN should be used only for bounded smoke
 requests.
 
-## 9 Accuracy and Nightly Validation
+## 9 Accuracy Validation
 
 Use the following validation ladder:
 
-1. The storage-free nightly guard loads the committed five-layer, 16-expert
-   configuration with dummy BF16 weights on one 16-NPU A3 node. In one model
-   instance it compares cold prefill, a Prefix Cache hit that leaves exactly
-   one token to prefill, and a post-reset cold run. It requires identical token
-   IDs, close and finite chosen-token log probabilities, complete outputs, and
-   `FULL_DECODE_ONLY` replay.
-1. A hosted five-layer, 16-expert W4A8 fixture should run the same parity case
-   with real weights. This adds quantized loader and W4A8 numerical coverage
-   while staying small enough for a nightly worker.
+1. Use a reduced W4A8 checkpoint for execution validation. Compare cold
+   prefill, a Prefix Cache hit that leaves exactly one token to prefill, and
+   a post-reset cold run. Check deterministic output tokens, close and finite
+   chosen-token log probabilities, complete outputs, and `FULL_DECODE_ONLY`
+   replay.
 1. Run GPQA with the full 93-layer, 896-expert checkpoint on the four-node
    deployment. This is the semantic accuracy gate and cannot be replaced by
-   either reduced fixture.
+   a reduced checkpoint.
 
 Keep the model revision, tokenizer, chat rendering, reasoning mode, sampling
 parameters, dataset revision, and evaluator revision fixed when comparing
