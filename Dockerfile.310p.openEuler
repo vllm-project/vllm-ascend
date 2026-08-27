@@ -31,7 +31,7 @@ ARG PIP_TRUSTED_HOST=""
 WORKDIR /workspace
 
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch && \
+    yum install -y python3-pip git vim wget protobuf-compiler net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch && \
     rm -rf /var/cache/yum
 
 # Install modelscope (for fast download) and ray (for multinode)
