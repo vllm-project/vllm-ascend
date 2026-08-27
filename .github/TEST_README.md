@@ -10,9 +10,42 @@ This document describes the CI workflows for `vllm-ascend`, how to add tests, an
 | `_selected_tests.yaml` | Called by `pr_test.yaml` | Runs tests selected by `select_tests.py` |
 | `_parse_trigger.yaml` | PR comment `/e2e` | Parses comment to run specific E2E tests |
 | `_pre_commit.yml` | Called by `pr_test.yaml` | Lint and format checks |
-| `schedule_nightly_test_a2.yaml` | Cron | Nightly E2E on A2 runners |
-| `schedule_nightly_test_a3.yaml` | Cron | Nightly E2E on A3 runners |
+| `nightly_image_build.yaml` | Cron (12:00 UTC) + dispatch | Builds `nightly-ci-main-{a2,a3,310p}` images; daily build/compile gate |
+| `schedule_daily_regression.yaml` | Cron (4x/day) + dispatch | High-freq regression: build gate + A2/A3 PR E2E smoke + nightly high-freq subset |
+| `_e2e_daily_tests.yaml` | Called by `schedule_daily_regression.yaml` | Checks out main HEAD, reinstalls, runs curated pytest subset |
+| `schedule_nightly_test_a2.yaml` | `workflow_dispatch` / `/nightly` | Full nightly E2E on A2 runners |
+| `schedule_nightly_test_a3.yaml` | `workflow_dispatch` / `/nightly` | Full nightly E2E on A3 runners |
 | `schedule_weekly_test_a3.yaml` | Cron | Weekly E2E on A3 runners |
+
+## Daily Regression Pipeline
+
+`schedule_daily_regression.yaml` runs **4x/day** during daytime (01:00, 04:00, 07:00,
+10:00 UTC = 09:00, 12:00, 15:00, 18:00 Beijing) to catch "broken window" regressions on
+`main` within ~3h. Each slot executes the **same curated fast subset** so any breakage is
+surfaced quickly and consistently. The 09:00 Beijing slot verifies the overnight nightly-ci
+image; the 18:00 Beijing slot ends before the 20:00 Beijing nightly image build.
+
+| Stage | Workflow / Job | Cadence | Budget |
+|-------|----------------|---------|--------|
+| Build / compile gate | `nightly_image_build.yaml` (scheduled) + `verify-image` job | 1x/day image build + per-slot smoke import | ~10 min |
+| A2 PR E2E smoke | `_e2e_daily_tests.yaml` (1-card subset) | 4x/day | ~42 min |
+| A3 PR E2E smoke | `_e2e_daily_tests.yaml` (two-card + four-card subsets) | 4x/day | ~28 min |
+| Nightly high-freq subset | `_e2e_daily_tests.yaml` (A2 + A3 nightly high-freq cases) | 4x/day | ~5 min |
+| Failure notification | `notify-failure` job (one tracking issue per day, deduplicated) | on failure | -- |
+
+The fast subset is defined in `.github/workflows/configs/daily_config.yaml` and resolved via the
+existing `resolve_nightly_tests.py --mode=matrix`. All jobs use the SAME lightweight executor
+(`_e2e_daily_tests.yaml`): checkout main HEAD → reinstall → pytest. Test selection is driven by
+the real `estimated_times` in `test_config.yaml` so every slot stays under 90 min (tests + ~20 min
+checkout+install+compile overhead).
+
+**To tune the subset:** edit `daily_config.yaml` -- append/trim `- name:` entries under
+`daily.a2_pr_e2e` / `daily.a3_pr_e2e_two_card` / `daily.a3_pr_e2e_four_card` /
+`daily.a2_nightly_hf` / `daily.a3_nightly_hf`. No workflow edit required.
+
+**Resource note:** A3 pool is constrained (max 5*16 NPUs). A3 matrices use `max-parallel: 2`
+to avoid starving the nightly/PR pool. Reduce cron frequency in `schedule_daily_regression.yaml`
+if A3 contention rises.
 
 ## Selective Testing System
 
@@ -24,13 +57,9 @@ PR changed files
     ▼
 test_config.yaml ──► resolve base inheritance ──► match modules ──► collect test paths
                                                                          │
-                                                                runner_mapping regex
-                                                                         │
-                                                               default partition
-                                                                         │
-                                                           pinned_routes (optional)
-                                                                         │
-                                                              partition runner_label
+                                                                Route by convention:
+                                                                 UT:  a2/, a2_2/, a3_2/, a3_4/, 310p/
+                                                                 E2E: one_card, two_card, four_card, *_310p.py
                                                                          │
                                                                 runner_label.json
                                                                          │
@@ -44,23 +73,6 @@ test_config.yaml ──► resolve base inheritance ──► match modules ─�
 | `.github/workflows/scripts/select_tests.py` | Matches changed files, scans tests, routes to runners |
 | `.github/workflows/scripts/test_config.yaml` | Maps source paths to UT/E2E tests |
 | `.github/workflows/scripts/runner_label.json` | Defines runner labels, chip types, NPU count, and image tags |
-
-`runner_mapping` maps test paths to default logical partitions such as
-`a3-2` or `a3-4`. After selection, skip filtering, and containment-aware
-deduplication, `pinned_routes` can move selected files into dedicated logical
-partitions without changing their technical directory structure. A file-level
-pin also applies when only one of its `::nodeid` targets is selected. If both a
-bare file and one of its nodeids are selected, the bare file wins to prevent
-duplicate execution. Each entry in `partition` selects an exact key from
-`runner_label.json` and sets the load-balanced group count.
-Logical partition names use display-ready labels such as `a3-2` and
-`a3-800i-2`; GitHub jobs render them as `a3-2 card-(part 1-3)` while the
-numeric `partition` value remains available for artifacts and load balancing.
-
-Workflows that temporarily reroute selected tests can use
-`--runner-label-override` with an exact label from `runner_label.json`. This
-override is applied after pinned routes, has the highest priority, and creates
-a transient single-shard partition for that invocation.
 
 ## `test_config.yaml` Tutorial
 
