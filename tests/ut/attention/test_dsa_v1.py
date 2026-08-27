@@ -159,9 +159,7 @@ def _make_kv_cache_spec(
     logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
     # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
     ratio_kwargs = (
-        {"tokens_per_state": compressor_ratio}
-        if use_tokens_per_state
-        else {"compress_ratio": compressor_ratio}
+        {"tokens_per_state": compressor_ratio} if use_tokens_per_state else {"compress_ratio": compressor_ratio}
     )
     kv_cache_spec = SimpleNamespace(
         block_size=physical_block_size * logical_compress_ratio,
