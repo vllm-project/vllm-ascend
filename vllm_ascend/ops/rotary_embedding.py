@@ -91,13 +91,19 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
 def get_cos_and_sin_mla(positions, use_cache=False):
     global _cos_cache
     global _sin_cache
+    global _cos_mla
+    global _sin_mla
+    num_tokens = positions.size(0)
+    # MLA-NoPE skip rope cache (e.g. GLM-5.3-Flash qk_rope_head_dim=0).
+    # Do not copy indexer RoPE (last dim 32) into a 0-width MLA buffer.
+    if _cos_mla is not None and _cos_mla.shape[-1] == 0:
+        return _cos_mla[:num_tokens], _sin_mla[:num_tokens]
     cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
     sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
     if not use_cache:
         return cos, sin
-    global _cos_mla
-    global _sin_mla
-    num_tokens = positions.size(0)
+    if _cos_mla is None or _cos_mla.shape[-1] != cos.shape[-1]:
+        return cos, sin
     _cos_mla[:num_tokens, ...] = cos
     _sin_mla[:num_tokens, ...] = sin
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]

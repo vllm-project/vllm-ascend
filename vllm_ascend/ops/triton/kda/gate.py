@@ -41,14 +41,10 @@ def apply_kda_gate(
     g = raw_g.float()
     heads = a_log.numel()
     if g.shape[-2] != heads:
-        raise ValueError(
-            f"KDA gate head dim mismatch: raw_g shape {tuple(raw_g.shape)} vs A_log numel {heads}."
-        )
+        raise ValueError(f"KDA gate head dim mismatch: raw_g shape {tuple(raw_g.shape)} vs A_log numel {heads}.")
     a = a_log.reshape(*([1] * (g.dim() - 2)), heads, 1).to(device=g.device, dtype=torch.float32)
     if g_bias is not None:
-        bias = g_bias.to(device=g.device, dtype=torch.float32).reshape(
-            *([1] * (g.dim() - 2)), heads, g.shape[-1]
-        )
+        bias = g_bias.to(device=g.device, dtype=torch.float32).reshape(*([1] * (g.dim() - 2)), heads, g.shape[-1])
         g = g + bias
     if safe_gate:
         return (lower_bound * torch.sigmoid(torch.exp(a) * g)).to(dtype=torch.float32)

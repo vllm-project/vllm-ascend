@@ -169,6 +169,11 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             return
 
         quantized, mx_scale = _mx_quantize(resolved, self.mxfp8_method.dynamic_mx_quant_scale_alg)
+        # mx_scale_pairs: CANN 9.1 npu_dynamic_mx_quant packs two E8M0 scales
+        # per entry on a 2D weight, so the native result is [out, in // 64, 2]
+        # while the MXFP8 method unpacks [out, in // 32]. view() keeps the
+        # bytes; reshape() restores the layout the method expects.
+        mx_scale = mx_scale.view(torch.uint8).reshape(resolved.shape[0], -1)
         layer.weight = torch.nn.Parameter(quantized, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(mx_scale, requires_grad=False)
         self.mxfp8_method.process_weights_after_loading(layer)
@@ -315,7 +320,7 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
             )
             quantized, expert_scale = _mx_quantize(resolved, scale_alg)
             weight[expert].copy_(quantized)
-            mx_scale[expert].copy_(expert_scale)
+            mx_scale[expert].copy_(expert_scale.view(torch.uint8).reshape(mx_scale[expert].shape))
         return mx_scale
 
     def get_eplb_weight_views(self, layer: torch.nn.Module) -> list[torch.Tensor]:
