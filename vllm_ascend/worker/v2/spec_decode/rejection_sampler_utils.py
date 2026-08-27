@@ -40,27 +40,31 @@ def _npu_gumbel_block_argmax(
     temp_ptr,
     seeds_ptr,
     pos_ptr,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
+    logits_cache_ptr,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
+    logits_cache_col_ptr,
     vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    if temp != 0.0 and APPLY_TEMPERATURE:
-        logits = logits / temp
-
-    if processed_logits_ptr is not None:
-        if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
+    if logits_cache_ptr is not None:
+        # Store the logits *before* temperature. Consumers (the rejection
+        # sampler) divide by the same temperature on load, which reproduces the
+        # value used below bitwise.
+        if logits_cache_col_ptr is not None:
+            col = tl.load(logits_cache_col_ptr)
         else:
             col = 0
         tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
+            logits_cache_ptr + req_state_idx * logits_cache_stride_0 + col * logits_cache_stride_1 + block,
             logits,
             mask=mask,
         )
+
+    if temp != 0.0 and APPLY_TEMPERATURE:
+        logits = logits / temp
 
     logits = logits.to(tl.float32)
     if temp != 0.0:
@@ -139,11 +143,15 @@ def _resample_kernel(
     if is_bonus:
         residual_logits = target_logits
     elif HAS_DRAFT_LOGITS:
-        draft_logits = tl.load(
-            draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + block,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
+        # draft_logits is stored pre-temperature, so apply scale first.
+        draft_logits = (
+            tl.load(
+                draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + block,
+                mask=mask,
+                other=float("-inf"),
+            ).to(tl.float32)
+            / temp
+        )
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
         target_log_probs = target_logits - target_lse
@@ -172,6 +180,7 @@ def _resample_kernel(
         seed_ptr,
         pos_ptr,
         None,
+        0,
         0,
         None,
         vocab_size,
@@ -298,12 +307,16 @@ def _probabilistic_rejection_kernel(
                 u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
                 u = tl.maximum(u, 4.6566127342e-10)
                 if HAS_DRAFT_LOGITS:
-                    draft_logit = tl.load(
-                        draft_logits_ptr
-                        + req_state_idx * draft_logits_stride_0
-                        + i * draft_logits_stride_1
-                        + draft_sampled
-                    ).to(tl.float32)
+                    # draft_logits is stored pre-temperature, so apply scale first.
+                    draft_logit = (
+                        tl.load(
+                            draft_logits_ptr
+                            + req_state_idx * draft_logits_stride_0
+                            + i * draft_logits_stride_1
+                            + draft_sampled
+                        ).to(tl.float32)
+                        / temp
+                    )
                     draft_lse = _compute_global_lse(
                         draft_local_max_ptr,
                         draft_local_max_stride,
