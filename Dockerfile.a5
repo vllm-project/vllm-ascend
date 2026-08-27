@@ -62,6 +62,12 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install --timeout 1200 -e /vllm-wo
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
+# MiniMax-M3 tool calling needs vllm._rust_tool_parser.
+RUN python3 -m pip install setuptools-rust && \
+    wget -qO- https://sh.rustup.rs | sh -s -- -y && \
+    . "$HOME/.cargo/env" && \
+    cd /vllm-workspace/vllm && bash ./build_rust.sh
+
 # Install vllm-ascend
 ARG SOC_VERSION="ascend950dt_9582"
 ARG COMPILE_CUSTOM_KERNELS=1
