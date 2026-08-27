@@ -90,9 +90,9 @@ def _copy_mamba_state_block(
     src_u64 = src_addr.to(tl.pointer_type(tl.uint64))
     dst_u64 = dst_addr.to(tl.pointer_type(tl.uint64))
 
-    per_tile_u64 = tl.cdiv(tl.cdiv(copy_size_u64, TEMPORAL_TILES), COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
-    tile_start = tile_idx.to(tl.int64) * per_tile_u64
-    tile_end = tl.minimum(tile_start + per_tile_u64, copy_size_u64)
+    work_per_tile = tl.cdiv(copy_size_u64, TEMPORAL_TILES)
+    tile_start = tile_idx.to(tl.int64) * work_per_tile
+    tile_end = tl.minimum(tile_start + work_per_tile, copy_size_u64)
     offsets = tl.arange(0, COPY_BLOCK_SIZE)
     for offset in range(tile_start, tile_end, COPY_BLOCK_SIZE):
         mask = offset + offsets < tile_end
