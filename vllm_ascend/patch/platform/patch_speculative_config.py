@@ -161,6 +161,20 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
                 "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
             }
         )
+    if hf_config.model_type in ("qwen4_exp", "qwen4_exp_text"):
+        text_config = getattr(hf_config, "text_config", hf_config)
+        text_config.model_type = "qwen4_exp_mtp"
+        n_predict = getattr(text_config, "mtp_num_hidden_layers", 1)
+        text_config.update(
+            {
+                "n_predict": n_predict,
+                "architectures": ["Qwen4ExpMTP"],
+                "index_share_for_mtp_iteration": getattr(
+                    text_config, "index_share_for_mtp_iteration", False
+                ),
+            }
+        )
+        hf_config = text_config
     if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
         hf_config.model_type = "longcat_flash_mtp"
         n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)

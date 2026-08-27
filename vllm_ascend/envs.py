@@ -104,6 +104,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Compatibility switches for Qwen3.8 Flash-Next on older CANN/Triton images.
+    # Both are non-sensitive booleans and default to the optimized kernel paths.
+    "VLLM_ASCEND_FORCE_GDN_TORCH_FALLBACK": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FORCE_GDN_TORCH_FALLBACK", "0"))
+    ),
+    "VLLM_ASCEND_FORCE_QSA_REFERENCE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_FORCE_QSA_REFERENCE", "0"))
+    ),
 }
 
 # end-env-vars-definition
