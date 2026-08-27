@@ -174,6 +174,10 @@ class AscendDSAC4StateBackend(AscendDSABackend):
 
 class AscendDSAC128StateBackend(AscendDSABackend):
     _backend_name = "ASCEND_DSA_C128_STATE"
+    # Not applicable: supported block sizes are device-dependent, so this
+    # class overrides get_supported_kernel_block_sizes() instead. Declared
+    # explicitly to avoid inheriting the base class value by accident.
+    _kernel_block_sizes: list[int] = []
 
     @classmethod
     def get_supported_kernel_block_sizes(cls) -> list[int]:
