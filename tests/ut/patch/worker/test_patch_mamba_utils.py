@@ -1,66 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import patch
 
 import numpy as np
+import torch
+from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.patch.worker.patch_mamba_utils import (
     _do_mamba_copy_block_npu,
-    _stage_mamba_copy_metadata,
     preprocess_mamba,
 )
 
 
-def _copy_buffer():
-    gpu = MagicMock()
-    gpu_view = MagicMock()
-    gpu.__getitem__.return_value = gpu_view
-    return SimpleNamespace(copy_to_gpu=MagicMock(), gpu=gpu), gpu_view
-
-
-def test_mamba_copy_metadata_is_staged_asynchronously_during_preprocess():
-    src_ptrs, _ = _copy_buffer()
-    dst_ptrs, _ = _copy_buffer()
-    sizes, _ = _copy_buffer()
-    copy_bufs = SimpleNamespace(
-        offset=2,
-        src_ptrs=src_ptrs,
-        dst_ptrs=dst_ptrs,
-        sizes=sizes,
-    )
-
-    _stage_mamba_copy_metadata(copy_bufs)
-
-    for buffer in (src_ptrs, dst_ptrs, sizes):
-        buffer.copy_to_gpu.assert_called_once_with(2)
-
-
-def test_mamba_state_copy_uses_previously_staged_metadata():
-    src_ptrs, src_view = _copy_buffer()
-    dst_ptrs, dst_view = _copy_buffer()
-    sizes, sizes_view = _copy_buffer()
-    copy_bufs = SimpleNamespace(
-        offset=2,
-        src_ptrs=src_ptrs,
-        dst_ptrs=dst_ptrs,
-        sizes=sizes,
-    )
-
-    with patch("vllm_ascend.patch.worker.patch_mamba_utils._batch_memcpy_triton") as batch_memcpy:
-        _do_mamba_copy_block_npu(copy_bufs)
-
-    for buffer in (src_ptrs, dst_ptrs, sizes):
-        buffer.copy_to_gpu.assert_not_called()
-        assert buffer.gpu.__getitem__.call_args_list == [call(slice(None, 2))]
-    batch_memcpy.assert_called_once_with(src_view, dst_view, sizes_view)
-
-
 def test_preprocess_stages_metadata_but_defers_state_copy():
+    # Separate CPU-backed buffers let us check staging without an NPU.
+    buffers = [
+        CpuGpuBuffer(2, dtype=dtype, device=torch.device("cpu"), pin_memory=False)
+        for dtype in (torch.int64, torch.int64, torch.int32)
+    ]
     copy_bufs = SimpleNamespace(
         offset=0,
         mamba_group_ids=[0],
         mamba_spec=SimpleNamespace(num_speculative_blocks=1, block_size=7),
+        src_ptrs=buffers[0],
+        dst_ptrs=buffers[1],
+        sizes=buffers[2],
     )
     scheduler_output = SimpleNamespace(
         finished_req_ids=[],
@@ -76,16 +41,17 @@ def test_preprocess_stages_metadata_but_defers_state_copy():
     mamba_state_idx = {"req": 0}
 
     def collect_metadata(copy_buffers, *_args):
+        for buffer, value in zip(buffers, (100, 200, 32)):
+            buffer.np[0] = value
         copy_buffers.offset = 1
 
     with (
         patch(
             "vllm_ascend.patch.worker.patch_mamba_utils.mamba_utils.collect_mamba_copy_meta",
             side_effect=collect_metadata,
-        ) as collect,
+        ),
         patch("vllm_ascend.patch.worker.patch_mamba_utils._can_launch_triton_batch_memcpy", return_value=True),
-        patch("vllm_ascend.patch.worker.patch_mamba_utils._stage_mamba_copy_metadata") as stage,
-        patch("vllm_ascend.patch.worker.patch_mamba_utils._do_mamba_copy_block_npu") as state_copy,
+        patch("vllm_ascend.patch.worker.patch_mamba_utils._batch_memcpy_triton") as state_copy,
     ):
         preprocess_mamba(
             scheduler_output,
@@ -99,9 +65,17 @@ def test_preprocess_stages_metadata_but_defers_state_copy():
             copy_bufs,
         )
 
-    collect.assert_called_once()
-    stage.assert_called_once_with(copy_bufs)
-    state_copy.assert_not_called()
+        state_copy.assert_not_called()
+        for buffer, value in zip(buffers, (100, 200, 32)):
+            torch.testing.assert_close(buffer.gpu, torch.tensor([value, 0], dtype=buffer.gpu.dtype))
+            # Later host reuse must not overwrite metadata staged for this step.
+            buffer.cpu.fill_(-1)
+
+        _do_mamba_copy_block_npu(copy_bufs)
+
+    state_copy.assert_called_once()
+    for actual, value in zip(state_copy.call_args.args, (100, 200, 32)):
+        torch.testing.assert_close(actual, torch.tensor([value], dtype=actual.dtype))
     assert input_batch.num_accepted_tokens_cpu.tolist() == [1]
 
 

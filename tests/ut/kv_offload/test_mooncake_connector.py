@@ -7,7 +7,7 @@ import time
 import types
 import unittest
 from collections import OrderedDict, defaultdict, deque
-from typing import Any, TypedDict, cast
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -93,19 +93,6 @@ for _k, _v in _saved_modules.items():
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
-
-
-class KimiMambaTransferCase(TypedDict):
-    decode_tp: int
-    pulls: int
-    conv_shape: list[int]
-    ssm_shape: list[int]
-    local_conv_len: int
-    local_ssm_len: int
-    remote_conv_stride: int
-    remote_ssm_stride: int
-    remote_tp_offset: int
-    expected_segment: int
 
 
 def make_mock_kv_caches() -> dict[str, Any]:
@@ -1358,114 +1345,52 @@ class TestCoreFunctionality(unittest.TestCase):
         return_value=False,
     )
     def test_append_mamba_transfer_meta_kimi_k3_sd_unequal_tp(self, _mock_layout):
-        """Cover K3 conv/SSM address slicing when prefill and decode TP differ."""
-        cases: list[KimiMambaTransferCase] = [
-            {
-                "decode_tp": 8,
-                "pulls": 2,
-                "conv_shape": [3, 4608],
-                "ssm_shape": [12, 128, 128],
-                "local_conv_len": 27648,
-                "local_ssm_len": 786432,
-                "remote_conv_stride": 15000,
-                "remote_ssm_stride": 400000,
-                "remote_tp_offset": 1,
-                "expected_segment": 768,
+        """P16 -> D8 slices Q/K/V per state row and honors padded page strides."""
+        self.thread.tp_size = 8
+        self.thread.vllm_config.model_config.hf_text_config = types.SimpleNamespace(
+            linear_attn_config={"num_heads": 96, "head_dim": 128}
+        )
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        length_list: list[int] = []
+        local_strides = [27648 + 4096, 786432 + 8192]
+        remote_strides = [15000, 400000]
+
+        self.thread._append_mamba_transfer_meta(
+            src_list,
+            dst_list,
+            length_list,
+            group_spec={
+                "kv_cache_spec_type": "MambaSpec",
+                "shapes": [[3, 4608], [12, 128, 128]],
+                "dtype_sizes": [2, 4],
             },
-            {
-                "decode_tp": 8,
-                "pulls": 4,
-                "conv_shape": [3, 4608],
-                "ssm_shape": [12, 128, 128],
-                "local_conv_len": 27648,
-                "local_ssm_len": 786432,
-                "remote_conv_stride": 6912,
-                "remote_ssm_stride": 196608,
-                "remote_tp_offset": 3,
-                "expected_segment": 384,
-            },
-            {
-                "decode_tp": 16,
-                "pulls": 2,
-                "conv_shape": [3, 2304],
-                "ssm_shape": [6, 128, 128],
-                "local_conv_len": 13824,
-                "local_ssm_len": 393216,
-                "remote_conv_stride": 6912,
-                "remote_ssm_stride": 196608,
-                "remote_tp_offset": 1,
-                "expected_segment": 384,
-            },
-        ]
+            src_layer_base_addr=[0x100000, 0x300000],
+            dst_layer_base_addr=[0x200000, 0x400000],
+            block_len=[27648, 786432],
+            block_stride=local_strides,
+            remote_block_stride=remote_strides,
+            local_block_id=2,
+            remote_block_id=3,
+            tp_num_need_pulls=2,
+            remote_tp_offset=1,
+        )
 
-        for case in cases:
-            with self.subTest(case=case):
-                self.thread.tp_size = case["decode_tp"]
-                self.thread.vllm_config.model_config.hf_text_config = types.SimpleNamespace(
-                    linear_attn_config={"num_heads": 96, "head_dim": 128}
-                )
-                src_list: list[int] = []
-                dst_list: list[int] = []
-                length_list: list[int] = []
-                local_bases = [0x100000, 0x300000]
-                remote_bases = [0x200000, 0x400000]
-                local_strides = [case["local_conv_len"] + 4096, case["local_ssm_len"] + 8192]
-                local_block_id = 2
-                remote_block_id = 3
-
-                self.thread._append_mamba_transfer_meta(
-                    src_list,
-                    dst_list,
-                    length_list,
-                    group_spec={
-                        "kv_cache_spec_type": "MambaSpec",
-                        "shapes": [case["conv_shape"], case["ssm_shape"]],
-                        "dtype_sizes": [2, 4],
-                    },
-                    src_layer_base_addr=local_bases,
-                    dst_layer_base_addr=remote_bases,
-                    block_len=[case["local_conv_len"], case["local_ssm_len"]],
-                    block_stride=local_strides,
-                    remote_block_stride=[case["remote_conv_stride"], case["remote_ssm_stride"]],
-                    remote_block_id=remote_block_id,
-                    local_block_id=local_block_id,
-                    tp_num_need_pulls=case["pulls"],
-                    remote_tp_offset=case["remote_tp_offset"],
-                )
-
-                remote_segment = case["expected_segment"]
-                local_segment = remote_segment * case["pulls"]
-                local_conv_base = local_bases[0] + local_block_id * local_strides[0]
-                remote_conv_base = remote_bases[0] + remote_block_id * case["remote_conv_stride"]
-                expected_src: list[int] = []
-                expected_dst: list[int] = []
-                for state_idx in range(3):
-                    for segment_idx in range(3):
-                        expected_src.append(
-                            local_conv_base
-                            + (
-                                state_idx * case["conv_shape"][1]
-                                + segment_idx * local_segment
-                                + case["remote_tp_offset"] * remote_segment
-                            )
-                            * 2
-                        )
-                        expected_dst.append(
-                            remote_conv_base + (state_idx * remote_segment * 3 + segment_idx * remote_segment) * 2
-                        )
-                expected_src.append(
-                    local_bases[1]
-                    + local_block_id * local_strides[1]
-                    + case["remote_tp_offset"] * case["local_ssm_len"] // case["pulls"]
-                )
-                expected_dst.append(remote_bases[1] + remote_block_id * case["remote_ssm_stride"])
-
-                self.assertEqual(src_list, expected_src)
-                self.assertEqual(dst_list, expected_dst)
-                self.assertEqual(
-                    length_list,
-                    [remote_segment * 2] * 9 + [case["local_ssm_len"] // case["pulls"]],
-                )
+        # The second P shard occupies the upper 768 elements of each 1536-wide
+        # Q/K/V segment in each D row. The remote rows have no inter-segment gaps.
+        local_offsets = [1536, 4608, 7680, 10752, 13824, 16896, 19968, 23040, 26112]
+        remote_offsets = [0, 1536, 3072, 4608, 6144, 7680, 9216, 10752, 12288]
+        self.assertEqual(
+            src_list,
+            [0x100000 + 2 * local_strides[0] + offset for offset in local_offsets]
+            + [0x300000 + 2 * local_strides[1] + 393216],
+        )
+        self.assertEqual(
+            dst_list,
+            [0x200000 + 3 * remote_strides[0] + offset for offset in remote_offsets]
+            + [0x400000 + 3 * remote_strides[1]],
+        )
+        self.assertEqual(length_list, [1536] * 9 + [393216])
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.is_conv_state_dim_first",

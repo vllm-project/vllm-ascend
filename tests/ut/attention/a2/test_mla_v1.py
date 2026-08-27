@@ -479,69 +479,30 @@ class TestAscendMLAMetadataBuilder(TestBase):
             self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
             self.assertEqual(builder.chunked_prefill_enabled, mock_vllm_config.scheduler_config.enable_chunked_prefill)
 
-    def test_metadata_builder_uses_draft_layer_rope_mode(self):
+    def test_metadata_builder_uses_layer_rope_mode(self):
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config = SimpleNamespace(
-            qk_rope_head_dim=64,
-            mla_use_nope=True,
-        )
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_vllm_config.speculative_config = None
-        mock_vllm_config.compilation_config.static_forward_context = {
-            "draft.self_attn": SimpleNamespace(
-                impl=SimpleNamespace(use_mla_rope=True),
-            ),
-        }
 
-        with patch(
-            "vllm_ascend.attention.mla_v1.get_ascend_config",
-            return_value=MagicMock(),
-        ):
-            builder = AscendMLAMetadataBuilder(
-                None,
-                ["draft.self_attn"],
-                mock_vllm_config,
-                "cpu",
-            )
+        for layer_uses_rope in (True, False):
+            with self.subTest(layer_uses_rope=layer_uses_rope):
+                # Deliberately disagree with the target config: the layer wins.
+                mock_vllm_config.model_config.hf_text_config = SimpleNamespace(
+                    qk_rope_head_dim=64,
+                    mla_use_nope=layer_uses_rope,
+                )
+                mock_vllm_config.compilation_config.static_forward_context = {
+                    "self_attn": SimpleNamespace(impl=SimpleNamespace(use_mla_rope=layer_uses_rope)),
+                }
+                with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=MagicMock()):
+                    builder = AscendMLAMetadataBuilder(None, ["self_attn"], mock_vllm_config, "cpu")
 
-        self.assertTrue(builder.use_mla_rope)
-
-    def test_metadata_builder_uses_target_layer_nope_mode(self):
-        mock_vllm_config = MagicMock()
-        mock_vllm_config.model_config.max_model_len = 1024
-        mock_vllm_config.model_config.get_head_size.return_value = 64
-        mock_vllm_config.model_config.dtype = torch.float16
-        mock_vllm_config.model_config.hf_text_config = SimpleNamespace(
-            qk_rope_head_dim=64,
-            mla_use_nope=False,
-        )
-        mock_vllm_config.cache_config.block_size = 16
-        mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
-        mock_vllm_config.speculative_config = None
-        mock_vllm_config.compilation_config.static_forward_context = {
-            "target.self_attn": SimpleNamespace(
-                impl=SimpleNamespace(use_mla_rope=False),
-            ),
-        }
-
-        with patch(
-            "vllm_ascend.attention.mla_v1.get_ascend_config",
-            return_value=MagicMock(),
-        ):
-            builder = AscendMLAMetadataBuilder(
-                None,
-                ["target.self_attn"],
-                mock_vllm_config,
-                "cpu",
-            )
-
-        self.assertFalse(builder.use_mla_rope)
+                self.assertEqual(builder.use_mla_rope, layer_uses_rope)
 
     def test_ascend_mla_metadata_builder_spec_decode(self):
         mock_vllm_config = MagicMock()

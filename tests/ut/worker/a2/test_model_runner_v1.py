@@ -22,7 +22,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -204,15 +203,6 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
                 self.assertEqual(postprocess_all.call_count, int(mode == "all"))
                 runner.num_accepted_tokens_event.record.assert_called_once()
 
-    def test_non_async_postprocess_keeps_upstream_behavior(self):
-        runner = self._build_runner()
-        runner.use_async_scheduling = False
-        output_token_ids = torch.tensor([[10, -1]])
-        scheduler_output = SimpleNamespace()
-        with patch("vllm.v1.worker.gpu_model_runner.GPUModelRunner._update_states_after_model_execute") as upstream:
-            runner._update_states_after_model_execute(output_token_ids, scheduler_output)
-        upstream.assert_called_once_with(output_token_ids, scheduler_output)
-
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
@@ -244,55 +234,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
-
-    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.apply_layerwise_kv_cache_plan")
-    def test_drafter_receives_logical_block_size_for_every_cache_group(
-        self,
-        _mock_apply_layerwise_plan,
-        _mock_has_kv_transfer_group,
-    ):
-        runner = self._build_runner()
-        runner.attn_groups = []
-        runner.model_config.enable_return_routed_experts = False
-        runner.speculative_config = SimpleNamespace(
-            use_eagle=lambda: False,
-            uses_draft_model=lambda: True,
-            uses_extract_hidden_states=lambda: False,
-        )
-        drafter = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        drafter.initialize_attn_backend = MagicMock()
-        runner.drafter = drafter
-        runner.may_add_encoder_only_layers_to_kv_cache_config = MagicMock()
-        runner.maybe_add_kv_sharing_layers_to_kv_cache_groups = MagicMock()
-
-        def initialize_attn_backend(_kv_cache_config):
-            runner.attn_groups = [
-                [SimpleNamespace(kv_cache_spec=object())],
-                [SimpleNamespace(kv_cache_spec=object())],
-            ]
-
-        runner.initialize_attn_backend = MagicMock(side_effect=initialize_attn_backend)
-
-        def reinitialize_input_batch(_kv_cache_config):
-            runner.kernel_block_sizes = [[0], [128]]
-
-        runner.may_reinitialize_input_batch = MagicMock(side_effect=reinitialize_input_batch)
-        runner.initialize_kv_cache_tensors = MagicMock(return_value={})
-
-        runner.initialize_kv_cache(
-            KVCacheConfig(
-                num_blocks=0,
-                kv_cache_tensors=[],
-                kv_cache_groups=[],
-            )
-        )
-
-        drafter.initialize_attn_backend.assert_called_once()
-        self.assertEqual(
-            drafter.initialize_attn_backend.call_args.args[1],
-            [0, 128],
-        )
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()

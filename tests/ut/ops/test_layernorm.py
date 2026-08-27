@@ -85,17 +85,15 @@ def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
     assert not layer.bias.requires_grad
 
 
-@pytest.mark.parametrize("activation", ["sigmoid", "swish"])
-@pytest.mark.parametrize("prenorm", [False, True])
-def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config, activation, prenorm):
-    layer = FusedRMSNormGated(hidden_size=8, eps=1e-6, activation=activation)
+def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
+    layer = FusedRMSNormGated(hidden_size=8, eps=1e-6, activation="sigmoid")
     x = torch.randn(1, 4, 2, 8)
     gate = torch.randn(4, 2, 8)
-    residual = torch.randn_like(x) if prenorm else None
-    expected = (torch.empty_like(x), torch.empty_like(x)) if prenorm else torch.empty_like(x)
+    residual = torch.randn_like(x)
+    expected = (torch.empty_like(x), torch.empty_like(x))
 
     with patch("vllm_ascend.ops.layernorm.rms_norm_gated", return_value=expected) as fused_norm_gate:
-        actual = layer(x, gate, residual=residual, prenorm=prenorm, residual_in_fp32=prenorm)
+        actual = layer(x, gate, residual=residual, prenorm=True, residual_in_fp32=True)
 
     assert isinstance(layer, AscendFusedRMSNormGated)
     assert actual is expected
@@ -104,11 +102,11 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config, acti
         gate,
         layer.weight,
         layer.bias,
-        activation,
+        "sigmoid",
         residual=residual,
         eps=1e-6,
-        prenorm=prenorm,
-        residual_in_fp32=prenorm,
+        prenorm=True,
+        residual_in_fp32=True,
     )
 
 

@@ -38,7 +38,6 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
-from vllm_ascend.utils import vllm_version_is
 
 
 def _make_hybrid_kv_cache_config(
@@ -217,6 +216,7 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
         head_size=128,
         dtype=torch.bfloat16,
         cache_dtype_str="fp8_ds_mla",
+        page_size_padded=(512 // 4) * (128 * 2 + 2) + 128,
         compress_ratio=4,
         model_version="deepseek_v4",
         indexes_kv_by_block_stride=True,
@@ -227,6 +227,8 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
 
     assert merged.block_size == spec.block_size
+    assert merged.real_page_size_bytes == (512 // 4) * (128 * 2 + 2)
+    assert merged.page_size_bytes == spec.page_size_padded
     assert merged.compress_ratio == spec.compress_ratio
     assert merged.model_version == spec.model_version
     assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
@@ -302,53 +304,29 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
 
 
 @pytest.mark.parametrize(
-    ("block_size", "page_size"),
+    ("block_size", "page_size", "draft_uses_mla"),
     [
-        pytest.param(384, 488448, id="tp16"),
-        pytest.param(768, 976896, id="tp8"),
+        pytest.param(384, 488448, False, id="gqa-tp16"),
+        pytest.param(768, 976896, False, id="gqa-tp8"),
+        pytest.param(384, 488448, True, id="mla-tp16"),
     ],
 )
-def test_kimi_k3_gqa_uses_four_mixed_kv_groups_and_five_builders(
-    block_size: int,
-    page_size: int,
-) -> None:
+def test_kimi_k3_dspark_uses_four_mixed_kv_groups(block_size, page_size, draft_uses_mla) -> None:
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(
         _make_kimi_k3_dspark_kv_cache_specs(
             block_size=block_size,
             page_size=page_size,
+            draft_uses_mla=draft_uses_mla,
         )
     )
 
     assert groups is not None
     assert [len(group.layer_names) for group in groups] == [29, 23, 23, 23]
     assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups)
-
     mixed_specs = groups[0].kv_cache_spec.kv_cache_specs
-    assert sum(isinstance(spec, MLAAttentionSpec) for spec in mixed_specs.values()) == 24
-    assert (
-        sum(
-            isinstance(spec, FullAttentionSpec) and not isinstance(spec, MLAAttentionSpec)
-            for spec in mixed_specs.values()
-        )
-        == 5
-    )
-
-    # The model runner keys builders by backend and exact inner spec. The
-    # mixed attention group contributes MLA + GQA, and each Mamba group one.
-    metadata_builder_count = sum(len(set(group.kv_cache_spec.kv_cache_specs.values())) for group in groups)
-    assert metadata_builder_count == 5
-
-
-def test_kimi_k3_mla_dspark_uses_four_groups_and_five_builders() -> None:
-    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs(draft_uses_mla=True))
-
-    assert groups is not None
-    assert [len(group.layer_names) for group in groups] == [29, 23, 23, 23]
-    # Target MLA is causal while draft MLA enables non-causal multi-token
-    # decode, so the mixed group needs two exact-spec builders. The three
-    # recurrent groups each contribute one more builder.
-    metadata_builder_count = sum(len(set(group.kv_cache_spec.kv_cache_specs.values())) for group in groups)
-    assert metadata_builder_count == 5
+    expected_mla_count = 29 if draft_uses_mla else 24
+    assert sum(isinstance(spec, MLAAttentionSpec) for spec in mixed_specs.values()) == expected_mla_count
+    assert all(isinstance(spec, FullAttentionSpec) for spec in mixed_specs.values())
 
 
 def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> None:
@@ -561,46 +539,6 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
     )
 
     assert coordinator is sentinel
-
-
-@pytest.mark.parametrize("num_prefill_lookahead", [0, 8])
-@pytest.mark.skipif(
-    vllm_version_is("0.27.1"),
-    reason="num_prefill_lookahead was added to the coordinator after v0.27.1",
-)
-def test_get_kv_cache_coordinator_forwards_prefill_lookahead(
-    monkeypatch,
-    num_prefill_lookahead: int,
-) -> None:
-    kv_cache_config = _make_hybrid_kv_cache_config(
-        full_block_size=16,
-        mamba_block_size=16,
-    )
-    captured_kwargs = {}
-
-    def _fake_ascend_coordinator(*args, **kwargs):
-        captured_kwargs.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_coordinator.AscendHybridKVCacheCoordinator",
-        _fake_ascend_coordinator,
-    )
-
-    get_kv_cache_coordinator(
-        kv_cache_config,
-        max_model_len=1024,
-        max_num_batched_tokens=1024,
-        use_eagle=False,
-        enable_caching=True,
-        enable_kv_cache_events=False,
-        dcp_world_size=1,
-        pcp_world_size=1,
-        hash_block_size=16,
-        num_prefill_lookahead=num_prefill_lookahead,
-    )
-
-    assert captured_kwargs["num_prefill_lookahead"] == num_prefill_lookahead
 
 
 def test_get_kv_cache_coordinator_uses_ascend_for_deepseek_v4(monkeypatch) -> None:

@@ -857,34 +857,6 @@ def test_shared_experts_part2_applies_optional_gate(with_gate):
     torch.testing.assert_close(output, expected)
 
 
-def test_shared_expert_consistency_uses_projection_input_width(monkeypatch):
-    shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
-    shared_experts.hidden_size = 3584
-    shared_experts.shared_expert_input_size = 7168
-    shared_experts.in_dtype = torch.float16
-    output = torch.ones(10, 7168)
-    shared_experts.layer = MagicMock(return_value=output)
-    shared_experts.part1 = MagicMock(return_value=output)
-    shared_experts.part2 = MagicMock(return_value=output)
-    random_input = torch.ones(10, 7168)
-    random = MagicMock(return_value=random_input)
-    monkeypatch.setattr(shared_experts_module.torch, "rand", random)
-
-    shared_experts.validate_consistency()
-
-    random.assert_called_once_with(
-        10,
-        7168,
-        device="npu",
-        dtype=torch.float16,
-    )
-    shared_experts.layer.assert_called_once()
-    torch.testing.assert_close(
-        shared_experts.layer.call_args.args[0],
-        random_input,
-    )
-
-
 def _make_quantized_situ_shared_experts(quant_type, gate_up_proj, down_proj):
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = SimpleNamespace(

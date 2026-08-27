@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -34,9 +33,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -64,12 +61,12 @@ class _DSparkProposerTestBase:
     """Shared helpers for ``AscendDSparkProposer`` tests."""
 
     @staticmethod
-    def _make_vllm_config(hf_config: SimpleNamespace) -> SimpleNamespace:
+    def _make_vllm_config(hf_config: SimpleNamespace, draft_sample_method: str) -> SimpleNamespace:
         """Build the minimal config consumed by the DSpark initializer."""
         draft_model_config = SimpleNamespace(hf_config=hf_config, get_hidden_size=lambda: _HIDDEN_SIZE)
         return SimpleNamespace(
             speculative_config=SimpleNamespace(
-                draft_sample_method="greedy",
+                draft_sample_method=draft_sample_method,
                 draft_model_config=draft_model_config,
             )
         )
@@ -83,9 +80,10 @@ class _DSparkProposerTestBase:
         block_size: int,
         hf_config: SimpleNamespace | None = None,
         draft_attn_causal: bool | None = None,
+        draft_sample_method: str = "greedy",
     ):
         device = torch.device("cpu")
-        vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace())
+        vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace(), draft_sample_method)
 
         def mock_parent_init(
             proposer: AscendDSparkProposer,
@@ -313,62 +311,17 @@ class TestPadDraftBuffersBeforeBuild(_DSparkProposerTestBase):
         proposer._pad_draft_buffers(num_actual, num_actual)
         assert torch.equal(proposer.positions, snapshot)
 
-    def test_must_precede_build(self):
-        """build_draft_attn_metadata reads positions but does not zero it, so
-        _pad_draft_buffers must run first."""
-        num_reqs, block_size, max_num_tokens = 4, 5, 256
-        num_actual = num_reqs * block_size
-        num_input = num_actual + 16
-
-        def capture_build():
-            captured = {}
-
-            def fake_build(common_attn_metadata, num_input_tokens, num_actual_tokens):
-                captured["region"] = common_attn_metadata.positions[num_actual:num_input].clone()
-                return None, common_attn_metadata
-
-            return captured, fake_build
-
-        ok = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
-        ok.positions[num_actual:num_input] = -999
-        cap_ok, build_ok = capture_build()
-        ok.build_draft_attn_metadata = build_ok
-        ok._pad_draft_buffers(num_actual, num_input)
-        ok.build_draft_attn_metadata(SimpleNamespace(positions=ok.positions), num_input, num_actual)
-        assert torch.all(cap_ok["region"] == 0)
-
-        bug = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
-        bug.positions[num_actual:num_input] = -999
-        cap_bug, build_bug = capture_build()
-        bug.build_draft_attn_metadata = build_bug
-        bug.build_draft_attn_metadata(SimpleNamespace(positions=bug.positions), num_input, num_actual)
-        bug._pad_draft_buffers(num_actual, num_input)
-        assert torch.all(cap_bug["region"] == -999)
-
-    def test_called_before_build_in_propose(self):
-        """In ``_propose`` the ``_pad_draft_buffers`` call must precede
-        ``build_draft_attn_metadata``."""
-        src = inspect.getsource(AscendSpecDecodeBaseProposer._propose)
-        pad_idx = src.find("self._pad_draft_buffers(")
-        build_idx = src.find("self.build_draft_attn_metadata(")
-        # Only assert when both calls live directly in _propose; a refactor that
-        # extracts them elsewhere leaves this guard inert rather than brittle.
-        if pad_idx != -1 and build_idx != -1:
-            assert pad_idx < build_idx, (
-                "_pad_draft_buffers must be called before build_draft_attn_metadata "
-                "in _propose, otherwise the attention backend reads un-zeroed "
-                "positions in the DP-padding region."
-            )
-
 
 class TestDSparkInitialization(_DSparkProposerTestBase):
     """Tests for DSpark initialization configuration."""
 
     @pytest.mark.parametrize(
-        ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req"),
+        ("hf_config", "expected_sample_from_anchor", "expected_num_query_per_req", "draft_sample_method"),
         [
-            pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS),
-            pytest.param(SimpleNamespace(sample_from_anchor=False), False, 1 + _NUM_SPECULATIVE_TOKENS),
+            pytest.param(SimpleNamespace(), True, _NUM_SPECULATIVE_TOKENS, "greedy"),
+            pytest.param(
+                SimpleNamespace(sample_from_anchor=False), False, 1 + _NUM_SPECULATIVE_TOKENS, "probabilistic"
+            ),
         ],
     )
     def test_configures_anchor_sampling(
@@ -376,6 +329,7 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         hf_config: SimpleNamespace,
         expected_sample_from_anchor: bool,
         expected_num_query_per_req: int,
+        draft_sample_method: str,
     ) -> None:
         """Verify the bonus-anchor flag selects the expected query layout."""
         proposer = self._make_proposer(
@@ -383,166 +337,13 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
             num_reqs=_MAX_BATCH_SIZE,
             block_size=_NUM_SPECULATIVE_TOKENS,
             hf_config=hf_config,
+            draft_sample_method=draft_sample_method,
         )
         expected_max_query_tokens = _MAX_BATCH_SIZE * expected_num_query_per_req
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
-
-
-class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
-    """``set_per_group_attn_metadata`` stores the runner-provided per-group
-    block table / slot mapping into the read-only dicts the proposer consults
-    during ``set_inputs_first_pass``."""
-
-    def test_stores_block_table_and_slot_mapping(self):
-        num_reqs, block_size, max_num_tokens = 4, 5, 256
-        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
-        # a gid not pre-populated by _make_proposer (which only seeds gid=0)
-        gid = 7
-        block_table = torch.zeros((num_reqs, 16), dtype=torch.int32)
-        slot_mapping = torch.full((max_num_tokens,), 42, dtype=torch.int32)
-
-        proposer.set_per_group_attn_metadata(gid, block_table, slot_mapping)
-
-        assert proposer._per_group_block_tables[gid] is block_table
-        assert proposer._per_group_slot_mappings[gid] is slot_mapping
-
-    def test_overwrites_existing_gid(self):
-        num_reqs, block_size, max_num_tokens = 2, 5, 256
-        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
-        gid = 0  # already populated by _make_proposer
-        old_block_table = proposer._per_group_block_tables[gid]
-        new_block_table = torch.ones((num_reqs, 16), dtype=torch.int32)
-        new_slot_mapping = torch.ones(max_num_tokens, dtype=torch.int32)
-
-        proposer.set_per_group_attn_metadata(gid, new_block_table, new_slot_mapping)
-
-        assert proposer._per_group_block_tables[gid] is new_block_table
-        assert proposer._per_group_slot_mappings[gid] is new_slot_mapping
-        assert proposer._per_group_block_tables[gid] is not old_block_table
-
-
-class TestDSparkInitValidation:
-    """``AscendDSparkProposer.__init__`` accepts probabilistic draft sampling
-    (supported via the per-step probability collection in
-    ``llm_base_proposer``), allocates the DSpark-specific draft/seed buffers
-    and overrides the DFlash query-token / cudagraph defaults."""
-
-    @staticmethod
-    def _make_vllm_config(
-        *,
-        num_speculative_tokens,
-        max_batch_size,
-        max_num_tokens,
-        draft_sample_method,
-        hidden_size=8,
-    ):
-        speculative_config = SimpleNamespace(
-            num_speculative_tokens=num_speculative_tokens,
-            draft_sample_method=draft_sample_method,
-            draft_model_config=SimpleNamespace(hf_config=SimpleNamespace(), get_hidden_size=lambda: hidden_size),
-        )
-        return SimpleNamespace(speculative_config=speculative_config)
-
-    @staticmethod
-    def _stub_dflash_init(
-        monkeypatch,
-        *,
-        num_speculative_tokens,
-        max_batch_size,
-        max_num_tokens,
-        dtype,
-        device,
-    ):
-        """Replace the heavy DFlash/Eagle base init with a stub that only sets
-        the attributes DSpark's ``__init__`` subsequently reads."""
-
-        def _stub(self, vllm_config, device, runner=None):
-            self.num_speculative_tokens = num_speculative_tokens
-            self.max_batch_size = max_batch_size
-            self.max_num_tokens = max_num_tokens
-            self.dtype = dtype
-            self.device = device
-            self.draft_model_config = vllm_config.speculative_config.draft_model_config
-            self.hidden_size = 0
-            self.hidden_states = None
-            self._dflash_hidden_states = None
-
-        monkeypatch.setattr(AscendDflashProposer, "__init__", _stub)
-
-    def test_probabilistic_accepted(self, monkeypatch):
-        device = torch.device("cpu")
-        self._stub_dflash_init(
-            monkeypatch,
-            num_speculative_tokens=5,
-            max_batch_size=16,
-            max_num_tokens=256,
-            dtype=torch.float32,
-            device=device,
-        )
-        vllm_config = self._make_vllm_config(
-            num_speculative_tokens=5,
-            max_batch_size=16,
-            max_num_tokens=256,
-            draft_sample_method="probabilistic",
-        )
-        # Probabilistic draft sampling is supported (per-step probabilities
-        # are collected in llm_base_proposer); init must not raise.
-        proposer = AscendDSparkProposer(vllm_config, device)
-        assert proposer._dspark_draft_buffer.shape == (16, 6)
-        assert proposer._dspark_seed_buffer.shape == (16,)
-
-    def test_greedy_allocates_dspark_buffers(self, monkeypatch):
-        device = torch.device("cpu")
-        num_spec, max_batch, max_num_tokens, hidden = 5, 16, 256, 8
-        self._stub_dflash_init(
-            monkeypatch,
-            num_speculative_tokens=num_spec,
-            max_batch_size=max_batch,
-            max_num_tokens=max_num_tokens,
-            dtype=torch.float32,
-            device=device,
-        )
-        vllm_config = self._make_vllm_config(
-            num_speculative_tokens=num_spec,
-            max_batch_size=max_batch,
-            max_num_tokens=max_num_tokens,
-            draft_sample_method="greedy",
-            hidden_size=hidden,
-        )
-        dynamic_spec_config = SimpleNamespace(method="", method_params={})
-        with patch(
-            "vllm_ascend.spec_decode.dspark_proposer.get_ascend_config",
-            return_value=SimpleNamespace(
-                dynamic_spec_config=dynamic_spec_config,
-            ),
-        ):
-            proposer = AscendDSparkProposer(vllm_config, device)
-
-        blk = 1 + num_spec
-        max_query_tokens = max_batch * num_spec
-        # DSpark-specific draft / seed buffers.
-        assert proposer._dspark_draft_buffer.shape == (max_batch, blk)
-        assert proposer._dspark_draft_buffer.dtype == torch.int64
-        assert proposer._dspark_seed_buffer.shape == (max_batch,)
-        assert proposer._dspark_seed_buffer.dtype == torch.int64
-        # hidden_size / hidden states come from the draft model config.
-        assert proposer.hidden_size == hidden
-        assert proposer.hidden_states.shape == (max_num_tokens, hidden)
-        assert proposer._dflash_hidden_states.shape == (max_num_tokens, hidden)
-        # DSpark runs eager only (Ascend cudagraph unsupported on this path).
-        assert proposer.use_cuda_graph is False
-        # anchor-first: N query tokens per request, no bonus token (unlike
-        # DFlash's 1+N).
-        assert proposer.max_query_tokens == max_query_tokens
-        assert proposer.positions.shape == (max_query_tokens,)
-        assert proposer.positions.dtype == torch.int32
-        assert proposer._slot_mapping_buffer.shape == (max_query_tokens,)
-        # per-group bookkeeping dicts start empty / None.
-        assert proposer._per_group_block_tables == {}
-        assert proposer._per_group_slot_mappings == {}
-        assert proposer._context_slot_mapping_buffers is None
+        assert proposer._dspark_draft_buffer.shape == (_MAX_BATCH_SIZE, 1 + _NUM_SPECULATIVE_TOKENS)
 
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):

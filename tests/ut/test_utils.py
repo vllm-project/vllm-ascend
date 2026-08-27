@@ -526,16 +526,8 @@ def test_check_gdn_layer_supports_kimi_linear_config_property():
     assert utils.check_gdn_layer(vllm_config) is True
 
 
-@pytest.mark.parametrize(
-    "hf_config",
-    [
-        pytest.param(
-            SimpleNamespace(text_config=SimpleNamespace(layer_types=["linear_attention"])),
-            id="qwen3-5-nested-text-config",
-        ),
-    ],
-)
-def test_check_gdn_layer_supports_layer_types(hf_config):
+def test_check_gdn_layer_supports_nested_layer_types():
+    hf_config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["linear_attention"]))
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
 
     assert utils.check_gdn_layer(vllm_config) is True

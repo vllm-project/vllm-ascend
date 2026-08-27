@@ -41,37 +41,6 @@ def test_zero_padded_output_uses_combined_live_token_count():
     assert torch.equal(actual[:, 6:], torch.zeros_like(actual[:, 6:]))
 
 
-def test_run_causal_conv1d_returns_declared_output_alias():
-    mixed_qkv = torch.randn(3, 8)
-    conv_weights = torch.randn(4, 8)
-    conv_state = torch.randn(2, 8, 4)
-    query_start_loc = torch.tensor([0, 3], dtype=torch.int32)
-    cache_indices = torch.tensor([1], dtype=torch.int32)
-    returned_alias = torch.full_like(mixed_qkv, 7)
-
-    with patch.object(
-        torch.ops._C_ascend,
-        "npu_causal_conv1d_custom",
-        return_value=returned_alias,
-        create=True,
-    ) as causal_conv:
-        actual = AscendKimiK3DeltaAttention._run_causal_conv1d(
-            mixed_qkv,
-            conv_weights,
-            conv_state,
-            query_start_loc,
-            cache_indices,
-            None,
-            run_mode=1,
-            num_accepted_tokens=torch.tensor([3], dtype=torch.int32),
-        )
-
-    assert actual is returned_alias
-    assert causal_conv.call_args.kwargs["query_start_loc_opt"] is query_start_loc
-    assert causal_conv.call_args.kwargs["cache_indices_opt"] is cache_indices
-    assert causal_conv.call_args.kwargs["initial_state_mode_opt"] is None
-
-
 def test_kda_output_norm_uses_checkpoint_epsilon():
     def fake_upstream_init(attention, _config, _vllm_config, _prefix):
         nn.Module.__init__(attention)

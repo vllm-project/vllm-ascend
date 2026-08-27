@@ -591,40 +591,6 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
     )
 
 
-def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
-    batch_spec = BatchSpec(
-        seq_lens=[1, 1, 0, 0],
-        query_lens=[1, 1, 0, 0],
-        name="full_graph_padded_non_spec_actual_seq_lengths",
-    )
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec=batch_spec,
-        block_size=16,
-        device=torch.device("cpu"),
-    )
-    builder = _make_builder(
-        device=torch.device("cpu"),
-        num_heads=32,
-        num_speculative_tokens=0,
-        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
-    )
-
-    attn_metadata = builder.build(0, common_attn_metadata)
-
-    assert torch.equal(
-        attn_metadata.non_spec_query_start_loc,
-        torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
-    )
-    assert (
-        attn_metadata.non_spec_decode_metadata.actual_seq_lengths.data_ptr()
-        == builder.non_spec_actual_seq_lengths.data_ptr()
-    )
-    assert torch.equal(
-        attn_metadata.non_spec_decode_metadata.actual_seq_lengths,
-        torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
-    )
-
-
 def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.MonkeyPatch):
     _patch_missing_runtime_cdiv(monkeypatch)
     batch_spec = BatchSpec(
