@@ -578,11 +578,7 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
             #    fault is a one-shot step guard, so this dataset run does not
             #    re-trigger it. The evaluation runs through the proxy, which
             #    spreads the requests across all DP ranks.
-            recovered_acc = _run_gsm8k_eval(proxy, "post-retry")
-            print(
-                f"[GSM8K acc] recovered={recovered_acc:.2f}% "
-                f"(standard: >= {_GSM8K_CASE['baseline'] - _GSM8K_CASE['threshold']}%)"
-            )
+            _run_gsm8k_eval(proxy, "post-retry")
 
 
 @pytest.mark.skipif(
