@@ -306,7 +306,6 @@ class AscendConfig:
 
         _A_FAMILY = {
             "enable_mlapo": "VLLM_ASCEND_ENABLE_MLAPO",
-            "msmonitor_use_daemon": "MSMONITOR_USE_DAEMON",
             "enable_transpose_kv_cache_by_block": "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
             "weight_nz_mode": "VLLM_ASCEND_ENABLE_NZ",
         }
