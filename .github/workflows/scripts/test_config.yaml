@@ -238,14 +238,21 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/eplb
-    - vllm_ascend/distributed/eplb_communicator.py
-    - vllm_ascend/distributed/eplb_state.py
+    - vllm_ascend/distributed/eplb
     - vllm_ascend/ops/fused_moe/eplb.py
-    - vllm_ascend/ops/fused_moe/router.py
+    - vllm_ascend/ops/fused_moe/routed_experts.py
+    - vllm_ascend/ops/triton/eplb.py
     - vllm_ascend/patch/platform/patch_eplb.py
+    - vllm_ascend/patch/platform/patch_fused_moe.py
     - vllm_ascend/worker/v2/eplb.py
   tests:
     - tests/ut/eplb
+    - tests/ut/distributed/eplb
+    - tests/ut/ops/test_eplb.py
+    - tests/ut/ops/a2/test_eplb.py
+    - tests/ut/patch/platform/test_patch_eplb.py
+    - tests/ut/patch/platform/test_patch_fused_moe.py
+    - tests/ut/worker/v2/test_eplb_load_collection_phase.py
     - tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
@@ -937,6 +944,7 @@ estimated_times:
   tests/ut/kv_offload/a2/test_remote_decode_lifecycle.py: 60
   tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
+  tests/ut/ops/a2/test_eplb.py: 30
   tests/ut/ops/a2/test_gdn_layerwise_kv.py: 70
   tests/ut/ops/a2/test_token_dispatcher.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50
