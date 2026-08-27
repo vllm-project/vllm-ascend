@@ -654,6 +654,8 @@ class NPUWorker(WorkerBase):
         if vllm_version_is("0.27.1"):
             return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
+        if not isinstance(kv_cache_spec, dict):
+            return available_memory
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
