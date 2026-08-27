@@ -274,17 +274,26 @@ jobs:
             VLLM_COMMIT=$(git -C vllm-upstream rev-parse HEAD)
           fi
           echo "Pre-starting main2main E2E env prep for vllm=${VLLM_COMMIT} (A2/A3/310P)..."
+          # gh 2.4.0 on this runner has no `run list --jq` (silently no-op);
+          # dispatch time is captured first so the API poll below can reject
+          # stale runs from earlier prep dispatches.
+          DISPATCH_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           gh workflow run main2main-e2e.yaml \
             --repo "${HEAD_FORK}" \
             --ref main \
             -f "vllm=${VLLM_COMMIT}" -f "base_ref=main" -f "round=prep" \
             -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}"
           for i in $(seq 1 12); do
-            RUN_ID=$(gh run list --repo "${HEAD_FORK}" \
-              --workflow main2main-e2e.yaml \
-              --event workflow_dispatch --limit 1 \
-              --json databaseId --jq '.[0].databaseId // empty' \
-              2>/dev/null || true)
+            RUN_ID=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main" \
+              | python3 -c "
+          import json, sys
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          cutoff = sys.argv[1]
+          for r in runs:
+              if r.get('path', '').endswith('main2main-e2e.yaml') and r.get('created_at', '') >= cutoff:
+                  print(r['database_id'])
+                  break
+          " "$DISPATCH_AT" 2>/dev/null || true)
             [ -n "${RUN_ID:-}" ] && break
             sleep 5
           done
@@ -397,12 +406,14 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
-      # CPU-runner install: requirements-dev.txt only.  The vllm-ascend
-      # package itself is NOT installed — no csrc compile or install on the
-      # CPU runner (the GPU runners own kernel compilation via the
-      # main2main-e2e workflow's prepare job).  UT/mypy consume the checkout
-      # through PYTHONPATH; only the _build_info.py stub is generated, which
-      # tests/ut/device imports at module load.
+      # CPU-runner install: requirements-dev.txt plus an editable install of
+      # the package itself with kernel compilation disabled (COMPILE_CUSTOM_
+      # KERNELS=0 — the GPU runners own csrc builds via the main2main-e2e
+      # workflow's prepare job).  Without the editable install the
+      # vllm.platform_plugins entry point is absent and `import vllm` fails
+      # device inference ("Failed to infer device type") — 162 UT failures
+      # in run 32989253968.  The _build_info.py stub is generated first;
+      # setup.py's develop regen overwrites it with identical content.
       #
       # uc-manager is excluded: it has no amd64 wheel and its sdist build
       # fetches vendor deps over git, which fails on this runner (run
@@ -434,6 +445,8 @@ jobs:
               "# Auto-generated file\n"
               f"__device_type__ = '{device_type}'\n")
           PY
+          COMPILE_CUSTOM_KERNELS=0 uv pip install --no-deps \
+            --no-build-isolation -e .
 
       - name: Run main2main flow
         id: run-main2main
