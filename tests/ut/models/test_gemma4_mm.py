@@ -14,6 +14,7 @@ from vllm_ascend.quantization.methods import (
 )
 from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
 
+
 def test_mxfp4_vit_linear_registers_and_loads_weight_scale():
     prefix = "vision_tower.encoder.layers.0.mlp.down_proj.linear"
     quant_config = AscendModelSlimConfig(
@@ -94,12 +95,15 @@ def test_mxfp8_vit_linear_uses_mxfp8_quant_method():
         ),
     )
 
-    with patch(
-        "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
-        return_value=current_config,
-    ), patch(
-        "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
-        return_value=current_config,
+    with (
+        patch(
+            "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+            return_value=current_config,
+        ),
+        patch(
+            "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
+            return_value=current_config,
+        ),
     ):
         linear = AscendReplicatedLinear(
             input_size=96,

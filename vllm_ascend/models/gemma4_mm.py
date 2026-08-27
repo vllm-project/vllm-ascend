@@ -25,6 +25,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import init_vllm_registered_model, maybe_prefix
+
 from vllm_ascend.quantization.methods import (
     AscendW4A4MXFP4DynamicLinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
@@ -53,7 +54,6 @@ def _patch_gemma4_vision_patch_embedder(
         patch_embedder,
         patch_embedder.__class__,
     )
-
 
 
 class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):

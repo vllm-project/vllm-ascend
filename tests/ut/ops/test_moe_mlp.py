@@ -907,7 +907,6 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
                 return_value=(requantized, requant_scale),
             ) as mock_dynamic_quant,
             patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=torch.zeros(1, 2)),
-            patch(f"{MOE_MLP}.ensure_mxfp8_moe_available"),
             patch(f"{MOE_MLP}.dispose_tensor"),
         ):
             quant_apply_mlp(**kwargs)
@@ -1157,7 +1156,6 @@ class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):
     """Non-GELU activations must NOT enter the GELU path (no regression)."""
 
     def _run_non_gelu(self, activation):
-        gate_up = torch.zeros(1, 16 if activation == MoEActivation.SWIGLUSTEP else 8)
         with (
             _mock_w8a8_gelu_compute(torch.zeros(1, 8)),
             patch(f"{MOE_MLP}._EXTRA_CTX") as mock_ctx,
