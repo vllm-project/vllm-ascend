@@ -19,8 +19,9 @@ What is guarded here (everything reachable from CPU UT):
   module-global name -- the whole reason the consolidated engine-core patch
   (``patch_engine_core.py``) can swap the module-level symbol instead of
   copying ``run_engine_core``;
-* the module-level class swaps and the consolidated engine-core entry-point
-  patch (``patch_engine_core._run_engine_core_patch_func``) actually took
+* the module-level class swaps and the consolidated engine-core patch
+  (``patch_engine_core._run_engine_core_patch_func`` plus the eager watchdog
+  ``_process_engine_step`` / ``_process_input_queue`` patches) actually took
   effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
@@ -91,6 +92,10 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 #   EngineCoreProc.run_engine_core = _run_engine_core_patch_func         (eager,
 #       installed by patch_engine_core; all run_engine_core wrappers were
 #       consolidated there)
+#   EngineCoreProc._process_engine_step / _process_input_queue =
+#       watchdog-feed patches                                            (eager,
+#       installed by patch_engine_core; previously patch_engine_watchdog
+#       self-patched at its own module level)
 #   vllm.v1.engine.core.DPEngineCoreProc = BalanceDPEngineCoreProc       (DEFERRED:
 #       swapped by patch_engine_core._patch_dp_engine_core_proc only when
 #       balance is enabled)
@@ -598,6 +603,12 @@ def test_module_level_swaps_and_engine_core_entrypoint_take_effect():
     assert _engine_core_patch._OriginalRunEngineCore is not _engine_core_patch._run_engine_core_patch_func, (
         "patch_engine_core._OriginalRunEngineCore must stash the pristine upstream run_engine_core"
     )
+    assert _UpstreamEngineCoreProc._process_engine_step is _engine_core_patch._patched_process_engine_step, (
+        "patch_engine_core must install the watchdog _process_engine_step patch"
+    )
+    assert _UpstreamEngineCoreProc._process_input_queue is _engine_core_patch._patched_process_input_queue, (
+        "patch_engine_core must install the watchdog _process_input_queue patch"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -939,6 +950,9 @@ def test_balance_engine_core_hooks(monkeypatch):
             patch.object(pe, "_balance_scheduling_enabled", return_value=True),
             patch.object(pe, "_get_dyntra_lb_config", return_value=SimpleNamespace(enabled=False)),
             patch.object(pe, "init_ascend_config", return_value=ascend_config),
+            # The wrapper now configures/starts the watchdog on every entry;
+            # mock it so the real singleton watchdog thread is never started.
+            patch.object(pe, "get_watch_dog"),
         ):
             assert pe._run_engine_core_patch_func(vllm_config=object(), dp_rank=1) == "ok"
             assert pe._engine_core_mod.DPEngineCoreProc is BalanceDPEngineCoreProc
@@ -950,6 +964,7 @@ def test_balance_engine_core_hooks(monkeypatch):
             patch.object(pe, "_balance_scheduling_enabled", return_value=False),
             patch.object(pe, "_get_dyntra_lb_config", return_value=SimpleNamespace(enabled=False)),
             patch.object(pe, "init_ascend_config", return_value=ascend_config),
+            patch.object(pe, "get_watch_dog"),
         ):
             assert pe._run_engine_core_patch_func() == "off"
             assert pe._engine_core_mod.DPEngineCoreProc is orig

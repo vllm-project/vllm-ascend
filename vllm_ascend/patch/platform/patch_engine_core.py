@@ -18,11 +18,13 @@ import vllm.v1.engine.core as _engine_core_mod
 from vllm.v1.engine.core import EngineCoreProc
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.common.utils.watch_dog import get_watch_dog
 from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc, _balance_scheduling_enabled
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import DyntraLBDPEngineCoreProc, _get_dyntra_lb_config
 from vllm_ascend.patch.platform.patch_dyntra_lb_core import _print_rank_0 as dyntra_print_rank_0
 from vllm_ascend.patch.platform.patch_pp_mtp import _patch_engine_core as pp_mtp_patch_post_step
 from vllm_ascend.patch.platform.patch_profiling_chunk import _apply_profiling_patches
+from vllm_ascend.patch.platform.patch_engine_watchdog import _patched_process_engine_step, _patched_process_input_queue
 
 _PATCHED = False
 
@@ -53,6 +55,10 @@ def _run_engine_core_patch_func(*args, dp_rank: int = 0, local_dp_rank: int = 0,
 
     _patch_dp_engine_core_proc(vllm_config, dp_rank)
 
+    _watchdog = get_watch_dog()
+    _watchdog.setup("engine")
+    _watchdog.start()
+
     return _OriginalRunEngineCore(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
 
@@ -69,6 +75,9 @@ def _apply_patch() -> None:
     # 1. Patch EngineCore.__init__ by _apply_profiling_patches
     # 2. Patch class DPEngineCoreProc by _patch_dp_engine_core_proc
     EngineCoreProc.run_engine_core = staticmethod(_run_engine_core_patch_func)
+    # Patch _process_engine_step & _process_input_queue
+    EngineCoreProc._process_engine_step = _patched_process_engine_step
+    EngineCoreProc._process_input_queue = _patched_process_input_queue
 
 
 _apply_patch()
