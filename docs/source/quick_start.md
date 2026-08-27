@@ -309,8 +309,6 @@ You can use ModelScope mirror to speed up download:
 export VLLM_USE_MODELSCOPE=True
 ```
 
-The Qwen3-0.6B offline and online examples below have been validated with default settings on Atlas A2, Atlas A3, and Atlas 950DT.
-
 There are two ways to start vLLM on Ascend NPU:
 
 === "Offline Batched Inference"

@@ -59,13 +59,6 @@ msgstr "## 使用方法"
 msgid "You can use ModelScope mirror to speed up download:"
 msgstr "您可以使用 ModelScope 镜像加速下载："
 
-msgid ""
-"The Qwen3-0.6B offline and online examples below have been validated with "
-"default settings on Atlas A2, Atlas A3, and Atlas 950DT."
-msgstr ""
-"以下 Qwen3-0.6B 离线和在线示例已使用默认配置在 Atlas A2、Atlas A3 和 Atlas 950DT "
-"上完成验证。"
-
 msgid "There are two ways to start vLLM on Ascend NPU:"
 msgstr "在昇腾 NPU 上启动 vLLM 有两种方式："
 
