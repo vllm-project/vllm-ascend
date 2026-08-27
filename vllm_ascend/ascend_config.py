@@ -1170,6 +1170,26 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+    if os.environ.get("ENABLE_MEGAKERNEL", "0") in ("1", "true", "True"):
+        # The MegaKernel GLM-5.2 decode path consumes the same packed SFA C8
+        # layout that AscendSFA uses for sparse attention. Force both main
+        # MLA and indexer caches into that layout so vLLM and MegaKernel can
+        # share one physical cache instead of allocating a second copy.
+        from vllm_ascend.utils import model_uses_sfa_sparse
+
+        model_config = vllm_config.model_config
+        hf_config = getattr(model_config, "hf_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        is_glm_moe_dsa = (
+            getattr(hf_config, "model_type", None) == "glm_moe_dsa"
+            or getattr(hf_text_config, "model_type", None) == "glm_moe_dsa"
+        )
+        if is_glm_moe_dsa and model_uses_sfa_sparse(model_config):
+            if vllm_config.additional_config is None:
+                vllm_config.additional_config = {}
+                additional_config = vllm_config.additional_config
+            additional_config["enable_sparse_sfa_c8"] = True
+            additional_config["enable_sparse_li_c8"] = True
     if "enable_flashcomm1" in additional_config or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1") is not None:
         logger.warning(
             "FlashComm is deprecated; remove enable_flashcomm1 and "

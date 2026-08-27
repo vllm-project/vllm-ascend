@@ -49,6 +49,11 @@ def register_meta_if_necessary(ns: str, op_name: str, fn, overload: str = ""):
     meta_impl_list = torch._C._dispatch_get_registrations_for_dispatch_key("Meta")
     if schema_to_find in meta_impl_list:
         return
+    # Skip ops not present in this build (e.g. LoRA ops on Ascend 950/A5).
+    base_op = op_name.split(".")[0]
+    ns_obj = getattr(torch.ops, ns, None)
+    if ns_obj is not None and not hasattr(ns_obj, base_op):
+        return
     lib.impl(op_name, fn, "Meta")
 
 
