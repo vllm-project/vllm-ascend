@@ -29,11 +29,23 @@ from vllm_ascend._310p.ops.gdn_attn_builder_310 import (
     AscendGDNAttentionBackend310,
     AscendGDNAttentionMetadataBuilder310,
 )
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 
 
 def test_ascend_gdn_attention_310_uses_310p_backend():
     assert AscendGatedDeltaNetAttention310.get_attn_backend(object()) is AscendGDNAttentionBackend310
     assert AscendGDNAttentionBackend310.get_builder_cls() is AscendGDNAttentionMetadataBuilder310
+
+
+def test_builder310_reuses_common_graph_materialization():
+    assert (
+        AscendGDNAttentionMetadataBuilder310._pad_spec_decode_metadata
+        is AscendGDNAttentionMetadataBuilder._pad_spec_decode_metadata
+    )
+    assert (
+        AscendGDNAttentionMetadataBuilder310._pad_decode_metadata
+        is AscendGDNAttentionMetadataBuilder._pad_decode_metadata
+    )
 
 
 def test_zero_padded_tokens_masks_only_padded_token_positions():
@@ -83,7 +95,7 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
         spec_token_indx=torch.arange(8, dtype=torch.int32),
     )
 
-    builder._pad_spec_decode_metadata(attn_metadata, graph_batch_size=4)
+    builder._pad_spec_decode_metadata(attn_metadata, graph_request_count=4)
 
     assert attn_metadata.spec_state_indices_tensor.tolist() == [
         [3, 30],
@@ -93,9 +105,35 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
     ]
     assert attn_metadata.spec_sequence_masks.tolist() == [True, True, False, False]
     assert attn_metadata.spec_query_start_loc.tolist() == [0, 4, 8, 8, 8]
-    assert attn_metadata.num_accepted_tokens.tolist() == [2, 3, 0, 0]
+    assert attn_metadata.num_accepted_tokens.tolist() == [2, 3, 1, 1]
     spec_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
     assert spec_meta.query_start_loc.data_ptr() == attn_metadata.spec_query_start_loc.data_ptr()
     assert spec_meta.cache_indices.data_ptr() == attn_metadata.spec_state_indices_tensor.data_ptr()
     assert spec_meta.num_accepted_tokens.data_ptr() == attn_metadata.num_accepted_tokens.data_ptr()
     assert attn_metadata.spec_decode_metadata.actual_seq_lengths.tolist() == [0, 4, 4, 0, 0]
+
+
+def test_builder310_pads_non_spec_decode_metadata_with_dummy_requests():
+    builder = object.__new__(AscendGDNAttentionMetadataBuilder310)
+    builder.non_spec_state_indices_tensor = torch.empty(4, dtype=torch.int32)
+    builder.non_spec_query_start_loc = torch.empty(5, dtype=torch.int32)
+    builder.non_spec_actual_seq_lengths = torch.empty(5, dtype=torch.int32)
+    builder.use_full_cuda_graph = True
+    attn_metadata = SimpleNamespace(
+        num_prefills=0,
+        num_decodes=2,
+        num_spec_decodes=0,
+        non_spec_state_indices_tensor=torch.tensor([3, 4], dtype=torch.int32),
+        non_spec_query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+    )
+
+    builder._pad_decode_metadata(attn_metadata, graph_request_count=4)
+
+    assert attn_metadata.non_spec_state_indices_tensor.tolist() == [
+        3,
+        4,
+        NULL_BLOCK_ID,
+        NULL_BLOCK_ID,
+    ]
+    assert attn_metadata.non_spec_query_start_loc.tolist() == [0, 1, 2, 2, 2]
+    assert attn_metadata.non_spec_decode_metadata.actual_seq_lengths.tolist() == [0, 1, 1, 0, 0]
