@@ -23,4 +23,14 @@ build_bisect_extra_args() {
   BISECT_EXTRA_ARGS+=(--native-check since-build)
   [ -n "${BISECT_CONFIG_BASE_PATH:-}" ] &&
     BISECT_EXTRA_ARGS+=(--config-base-path "$BISECT_CONFIG_BASE_PATH")
+  # Always return success: the last `[ -n ... ] && ...` above legitimately
+  # short-circuits to a non-zero status when its env var is unset (the common
+  # case -- BISECT_CONFIG_BASE_PATH defaults to ''), which otherwise becomes
+  # this function's exit status. The callers run under `set -e`
+  # (aop_process.sh; the worker branch of run.sh), so a non-zero return would
+  # abort before `python -m tools.bisect.auto_bisect` is ever launched -- on
+  # single-node the bisect never starts, and on multi-node the worker never
+  # joins the barrier (60min timeout, bad-commit SKIP, bisect aborts). This
+  # helper only appends args and has no failure mode.
+  return 0
 }
