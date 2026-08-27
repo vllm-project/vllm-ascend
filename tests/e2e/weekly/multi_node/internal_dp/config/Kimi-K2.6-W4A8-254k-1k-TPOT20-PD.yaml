@@ -1,0 +1,79 @@
+test_name: "Kimi-K2.6-W4A8-254k-1k-TPOT20-PD"
+model: "Eco-Tech/Kimi-K2.6-w4a8"
+num_nodes: 2
+npu_per_node: 16
+env_common: &env_common
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_CONNECT_TIMEOUT: "120"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  VLLM_SERVER_DEV_MODE: "1"
+  VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "8080"
+
+deployment:
+  - envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: "512"
+    server_cmd: >
+      vllm serve Eco-Tech/Kimi-K2.6-w4a8
+      --tool-call-parser kimi_k2
+      --reasoning-parser kimi_k2
+      --allowed-local-media-path /
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --tensor-parallel-size 16
+      --safetensors-load-strategy 'prefetch'
+      --enable-expert-parallel
+      --seed 1024
+      --max-model-len 262144
+      --max-num-batched-tokens 8192
+      --max-num-seqs 1
+      --enforce-eager
+      --trust-remote-code
+      --gpu-memory-utilization 0.95
+      --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 1}'
+      --additional-config '{"enable_fused_mc2":1}'
+      --kv-transfer-config '{"kv_connector": "MooncakeConnectorV1","kv_role": "kv_producer","kv_port": "30000","engine_id": "0","kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 1,"tp_size": 16},"decode": {"dp_size": 1,"tp_size": 16}}}'
+  -
+    envs:
+      <<: *env_common
+      HCCL_BUFFSIZE: "800"
+    server_cmd: >
+      vllm serve Eco-Tech/Kimi-K2.6-w4a8
+      --tool-call-parser kimi_k2
+      --reasoning-parser kimi_k2
+      --allowed-local-media-path /
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --tensor-parallel-size 16
+      --enable-expert-parallel
+      --safetensors-load-strategy 'prefetch'
+      --seed 1024
+      --max-model-len 262144
+      --max-num-batched-tokens 64
+      --max-num-seqs 1
+      --trust-remote-code
+      --gpu-memory-utilization 0.95
+      --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 7}'
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --additional-config '{"recompute_scheduler_enable":true,"enable_fused_mc2":1}'
+      --kv-transfer-config '{"kv_connector": "MooncakeConnectorV1","kv_role": "kv_consumer","kv_port": "30100","engine_id": "1","kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 1,"tp_size": 16},"decode": {"dp_size": 1,"tp_size": 16}}}'
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in254k-bs16-prefix99-kimi
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 50.9973
+    threshold: 0.97
