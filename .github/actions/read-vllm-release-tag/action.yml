@@ -1,0 +1,19 @@
+name: Read vLLM release tag
+description: Read and validate the verified vLLM release tag.
+outputs:
+  release_tag:
+    description: Verified vLLM release tag.
+    value: ${{ steps.read.outputs.release_tag }}
+runs:
+  using: composite
+  steps:
+    - name: Read release tag
+      id: read
+      shell: bash
+      run: |
+        release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+        [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+          echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+          exit 1
+        }
+        echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"

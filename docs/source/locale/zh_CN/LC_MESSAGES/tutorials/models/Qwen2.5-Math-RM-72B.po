@@ -1,0 +1,206 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-22 04:30+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:1
+msgid "Qwen2.5-Math-RM-72B"
+msgstr "Qwen2.5-Math-RM-72B"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:3
+msgid "Introduction"
+msgstr "简介"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:5
+msgid ""
+"Qwen2.5-Math-RM-72B is a 72-billion parameter reward model designed for "
+"mathematical reasoning and evaluation. It is part of Alibaba Cloud's Qwen"
+" 2.5 series, specifically optimized for scoring and ranking mathematical "
+"problem solutions. The model supports a maximum context window of 128K "
+"tokens and delivers enhanced capabilities in mathematical computation, "
+"step-by-step reasoning evaluation, and solution quality assessment."
+msgstr ""
+"Qwen2.5-Math-RM-72B 是一个720亿参数的奖励模型，专为数学推理和评估设计。它是阿里云Qwen 2.5系列的一部分，专门针对数学问题解答的评分和排序进行了优化。该模型支持最大128K token的上下文窗口，在数学计算、逐步推理评估和解答质量评估方面具有增强能力。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:7
+msgid ""
+"This document provides a detailed workflow for the complete deployment "
+"and verification of the model, including supported features, environment "
+"preparation, single-node deployment, functional verification, and "
+"performance evaluation."
+msgstr ""
+"本文档提供了该模型完整部署和验证的详细工作流程，包括支持特性、环境准备、单节点部署、功能验证和性能评估。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:9
+msgid "The `Qwen2.5-Math-RM-72B` model is supported since `vllm-ascend:v0.9.0`."
+msgstr "`Qwen2.5-Math-RM-72B` 模型自 `vllm-ascend:v0.9.0` 版本起得到支持。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:11
+msgid "Supported Features"
+msgstr "支持特性"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:13
+msgid ""
+"Refer to [supported "
+"features](../../user_guide/support_matrix/supported_models.md) to get the"
+" model's supported feature matrix."
+msgstr ""
+"请参考[支持特性](../../user_guide/support_matrix/supported_models.md)获取模型的支持特性矩阵。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:15
+msgid ""
+"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get "
+"the feature's configuration."
+msgstr ""
+"请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置信息。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:17
+msgid "Environment Preparation"
+msgstr "环境准备"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:19
+msgid "Model Weight"
+msgstr "模型权重"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:21
+msgid "`Qwen2.5-Math-RM-72B` (BF16 version):"
+msgstr "`Qwen2.5-Math-RM-72B` (BF16版本)："
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:22
+msgid ""
+"With CPU offloading: requires at least 1 Atlas 910B4 (32G × 1) card or "
+"higher"
+msgstr ""
+"启用CPU卸载：至少需要1张Atlas 910B4 (32G × 1) 或更高规格的加速卡"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:23
+msgid ""
+"Without CPU offloading: requires at least 4 Atlas 910B4 (32G × 4) cards "
+"or higher [Download model "
+"weight](https://modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)"
+msgstr ""
+"不启用CPU卸载：至少需要4张Atlas 910B4 (32G × 4) 或更高规格的加速卡 [下载模型权重](https://modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:26
+msgid ""
+"It is recommended to download the model weights to a local directory "
+"(e.g., `./Qwen2.5-Math-RM-72B/`) for quick access during deployment."
+msgstr ""
+"建议将模型权重下载到本地目录（例如 `./Qwen2.5-Math-RM-72B/`），以便在部署时快速访问。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:28
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:30
+msgid ""
+"You can use our official docker image to run `Qwen2.5-Math-RM-72B` "
+"directly."
+msgstr ""
+"您可以使用我们的官方Docker镜像直接运行 `Qwen2.5-Math-RM-72B`。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:32
+msgid ""
+"These versions support multi-NPU deployment, allowing the model to "
+"utilize all available NPU devices (e.g., 4 NPUs) for improved "
+"performance."
+msgstr ""
+"这些版本支持多NPU部署，允许模型利用所有可用的NPU设备（例如4个NPU）以获得更好的性能。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:34
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动Docker镜像，请参考[使用Docker](../../installation.md#set-up-using-docker)。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:57
+msgid "Deployment"
+msgstr "部署"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:59
+msgid "Single-node Deployment"
+msgstr "单节点部署"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:61
+msgid ""
+"Qwen2.5-Math-RM-72B supports single-node single-card deployment on the "
+"910B4 platform. Follow these steps to start the inference service:"
+msgstr ""
+"Qwen2.5-Math-RM-72B 支持在910B4平台上进行单节点单卡部署。按照以下步骤启动推理服务："
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:63
+msgid ""
+"Prepare model weights: Ensure the downloaded model weights are stored in "
+"the `./Qwen2.5-Math-RM-72B/` directory."
+msgstr ""
+"准备模型权重：确保下载的模型权重存储在 `./Qwen2.5-Math-RM-72B/` 目录中。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:64
+msgid "Create and execute the deployment script (save as `deploy.sh`):"
+msgstr "创建并执行部署脚本（保存为 `deploy.sh`）："
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:81
+msgid ""
+"The `--task reward` parameter is required to run the model in reward "
+"model mode for scoring mathematical solutions."
+msgstr ""
+"`--task reward` 参数是必需的，用于以奖励模型模式运行模型以对数学解答进行评分。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:84
+msgid "Functional Verification"
+msgstr "功能验证"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:86
+msgid "After starting the service, verify functionality using a `curl` request:"
+msgstr "启动服务后，使用 `curl` 请求验证功能："
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:101
+#, python-brace-format
+msgid ""
+"A valid response (e.g., `{\"reward_score\": 1.69}`) indicates successful "
+"deployment."
+msgstr ""
+"有效的响应（例如 `{\"reward_score\": 1.69}`）表示部署成功。"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:103
+msgid "Batch Reward Scoring"
+msgstr "批量奖励评分"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:105
+msgid "You can also score multiple responses for comparison:"
+msgstr "您还可以对多个回答进行评分以进行比较："
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:139
+msgid "References"
+msgstr "参考资料"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:141
+msgid "[Qwen2.5-Math Technical Report](https://arxiv.org/abs/2409.12122)"
+msgstr "[Qwen2.5-Math 技术报告](https://arxiv.org/abs/2409.12122)"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:142
+msgid "[HuggingFace Model Card](https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B)"
+msgstr "[HuggingFace 模型卡片](https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B)"
+
+#: ../../source/tutorials/models/Qwen2.5-Math-RM-72B.md:143
+msgid "[vLLM Documentation](https://docs.vllm.ai/)"
+msgstr "[vLLM 文档](https://docs.vllm.ai/)"

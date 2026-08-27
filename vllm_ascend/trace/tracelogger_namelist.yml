@@ -1,0 +1,378 @@
+type: "marker"
+targets:
+  - module: "vllm.entrypoints.serve.render.serving:OpenAIServingRender"
+    trace_scope: platform
+    function_name: preprocess_chat
+    entry_operation: |
+      import os
+      from vllm_ascend.trace.utils import log_action, request_id_from_obj
+      request = args[0] if args else kwargs.get("request")
+      raw_request_id = getattr(request, "raw_request_id", request_id_from_obj(request))
+      if os.getenv("ROLE") == "prefill":
+          log_action("Get prefill engine request and start pickle", raw_request_id)
+    exit_operation: |
+      import os
+      from vllm_ascend.trace.utils import log_action, request_id_from_obj
+      request = args[0] if args else kwargs.get("request")
+      raw_request_id = getattr(request, "raw_request_id", request_id_from_obj(request))
+      if os.getenv("ROLE") == "prefill":
+          log_action("Finish process request in prefill engine", raw_request_id)
+
+  - module: "vllm.entrypoints.openai.chat_completion.serving:OpenAIServingChat"
+    trace_scope: platform
+    function_name: create_chat_completion
+    entry_operation: |
+      import os
+      from vllm_ascend.trace.utils import get_or_set_chat_request_id, log_action
+      request = args[0] if args else kwargs.get("request")
+      raw_request = args[1] if len(args) > 1 else kwargs.get("raw_request")
+      raw_request_id = get_or_set_chat_request_id(request, raw_request)
+      if os.getenv("ROLE") == "prefill":
+          log_action("PD api server get request", raw_request_id)
+      else:
+          log_action("Enter decode to generate", raw_request_id)
+
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    trace_scope: platform
+    function_name: add_request
+    entry_operation: |
+      import os
+      from vllm_ascend.trace.utils import log_action
+      if os.getenv("ROLE") == "prefill" and args:
+          log_action("Prefill add waiting queue", args[0].request_id)
+
+  - module: "vllm_ascend.core.recompute_scheduler:RecomputeScheduler"
+    trace_scope: platform
+    function_name: add_request
+    entry_operation: |
+      import os
+      from vllm_ascend.trace.utils import log_action
+      if os.getenv("ROLE") == "prefill" and args:
+          log_action("Prefill add waiting queue", args[0].request_id)
+
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    trace_scope: platform
+    function_name: _update_from_kv_xfer_finished
+    entry_operation: |
+      import os
+      from vllm_ascend.trace.utils import log_action
+      kv_connector_output = args[0]
+      for req_id in (getattr(kv_connector_output, "finished_sending", None) or ()):
+          if req_id in self.requests:
+              log_action("Prefill free kv blocks", req_id)
+
+  - module: "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector:MooncakeConnectorWorker"
+    trace_scope: worker
+    function_name: start_load_kv
+    entry_operation: |
+      from vllm_ascend.trace.utils import log_action
+      metadata = args[0] if args else kwargs.get("metadata")
+      for request_id in getattr(metadata, "requests", {}) or {}:
+          log_action("Start pull kv", request_id)
+
+  - module: "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector:MooncakeConnectorWorker"
+    trace_scope: worker
+    function_name: get_finished
+    exit_operation: |
+      from vllm_ascend.trace.utils import log_action
+      done_recving = result[1] if result and len(result) > 1 else set()
+      for request_id in done_recving or ():
+          log_action("Finish pull kv", request_id)
+
+  - module: "vllm.v1.serial_utils:MsgpackDecoder"
+    trace_scope: platform
+    function_name: decode
+    exit_operation: |
+      import os
+      from vllm.v1.engine import EngineCoreOutputs
+      from vllm_ascend.trace.utils import log_action
+      if isinstance(result, EngineCoreOutputs) and os.getenv("ROLE") == "prefill":
+          for request in getattr(result, "outputs", []):
+              log_action("Client get prefill output", request.request_id)
+
+  - module: "vllm.v1.engine.core_client:AsyncMPClient"
+    trace_scope: platform
+    function_name: get_output_async
+    exit_operation: |
+      import os
+      from vllm.v1.engine import EngineCoreOutputs
+      from vllm_ascend.trace.utils import log_action
+      if isinstance(result, EngineCoreOutputs) and os.getenv("ROLE") == "prefill":
+          for request in getattr(result, "outputs", []):
+              log_action("Pop output queues", request.request_id)
+              log_action("Finish prefill pickle and start response", request.request_id)
+
+  - module: "vllm.v1.core.kv_cache_manager:KVCacheManager"
+    trace_scope: platform
+    function_name: allocate_slots
+    exit_operation: |
+      import os
+      from vllm_ascend.trace.utils import log_action
+      request = args[0] if args else kwargs.get("request")
+      delay_cache_blocks = kwargs.get("delay_cache_blocks", False)
+      if len(args) > 6:
+          delay_cache_blocks = args[6]
+      if result and delay_cache_blocks is False and os.getenv("ROLE") == "prefill":
+          log_action("Prefill get new_blocks", request.request_id)
+      elif result and delay_cache_blocks:
+          log_action("Add need pulling sequence", request.request_id)
+      if result is None and os.getenv("ROLE") == "prefill":
+          log_action("fail to add result of kv insufficient", request.request_id)
+
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    trace_scope: platform
+    function_name: schedule
+    entry_operation: &scheduler_schedule_entry |
+      import os
+      import time
+      from vllm_ascend.trace.utils import log_action
+      self._trace_engine_step_start_time = time.time()
+      try:
+          self._trace_start_free_block_num = self.kv_cache_manager.block_pool.get_num_free_blocks()
+      except Exception:
+          self._trace_start_free_block_num = 0
+
+      class TraceRunningList(list):
+          def append(trace_self, item):
+              if os.getenv("ROLE") == "prefill":
+                  log_action("success add to seq groups", item.request_id)
+              else:
+                  log_action("Start append running sequece for decode", item.request_id)
+              super().append(item)
+
+      if not getattr(self.running, "_vllm_ascend_trace_running", False):
+          wrapped_running = TraceRunningList(self.running)
+          wrapped_running._vllm_ascend_trace_running = True
+          self.running = wrapped_running
+      for request in self.waiting:
+          log_action("try to schedule in waiting queue", request.request_id)
+    exit_operation: &scheduler_schedule_exit |
+      import os
+      import time
+      from vllm_ascend.trace.utils import log_action, request_id_from_obj
+      scheduler_output_schedule = result
+      self.execute_model_start_time = time.time()
+      engine_core_str = f"{os.getpid()}-{self.execute_model_start_time}"
+      setattr(scheduler_output_schedule, "engine_core_str", engine_core_str)
+      setattr(
+          scheduler_output_schedule,
+          "engine_step_start_time",
+          getattr(self, "_trace_engine_step_start_time", time.time()),
+      )
+      setattr(
+          scheduler_output_schedule,
+          "start_free_block_num",
+          getattr(self, "_trace_start_free_block_num", 0),
+      )
+      for req in getattr(scheduler_output_schedule, "scheduled_new_reqs", []):
+          request_id = getattr(req, "req_id", request_id_from_obj(req))
+          if os.getenv("ROLE") == "prefill":
+              log_action("Prefill start execute_model", request_id)
+          else:
+              log_action("Start to send output", request_id)
+
+  - module: "vllm_ascend.core.scheduler_dynamic_batch:SchedulerDynamicBatch"
+    trace_scope: platform
+    function_name: schedule
+    entry_operation: *scheduler_schedule_entry
+    exit_operation: *scheduler_schedule_exit
+
+  - module: "vllm_ascend.core.scheduler_profiling_chunk:ProfilingChunkScheduler"
+    trace_scope: platform
+    function_name: schedule
+    entry_operation: *scheduler_schedule_entry
+    exit_operation: *scheduler_schedule_exit
+
+  - module: "vllm_ascend.core.recompute_scheduler:RecomputeScheduler"
+    trace_scope: platform
+    function_name: schedule
+    entry_operation: *scheduler_schedule_entry
+    exit_operation: *scheduler_schedule_exit
+
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    trace_scope: platform
+    function_name: update_from_output
+    entry_operation: &scheduler_update_entry |
+      import os
+      import time
+      from vllm_ascend.trace.utils import log_action, request_id_from_obj
+      scheduler_output = args[0]
+      self.execute_model_end_time = time.time()
+      if os.getenv("ROLE") == "prefill":
+          for req in getattr(scheduler_output, "scheduled_new_reqs", []):
+              request_id = getattr(req, "req_id", request_id_from_obj(req))
+              log_action("Prefill done execute_model", request_id)
+    exit_operation: &scheduler_update_exit |
+      import os
+      import time
+      from vllm_ascend.trace.utils import ip_str, log_raw
+      scheduler_output = args[0]
+      if getattr(scheduler_output, "total_num_scheduled_tokens", 0) != 0:
+          engine_step_finish_time = time.time()
+          engine_step_start_time = getattr(scheduler_output, "engine_step_start_time", engine_step_finish_time)
+          start_free_block_num = getattr(scheduler_output, "start_free_block_num", 0)
+          engine_step_execute_cost = (engine_step_finish_time - engine_step_start_time) * 1000
+          engine_core_str = getattr(scheduler_output, "engine_core_str", f"{os.getpid()}-{engine_step_start_time}")
+          execute_model_start_time = float(str(engine_core_str).split("-", 1)[1])
+          execute_model_end_time = getattr(self, "execute_model_end_time", engine_step_finish_time)
+          execute_model_cost_time = (execute_model_end_time - execute_model_start_time) * 1000
+          waiting_reqs_num_after_step = len(self.waiting)
+          running_reqs_num_after_step = (
+              len(getattr(scheduler_output, "scheduled_new_reqs", []))
+              + getattr(getattr(scheduler_output, "scheduled_cached_reqs", None), "num_reqs", 0)
+          )
+          total_tokens = getattr(scheduler_output, "total_num_scheduled_tokens", 0)
+          reqs_ids = []
+          bs_tokens = []
+          if os.getenv("ROLE") == "prefill":
+              for req_id, num_scheduled_token in getattr(scheduler_output, "num_scheduled_tokens", {}).items():
+                  reqs_ids.append(req_id)
+                  bs_tokens.append(num_scheduled_token)
+          else:
+              for req in getattr(scheduler_output, "scheduled_new_reqs", []):
+                  total_tokens += getattr(req, "num_computed_tokens", 0)
+              cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
+              for computed_tokens in getattr(cached_reqs, "num_computed_tokens", []):
+                  total_tokens += computed_tokens
+          kv_blocks_num = getattr(getattr(self, "kv_cache_config", None), "num_blocks", 0)
+          try:
+              end_free_block_num = self.kv_cache_manager.block_pool.get_num_free_blocks()
+          except Exception:
+              end_free_block_num = 0
+          cost_blocks_num = start_free_block_num - end_free_block_num
+          engine_core_outputs = None
+          if isinstance(result, dict):
+              for output in result.values():
+                  if getattr(output, "scheduler_stats", None) is not None:
+                      engine_core_outputs = output
+                      break
+          kv_cache_usage = 0
+          if engine_core_outputs is not None:
+              kv_cache_usage = getattr(engine_core_outputs.scheduler_stats, "kv_cache_usage", 0)
+          log_raw(
+              f"profile: {os.getenv('ROLE')}_{ip_str}|{engine_step_start_time}|"
+              f"{engine_step_finish_time}|{engine_step_execute_cost}|{running_reqs_num_after_step}|{total_tokens}|"
+              f"{waiting_reqs_num_after_step}|{reqs_ids}|{bs_tokens}|{execute_model_start_time}|"
+              f"{execute_model_end_time}|{execute_model_cost_time}|{kv_cache_usage}|{kv_blocks_num}|"
+              f"{start_free_block_num}|{end_free_block_num}|{cost_blocks_num}|{engine_core_str}"
+          )
+
+  - module: "vllm_ascend.core.recompute_scheduler:RecomputeScheduler"
+    trace_scope: platform
+    function_name: update_from_output
+    entry_operation: *scheduler_update_entry
+    exit_operation: *scheduler_update_exit
+
+  - module: "vllm_ascend.worker.model_runner_v1:NPUModelRunner"
+    trace_scope: worker
+    function_name: execute_model
+    entry_operation: |
+      import os
+      import time
+      from vllm_ascend.trace.utils import log_action, request_id_from_obj
+      scheduler_output = args[0] if args else kwargs.get("scheduler_output")
+      self._trace_main_model_start_time = time.time()
+      for req in getattr(scheduler_output, "scheduled_new_reqs", []):
+          request_id = getattr(req, "req_id", request_id_from_obj(req))
+          if os.getenv("ROLE") == "prefill":
+              log_action("Prefill start execute main model", request_id)
+    exit_operation: |
+      import os
+      import time
+      from vllm_ascend.trace.utils import ip_str, log_action, log_raw, request_id_from_obj
+      scheduler_output = args[0] if args else kwargs.get("scheduler_output")
+      for req in getattr(scheduler_output, "scheduled_new_reqs", []):
+          request_id = getattr(req, "req_id", request_id_from_obj(req))
+          if os.getenv("ROLE") == "prefill":
+              log_action("Prefill done execute main model", request_id)
+      if getattr(scheduler_output, "total_num_scheduled_tokens", 0) != 0 and os.getenv("ROLE") != "prefill":
+          main_model_start_time = getattr(self, "_trace_main_model_start_time", None)
+          if main_model_start_time is not None:
+              main_model_end_time = time.time()
+              execute_model_cost_time = (main_model_end_time - main_model_start_time) * 1000
+              engine_core_str = getattr(scheduler_output, "engine_core_str", "")
+              log_raw(
+                  f"profile_mainmodel: {os.getenv('ROLE')}_{ip_str}|{main_model_start_time}|"
+                  f"{main_model_end_time}|{execute_model_cost_time}|{engine_core_str}"
+              )
+
+  - module: "vllm_ascend.worker.model_runner_v1:NPUModelRunner"
+    trace_scope: worker
+    function_name: propose_draft_token_ids
+    entry_operation: |
+      import os
+      import time
+      from vllm_ascend.trace.utils import log_action, request_id_from_obj
+      scheduler_output = args[2] if len(args) > 2 else kwargs.get("scheduler_output")
+      if scheduler_output is not None:
+          self._trace_mtp_model_start_time = time.time()
+          for req in getattr(scheduler_output, "scheduled_new_reqs", []):
+              request_id = getattr(req, "req_id", request_id_from_obj(req))
+              if os.getenv("ROLE") == "prefill":
+                  log_action("Prefill start execute mtp model", request_id)
+    exit_operation: |
+      import os
+      import time
+      from vllm_ascend.trace.utils import ip_str, log_action, log_raw, request_id_from_obj
+      scheduler_output = args[2] if len(args) > 2 else kwargs.get("scheduler_output")
+      if scheduler_output is not None:
+          for req in getattr(scheduler_output, "scheduled_new_reqs", []):
+              request_id = getattr(req, "req_id", request_id_from_obj(req))
+              if os.getenv("ROLE") == "prefill":
+                  log_action("Prefill done execute mtp model", request_id)
+          if getattr(scheduler_output, "total_num_scheduled_tokens", 0) != 0 and os.getenv("ROLE") != "prefill":
+              mtp_model_start_time = getattr(self, "_trace_mtp_model_start_time", None)
+              if mtp_model_start_time is not None:
+                  mtp_model_end_time = time.time()
+                  execute_model_cost_time = (mtp_model_end_time - mtp_model_start_time) * 1000
+                  engine_core_str = getattr(scheduler_output, "engine_core_str", "")
+                  log_raw(
+                      f"profile_mtpmodel: {os.getenv('ROLE')}_{ip_str}|{mtp_model_start_time}|"
+                      f"{mtp_model_end_time}|{execute_model_cost_time}|{engine_core_str}"
+                  )
+
+  - module: "vllm.v1.engine.core:EngineCoreProc"
+    trace_scope: platform
+    function_name: process_input_sockets
+    entry_operation: |
+      import os
+      from vllm.v1.engine import EngineCoreRequestType
+      from vllm_ascend.trace.utils import log_action
+      if not getattr(self, "_trace_input_queue_patched", False):
+          original_put_nowait = self.input_queue.put_nowait
+
+          def patched_put_nowait(item, *put_args, **put_kwargs):
+              request_type, request = item
+              if request_type == EngineCoreRequestType.ADD:
+                  req = request[0] if isinstance(request, tuple) and request else request
+                  request_id = getattr(req, "request_id", "unknown")
+                  if os.getenv("ROLE") == "prefill":
+                      log_action("Start process request in prefill engine", request_id)
+                  else:
+                      log_action("Start to dispatch decode request", request_id)
+              return original_put_nowait(item, *put_args, **put_kwargs)
+
+          self.input_queue.put_nowait = patched_put_nowait
+          self._trace_input_queue_patched = True
+
+  - module: "vllm.v1.engine.core:EngineCoreProc"
+    trace_scope: platform
+    function_name: process_output_sockets
+    entry_operation: |
+      import os
+      from vllm_ascend.trace.utils import log_action
+      if not getattr(self, "_trace_output_queue_patched", False):
+          original_get = self.output_queue.get
+
+          def patched_get(*get_args, **get_kwargs):
+              value = original_get(*get_args, **get_kwargs)
+              if isinstance(value, bytes):
+                  return value
+              client_index, engine_core_outputs = value
+              for request in getattr(engine_core_outputs, "outputs", []):
+                  if os.getenv("ROLE") == "prefill":
+                      log_action("Start to send output in prefill stage", request.request_id)
+              return value
+
+          self.output_queue.get = patched_get
+          self._trace_output_queue_patched = True

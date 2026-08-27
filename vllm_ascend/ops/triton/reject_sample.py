@@ -1,0 +1,710 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+from vllm.triton_utils import tl, triton
+
+from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num
+
+
+def cal_grid_and_block_size(batch_size: int):
+    vectorcore_num = get_vectorcore_num()
+    if batch_size <= vectorcore_num:
+        grid = batch_size
+        block_size = 1
+    else:
+        grid = vectorcore_num
+        block_size = triton.next_power_of_2(triton.cdiv(batch_size, grid))
+    return grid, block_size
+
+
+@triton.jit(do_not_specialize=["max_spec_len"])
+def bonus_renew_1(
+    bonus_token_ids_ptr,
+    position,
+    output_token_ids_ptr,
+):
+    bonus_token_id = tl.load(bonus_token_ids_ptr + position)
+    tl.store(output_token_ids_ptr + position * 2 + 1, bonus_token_id)
+
+
+@triton.jit(do_not_specialize=["max_spec_len"])
+def rejection_greedy_sample_spec_len_1_triton(
+    output_token_ids_ptr,  # [batch_size, 2]
+    draft_token_ids_ptr,  # [num_tokens]
+    target_argmax_ptr,  # [num_tokens]
+    bonus_token_ids_ptr,
+    vec_len,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block_idx = tl.program_id(0)
+    offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offset < vec_len
+
+    draft_token_id = tl.load(draft_token_ids_ptr + offset, mask)
+    target_argmax_id = tl.load(target_argmax_ptr + offset, mask)
+    tl.store(output_token_ids_ptr + offset * 2, target_argmax_id, mask)
+
+    # Add validity check for pos within the loop
+    for pos in tl.range(0, BLOCK_SIZE):
+        # Calculate the global position of the current token
+        global_pos = block_idx * BLOCK_SIZE + pos
+        if global_pos < vec_len:
+            draft_token_id1 = get_element(draft_token_id, (pos,))
+            target_argmax1 = get_element(target_argmax_id, (pos,))
+            if draft_token_id1 == target_argmax1:
+                bonus_renew_1(
+                    bonus_token_ids_ptr,
+                    global_pos,
+                    output_token_ids_ptr,
+                )
+
+
+@triton.jit(do_not_specialize=["max_spec_len"])
+def bonus_renew(
+    bonus_token_ids_ptr,
+    position,
+    output_token_ids_ptr,
+    max_spec_len,
+    num_tokens1,
+):
+    bonus_token_id = tl.load(bonus_token_ids_ptr + position)
+    tl.store(output_token_ids_ptr + position * (max_spec_len + 1) + num_tokens1, bonus_token_id)
+
+
+@triton.jit(do_not_specialize=["vec_len", "max_spec_len"])
+def rejection_greedy_sample_triton(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens_ptr,  # [batch_size]
+    draft_token_ids_ptr,  # [num_tokens]
+    target_argmax_ptr,  # [num_tokens]
+    bonus_token_ids_ptr,  # [batch_size]
+    is_greedy_ptr,  # [batch_size] or None
+    vec_len,
+    max_spec_len,
+    BLOCK_SIZE: tl.constexpr,
+):
+    block_idx = tl.program_id(0)
+    offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offset < vec_len
+
+    if is_greedy_ptr is None:
+        is_greedy_mask = mask
+    else:
+        is_greedy = tl.load(is_greedy_ptr + offset, mask=mask, other=0)
+        is_greedy_mask = mask & (is_greedy != 0)
+
+    start_idx = tl.where(offset == 0, 0, tl.load(cu_num_draft_tokens_ptr + offset - 1, is_greedy_mask))
+    end_idx = tl.load(cu_num_draft_tokens_ptr + offset, is_greedy_mask)
+    num_draft_tokens = end_idx - start_idx
+
+    for pos in tl.range(0, BLOCK_SIZE):
+        num_tokens1 = get_element(num_draft_tokens, (pos,))
+        rejected = False
+        start_idx1 = get_element(start_idx, (pos,))
+        is_greedy_mask1 = get_element(is_greedy_mask, (pos,))
+        position = block_idx * BLOCK_SIZE + pos
+        for i in range(num_tokens1):
+            if not rejected:
+                draft_token_id = tl.load(draft_token_ids_ptr + start_idx1 + i)
+                target_argmax_id = tl.load(target_argmax_ptr + start_idx1 + i)
+                tl.store(
+                    output_token_ids_ptr + position * (max_spec_len + 1) + i,
+                    target_argmax_id,
+                )
+                if draft_token_id != target_argmax_id:
+                    # Reject.
+                    rejected = True
+
+        if not rejected and is_greedy_mask1:
+            bonus_renew(
+                bonus_token_ids_ptr,
+                position,
+                output_token_ids_ptr,
+                max_spec_len,
+                num_tokens1,
+            )
+
+
+@triton.jit(do_not_specialize=["max_spec_len"])
+def rejection_random_sample_kernel(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens_ptr,  # [batch_size]
+    draft_token_ids_ptr,  # [num_tokens]
+    draft_probs_ptr,  # [num_tokens, vocab_size] or None
+    target_probs_ptr,  # [num_tokens, vocab_size] or [num_tokens, selected_vocab_size] if ENABLE_REDUCE_SAMPLING
+    target_indices_ptr,  # [num_tokens, selected_vocab_size] global vocab indices, only used if ENABLE_REDUCE_SAMPLING
+    bonus_token_ids_ptr,  # [batch_size]
+    recovered_token_ids_ptr,  # [num_tokens]
+    uniform_probs_ptr,  # [num_tokens]
+    is_greedy_ptr,  # [batch_size]
+    max_spec_len,
+    vocab_size,  # vocab_size or selected_vocab_size if ENABLE_REDUCE_SAMPLING
+    global_vocab_size,  # global vocab size for draft_probs indexing (only used if ENABLE_REDUCE_SAMPLING)
+    vec_len,
+    ori_target_probs_ptr,  # [num_tokens, ori_vocab_size] original probs for entropy
+    NO_ORI_TARGET_PROBS: tl.constexpr,
+    NO_DRAFT_PROBS: tl.constexpr,
+    ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce sampling
+    ENTROPY_VERIFY: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    VOCAB_BLOCK_SIZE: tl.constexpr = 512,
+    POSTERIOR_THRESHOLD: tl.constexpr = 0.95,
+    POSTERIOR_ALPHA: tl.constexpr = 0.4,
+    SUB_BLOCK: tl.constexpr = 4096,
+    EPSILON: tl.constexpr = 1e-10,
+):
+    block_idx = tl.program_id(0)
+    offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < vec_len
+    is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
+    not_greedy_mask = is_greedy == 0
+    start_idxs = tl.where(offsets == 0, 0, tl.load(cu_num_draft_tokens_ptr + offsets - 1, not_greedy_mask))
+    end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, not_greedy_mask)
+    n_num_draft_tokens = end_idxs - start_idxs
+
+    for req_i in range(BLOCK_SIZE):
+        not_greedy = get_element(not_greedy_mask, (req_i,))
+        if not_greedy:
+            rejected = False
+            start_idx = get_element(start_idxs, (req_i,))
+            req_idx = block_idx * BLOCK_SIZE + req_i
+            num_draft_tokens = get_element(n_num_draft_tokens, (req_i,))
+
+            for pos in range(num_draft_tokens):
+                if not rejected:
+                    if ENABLE_REDUCE_SAMPLING:
+                        token_idx = start_idx + pos
+                        draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
+
+                        if draft_token_id == -1:
+                            rejected = True
+                            token_id = tl.load(recovered_token_ids_ptr + token_idx)
+                        else:
+                            target_prob = 0.0
+                            found = False
+
+                            for v_offset in range(0, vocab_size, VOCAB_BLOCK_SIZE):
+                                if not found:
+                                    vocab_offsets = v_offset + tl.arange(0, VOCAB_BLOCK_SIZE)
+                                    vocab_mask = vocab_offsets < vocab_size
+
+                                    candidate_indices = tl.load(
+                                        target_indices_ptr + token_idx * vocab_size + vocab_offsets,
+                                        mask=vocab_mask,
+                                        other=-1,
+                                    )
+
+                                    match_mask = candidate_indices == draft_token_id
+
+                                    candidate_probs = tl.load(
+                                        target_probs_ptr + token_idx * vocab_size + vocab_offsets,
+                                        mask=vocab_mask,
+                                        other=0.0,
+                                    )
+
+                                    current_match_prob = tl.sum(candidate_probs * match_mask, axis=0)
+                                    if current_match_prob > 0.0:
+                                        target_prob = current_match_prob
+                                        found = True
+
+                            if NO_DRAFT_PROBS:
+                                draft_prob = 1
+                            else:
+                                draft_prob = tl.load(draft_probs_ptr + token_idx * global_vocab_size + draft_token_id)
+
+                            uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+
+                            # Acceptance condition
+                            if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
+                                # Accept
+                                token_id = draft_token_id
+                            else:
+                                # Reject - use recovered token
+                                rejected = True
+                                token_id = tl.load(recovered_token_ids_ptr + token_idx)
+
+                        tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos, token_id)
+                    else:
+                        token_idx = start_idx + pos
+                        draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
+                        if draft_token_id == -1:
+                            rejected = True
+                            token_id = tl.load(recovered_token_ids_ptr + token_idx)
+                        else:
+                            target_prob = tl.load(target_probs_ptr + token_idx * global_vocab_size + draft_token_id)
+                            if NO_DRAFT_PROBS:
+                                draft_prob = 1
+                            else:
+                                draft_prob = tl.load(draft_probs_ptr + token_idx * global_vocab_size + draft_token_id)
+                            uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+
+                            if ENTROPY_VERIFY:
+                                loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+                                entropy = 0.0
+                                for loop_i in range(loop):
+                                    vocab_start = loop_i * SUB_BLOCK
+                                    vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                                    vocab_mask = vocab_offset < vocab_size
+                                    if NO_ORI_TARGET_PROBS:
+                                        probs = tl.load(
+                                            target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                                            vocab_mask,
+                                            other=0,
+                                        )
+                                    else:
+                                        probs = tl.load(
+                                            ori_target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                                            vocab_mask,
+                                            other=0,
+                                        )
+                                    log_probs = tl.log(probs + EPSILON)
+                                    entropy_contrib = -probs * log_probs
+                                    entropy += tl.sum(entropy_contrib)
+
+                                exp_neg_entropy = tl.exp(-entropy * POSTERIOR_ALPHA)
+                                threshold_by_entropy = exp_neg_entropy
+                                threshold = tl.minimum(threshold_by_entropy, POSTERIOR_THRESHOLD)
+                                _uniform_prob = threshold * uniform_prob
+                            else:
+                                _uniform_prob = uniform_prob
+                            # NOTE(woosuk): While the draft probability should never be 0,
+                            # we check it to avoid NaNs. If it happens to be 0, we reject.
+                            if draft_prob > 0 and target_prob / draft_prob >= _uniform_prob:
+                                # Accept.
+                                token_id = draft_token_id
+                            else:
+                                # Reject. Use recovered token.
+                                rejected = True
+                                token_id = tl.load(recovered_token_ids_ptr + token_idx)
+                        tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos, token_id)
+
+            if not rejected:
+                # If all tokens are accepted, append the bonus token.
+                bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+                tl.store(
+                    output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
+                    bonus_token_id,
+                )
+
+
+@triton.jit(do_not_specialize=["replace_from", "replace_to", "vec_len"])
+def expand_kernel(
+    output_ptr,  # [num_tokens]
+    input_ptr,  # [batch_size]
+    cu_num_tokens_ptr,  # [batch_size]
+    replace_from,
+    replace_to,
+    vec_len,
+    MAX_NUM_TOKENS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    offset = req_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    len_mask = offset < vec_len
+
+    start_idx = tl.where(offset == 0, 0, tl.load(cu_num_tokens_ptr + offset - 1, len_mask))
+    end_idx = tl.load(cu_num_tokens_ptr + offset, len_mask)
+    num_tokens = end_idx - start_idx
+
+    src_val = tl.load(input_ptr + offset, len_mask)
+    src_val = tl.where(src_val == replace_from, replace_to, src_val)
+
+    for i in tl.range(0, BLOCK_SIZE):
+        num_tokens1 = get_element(num_tokens, (i,))
+        start_idx1 = get_element(start_idx, (i,))
+        src_val1 = get_element(src_val, (i,))
+        offset1 = tl.arange(0, MAX_NUM_TOKENS)
+        tl.store(output_ptr + start_idx1 + offset1, src_val1, mask=offset1 < num_tokens1)
+
+
+@triton.jit
+def sample_recovered_tokens_kernel(
+    output_token_ids_ptr,
+    cu_num_draft_tokens_ptr,
+    draft_token_ids_ptr,
+    draft_probs_ptr,
+    target_probs_ptr,
+    target_indices_ptr,
+    q_ptr,
+    vocab_size,
+    global_vocab_size,
+    NO_DRAFT_PROBS: tl.constexpr,
+    ENABLE_REDUCE_SAMPLING: tl.constexpr,
+    SUB_BLOCK: tl.constexpr,
+    VOCAB_BLOCK_SIZE: tl.constexpr = 512,
+):
+    req_idx = tl.program_id(0)
+    pos = tl.program_id(1)
+
+    # Compute token index
+    start_idx = tl.where(req_idx == 0, 0, tl.load(cu_num_draft_tokens_ptr + req_idx - 1))
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    num_draft_tokens = end_idx - start_idx
+
+    if pos >= num_draft_tokens:
+        return
+
+    token_idx = start_idx + pos
+
+    if ENABLE_REDUCE_SAMPLING:
+        C = vocab_size
+        n_loop = tl.cdiv(C, VOCAB_BLOCK_SIZE)
+
+        global_max_p = tl.full((), -float("inf"), tl.float32)
+        global_recovered_id = tl.full((), -1, tl.int64)
+        draft_token_id = tl.load(draft_token_ids_ptr + token_idx).to(tl.int64)
+
+        for li in range(n_loop):
+            c_start = li * VOCAB_BLOCK_SIZE
+            offs = c_start + tl.arange(0, VOCAB_BLOCK_SIZE)
+            mask = offs < C
+
+            # Load target prob and global index
+            tprob = tl.load(target_probs_ptr + token_idx * C + offs, mask=mask, other=0.0).to(tl.float32)
+
+            gidx = tl.load(target_indices_ptr + token_idx * C + offs, mask=mask, other=0).to(tl.int64)
+
+            if NO_DRAFT_PROBS:
+                is_draft = (gidx == draft_token_id) & mask
+                prob = tl.where(is_draft, 0.0, tprob)
+            else:
+                valid = (gidx >= 0) & (gidx < global_vocab_size) & mask
+                dprob = tl.load(draft_probs_ptr + token_idx * global_vocab_size + gidx, mask=valid, other=0.0).to(
+                    tl.float32
+                )
+                prob = tl.maximum(tprob - dprob, 0.0)
+
+            qv = tl.load(q_ptr + req_idx * C + offs, mask=mask, other=1.0).to(tl.float32)
+
+            bad_q = (qv <= 0) | (qv != qv) | (qv == float("inf")) | (qv == -float("inf"))
+            score = tl.where(bad_q, float("-inf"), prob / qv)
+            score = tl.where(mask, score, float("-inf"))
+
+            block_best_score = tl.max(score, axis=0)
+            block_best_idx = tl.argmax(score, axis=0).to(tl.int64)
+            block_best_global_id = tl.load(target_indices_ptr + token_idx * C + (c_start + block_best_idx)).to(tl.int64)
+
+            better = block_best_score > global_max_p
+            global_max_p = tl.where(better, block_best_score, global_max_p)
+            global_recovered_id = tl.where(better, block_best_global_id, global_recovered_id)
+
+        tl.store(output_token_ids_ptr + token_idx, global_recovered_id)
+    else:
+        vocab_size = global_vocab_size
+        loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+        global_recovered_id = -1
+        global_max_p = -1.0
+        if NO_DRAFT_PROBS:
+            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+            for loop_i in range(loop):
+                vocab_start = loop_i * SUB_BLOCK
+                vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                prob = tl.load(
+                    target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+                    mask=vocab_offset < vocab_size,
+                    other=0,
+                )
+                prob = tl.where(vocab_offset == draft_token_id, 0.0, prob)
+                q = tl.load(
+                    q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
+                )
+                new_p = prob / q
+                recovered_id = tl.argmax(new_p, axis=-1)
+                max_p = get_element(new_p, (recovered_id,))
+                if max_p > global_max_p:
+                    global_max_p = max_p
+                    global_recovered_id = vocab_start + recovered_id
+        else:
+            for loop_i in range(loop):
+                vocab_start = loop_i * SUB_BLOCK
+                vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                draft_prob = tl.load(
+                    draft_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+                    mask=vocab_offset < vocab_size,
+                    other=0,
+                )
+                target_prob = tl.load(
+                    target_probs_ptr + (start_idx + pos) * vocab_size + vocab_offset,
+                    mask=vocab_offset < vocab_size,
+                    other=0,
+                )
+                prob = tl.maximum(target_prob - draft_prob, 0)
+                # NOTE(woosuk): We don't need `prob = prob / tl.sum(prob)` here because
+                # `tl.argmax` will select the maximum value.
+
+                q = tl.load(
+                    q_ptr + req_idx * vocab_size + vocab_offset, mask=vocab_offset < vocab_size, other=float("-inf")
+                )
+                new_p = prob / q
+                recovered_id = tl.argmax(new_p, axis=-1)
+                max_p = get_element(new_p, (recovered_id,))
+                if max_p > global_max_p:
+                    global_max_p = max_p
+                    global_recovered_id = vocab_start + recovered_id
+
+        tl.store(output_token_ids_ptr + start_idx + pos, global_recovered_id)
+
+
+def rejection_greedy_sample_with_triton(
+    output_token_ids,
+    num_draft_tokens,
+    cu_num_draft_tokens,
+    draft_token_ids,
+    target_argmax,
+    bonus_token_ids,
+    is_greedy,
+    max_spec_len,
+    grid,
+    block_size,
+):
+    vec_len = output_token_ids.shape[0]
+
+    if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and is_greedy is None:
+        rejection_greedy_sample_spec_len_1_triton[(grid,)](
+            output_token_ids,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            vec_len,
+            BLOCK_SIZE=block_size,
+        )
+    else:
+        rejection_greedy_sample_triton[(grid,)](
+            output_token_ids,
+            cu_num_draft_tokens,
+            draft_token_ids,
+            target_argmax,
+            bonus_token_ids,
+            is_greedy,
+            vec_len,
+            max_spec_len,
+            BLOCK_SIZE=block_size,
+        )
+
+
+def expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replace_to, max_num_tokens):
+    vec_len = batch_size
+    grid, block_size = cal_grid_and_block_size(batch_size)
+
+    expand_kernel[(grid,)](
+        expanded_x,
+        x,
+        cu_num_tokens,
+        replace_from,
+        replace_to,
+        vec_len,
+        MAX_NUM_TOKENS=max_num_tokens,  # To avoid recompilation.
+        BLOCK_SIZE=block_size,
+    )
+
+
+@triton.jit(do_not_specialize=["max_spec_len"])
+def rejection_random_sample_block_verify_kernel(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens_ptr,  # [batch_size]
+    draft_token_ids_ptr,  # [num_tokens]
+    draft_probs_ptr,  # [num_tokens, vocab_size] or None
+    target_probs_ptr,  # [num_tokens, vocab_size] or [num_tokens, selected_vocab_size] if ENABLE_REDUCE_SAMPLING
+    target_indices_ptr,  # [num_tokens, selected_vocab_size] global vocab indices, only used if ENABLE_REDUCE_SAMPLING
+    bonus_token_ids_ptr,  # [batch_size]
+    recovered_token_ids_ptr,  # [num_tokens]
+    uniform_probs_ptr,  # [num_tokens]
+    is_greedy_ptr,  # [batch_size]
+    max_spec_len,
+    vocab_size,  # vocab_size or selected_vocab_size if ENABLE_REDUCE_SAMPLING
+    global_vocab_size,  # global vocab size for draft_probs indexing (only used if ENABLE_REDUCE_SAMPLING)
+    vec_len,
+    ori_target_probs_ptr,  # [num_tokens, ori_vocab_size] original probs for entropy
+    NO_ORI_TARGET_PROBS: tl.constexpr,
+    NO_DRAFT_PROBS: tl.constexpr,
+    ENABLE_REDUCE_SAMPLING: tl.constexpr,  # Whether using reduce_sampling
+    BLOCK_SIZE: tl.constexpr,
+    ENTROPY_VERIFY: tl.constexpr,
+    VOCAB_BLOCK_SIZE: tl.constexpr = 512,
+    POSTERIOR_THRESHOLD: tl.constexpr = 0.95,
+    POSTERIOR_ALPHA: tl.constexpr = 0.4,
+    SUB_BLOCK: tl.constexpr = 4096,
+    EPSILON: tl.constexpr = 1e-10,
+):
+    block_idx = tl.program_id(0)
+    offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < vec_len
+    is_greedy = tl.load(is_greedy_ptr + offsets, mask, other=1)
+    not_greedy_mask = is_greedy == 0
+    prev_mask = not_greedy_mask & (offsets > 0)
+    prev_end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets - 1, prev_mask, other=0)
+    start_idxs = tl.where(offsets == 0, 0, prev_end_idxs)
+    end_idxs = tl.load(cu_num_draft_tokens_ptr + offsets, not_greedy_mask)
+    n_num_draft_tokens = end_idxs - start_idxs
+
+    if ENABLE_REDUCE_SAMPLING:
+        for req_i in range(BLOCK_SIZE):
+            not_greedy = get_element(not_greedy_mask, (req_i,))
+            if not_greedy:
+                pi = 1.0
+                uniform_prob = 1.0
+                last_accepted_token_pos = -1
+                start_idx = get_element(start_idxs, (req_i,))
+                req_idx = block_idx * BLOCK_SIZE + req_i
+                num_draft_tokens = get_element(n_num_draft_tokens, (req_i,))
+
+                for pos in range(num_draft_tokens):
+                    token_idx = start_idx + pos
+                    draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
+
+                    if draft_token_id == -1:
+                        pi = 0.0
+                    else:
+                        target_prob = 0.0
+                        found = False
+
+                        for v_offset in range(0, vocab_size, VOCAB_BLOCK_SIZE):
+                            if not found:
+                                vocab_offsets = v_offset + tl.arange(0, VOCAB_BLOCK_SIZE)
+                                vocab_mask = vocab_offsets < vocab_size
+
+                                candidate_indices = tl.load(
+                                    target_indices_ptr + token_idx * vocab_size + vocab_offsets,
+                                    mask=vocab_mask,
+                                    other=-1,
+                                )
+
+                                match_mask = candidate_indices == draft_token_id
+
+                                candidate_probs = tl.load(
+                                    target_probs_ptr + token_idx * vocab_size + vocab_offsets,
+                                    mask=vocab_mask,
+                                    other=0.0,
+                                )
+
+                                current_match_prob = tl.sum(candidate_probs * match_mask, axis=0)
+
+                                if current_match_prob > 0.0:
+                                    target_prob = current_match_prob
+                                    found = True
+
+                        tmp_uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+                        uniform_prob = uniform_prob * tmp_uniform_prob
+
+                        if NO_DRAFT_PROBS:
+                            draft_prob = 1.0
+                        else:
+                            draft_prob = tl.load(draft_probs_ptr + token_idx * global_vocab_size + draft_token_id)
+
+                        pi = min(pi * target_prob / draft_prob, 1.0)
+                        if draft_prob > 0 and pi >= uniform_prob:
+                            last_accepted_token_pos = pos
+
+                # Store accepted tokens
+                if last_accepted_token_pos > -1:
+                    for pos in range(last_accepted_token_pos + 1):
+                        token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+                        tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos, token_id)
+
+                # Store recovered or bonus token
+                if last_accepted_token_pos + 1 < num_draft_tokens:
+                    # Rejected - store recovered token
+                    recovered_token_id = tl.load(recovered_token_ids_ptr + start_idx + last_accepted_token_pos + 1)
+                    tl.store(
+                        output_token_ids_ptr + req_idx * (max_spec_len + 1) + last_accepted_token_pos + 1,
+                        recovered_token_id,
+                    )
+                else:
+                    # All accepted - store bonus token
+                    bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+                    tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens, bonus_token_id)
+    else:
+        for req_i in range(BLOCK_SIZE):
+            not_greedy = get_element(not_greedy_mask, (req_i,))
+            if not_greedy:
+                pi = 1.0
+                uniform_prob = 1.0
+                last_accepted_token_pos = -1
+                start_idx = get_element(start_idxs, (req_i,))
+                req_idx = block_idx * BLOCK_SIZE + req_i
+                num_draft_tokens = get_element(n_num_draft_tokens, (req_i,))
+
+                for pos in range(num_draft_tokens):
+                    token_idx = start_idx + pos
+                    draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
+
+                    if draft_token_id == -1:
+                        pi = 0.0
+                    else:
+                        target_prob = tl.load(target_probs_ptr + token_idx * vocab_size + draft_token_id)
+
+                        tmp_uniform_prob = tl.load(uniform_probs_ptr + token_idx)
+                        uniform_prob = uniform_prob * tmp_uniform_prob
+
+                        if NO_DRAFT_PROBS:
+                            draft_prob = 1.0
+                        else:
+                            vocab_for_draft = global_vocab_size if ENABLE_REDUCE_SAMPLING else vocab_size
+                            draft_prob = tl.load(draft_probs_ptr + token_idx * vocab_for_draft + draft_token_id)
+
+                        if ENTROPY_VERIFY:
+                            loop = (vocab_size + SUB_BLOCK - 1) // SUB_BLOCK
+                            entropy = 0.0
+                            for loop_i in range(loop):
+                                vocab_start = loop_i * SUB_BLOCK
+                                vocab_offset = vocab_start + tl.arange(0, SUB_BLOCK)
+                                vocab_mask = vocab_offset < vocab_size
+                                if NO_ORI_TARGET_PROBS:
+                                    probs = tl.load(
+                                        target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                                        vocab_mask,
+                                        other=0,
+                                    )
+                                else:
+                                    probs = tl.load(
+                                        ori_target_probs_ptr + token_idx * vocab_size + vocab_offset,
+                                        vocab_mask,
+                                        other=0,
+                                    )
+                                log_probs = tl.log(probs + EPSILON)
+                                entropy_contrib = -probs * log_probs
+                                entropy += tl.sum(entropy_contrib)
+
+                            exp_neg_entropy = tl.exp(-entropy * POSTERIOR_ALPHA)
+                            threshold_by_entropy = exp_neg_entropy
+                            threshold = tl.minimum(threshold_by_entropy, POSTERIOR_THRESHOLD)
+                            _uniform_prob = threshold * uniform_prob
+                        else:
+                            _uniform_prob = uniform_prob
+
+                        pi = min(pi * target_prob / draft_prob, 1.0)
+                        if draft_prob > 0 and pi >= _uniform_prob:
+                            last_accepted_token_pos = pos
+
+                # Store accepted tokens
+                if last_accepted_token_pos > -1:
+                    for pos in range(last_accepted_token_pos + 1):
+                        token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
+                        tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos, token_id)
+
+                # Store recovered or bonus token
+                if last_accepted_token_pos + 1 < num_draft_tokens:
+                    # Rejected - store recovered token
+                    recovered_token_id = tl.load(recovered_token_ids_ptr + start_idx + last_accepted_token_pos + 1)
+                    tl.store(
+                        output_token_ids_ptr + req_idx * (max_spec_len + 1) + last_accepted_token_pos + 1,
+                        recovered_token_id,
+                    )
+                else:
+                    # All accepted - store bonus token
+                    bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+                    tl.store(output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens, bonus_token_id)

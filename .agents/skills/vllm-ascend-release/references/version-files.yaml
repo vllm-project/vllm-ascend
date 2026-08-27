@@ -1,0 +1,97 @@
+# Version Files Reference
+#
+# This file defines all files that need version updates during a release.
+# The script update_version_references.py loads this configuration.
+#
+# Pattern syntax:
+# - Use X.X.X as placeholder for version numbers (will match \d+.\d+.\d+ and rc versions)
+# - Use XXXX as placeholder for issue numbers (will match \d+)
+# - 'pattern' entries are auto-updated with regex replacement
+# - 'variable' entries update variable definitions (YAML, shell, Docker)
+# - 'action' entries require manual intervention
+
+files:
+  - path: README.md
+    description: Main README with getting started instructions
+    updates:
+      - pattern: "pip install vllm-ascend==X.X.X"
+        replacement: "pip install vllm-ascend=={version_num}"
+      - pattern: "vllm-ascend:vX.X.X"
+        replacement: "vllm-ascend:{version}"
+
+  - path: README.zh.md
+    description: Chinese README
+    updates:
+      - pattern: "pip install vllm-ascend==X.X.X"
+        replacement: "pip install vllm-ascend=={version_num}"
+      - pattern: "vllm-ascend:vX.X.X"
+        replacement: "vllm-ascend:{version}"
+
+  - path: docs/conf.py
+    description: Sphinx documentation configuration
+    updates:
+      - pattern: 'version = "X.X.X"'
+        replacement: 'version = "{version_num}"'
+      - pattern: 'release = "X.X.X"'
+        replacement: 'release = "{version_num}"'
+
+  - path: docs/source/faqs.md
+    description: FAQs page with feedback issue link
+    updates:
+      - pattern: "https://github.com/vllm-project/vllm-ascend/issues/XXXX"
+        replacement: "{feedback_issue}"
+
+  - path: docs/source/user_guide/release_notes.md
+    description: Release notes document
+    updates:
+      - action: "Add new release notes section"
+        description: "Add complete release notes for the new version at the top of the file"
+
+  - path: docs/source/community/versioning_policy.md
+    description: Version compatibility and release policy
+    updates:
+      - action: "Update Release compatibility matrix"
+        description: "Add row for new version with vLLM compatibility info"
+      - action: "Update Release window section"
+        description: "Update current release window dates"
+      - action: "Update Branch states section"
+        description: "Update branch status (stable/development)"
+
+  - path: docs/source/community/contributors.md
+    description: Contributors list
+    updates:
+      - action: "Add new contributors"
+        description: "Add contributors from this release cycle"
+
+  - path: .github/workflows/*.yml
+    description: CI workflow files
+    updates:
+      - variable: VLLM_VERSION
+        description: "Update vLLM version for CI testing"
+
+  - path: docker/Dockerfile*
+    description: Docker build files
+    updates:
+      - variable: VLLM_VERSION
+        description: "Update base vLLM version"
+
+# Update order
+# Files should be updated in this order to ensure consistency
+update_order:
+  1: docs/conf.py
+  2: README.md
+  3: README.zh.md
+  4: docs/source/faqs.md
+  5: docs/source/user_guide/release_notes.md
+  6: docs/source/community/versioning_policy.md
+  7: docs/source/community/contributors.md
+  8: .github/workflows/*.yml
+  9: docker/Dockerfile*
+
+# Validation
+# After updates, verify these conditions
+validation:
+  - "grep -r 'X.X.X' docs/ README* | grep -v node_modules  # Check for consistent version"
+  - "grep 'version = ' docs/conf.py  # Verify version in docs config"
+  - "grep 'VLLM_VERSION' .github/workflows/*.yml  # Check CI workflow versions"
+  - "head -50 docs/source/user_guide/release_notes.md  # Verify release notes added"

@@ -1,0 +1,39 @@
+# Should be mirrored in pyproject.toml
+cmake>=3.26
+decorator
+einops
+numpy
+packaging
+pip
+pybind11
+pyyaml
+regex
+scipy
+pandas
+psutil
+setuptools>=64
+setuptools-scm>=8
+torch==2.10.0
+torch-npu==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
+triton-ascend==3.2.1
+wheel
+xgrammar>=0.1.30
+pandas-stubs
+compressed_tensors>=0.11.0
+
+# Required for disaggregated prefill
+msgpack
+quart
+
+# Required for N-gram speculative decoding
+numba
+
+# Required for kvpool supports memcache backend
+memfabric_hybrid
+memcache_hybrid
+
+arctic-inference==0.1.1
+transformers==5.5.4
+fastapi<0.124.0

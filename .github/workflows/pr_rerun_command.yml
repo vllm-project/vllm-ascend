@@ -1,0 +1,190 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Handle /rerun Command
+
+on:
+  repository_dispatch:
+    types: [rerun-command]
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  actions: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  rerun:
+    name: Re-run failed CI jobs
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    outputs:
+      rerun_count: ${{ steps.rerun.outputs.rerun_count }}
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Check user authorization
+        id: auth
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          ACTOR='${{ github.event.client_payload.github.payload.comment.user.login }}'
+          PR_AUTHOR='${{ github.event.client_payload.pull_request.user.login }}'
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+
+          if [ "$ACTOR" = "$PR_AUTHOR" ]; then
+            echo "User $ACTOR is the PR author, authorized."
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+          else
+            ROLE_NAME=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/collaborators/$ACTOR/permission" | jq -r '.role_name // empty')
+            case "$ROLE_NAME" in
+              triage|write|maintain|admin)
+                echo "authorized=true" >> "$GITHUB_OUTPUT"
+                ;;
+              *)
+                echo "::error::User $ACTOR is not the PR author and does not have triage+ permission."
+                echo "authorized=false" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          fi
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: rerun command failed: you do not have permission. Only the PR author or users with triage+ permission can trigger /rerun.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
+      - name: Re-run failed jobs
+        id: rerun
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          PR_SHA='${{ github.event.client_payload.pull_request.head.sha }}'
+          REPO='${{ github.event.client_payload.github.payload.repository.full_name }}'
+
+          # Get all workflow runs for this SHA, sorted by newest first.
+          RUNS=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$REPO/actions/runs?head_sha=$PR_SHA&per_page=100&sort=created&direction=desc" \
+            | tr -d '\000-\010\013\014\016-\037')
+          TOTAL=$(echo "$RUNS" | jq '.total_count // 0')
+          if [ "$TOTAL" = "0" ]; then
+            {
+              echo "rerun_count=0"
+              echo "comment_body<<CMTEOF"
+              echo "[Bot]: rerun completed. No workflow runs found for this commit."
+              echo "CMTEOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Dedup: keep only the latest run per workflow name (by run ID)
+          CANDIDATE_RUNS=$(echo "$RUNS" | jq -r '
+            [.workflow_runs[] | {id: .id, name: .name, status: .status, conclusion: .conclusion}] |
+            group_by(.name) |
+            map(max_by(.id)) |
+            .[] | "\(.id)|\(.name)|\(.status)|\(.conclusion // "null")"')
+
+          RERUNNED=""
+          FAILED=""
+          RERUN_COUNT=0
+
+          while IFS= read -r RUN; do
+            [ -z "$RUN" ] && continue
+            RUN_ID=$(echo "$RUN" | cut -d'|' -f1)
+            RUN_NAME=$(echo "$RUN" | cut -d'|' -f2)
+            STATUS=$(echo "$RUN" | cut -d'|' -f3)
+            CONCLUSION=$(echo "$RUN" | cut -d'|' -f4)
+
+            if [ "$STATUS" != "completed" ]; then
+              echo "Skipping $RUN_NAME (ID: $RUN_ID) - still in progress."
+              FAILED="${FAILED}"$'\n'"- $RUN_NAME: still in progress, retry /rerun after completion"
+              continue
+            fi
+
+            if [ "$CONCLUSION" != "failure" ]; then
+              echo "Skipping $RUN_NAME (ID: $RUN_ID) - conclusion is '$CONCLUSION'."
+              continue
+            fi
+
+            echo "Re-running failed jobs in $RUN_NAME (ID: $RUN_ID)..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs")
+            if [ "$HTTP_CODE" = "201" ]; then
+              echo "  -> Success."
+              RERUNNED="${RERUNNED}"$'\n'"- $RUN_NAME"
+              RERUN_COUNT=$((RERUN_COUNT + 1))
+            else
+              echo "  -> Failed (HTTP $HTTP_CODE)."
+              FAILED="${FAILED}"$'\n'"- $RUN_NAME: API returned HTTP $HTTP_CODE"
+            fi
+          done <<< "$CANDIDATE_RUNS"
+
+          # Build comment body
+          {
+            echo "comment_body<<CMTEOF"
+            if [ -n "$RERUNNED" ]; then
+              echo "[Bot]: rerun completed."
+              echo ""
+              echo "**Rerun:**$RERUNNED"
+              echo ""
+            fi
+            if [ -n "$FAILED" ]; then
+              if [ -z "$RERUNNED" ]; then
+                echo "[Bot]: rerun completed."
+                echo ""
+              fi
+              echo "**Failed:**$FAILED"
+              echo ""
+            fi
+            if [ -z "$RERUNNED" ] && [ -z "$FAILED" ]; then
+              echo "[Bot]: rerun completed. No failed jobs found."
+            fi
+            echo "CMTEOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "rerun_count=$RERUN_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Comment result on PR
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: ${{ steps.rerun.outputs.comment_body }}
+          reactions: hooray
