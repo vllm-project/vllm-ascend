@@ -8,14 +8,12 @@ from typing import TYPE_CHECKING
 import torch
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    ECCPUConnectorMetadata,
     _get_encoder_cache_hidden_dim,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.connector import ECCPUConnector
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class AscendECCPUConnector(ECCPUConnector):
@@ -52,22 +50,3 @@ class AscendECCPUConnector(ECCPUConnector):
         )
 
         return AscendECCPUWorker(vllm_config)
-
-    def _make_scheduler(self, vllm_config: "VllmConfig"):
-        from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.scheduler import (
-            AscendECCPUScheduler,
-        )
-
-        return AscendECCPUScheduler(vllm_config)
-
-    def build_connector_meta(self, scheduler_output: "SchedulerOutput") -> ECCPUConnectorMetadata:
-        metadata = super().build_connector_meta(scheduler_output)
-
-        # Upstream's LIFO allocator returns the selected blocks in stack-pop
-        # order. Treat the allocation as a set and publish a stable ascending
-        # order for both save and load metadata. This keeps their byte layout
-        # identical while exposing physically adjacent blocks as contiguous
-        # runs that the Ascend worker can submit as one larger DMA descriptor.
-        metadata.saves = {mm_hash: sorted(block_ids) for mm_hash, block_ids in metadata.saves.items()}
-        metadata.loads = {mm_hash: sorted(block_ids) for mm_hash, block_ids in metadata.loads.items()}
-        return metadata

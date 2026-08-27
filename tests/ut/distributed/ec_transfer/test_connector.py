@@ -7,15 +7,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
-from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    ECCPUConnectorMetadata,
-)
 from vllm.distributed.ec_transfer.ec_connector.cpu.connector import (
     ECCPUConnector,
 )
 
 import vllm_ascend.distributed.ec_transfer.ec_connector.cpu.connector as connector_mod
-import vllm_ascend.distributed.ec_transfer.ec_connector.cpu.scheduler as scheduler_mod
 from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.connector import (
     AscendECCPUConnector,
 )
@@ -66,29 +62,12 @@ def test_valid_cpu_bytes_delegates_to_upstream_connector(monkeypatch):
     assert calls == [(config, ECConnectorRole.SCHEDULER)]
 
 
-def test_make_scheduler_uses_ascend_scheduler(monkeypatch):
-    scheduler = object()
-    config = _config("64")
-    monkeypatch.setattr(
-        scheduler_mod,
-        "AscendECCPUScheduler",
-        lambda received_config: scheduler if received_config is config else None,
-    )
+def test_make_worker_uses_ascend_backend(monkeypatch):
+    import vllm_ascend.distributed.ec_transfer.ec_connector.cpu.worker as worker_mod
+
+    config = object()
+    expected = object()
+    monkeypatch.setattr(worker_mod, "AscendECCPUWorker", lambda cfg: expected)
     connector = AscendECCPUConnector.__new__(AscendECCPUConnector)
 
-    assert connector._make_scheduler(config) is scheduler
-
-
-def test_build_connector_meta_orders_blocks_for_dma_coalescing():
-    metadata = ECCPUConnectorMetadata(
-        saves={"save": [8, 7, 6]},
-        loads={"load": [4, 2, 3]},
-    )
-    connector = AscendECCPUConnector.__new__(AscendECCPUConnector)
-    connector.connector_scheduler = SimpleNamespace(build_connector_meta=lambda output: metadata)
-
-    result = connector.build_connector_meta(None)
-
-    assert result is metadata
-    assert result.saves == {"save": [6, 7, 8]}
-    assert result.loads == {"load": [2, 3, 4]}
+    assert connector._make_worker(config) is expected
