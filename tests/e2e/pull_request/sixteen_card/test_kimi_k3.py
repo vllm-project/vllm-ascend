@@ -3,7 +3,8 @@
 """Single-node A3 (16 logical NPUs) K3 functional tests, not accuracy tests.
 
 Build local configs and initialize dummy weights; no full checkpoint is needed.
-Keep production tensor widths while reducing the target to 16 layers/experts.
+Keep production tensor widths with a six-layer, 16-expert target. Cover Block5
+at TP16, quantized GQA at DP2/TP8, legacy MLA at P8/D8, and MTP with an image.
 Random weights cannot validate checkpoint loading, QuaRot or acceptance rates.
 """
 
@@ -25,15 +26,16 @@ from vllm.v1.metrics.reader import Counter
 
 from tests.e2e.conftest import RemoteOpenAIServer, RemotePDServer, VllmRunner
 
-NUM_LAYERS = 16
+NUM_LAYERS = 6
 NUM_EXPERTS = 16
 NUM_VISION_LAYERS = 2
 VOCAB_SIZE = 163840
 MAX_MODEL_LEN = 2048
 OUTPUT_TOKENS = 2
-# Keep the final consecutive MLA layers as well as the regular KDA/MLA pattern.
-# Layer 13 also crosses the production attention-residual block boundary (12).
-FULL_ATTN_LAYERS = (4, 8, 12, 15, 16)
+# Keep both KDA and MLA, including the final consecutive MLA layers. A smaller
+# attention-residual block retains cross-block execution in the reduced model.
+FULL_ATTN_LAYERS = (2, 5, 6)
+ATTN_RES_BLOCK_SIZE = 4
 
 
 def _text_config() -> dict:
@@ -61,7 +63,7 @@ def _text_config() -> dict:
         "topk_group": 1,
         "topk_method": "noaux_tc",
         "moe_renormalize": True,
-        "attn_res_block_size": 12,
+        "attn_res_block_size": ATTN_RES_BLOCK_SIZE,
         "num_attention_heads": 96,
         "num_key_value_heads": 96,
         "q_lora_rank": 1536,
@@ -124,7 +126,7 @@ def _draft_config(variant: str) -> dict:
             num_target_layers=NUM_LAYERS,
             # The drafter consumes intermediate layer outputs, before the final
             # target layer. Remap all five taps to the reduced target.
-            dflash_config={"mask_token_id": 163824, "target_layer_ids": [1, 3, 7, 11, 14]},
+            dflash_config={"mask_token_id": 163824, "target_layer_ids": [0, 1, 2, 3, 4]},
             rope_parameters={
                 "rope_type": "yarn",
                 "factor": 16.0,
@@ -145,7 +147,7 @@ def _draft_config(variant: str) -> dict:
         target_hidden_size=7168,
         target_num_hidden_layers=NUM_LAYERS,
         num_target_layers=5,
-        target_layer_ids=[1, 3, 7, 11, 14],
+        target_layer_ids=[0, 1, 2, 3, 4],
         mask_token_id=163837,
         rope_parameters={
             "rope_type": "yarn",
@@ -166,7 +168,7 @@ def _draft_config(variant: str) -> dict:
             head_dim=64,
             qk_head_dim=192,
             num_target_layers=3,
-            target_layer_ids=[7, 11, 14],
+            target_layer_ids=[1, 3, 4],
             layer_types=["full_attention"] * 3,
             mask_token_id=163839,
             markov_rank=512,
@@ -275,9 +277,11 @@ def _write_w4a8_description(path: Path) -> None:
         if layer:
             for projection in ("routed_expert_down_proj", "routed_expert_up_proj"):
                 description[f"{prefix}.block_sparse_moe.{projection}.weight"] = "W8A8_DYNAMIC"
-            for expert in range(NUM_EXPERTS):
-                for projection in ("w1", "w2", "w3"):
-                    description[f"{prefix}.block_sparse_moe.experts.{expert}.{projection}.weight"] = "W4A8_DYNAMIC"
+            # ModelSlim selects the fused expert group's scheme from expert 0.
+            # All 16 experts still run; duplicating their identical descriptions
+            # only bloats the config sent to each spawned worker.
+            for projection in ("w1", "w2", "w3"):
+                description[f"{prefix}.block_sparse_moe.experts.0.{projection}.weight"] = "W4A8_DYNAMIC"
     description = {f"language_model.{key}" if key != "optional" else key: value for key, value in description.items()}
     for layer in range(NUM_VISION_LAYERS):
         for projection in ("mlp.fc0", "mlp.fc1", "wqkv", "wo"):
@@ -287,11 +291,13 @@ def _write_w4a8_description(path: Path) -> None:
     (path / "quant_model_description.json").write_text(json.dumps(description), encoding="utf-8")
 
 
-@pytest.fixture
-def k3_models(tmp_path: Path) -> dict[str, str]:
+@pytest.fixture(scope="module")
+def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    tmp_path = tmp_path_factory.mktemp("k3-dummy")
     models = {"target": _write_target(tmp_path / "target")}
     models["w4a8"] = _write_target(tmp_path / "w4a8")
     _write_w4a8_description(tmp_path / "w4a8")
+    models["mtp"] = _write_target(tmp_path / "mtp", mtp=True)
     for variant in ("mla", "mla_block5", "gqa"):
         models[variant] = _write_config(tmp_path / variant, _draft_config(variant))
     return models
@@ -368,14 +374,9 @@ def _generate(llm, prompts: list[dict]):
     return outputs
 
 
-@pytest.mark.parametrize("variant", ["mla", "mla_block5", "gqa"])
-def test_k3_dspark_tp16(k3_models: dict[str, str], variant: str) -> None:
-    args = _engine_args(k3_models, variant)
-    target = k3_models["target"]
-    if variant == "gqa":
-        args["quantization"] = "ascend"
-        target = k3_models["w4a8"]
-    with VllmRunner(target, **args) as runner:
+def test_k3_mla_block5_tp16(k3_models: dict[str, str]) -> None:
+    args = _engine_args(k3_models, "mla_block5")
+    with VllmRunner(k3_models["target"], **args) as runner:
         llm = runner.model
         _generate(llm, [_prompt(1)])
         # Kernel-block and block+1 prefill, mixed lengths, and chunked prefill.
@@ -450,20 +451,22 @@ def _draft_counts(url: str) -> dict[str, float]:
     }
 
 
-def test_k3_gqa_dp2_tp8(k3_models: dict[str, str]) -> None:
+def test_k3_gqa_w4a8_dp2_tp8(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "gqa", tp=8)
     args["data_parallel_size"] = 2
+    args["quantization"] = "ascend"
     args["additional_config"]["enable_shared_expert_dp"] = True
     port = get_open_port()
     with RemoteOpenAIServer(
-        k3_models["target"],
-        [*_serve_args(args), "--port", str(port)],
+        k3_models["w4a8"],
+        [*_serve_args(args), "--port", str(port), "--api-server-count", "1"],
         server_host="127.0.0.1",
         server_port=port,
         auto_port=False,
         max_wait_seconds=600,
     ) as server:
-        prompts = [_prompt(length, salt=i * 137)["prompt_token_ids"] for i, length in enumerate((1, 129, 769, 1153))]
+        lengths = (1, 129, 769, MAX_MODEL_LEN - OUTPUT_TOKENS)
+        prompts = [_prompt(length, salt=i * 137)["prompt_token_ids"] for i, length in enumerate(lengths)]
         with ThreadPoolExecutor(max_workers=4) as pool:
             outputs = list(pool.map(lambda prompt: _completion(server.url_for("v1", "completions"), prompt), prompts))
         assert len(outputs) == len(prompts)
@@ -471,8 +474,7 @@ def test_k3_gqa_dp2_tp8(k3_models: dict[str, str]) -> None:
         assert len(counts) == 2 and all(count > 0 for count in counts.values()), counts
 
 
-def test_k3_mtp_image_tp16(k3_models: dict[str, str], tmp_path: Path) -> None:
-    target = _write_target(tmp_path / "mtp", mtp=True)
+def test_k3_mtp_image_tp16(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "gqa")
     args["speculative_config"] = {
         "method": "mtp",
@@ -481,7 +483,7 @@ def test_k3_mtp_image_tp16(k3_models: dict[str, str], tmp_path: Path) -> None:
         "draft_load_config": {"load_format": "dummy"},
     }
     args["limit_mm_per_prompt"] = {"image": 1}
-    with VllmRunner(target, **args) as runner:
+    with VllmRunner(k3_models["mtp"], **args) as runner:
         _generate(runner.model, [_prompt(1)])
         image_prompt = {
             "prompt": "<|kimi_image_placeholder|> describe",
@@ -492,7 +494,7 @@ def test_k3_mtp_image_tp16(k3_models: dict[str, str], tmp_path: Path) -> None:
         assert drafts and sum(m.value for m in drafts) > 0, "Requests bypassed MTP"
 
 
-def test_k3_gqa_pd_tp8(k3_models: dict[str, str]) -> None:
+def test_k3_mla_pd_tp8(k3_models: dict[str, str]) -> None:
     prefill_port, decode_port = get_open_port(), get_open_port()
     transfer_config = {
         "kv_connector": "MooncakeConnectorV1",
@@ -501,13 +503,13 @@ def test_k3_gqa_pd_tp8(k3_models: dict[str, str]) -> None:
             "decode": {"dp_size": 1, "tp_size": 8},
         },
     }
-    prefill_args = _engine_args(k3_models, "gqa", tp=8)
+    prefill_args = _engine_args(k3_models, "mla", tp=8)
     # P also builds the draft KV that D consumes; both peers need the same
     # target/draft layer layout even though P only generates one token.
     prefill_args.pop("compilation_config")
     prefill_args["enforce_eager"] = True
     prefill_args["kv_transfer_config"] = dict(transfer_config, kv_role="kv_producer", kv_port=get_open_port())
-    decode_args = _engine_args(k3_models, "gqa", tp=8)
+    decode_args = _engine_args(k3_models, "mla", tp=8)
     decode_args["kv_transfer_config"] = dict(transfer_config, kv_role="kv_consumer", kv_port=get_open_port())
     servers = [
         [k3_models["target"], "--port", str(prefill_port), *_serve_args(prefill_args)],

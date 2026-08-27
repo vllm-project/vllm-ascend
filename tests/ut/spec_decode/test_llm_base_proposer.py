@@ -116,6 +116,7 @@ def test_load_model_reads_validated_draft_window_size():
     proposer.runner = SimpleNamespace(max_num_reqs=8)
     proposer.device = "cpu"
     proposer.parallel_drafting = False
+    proposer.supports_mm_inputs = False
     proposer._maybe_share_embeddings = MagicMock()
     proposer._maybe_share_topk_indices = MagicMock()
     proposer._maybe_share_lm_head = MagicMock()
