@@ -119,31 +119,35 @@ class TestSwigluOaiDynamicMxQuant(unittest.TestCase):
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
-    def test_unquant_situ_uses_upstream_activation_contract(self):
-        hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
-        gate_up_out = torch.randn(2, 16, dtype=torch.bfloat16)
-        expected_output = torch.randn(2, 8, dtype=torch.bfloat16)
-        with set_current_vllm_config(VllmConfig()):
-            expected_activation = SituAndMul(beta=4.0, linear_beta=25.0)(gate_up_out)
+    def test_unquant_situ_matches_upstream_without_config_context(self):
+        for dtype in (torch.bfloat16, torch.float16, torch.float32):
+            for linear_beta in (None, 25.0):
+                with self.subTest(dtype=dtype, linear_beta=linear_beta):
+                    hidden_states = torch.randn(2, 8, dtype=dtype)
+                    gate_up_out = torch.linspace(-40, 40, 32).reshape(2, 16).to(dtype)
+                    expected_output = torch.randn(2, 8, dtype=dtype)
+                    with set_current_vllm_config(VllmConfig()):
+                        expected_activation = SituAndMul(beta=4.0, linear_beta=linear_beta).forward_native(gate_up_out)
 
-            with patch(
-                f"{MOE_MLP}.torch_npu.npu_grouped_matmul",
-                side_effect=[[gate_up_out], [expected_output]],
-                create=True,
-            ) as grouped_matmul:
-                output, _ = unquant_apply_mlp(
-                    hidden_states=hidden_states,
-                    w1=torch.randn(1, 8, 16),
-                    w2=torch.randn(1, 8, 8),
-                    group_list=torch.tensor([1, 1]),
-                    activation=MoEActivation.SITU,
-                    activation_situ_beta=4.0,
-                    activation_situ_linear_beta=25.0,
-                    need_trans=False,
-                )
+                    # The worker forward runs outside the model-init config context.
+                    with patch(
+                        f"{MOE_MLP}.torch_npu.npu_grouped_matmul",
+                        side_effect=[[gate_up_out], [expected_output]],
+                        create=True,
+                    ) as grouped_matmul:
+                        output, _ = unquant_apply_mlp(
+                            hidden_states=hidden_states,
+                            w1=torch.randn(1, 8, 16),
+                            w2=torch.randn(1, 8, 8),
+                            group_list=torch.tensor([1, 1]),
+                            activation=MoEActivation.SITU,
+                            activation_situ_beta=4.0,
+                            activation_situ_linear_beta=linear_beta,
+                            need_trans=False,
+                        )
 
-        self.assertIs(output, expected_output)
-        torch.testing.assert_close(grouped_matmul.call_args_list[1].kwargs["x"][0], expected_activation)
+                    self.assertIs(output, expected_output)
+                    torch.testing.assert_close(grouped_matmul.call_args_list[1].kwargs["x"][0], expected_activation)
 
     def test_unquant_swigluoai_uninterleave_falls_back_on_a5(self):
         hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
@@ -596,6 +600,7 @@ class TestQuantApplyMlpSituEplb(_GeluPathBase):
         stream_patch, evt = _patch_npu_stream()
 
         with (
+            patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
             stream_patch,
             patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True) as mock_gmm1,
             patch(
@@ -679,7 +684,6 @@ class TestQuantApplyMlpSituEplb(_GeluPathBase):
         stream_patch, evt = _patch_npu_stream()
 
         with (
-            set_current_vllm_config(VllmConfig()),
             stream_patch,
             patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
             patch(
@@ -718,7 +722,6 @@ class TestQuantApplyMlpSituEplb(_GeluPathBase):
         stream_patch, evt = _patch_npu_stream()
 
         with (
-            set_current_vllm_config(VllmConfig()),
             stream_patch,
             patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
             patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
