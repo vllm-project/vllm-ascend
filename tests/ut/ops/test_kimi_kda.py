@@ -10,7 +10,6 @@ from torch import nn
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
-    AscendKimiK3MergedGateProjection,
     _prepare_beta,
     _zero_padded_output,
     _zero_padded_recurrent_output,
@@ -91,12 +90,9 @@ def test_kda_output_norm_uses_checkpoint_epsilon():
             enable_prompt_embeds=False,
         )
     )
-    with (
-        patch(
-            "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
-            new=fake_upstream_init,
-        ),
-        patch("vllm_ascend.ops.kimi_kda.is_vl_model", return_value=False),
+    with patch(
+        "vllm_ascend.ops.kimi_kda.KimiK3DeltaAttention.__init__",
+        new=fake_upstream_init,
     ):
         attention = AscendKimiK3DeltaAttention(config, vllm_config)
 
@@ -201,28 +197,6 @@ def test_prefill_accepts_unbounded_gate():
     assert kda_gate_cumsum.call_args.args[0] is transformed_gate
     assert kda_gate_cumsum.call_args.args[1] == 64
     assert "use_gate_in_kernel" not in kda_gate_cumsum.call_args.kwargs
-
-
-def test_merged_gate_projection_uses_vllm_shard_loader():
-    projection = AscendKimiK3MergedGateProjection.__new__(
-        AscendKimiK3MergedGateProjection,
-    )
-    nn.Module.__init__(projection)
-    param = nn.Parameter(torch.empty(4, 3))
-    loaded_weight = torch.empty(2, 3)
-
-    with patch(
-        "vllm_ascend.ops.kimi_kda._KimiGDNMergedColumnParallelLinear.weight_loader",
-        autospec=True,
-    ) as weight_loader:
-        projection.load_shard_weight(param, loaded_weight, shard_id=2)
-
-    weight_loader.assert_called_once_with(
-        projection,
-        param,
-        loaded_weight,
-        2,
-    )
 
 
 def test_kda_empty_forward_context_clears_preallocated_output():
