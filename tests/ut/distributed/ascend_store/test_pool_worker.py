@@ -724,8 +724,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def test_wait_for_save_pipelines_one_step(self):
         worker = self._make_worker()
         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        first_batch = KVCacheStoreBatch(1, [])
-        second_batch = KVCacheStoreBatch(2, [])
+        first_batch = KVCacheStoreBatch([])
+        second_batch = KVCacheStoreBatch([])
         send_thread.prepare_save_batch.side_effect = [first_batch, second_batch]
         worker.kv_send_thread = send_thread
 
@@ -770,7 +770,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def test_partial_save_forces_current_step_fence(self):
         worker = self._make_worker()
         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        batch = KVCacheStoreBatch(1, [])
+        batch = KVCacheStoreBatch([])
         send_thread.prepare_save_batch.return_value = batch
         worker.kv_send_thread = send_thread
 

@@ -1793,29 +1793,22 @@ class KVPoolWorker:
             force_current_step=force_current_step,
         )
 
-    def _wait_for_save_tp_mismatch(self, connector_metadata: AscendConnectorMetadata) -> None:
-        current_event = None
-        assert self.kv_send_thread is not None
-        send_thread = self.kv_send_thread
-
-        for request in connector_metadata.requests:
-            can_save = request.can_save
-            if can_save is None or not can_save:
-                continue
-            if current_event is None:
-                current_event = torch.npu.Event()
-                current_event.record()
-            request.skip_null_blocks_by_group = self.group_uses_align_state
-            request.current_event = current_event
-            send_thread.add_stored_request(request.req_id)
-            send_thread.add_request(request)
-
-        if current_event is not None:
-            send_thread.request_queue.join()
-
     def wait_for_save(self, connector_metadata: AscendConnectorMetadata) -> None:
         if self.tp_mismatch:
-            self._wait_for_save_tp_mismatch(connector_metadata)
+            current_event = None
+            assert self.kv_send_thread is not None
+            for request in connector_metadata.requests:
+                if not request.can_save:
+                    continue
+                if current_event is None:
+                    current_event = torch.npu.Event()
+                    current_event.record()
+                request.skip_null_blocks_by_group = self.group_uses_align_state
+                request.current_event = current_event
+                self.kv_send_thread.add_stored_request(request.req_id)
+                self.kv_send_thread.add_request(request)
+            if current_event is not None:
+                self.kv_send_thread.request_queue.join()
             return
         if self.use_layerwise:
             return

@@ -607,7 +607,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_lookup_waits_only_for_conflicting_pending_batch(self):
         t, _ = self._make_thread([1])
-        batch = KVCacheStoreBatch(1, [])
+        batch = KVCacheStoreBatch([])
         batch.pending_keys.add("k1")
         batch.prepared.set()
         with t._pending_batches_lock:
@@ -626,7 +626,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_non_conflicting_lookup_does_not_wait_for_put(self):
         t, _ = self._make_thread([1])
-        batch = KVCacheStoreBatch(1, [])
+        batch = KVCacheStoreBatch([])
         batch.pending_keys.add("other-key")
         batch.prepared.set()
         with t._pending_batches_lock:
