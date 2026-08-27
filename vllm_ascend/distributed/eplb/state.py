@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
-"""Ascend-owned EPLB state extensions."""
+"""Ascend-owned extensions for the upstream EPLB state."""
 
+import inspect
 from dataclasses import fields
 from typing import Any
 
@@ -13,16 +14,26 @@ from vllm.distributed.eplb import eplb_state as _eplb_state
 
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
+ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
+
+
+def _upstream_from_mapping_accepts_valid_expert_count() -> bool:
+    """Return whether the selected vLLM uses the release mapping contract."""
+    return "num_valid_physical_experts" in inspect.signature(_eplb_state.EplbState.from_mapping).parameters
+
 
 class AscendEplbLayerState(_eplb_state.EplbLayerState):
-    """EPLB layer state with a graph-stable expert replica routing table."""
+    """EPLB layer state with a graph-stable replica routing table."""
 
     def __init__(self) -> None:
         super().__init__()
         self.expert_replica_routing_table: torch.Tensor | None = None
 
     @classmethod
-    def from_upstream(cls, state: _eplb_state.EplbLayerState) -> "AscendEplbLayerState":
+    def from_upstream(
+        cls,
+        state: _eplb_state.EplbLayerState,
+    ) -> "AscendEplbLayerState":
         ascend_state = cls()
         for field in fields(_eplb_state.EplbLayerState):
             setattr(ascend_state, field.name, getattr(state, field.name))
@@ -47,9 +58,7 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
         logical_to_physical_map = self.logical_to_physical_map
         logical_replica_count = self.logical_replica_count
         if logical_to_physical_map is None or logical_replica_count is None:
-            raise RuntimeError(
-                "Cannot build the expert replica routing table before Ascend EPLB layer state is initialized."
-            )
+            raise RuntimeError("Cannot build the replica routing table before EPLB layer state is initialized.")
 
         new_routing_table = _eplb_ops.build_expert_replica_routing_table(
             logical_to_physical_map,
@@ -68,8 +77,11 @@ class AscendEplbLayerState(_eplb_state.EplbLayerState):
             self.expert_replica_routing_table = new_routing_table
 
 
-def refresh_model_routing_tables(model_state: Any, layer_idx: int | None = None) -> None:
-    """Refresh all routing tables, or one after an async map commit."""
+def refresh_model_routing_tables(
+    model_state: Any,
+    layer_idx: int | None = None,
+) -> None:
+    """Refresh every routing table, or one table after an async commit."""
     layers = list(model_state.model.moe_layers)
     selected_layers = enumerate(layers) if layer_idx is None else ((layer_idx, layers[layer_idx]),)
     for _, layer in selected_layers:
@@ -79,21 +91,15 @@ def refresh_model_routing_tables(model_state: Any, layer_idx: int | None = None)
 
 
 class AscendEplbState(_eplb_state.EplbState):
-    """Own Ascend routing-table refreshes without patching commit helpers."""
+    """Keep Ascend routing and load-recording state around upstream EPLB."""
+
+    cuda_device_index: int | None
 
     def __init__(self, parallel_config, device: torch.device) -> None:
         super().__init__(parallel_config, device)
         self._has_fresh_recorded_load = False
-
-    def step(
-        self,
-        is_dummy: bool = False,
-        is_profile: bool = False,
-        log_stats: bool = False,
-    ) -> None:
-        if not is_dummy and not is_profile and self._should_record_current_step(log_stats=log_stats):
-            self._has_fresh_recorded_load = True
-        super().step(is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
+        if self.cuda_device_index is None:
+            self.cuda_device_index = torch.accelerator.current_device_index()
 
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""
@@ -126,11 +132,6 @@ class AscendEplbState(_eplb_state.EplbState):
         is_profile: bool = False,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
-        # Dummy steps keep every rank on the same EPLB clock, but they do not
-        # advance the load window. Avoid repeatedly rearranging from the same
-        # stale window when no rank recorded a fresh sample in this period.
-        # Elastic EP reshuffles are forced lifecycle operations, not scheduled
-        # load-based rearrangements, so they must bypass the freshness gate.
         should_gate = (
             hasattr(self, "_has_fresh_recorded_load")
             and not is_profile
@@ -140,7 +141,10 @@ class AscendEplbState(_eplb_state.EplbState):
         if should_gate and not self._has_global_fresh_recorded_load():
             return None
 
-        result = super().rearrange(is_profile=is_profile, rank_mapping=rank_mapping)
+        result = super().rearrange(
+            is_profile=is_profile,
+            rank_mapping=rank_mapping,
+        )
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)
@@ -156,16 +160,20 @@ class AscendEplbState(_eplb_state.EplbState):
         device: torch.device,
         parallel_config,
         expanded_physical_to_logical: torch.Tensor,
-        num_valid_physical_experts: int,
+        num_valid_physical_experts: int | None = None,
     ) -> "AscendEplbState":
-        state = super().from_mapping(
-            model=model,
-            model_config=model_config,
-            device=device,
-            parallel_config=parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=num_valid_physical_experts,
-        )
+        from_mapping_kwargs: dict[str, Any] = {
+            "model": model,
+            "model_config": model_config,
+            "device": device,
+            "parallel_config": parallel_config,
+            "expanded_physical_to_logical": expanded_physical_to_logical,
+        }
+        if _upstream_from_mapping_accepts_valid_expert_count():
+            if num_valid_physical_experts is None:
+                raise TypeError("num_valid_physical_experts is required by the selected vLLM release mapping contract")
+            from_mapping_kwargs["num_valid_physical_experts"] = num_valid_physical_experts
+        state = super().from_mapping(**from_mapping_kwargs)
         for model_state in state.model_states.values():
             refresh_model_routing_tables(model_state)
         return state

@@ -845,19 +845,22 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.use_async:
+            if upstream_eplb_config.communicator not in (None, "torch_gloo"):
                 raise ValueError(
-                    "Async EPLB is not supported by Model Runner V2 on Ascend yet; set eplb_config.use_async to false."
+                    "Async EPLB on Ascend requires the torch_gloo communicator "
+                    f"(CPU staging), but got {upstream_eplb_config.communicator!r}. "
+                    "Set eplb_config.communicator to 'torch_gloo'."
                 )
-            if upstream_eplb_config.communicator not in (None, "torch_nccl", "torch_gloo"):
-                raise ValueError(
-                    "Do not set eplb_config.communicator on Ascend; "
-                    "torch.distributed over HCCL is selected automatically."
+            if not upstream_eplb_config.use_async:
+                logger.warning(
+                    "Synchronous EPLB is not supported on Ascend; "
+                    "parameter=eplb_config.use_async, value=False, "
+                    "action: forcing asynchronous EPLB."
                 )
-            # ParallelConfig chooses torch_gloo as its generic synchronous
-            # default before this platform hook runs. Ascend maps torch_nccl
-            # to torch.distributed over the HCCL device process group.
-            upstream_eplb_config.communicator = "torch_nccl"
+                upstream_eplb_config.use_async = True
+                upstream_eplb_config.communicator = "torch_gloo"
+            if vllm_config.parallel_config.enable_elastic_ep:
+                raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
     elif "load_collection_phase" in eplb_config:
         raise ValueError(
             "additional_config.eplb_config.load_collection_phase is only supported by "
