@@ -275,13 +275,17 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
                         actual_seq_lengths_q_is_cumulative = True
                     attn_count = attn_count + 1
                 else:
-                    actual_seq_lengths_kv = attn_metadata[key].decode_meta.num_computed_tokens_of_dcp[:, dcp_rank]
+                    decode_metadata = attn_metadata[key].decode_meta
+                    actual_seq_lengths_kv = decode_metadata.num_computed_tokens_of_dcp[:, dcp_rank]
                     pad_length = num_tokens - len(actual_seq_lengths_kv)
                     if pad_length > 0:
                         pad_tensor = np.zeros(pad_length, dtype=actual_seq_lengths_kv.dtype)
                         actual_seq_lengths_kv = np.concatenate([actual_seq_lengths_kv, pad_tensor])
 
-                    actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
+                    actual_seq_lengths_q = decode_metadata.query_lens
+                    if actual_seq_lengths_q is None:
+                        actual_seq_lengths_q = decode_metadata.actual_seq_lengths_q
+                        actual_seq_lengths_q_is_cumulative = True
 
                 if dcp_size > 1:
                     num_heads = num_heads * dcp_size
@@ -289,7 +293,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
                 torch.npu.graph_task_update_begin(update_stream, handle)
 
                 input_layout = "TND"
-                if _EXTRA_CTX.is_draft_model and speculative_config is not None:
+                if speculative_config is not None:
                     input_layout = "BSND"
                     if (
                         actual_seq_lengths_q_is_cumulative
@@ -347,7 +351,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         is_uniform = True
         decode_q_lens: list[int] | None = None
         max_q = 0
-        if _EXTRA_CTX.is_draft_model and self.vllm_config.speculative_config is not None:
+        if self.vllm_config.speculative_config is not None:
             input_layerout = "BSND"
             num_decodes = attn_metadata.num_decodes
             if attn_metadata.decode_meta.dcp_mtp_attn_mask is not None:

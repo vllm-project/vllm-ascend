@@ -262,6 +262,7 @@ class AscendDflashProposer(AscendEagleProposer):
         multi_steps_attn_metadata = []
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
             builder = self.draft_attn_groups[0].get_metadata_builder()
+            cp_metadata = None
             if self.dcp_size > 1:
                 query_lens_cpu = torch.full(
                     (num_reqs,), 
