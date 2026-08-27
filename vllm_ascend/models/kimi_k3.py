@@ -467,6 +467,14 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         if self.use_sequence_parallel:
             self.self_attn.o_proj.reduce_results = False
 
+    def _run_self_attn(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        # Ascend attention returns its output instead of filling an AMD buffer.
+        return self.self_attn(positions=positions, hidden_states=hidden_states)
+
     def forward_attn_residual(
         self,
         positions: torch.Tensor,
