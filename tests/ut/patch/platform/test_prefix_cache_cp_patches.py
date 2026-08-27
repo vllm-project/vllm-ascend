@@ -488,7 +488,36 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
 
 @pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #51718 only re-plans ranks on main")
 def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
-    kv_cache_groups = _make_deepseek_v4_kv_cache_config().kv_cache_groups
+    small_page_spec = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+        **_ratio_kwargs(4),
+        model_version="deepseek_v4",
+    )
+    large_page_spec = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        **_ratio_kwargs(4),
+        model_version="deepseek_v4",
+    )
+    group_spec = UniformTypeKVCacheSpecs.from_specs(
+        {
+            "small_attn": small_page_spec,
+            "large_attn": large_page_spec,
+            "mtp_attn": large_page_spec,
+        }
+    )
+    assert group_spec is not None
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            layer_names=["small_attn", "large_attn", "mtp_attn"],
+            kv_cache_spec=group_spec,
+        )
+    ]
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
