@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+import vllm.v1.core.kv_cache_utils as vllm_kv_cache_utils
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -483,6 +484,31 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )
     assert needed_memory == expected_memory
+
+
+@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #51718 only re-plans ranks on main")
+def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
+    kv_cache_groups = _make_deepseek_v4_kv_cache_config().kv_cache_groups
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=None,
+            prefix_cache_retention_interval=None,
+        )
+    )
+
+    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(kv_cache_groups)
+    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(kv_cache_groups)
+    assert ascend_bytes_per_block != upstream_bytes_per_block
+    assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
+
+    expected_num_blocks = 7
+    replanned_config = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
+        vllm_config,
+        kv_cache_groups,
+        expected_num_blocks * ascend_bytes_per_block,
+    )
+
+    assert replanned_config.num_blocks == expected_num_blocks
 
 
 @pytest.mark.parametrize(
