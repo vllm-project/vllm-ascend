@@ -47,15 +47,33 @@ class AscendCompilationConfig:
     """Configuration for controlling the behavior of Ascend graph optimization.
 
     Migrated to ``@config`` (pydantic dataclass). The 310P runtime downgrade
-    (disable npugraph_ex / static_kernel) and the static_kernel→npugraph_ex
-    dependency check are applied in an ``after`` model_validator.
+    (disable npugraph_ex / static_kernel / super_kernel) and the
+    super_kernel→static_kernel→npugraph_ex dependency checks are applied in
+    an ``after`` model_validator.
     """
 
     enable_npugraph_ex: bool = True
     enable_static_kernel: bool = False
+    enable_super_kernel: bool = False
     fuse_norm_quant: bool = True
     fuse_qknorm_rope: bool = True
     fuse_muls_add: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_super_kernel_to_static_kernel(cls, data: Any) -> Any:
+        if isinstance(data, ArgsKwargs):
+            if data.kwargs is None:
+                return data
+            kw = dict(data.kwargs)
+            if "enable_super_kernel" not in kw and "enable_static_kernel" in kw:
+                kw["enable_super_kernel"] = kw["enable_static_kernel"]
+            return ArgsKwargs(data.args, kw)
+        if isinstance(data, dict):
+            if "enable_super_kernel" not in data and "enable_static_kernel" in data:
+                data = dict(data)
+                data["enable_super_kernel"] = data["enable_static_kernel"]
+        return data
 
     @model_validator(mode="after")
     def _apply_310p_downgrade_and_static_kernel_check(self):
@@ -68,10 +86,17 @@ class AscendCompilationConfig:
                 logger.warning(
                     "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
                 )
+            if self.enable_super_kernel:
+                logger.warning(
+                    "super kernel requires static kernel, which is not supported on Ascend 310P. Disabling it."
+                )
             self.enable_npugraph_ex = False
             self.enable_static_kernel = False
+            self.enable_super_kernel = False
         if self.enable_static_kernel:
             assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
+        if self.enable_super_kernel:
+            assert self.enable_static_kernel, "Super kernel generation requires static kernel to be enabled."
         return self
 
 
