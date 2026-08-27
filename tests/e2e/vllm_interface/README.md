@@ -1,18 +1,15 @@
 # vLLM upstream interface compatibility
 
-This directory is collected by vLLM's existing Ascend NPU job. Recursive E2E collection excludes `unit_tests/` through
-the repository pytest configuration, while explicitly targeting that directory still runs the analyzer unit suite. In
-addition to the hardware sampler smoke test,
+This directory is collected by vLLM's existing Ascend NPU job. In addition to the hardware sampler smoke test,
 `test_upstream_interface_compatibility.py` performs a source-only compatibility check between the checked-out vLLM PR
 and the vllm-ascend revision installed by that job. The analysis does not import either project and does not require NPU
 execution.
 
-All implementation and validation code for this check is kept in this directory:
+All implementation code for this check is kept in this directory:
 
 ```text
 tests/e2e/vllm_interface/
 ├── vllm_interface_contracts/  # source analyzer and CLI
-├── unit_tests/                # source-only analyzer tests
 ├── test_upstream_interface_compatibility.py
 ├── singlecard/                # existing NPU sampler test
 └── README.md
@@ -90,12 +87,6 @@ itself is CPU-only, but its first upstream run must also confirm that the combin
 duration fits the existing job timeout.
 
 ## Local commands
-
-Run the source-only unit tests without NPU hardware:
-
-```bash
-python -m pytest -q --confcutdir=tests/e2e/vllm_interface tests/e2e/vllm_interface/unit_tests
-```
 
 Running the E2E entry outside the upstream vLLM NPU image skips it because `/workspace/vllm` is not present:
 
