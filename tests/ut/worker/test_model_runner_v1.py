@@ -605,7 +605,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
     def test_reshape_hybrid_attention_strips_padding_without_block_splitting(self):
         """vLLM #51718 pads hybrid pages independently of kernel splitting."""
         runner = self._build_runner()
-        runner.hybrid_with_attn_and_mamba = True
         runner.use_hybrid_blocks = False
         layer_name = "model.layers.0.self_attn.attn"
         unpadded_page_size = 4 * 2 * (3 + 3) * torch.float16.itemsize
@@ -631,16 +630,25 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ]
         raw_size = spec.page_size_bytes * 2
         raw_caches = (
-            torch.zeros(raw_size, dtype=torch.int8),
             (
-                torch.zeros(raw_size // 2, dtype=torch.int8),
-                torch.zeros(raw_size // 2, dtype=torch.int8),
+                "legacy-combined",
+                torch.zeros(raw_size, dtype=torch.int8),
+                True,
+            ),
+            (
+                "main-separate",
+                (
+                    torch.zeros(raw_size // 2, dtype=torch.int8),
+                    torch.zeros(raw_size // 2, dtype=torch.int8),
+                ),
+                False,
             ),
         )
 
-        for raw_cache in raw_caches:
+        for layout, raw_cache, hybrid_flag in raw_caches:
+            runner.hybrid_with_attn_and_mamba = hybrid_flag
             with (
-                self.subTest(combined=isinstance(raw_cache, torch.Tensor)),
+                self.subTest(layout=layout),
                 patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False),
             ):
                 k_cache, v_cache = runner._reshape_kv_cache_tensors(
