@@ -1139,6 +1139,7 @@ def _setup_compile_backend(
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
+        additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
     elif compilation_config.cudagraph_mode.requires_piecewise_compilation():
         # Our is_cuda_alike is False so we cannot reuse the assertion of upstream
         if compilation_config.mode != CompilationMode.VLLM_COMPILE and not envs_vllm.VLLM_USE_BREAKABLE_CUDAGRAPH:
@@ -1165,6 +1166,7 @@ def _setup_compile_backend(
             _prune_capture_sizes_for_950(vllm_config)
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
+        additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
     elif compilation_config.cudagraph_mode.has_full_cudagraphs():
         # Don't split the FX graph for static kernel; it would compile multiple times.
         compilation_config.splitting_ops = []
@@ -1174,6 +1176,7 @@ def _setup_compile_backend(
         compilation_config.mode = CompilationMode.NONE
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
+        additional_config["ascend_compilation_config"]["enable_super_kernel"] = False
 
     # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
     if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1":
