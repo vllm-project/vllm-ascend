@@ -411,6 +411,7 @@ def rms_norm_gated(
         activation=activation,
         eps=eps,
         residual=residual,
+        out_dtype=x.dtype,  # Preserve the input, as in the v0.26 K3 fused norm gate.
         residual_dtype=residual_dtype,
         is_rms_norm=True,
     )

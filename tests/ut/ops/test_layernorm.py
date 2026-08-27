@@ -4,7 +4,9 @@ import pytest
 import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
+from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -81,6 +83,33 @@ def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
 
     assert layer.bias is not None
     assert not layer.bias.requires_grad
+
+
+@pytest.mark.parametrize("activation", ["sigmoid", "swish"])
+@pytest.mark.parametrize("prenorm", [False, True])
+def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config, activation, prenorm):
+    layer = FusedRMSNormGated(hidden_size=8, eps=1e-6, activation=activation)
+    x = torch.randn(1, 4, 2, 8)
+    gate = torch.randn(4, 2, 8)
+    residual = torch.randn_like(x) if prenorm else None
+    expected = (torch.empty_like(x), torch.empty_like(x)) if prenorm else torch.empty_like(x)
+
+    with patch("vllm_ascend.ops.layernorm.rms_norm_gated", return_value=expected) as fused_norm_gate:
+        actual = layer(x, gate, residual=residual, prenorm=prenorm, residual_in_fp32=prenorm)
+
+    assert isinstance(layer, AscendFusedRMSNormGated)
+    assert actual is expected
+    fused_norm_gate.assert_called_once_with(
+        x,
+        gate,
+        layer.weight,
+        layer.bias,
+        activation,
+        residual=residual,
+        eps=1e-6,
+        prenorm=prenorm,
+        residual_in_fp32=prenorm,
+    )
 
 
 @pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
