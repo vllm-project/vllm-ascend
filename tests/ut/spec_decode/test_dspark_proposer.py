@@ -28,8 +28,15 @@ import pytest
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    copy_and_expand_dspark_inputs_kernel_by_request,
+)
+from vllm_ascend.spec_decode import dspark_proposer as dspark_proposer_module
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.spec_decode.dspark_proposer import (
+    AscendDSparkProposer,
+    _compute_dspark_num_programs,
+)
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
@@ -41,6 +48,18 @@ _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
 
 
+def test_dspark_uses_request_local_guarded_input_kernel():
+    assert dspark_proposer_module.copy_and_expand_dflash_and_dspark_inputs_kernel is (
+        copy_and_expand_dspark_inputs_kernel_by_request
+    )
+
+
+def test_dspark_grid_covers_context_tiles_and_requests():
+    assert _compute_dspark_num_programs(num_context_tokens=45, batch_size=6) == 6
+    assert _compute_dspark_num_programs(num_context_tokens=8192, batch_size=1) == 8
+    assert _compute_dspark_num_programs(num_context_tokens=45, batch_size=16) == 8
+
+
 @pytest.fixture(autouse=True)
 def _stub_device_properties(monkeypatch):
     """CPU CI has no NPU: ``init_device_properties_triton`` is skipped when
@@ -48,8 +67,7 @@ def _stub_device_properties(monkeypatch):
     ``get_vectorcore_num`` asserts. ``set_inputs_first_pass`` sizes the kernel
     grid via ``_compute_num_programs`` -> ``get_vectorcore_num``; stub the
     device-property globals so the grid computation runs on CPU. The kernel
-    itself is mocked per-test, and the small inputs here yield a ``(1,)`` grid
-    either way (matching ``test_kernel_called_with_has_num_rejected``)."""
+    itself is mocked per-test."""
     monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_AICORE", 8)
     monkeypatch.setattr("vllm_ascend.ops.triton.triton_utils._NUM_VECTORCORE", 8)
 
@@ -676,14 +694,14 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         self._invoke_set_inputs_first_pass(
             proposer, num_reqs=num_reqs, block_size=block_size, num_rejected=rejected
         )
-        # The proposer calls the kernel as ``kernel[1,](...)`` (Triton-style
-        # grid indexing), so the call lands on the indexed sub-mock.
-        sub = kernel[1,]
+        # Four request-local programs are selected for this four-request batch.
+        sub = kernel[(4,)]
         assert sub.called
         kwargs = sub.call_args.kwargs
         assert kwargs["HAS_NUM_REJECTED"] is True
         assert kwargs["num_rejected_tokens_ptr"] is rejected
         assert kwargs["SAMPLE_FROM_ANCHOR"] is True
+        assert kwargs["error_ptr"] is proposer._copy_expand_error
 
 
 class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
