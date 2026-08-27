@@ -36,6 +36,7 @@ from vllm.model_executor.layers.linear import (  # noqa
     RowParallelLinear,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -141,6 +142,12 @@ class AscendLinearBase(LinearBase):
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
         self.return_bias = return_bias
         self.disable_tp = disable_tp
+
+    def update_param_tp_status(self):
+        for param in self.parameters():
+            if isinstance(param, BasevLLMParameter):
+                param.tp_rank = self.tp_rank
+                param.tp_size = self.tp_size
 
 
 class AscendQKVParallelLinear(QKVParallelLinear):
@@ -348,6 +355,8 @@ class AscendRowParallelLinear(RowParallelLinear):
         else:
             self.register_parameter("bias", None)
 
+        self.update_param_tp_status()
+
         if self.custom_op is not None:
             self.custom_op.update_attrs()
 
@@ -437,6 +446,8 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             )
         else:
             self.register_parameter("bias", None)
+
+        self.update_param_tp_status()
 
         if self.custom_op is not None:
             self.custom_op.update_attrs()
@@ -560,6 +571,8 @@ class AscendReplicatedLinear(ReplicatedLinear):
             )
         else:
             self.register_parameter("bias", None)
+
+        self.update_param_tp_status()
 
         if self.custom_op is not None:
             self.custom_op.update_attrs()
