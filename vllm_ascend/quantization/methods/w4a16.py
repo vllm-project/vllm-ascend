@@ -302,7 +302,6 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         )
 
         topk_ids = topk_ids.to(torch.int32)
-        topk_weights = topk_weights.to(x.dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
