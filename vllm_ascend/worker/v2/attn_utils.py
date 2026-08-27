@@ -694,13 +694,13 @@ def _allocate_kv_cache(
 
             continue
 
-        # vLLM #51718 packs all group layers into one tensor on main; each layer
-        # owns an equal share (the per-layer size v0.27.1 stored directly on the
-        # tensor). Dividing the tensor directly (rather than via the spec's
-        # page_size_bytes) stays correct even when a group spec reports the
-        # summed page size.
+        # vLLM #51718 packs all group layers into one tensor on main; the
+        # per-layer size is the block count times this layer's own page size
+        # (correct even when the tensor's group is not the largest group).
         kv_cache_tensor_size = (
-            kv_cache_tensor.size if vllm_version_is("0.27.1") else kv_cache_tensor.size // len(shared_names)
+            kv_cache_tensor.size
+            if vllm_version_is("0.27.1")
+            else kv_cache_config.num_blocks * example_spec.page_size_bytes
         )
         # TODO:Subsequently, extend the `AttentionSpec` class in the vLLM community and remove these branches.
         if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
