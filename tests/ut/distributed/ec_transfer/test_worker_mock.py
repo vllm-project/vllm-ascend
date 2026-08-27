@@ -2,13 +2,16 @@
 # This file is a part of the vllm-ascend project.
 # SPDX-License-Identifier: Apache-2.0
 
+from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
-from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
-    ECCPUConnectorMetadata,
+import vllm.distributed.ec_transfer.ec_connector.cpu.worker as upstream_worker_mod
+from vllm.distributed.ec_transfer.ec_connector.cpu.worker import (
+    ECCPUTransferDirection,
+    Transfer,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.worker.descriptor_buffers import (
     DescriptorBufferPool,
@@ -21,50 +24,52 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.cpu.worker import (
 
 
 class FakeStream:
-    def __init__(self):
+    def __init__(self, order=None):
+        self.order = order
         self.synchronize_calls = 0
-        self.waited_streams = []
 
     def synchronize(self):
         self.synchronize_calls += 1
+        if self.order is not None:
+            self.order.append("stream_synchronize")
 
     def wait_stream(self, stream):
-        self.waited_streams.append(stream)
+        del stream
 
 
 class FakeEvent:
-    def __init__(self, *, record_error=False, query_error=False):
-        self.completed = False
+    def __init__(self, *, completed=False, order=None):
+        self.completed = completed
+        self.order = order
         self.recorded_stream = None
-        self.record_error = record_error
-        self.query_error = query_error
+        self.synchronize_calls = 0
 
     def record(self, stream):
         self.recorded_stream = stream
-        if self.record_error:
-            raise RuntimeError("event record failed")
 
     def query(self):
-        if self.query_error:
-            raise RuntimeError("event query failed")
         return self.completed
-
-
-class FakeNPU:
-    def __init__(self, *, record_error=False):
-        self.events = []
-        self.synchronize_calls = 0
-        self.record_error = record_error
-
-    def Event(self):
-        event = FakeEvent(record_error=self.record_error)
-        self.events.append(event)
-        return event
 
     def synchronize(self):
         self.synchronize_calls += 1
-        for event in self.events:
-            event.completed = True
+        if self.order is not None:
+            self.order.append("event_synchronize")
+
+    def elapsed_time(self, end_event):
+        del end_event
+        return 0.0
+
+
+class FakeNPU:
+    def __init__(self):
+        self.events = []
+        self.enable_timing = []
+
+    def Event(self, *, enable_timing=False):
+        event = FakeEvent()
+        self.events.append(event)
+        self.enable_timing.append(enable_timing)
+        return event
 
 
 class FakePlatform:
@@ -98,51 +103,6 @@ class FakeRegion:
         self.cleanup_calls += 1
 
 
-def make_worker(dtype=torch.float32):
-    worker = AscendECCPUWorker.__new__(AscendECCPUWorker)
-    worker._region = FakeRegion()
-    worker._dtype = dtype
-    worker._is_save_rank = True
-    worker._buf_pool = DescriptorBufferPool()
-    worker._save_bufs = None
-    worker._save_count = 0
-    worker._inflight_descriptor_bufs = []
-    worker._load_stream = FakeStream()
-    worker._mmap_pinned = True
-    return worker
-
-
-def patch_npu_events(monkeypatch, *, record_error=False):
-    npu = FakeNPU(record_error=record_error)
-    monkeypatch.setattr(worker_mod.torch, "npu", npu, raising=False)
-    return npu
-
-
-def make_worker_env(monkeypatch, dtype=torch.float32, *, record_error=False):
-    worker = make_worker(dtype=dtype)
-    platform = FakePlatform()
-    npu = patch_npu_events(monkeypatch, record_error=record_error)
-    monkeypatch.setattr(worker_mod, "current_platform", platform)
-    return worker, platform, npu
-
-
-def patch_copy_capture(monkeypatch):
-    calls = []
-
-    def capture_copy(src_ptrs, dst_ptrs, sizes, direction):
-        calls.append(
-            (
-                src_ptrs.clone(),
-                dst_ptrs.clone(),
-                sizes.clone(),
-                direction,
-            )
-        )
-
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", capture_copy)
-    return calls
-
-
 def raises(message):
     def raise_error(*args, **kwargs):
         del args, kwargs
@@ -151,11 +111,13 @@ def raises(message):
     return raise_error
 
 
-def save_one_block(worker, source=None):
-    source = torch.arange(16, dtype=torch.int8) if source is None else source
-    metadata = ECCPUConnectorMetadata(saves={"hash": [0]})
-    worker.save_caches({"hash": source}, "hash", metadata)
-    return source, metadata
+def make_worker():
+    worker = AscendECCPUWorker.__new__(AscendECCPUWorker)
+    worker._region = FakeRegion()
+    worker._buf_pool = DescriptorBufferPool()
+    worker._event_pool = []
+    worker._mmap_pinned = True
+    return worker
 
 
 def patch_init_dependencies(
@@ -166,14 +128,17 @@ def patch_init_dependencies(
 ):
     region = FakeRegion()
     platform = FakePlatform()
+    npu = FakeNPU()
     register_calls = []
     pcp_group = SimpleNamespace(rank_in_group=0)
 
-    monkeypatch.setattr(worker_mod, "create_ascend_ec_shared_region", lambda cfg: region)
-    monkeypatch.setattr(worker_mod, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(worker_mod, "get_pcp_group", lambda: pcp_group)
+    monkeypatch.setattr(upstream_worker_mod, "create_ec_shared_region", lambda cfg: region)
+    monkeypatch.setattr(upstream_worker_mod, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(upstream_worker_mod, "get_pcp_group", lambda: pcp_group)
     monkeypatch.setattr(worker_mod, "_supports_eccpu_offload", lambda: supported)
+    monkeypatch.setattr(worker_mod.torch, "npu", npu, raising=False)
     monkeypatch.setattr(worker_mod, "current_platform", platform)
+    monkeypatch.setattr(upstream_worker_mod, "current_platform", platform)
 
     def register(blocks):
         register_calls.append(blocks)
@@ -181,50 +146,38 @@ def patch_init_dependencies(
             raise register_error
 
     monkeypatch.setattr(worker_mod, "_register_pinned_host_mmap", register)
-    return region, platform, register_calls
+    return region, platform, npu, register_calls
 
 
-@pytest.mark.parametrize(
-    ("block_ids", "expected"),
-    [
-        ([], []),
-        ([4], [(0, 4, 1)]),
-        ([3, 4, 5], [(0, 3, 3)]),
-        ([3, 4, 7, 8, 2], [(0, 3, 2), (2, 7, 2), (4, 2, 1)]),
-    ],
-)
-def test_iter_contiguous_block_runs(block_ids, expected):
-    assert list(worker_mod._iter_contiguous_block_runs(block_ids)) == expected
-
-
-def test_init_registers_mmap_after_creating_load_stream(monkeypatch):
-    region, platform, register_calls = patch_init_dependencies(monkeypatch)
+def test_init_registers_mmap_and_uses_upstream_lifecycle(monkeypatch):
+    region, platform, _, register_calls = patch_init_dependencies(monkeypatch)
     config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
 
     worker = AscendECCPUWorker(config)
 
     assert worker._region is region
-    assert worker._load_stream is platform.created_streams[0]
     assert register_calls == [region.blocks]
     assert worker._mmap_pinned is True
     assert worker._is_save_rank is True
+    assert worker._inflight_saves == deque()
+    assert worker._inflight_loads == deque()
+    assert platform.created_streams == []
     assert region.cleanup_calls == 0
 
 
 def test_init_rejects_unsupported_runtime_and_cleans_region(monkeypatch):
-    region, platform, register_calls = patch_init_dependencies(monkeypatch, supported=False)
+    region, _, _, register_calls = patch_init_dependencies(monkeypatch, supported=False)
     config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
 
     with pytest.raises(RuntimeError, match="aclrtMemcpyBatchAsync"):
         AscendECCPUWorker(config)
 
-    assert platform.created_streams == []
     assert register_calls == []
     assert region.cleanup_calls == 1
 
 
 def test_init_registration_failure_cleans_region(monkeypatch):
-    region, platform, register_calls = patch_init_dependencies(
+    region, _, _, register_calls = patch_init_dependencies(
         monkeypatch, register_error=RuntimeError("registration failed")
     )
     config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
@@ -232,528 +185,175 @@ def test_init_registration_failure_cleans_region(monkeypatch):
     with pytest.raises(RuntimeError, match="registration failed"):
         AscendECCPUWorker(config)
 
-    assert len(platform.created_streams) == 1
     assert register_calls == [region.blocks]
     assert region.cleanup_calls == 1
 
 
-def test_save_and_flush_builds_d2h_descriptors(monkeypatch):
-    worker, platform, npu = make_worker_env(monkeypatch, dtype=torch.int8)
-    calls = patch_copy_capture(monkeypatch)
-
-    src = torch.arange(20, dtype=torch.int8)
-    metadata = ECCPUConnectorMetadata(saves={"hash": [3, 1]})
-    worker.save_caches({"hash": src}, "hash", metadata)
-    worker.flush_saves()
-
-    src_ptrs, dst_ptrs, sizes, direction = calls[0]
-    assert src_ptrs.tolist() == [src.data_ptr(), src.data_ptr() + 16]
-    assert dst_ptrs.tolist() == [
-        worker._region.blocks.data_ptr() + 3 * 16,
-        worker._region.blocks.data_ptr() + 16,
-    ]
-    assert sizes.tolist() == [16, 4]
-    assert direction == worker_mod._DIRECTION_D2H
-    assert worker._save_count == 0
-    assert worker._save_bufs is None
-    assert len(worker._inflight_descriptor_bufs) == 1
-    assert npu.events[0].recorded_stream is platform.compute_stream
-    assert platform.compute_stream.synchronize_calls == 0
-
-
-def test_descriptor_reuse_waits_for_event_completion(monkeypatch):
-    worker, _, npu = make_worker_env(monkeypatch, dtype=torch.int8)
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
-
-    source, metadata = save_one_block(worker)
-    first_bufs = worker._save_bufs
-    worker.flush_saves()
-
-    worker.save_caches({"hash": source}, "hash", metadata)
-    second_bufs = worker._save_bufs
-    assert second_bufs is not first_bufs
-    assert npu.events[0].completed is False
-    assert len(worker._buf_pool._pool) == 0
-    worker.flush_saves()
-
-    npu.events[0].completed = True
-    worker.save_caches({"hash": source}, "hash", metadata)
-
-    assert worker._save_bufs is first_bufs
-    assert worker._inflight_descriptor_bufs == [(npu.events[1], second_bufs)]
-
-
-def test_event_record_failure_falls_back_to_synchronous_d2h_release(
-    monkeypatch,
-):
-    worker, platform, npu = make_worker_env(monkeypatch, dtype=torch.int8, record_error=True)
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
-
-    save_one_block(worker)
-    worker.flush_saves()
-
-    assert platform.compute_stream.synchronize_calls == 1
-    assert len(worker._buf_pool._pool) == 1
-    assert worker._inflight_descriptor_bufs == []
-    assert worker._save_bufs is None
-    assert worker._save_count == 0
-    assert npu.events[0].recorded_stream is platform.compute_stream
-
-
-def test_d2h_event_record_and_sync_failure_propagates_sync_error(monkeypatch):
-    worker, platform, _ = make_worker_env(monkeypatch, dtype=torch.int8, record_error=True)
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
-
-    save_one_block(worker)
-    original_bufs = worker._save_bufs
-
-    monkeypatch.setattr(
-        platform.compute_stream,
-        "synchronize",
-        raises("stream synchronize failed"),
-    )
-    with pytest.raises(RuntimeError, match="stream synchronize failed") as exc_info:
-        worker.flush_saves()
-
-    assert isinstance(exc_info.value.__context__, RuntimeError)
-    assert str(exc_info.value.__context__) == "event record failed"
-    assert worker._save_bufs is None
-    assert worker._save_count == 0
-    assert original_bufs not in worker._buf_pool._pool
-
-
-def test_d2h_sync_failure_is_propagated_without_latching_worker(monkeypatch):
-    worker, platform, _ = make_worker_env(monkeypatch, dtype=torch.int8)
-
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("copy failed"))
-    source, _ = save_one_block(worker)
-    original_bufs = worker._save_bufs
-
-    monkeypatch.setattr(
-        platform.compute_stream,
-        "synchronize",
-        raises("stream synchronize failed"),
-    )
-    with pytest.raises(RuntimeError, match="stream synchronize failed"):
-        worker.flush_saves()
-
-    assert worker._save_bufs is None
-    assert worker._save_count == 0
-    assert len(worker._buf_pool._pool) == 0
-    assert original_bufs not in worker._buf_pool._pool
-
-    worker.save_caches(
-        {"hash": source},
-        "hash",
-        ECCPUConnectorMetadata(saves={"hash": [0]}),
-    )
-    assert worker._save_bufs is not None
-
-
-def test_reclaim_preserves_unprocessed_descriptors_when_query_fails():
+def test_acquire_event_uses_npu_event_and_recycles(monkeypatch):
     worker = make_worker()
-    first_bufs = worker._buf_pool.acquire(1)
-    second_bufs = worker._buf_pool.acquire(1)
-    completed_event = FakeEvent()
-    completed_event.completed = True
-    failing_event = FakeEvent(query_error=True)
-    worker._inflight_descriptor_bufs = [
-        (completed_event, first_bufs),
-        (failing_event, second_bufs),
-    ]
+    npu = FakeNPU()
+    monkeypatch.setattr(worker_mod.torch, "npu", npu, raising=False)
 
-    with pytest.raises(RuntimeError, match="event query failed"):
-        worker._reclaim_completed_descriptor_bufs()
+    created = worker._acquire_event()
+    worker._event_pool.append(created)
+    recycled = worker._acquire_event()
 
-    assert worker._buf_pool._pool == [first_bufs]
-    assert worker._inflight_descriptor_bufs == [(failing_event, second_bufs)]
-
-    failing_event.query_error = False
-    failing_event.completed = True
-    worker._reclaim_completed_descriptor_bufs()
-    assert len(worker._buf_pool._pool) == 2
-    assert worker._inflight_descriptor_bufs == []
-
-
-def test_save_coalesces_contiguous_blocks_into_one_descriptor(monkeypatch):
-    worker, _, _ = make_worker_env(monkeypatch, dtype=torch.int8)
-    calls = patch_copy_capture(monkeypatch)
-
-    src = torch.arange(40, dtype=torch.int8)
-    metadata = ECCPUConnectorMetadata(saves={"hash": [2, 3, 4]})
-    worker.save_caches({"hash": src}, "hash", metadata)
-    worker.flush_saves()
-
-    src_ptrs, dst_ptrs, sizes, direction = calls[0]
-    assert src_ptrs.tolist() == [src.data_ptr()]
-    assert dst_ptrs.tolist() == [worker._region.blocks.data_ptr() + 2 * 16]
-    assert sizes.tolist() == [40]
-    assert direction == worker_mod._DIRECTION_D2H
-
-
-def test_save_descriptor_buffer_capacity_uses_block_count():
-    worker = make_worker(dtype=torch.int8)
-    metadata = ECCPUConnectorMetadata(saves={"first": [0, 1, 4], "second": [6, 7]})
-
-    worker.save_caches({"first": torch.arange(48, dtype=torch.int8)}, "first", metadata)
-
-    assert worker._save_bufs is not None
-    assert worker._save_bufs.src_ptrs.numel() == 5
-    assert worker._save_count == 2
-
-    worker.save_caches({"second": torch.arange(32, dtype=torch.int8)}, "second", metadata)
-
-    assert worker._save_bufs.src_ptrs.numel() == 5
-    assert worker._save_count == 3
+    assert recycled is created
+    assert npu.enable_timing == [True]
 
 
 @pytest.mark.parametrize(
-    ("is_save_rank", "cache_hash", "metadata"),
+    ("direction", "expected"),
     [
-        (True, "missing", ECCPUConnectorMetadata()),
-        (False, "hash", ECCPUConnectorMetadata(saves={"hash": [0]})),
+        (ECCPUTransferDirection.HOST_TO_DEVICE, worker_mod._DIRECTION_H2D),
+        (ECCPUTransferDirection.DEVICE_TO_HOST, worker_mod._DIRECTION_D2H),
     ],
-    ids=["not-allocated", "non-save-rank"],
 )
-def test_save_early_exits_without_reading_encoder_cache(monkeypatch, is_save_rank, cache_hash, metadata):
-    worker = make_worker(dtype=torch.int8)
-    worker._is_save_rank = is_save_rank
-    calls: list[object] = []
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", calls.append)
+def test_submit_transfer_maps_cann_direction_without_releasing(monkeypatch, direction, expected):
+    worker = make_worker()
+    bufs = worker._buf_pool.acquire(2)
+    calls = []
+    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: calls.append(args))
 
-    worker.save_caches({}, cache_hash, metadata)
-    worker.flush_saves()
+    worker._submit_transfer(bufs, 1, direction)
 
-    assert calls == []
-    assert worker._save_count == 0
-    assert worker._save_bufs is None
-
-
-def test_save_rejects_non_contiguous_encoder_cache():
-    worker = make_worker(dtype=torch.int8)
-    source = torch.arange(32, dtype=torch.int8).reshape(4, 8).t()
-    metadata = ECCPUConnectorMetadata(saves={"hash": [0, 1]})
-
-    with pytest.raises(RuntimeError, match="Non-contiguous"):
-        worker.save_caches({"hash": source}, "hash", metadata)
+    src, dst, sizes, cann_direction = calls[0]
+    assert src.data_ptr() == bufs.src_ptrs.data_ptr()
+    assert dst.data_ptr() == bufs.dst_ptrs.data_ptr()
+    assert sizes.data_ptr() == bufs.sizes.data_ptr()
+    assert cann_direction == expected
+    assert worker._buf_pool._pool == []
 
 
-@pytest.mark.parametrize("block_ids", [[0], [0, 1, 2]])
-def test_save_rejects_mismatched_block_count(block_ids):
-    worker = make_worker(dtype=torch.int8)
-    source = torch.arange(20, dtype=torch.int8)
-    metadata = ECCPUConnectorMetadata(saves={"hash": block_ids})
-
-    with pytest.raises(AssertionError, match="block count mismatch"):
-        worker.save_caches({"hash": source}, "hash", metadata)
-
-
-def test_flush_releases_descriptors_when_dma_submission_fails(monkeypatch):
-    worker, platform, _ = make_worker_env(monkeypatch, dtype=torch.int8)
-    save_one_block(worker)
-
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("D2H submission failed"))
-
-    with pytest.raises(RuntimeError, match="D2H submission failed"):
-        worker.flush_saves()
-
-    assert worker._save_count == 0
-    assert worker._save_bufs is None
-    assert len(worker._buf_pool._pool) == 1
-    assert platform.compute_stream.synchronize_calls == 1
-
-
-def test_load_builds_h2d_descriptors_and_waits(monkeypatch):
-    worker, platform, npu = make_worker_env(monkeypatch)
-    calls = patch_copy_capture(monkeypatch)
-
-    existing = torch.zeros((1, 4), dtype=torch.float32)
-    encoder_cache = {"cached": existing}
-    metadata = ECCPUConnectorMetadata(loads={"loaded": [7, 2], "cached": [1]})
-    worker.start_load_caches(encoder_cache, metadata)
-
-    loaded = encoder_cache["loaded"]
-    src_ptrs, dst_ptrs, sizes, direction = calls[0]
-    assert loaded.shape == (2, 4)
-    assert loaded.dtype == torch.float32
-    assert encoder_cache["cached"] is existing
-    assert src_ptrs.tolist() == [
-        worker._region.blocks.data_ptr() + 7 * 16,
-        worker._region.blocks.data_ptr() + 2 * 16,
-    ]
-    assert dst_ptrs.tolist() == [loaded.data_ptr(), loaded.data_ptr() + 16]
-    assert sizes.tolist() == [16, 16]
-    assert direction == worker_mod._DIRECTION_H2D
-    assert platform.compute_stream.waited_streams == [worker._load_stream]
-    assert len(worker._inflight_descriptor_bufs) == 1
-    assert npu.events[0].recorded_stream is worker._load_stream
-    assert worker._load_stream.synchronize_calls == 0
-
-
-def test_load_coalesces_contiguous_blocks_into_one_descriptor(monkeypatch):
-    worker, platform, _ = make_worker_env(monkeypatch)
-    calls = patch_copy_capture(monkeypatch)
-
-    encoder_cache: dict[str, torch.Tensor] = {}
-    metadata = ECCPUConnectorMetadata(loads={"loaded": [2, 3, 4]})
-    worker.start_load_caches(encoder_cache, metadata)
-
-    loaded = encoder_cache["loaded"]
-    src_ptrs, dst_ptrs, sizes, direction = calls[0]
-    assert loaded.shape == (3, 4)
-    assert src_ptrs.tolist() == [worker._region.blocks.data_ptr() + 2 * 16]
-    assert dst_ptrs.tolist() == [loaded.data_ptr()]
-    assert sizes.tolist() == [3 * 16]
-    assert direction == worker_mod._DIRECTION_H2D
-    assert platform.compute_stream.waited_streams == [worker._load_stream]
-
-
-def test_load_coalesces_each_cache_item_without_changing_output_offsets(
-    monkeypatch,
-):
-    worker, _, _ = make_worker_env(monkeypatch)
-    calls = patch_copy_capture(monkeypatch)
-
-    encoder_cache: dict[str, torch.Tensor] = {}
-    metadata = ECCPUConnectorMetadata(loads={"first": [0, 1], "second": [4, 5]})
-    worker.start_load_caches(encoder_cache, metadata)
-
-    first = encoder_cache["first"]
-    second = encoder_cache["second"]
-    src_ptrs, dst_ptrs, sizes, direction = calls[0]
-    assert first.shape == second.shape == (2, 4)
-    assert src_ptrs.tolist() == [
-        worker._region.blocks.data_ptr(),
-        worker._region.blocks.data_ptr() + 4 * 16,
-    ]
-    assert dst_ptrs.tolist() == [first.data_ptr(), second.data_ptr()]
-    assert sizes.tolist() == [2 * 16, 2 * 16]
-    assert direction == worker_mod._DIRECTION_H2D
-
-
-def test_load_descriptor_buffer_capacity_uses_block_count(monkeypatch):
-    worker, _, _ = make_worker_env(monkeypatch)
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
-    encoder_cache: dict[str, torch.Tensor] = {}
-    metadata = ECCPUConnectorMetadata(loads={"first": [0, 1, 4], "second": [6, 7]})
-
-    worker.start_load_caches(encoder_cache, metadata)
-
-    assert encoder_cache["first"].shape == (3, 4)
-    assert encoder_cache["second"].shape == (2, 4)
-    assert len(worker._buf_pool._pool) == 0
-    assert len(worker._inflight_descriptor_bufs) == 1
-    assert worker._inflight_descriptor_bufs[0][1].src_ptrs.numel() == 5
-
-
-def test_load_is_noop_when_all_hashes_are_already_cached(monkeypatch):
+def test_submit_failure_synchronizes_and_releases_descriptors(monkeypatch):
     worker = make_worker()
     platform = FakePlatform()
+    bufs = worker._buf_pool.acquire(1)
     monkeypatch.setattr(worker_mod, "current_platform", platform)
-    calls: list[object] = []
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", calls.append)
-    existing = torch.zeros((1, 4), dtype=torch.float32)
-    encoder_cache = {"cached": existing}
-    metadata = ECCPUConnectorMetadata(loads={"cached": [1]})
+    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("copy failed"))
 
-    worker.start_load_caches(encoder_cache, metadata)
+    with pytest.raises(RuntimeError, match="copy failed"):
+        worker._submit_transfer(
+            bufs,
+            1,
+            ECCPUTransferDirection.DEVICE_TO_HOST,
+        )
 
-    assert encoder_cache == {"cached": existing}
-    assert calls == []
-    assert platform.compute_stream.waited_streams == []
-
-
-def test_load_releases_descriptors_when_dma_submission_fails(monkeypatch):
-    worker, platform, _ = make_worker_env(monkeypatch)
-
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("H2D submission failed"))
-    encoder_cache: dict[str, torch.Tensor] = {}
-    metadata = ECCPUConnectorMetadata(loads={"hash": [1]})
-
-    with pytest.raises(RuntimeError, match="H2D submission failed"):
-        worker.start_load_caches(encoder_cache, metadata)
-
-    assert encoder_cache == {}
-    assert len(worker._buf_pool._pool) == 1
-    assert worker._load_stream.synchronize_calls == 1
-    assert platform.compute_stream.waited_streams == []
+    assert platform.compute_stream.synchronize_calls == 1
+    assert worker._buf_pool._pool == [bufs]
 
 
-def test_h2d_sync_failure_is_propagated_without_latching_worker(monkeypatch):
-    worker, _, _ = make_worker_env(monkeypatch)
-    copy_calls = 0
-
-    def fail_copy(*args):
-        nonlocal copy_calls
-        del args
-        copy_calls += 1
-        raise RuntimeError("H2D submission failed")
-
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", fail_copy)
-    monkeypatch.setattr(
-        worker._load_stream,
-        "synchronize",
-        raises("load stream synchronize failed"),
-    )
-    metadata = ECCPUConnectorMetadata(loads={"hash": [1]})
-
-    with pytest.raises(RuntimeError, match="load stream synchronize failed"):
-        worker.start_load_caches({}, metadata)
-
-    assert copy_calls == 1
-    with pytest.raises(RuntimeError, match="load stream synchronize failed"):
-        worker.start_load_caches({}, metadata)
-
-    assert copy_calls == 2
-
-
-def test_event_record_failure_falls_back_to_synchronous_h2d_release(
-    monkeypatch,
-):
-    worker, platform, npu = make_worker_env(monkeypatch, record_error=True)
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
-
-    encoder_cache: dict[str, torch.Tensor] = {}
-    worker.start_load_caches(encoder_cache, ECCPUConnectorMetadata(loads={"hash": [1]}))
-
-    assert worker._load_stream.synchronize_calls == 1
-    assert len(worker._buf_pool._pool) == 1
-    assert worker._inflight_descriptor_bufs == []
-    assert npu.events[0].recorded_stream is worker._load_stream
-    assert encoder_cache["hash"].shape == (1, 4)
-    assert platform.compute_stream.waited_streams == [worker._load_stream]
-
-
-def test_h2d_event_record_and_sync_failure_propagates_sync_error(monkeypatch):
-    worker, platform, _ = make_worker_env(monkeypatch, record_error=True)
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
-
-    monkeypatch.setattr(
-        worker._load_stream,
-        "synchronize",
-        raises("load stream synchronize failed"),
-    )
-    with pytest.raises(RuntimeError, match="load stream synchronize failed") as exc_info:
-        worker.start_load_caches({}, ECCPUConnectorMetadata(loads={"hash": [1]}))
-
-    assert isinstance(exc_info.value.__context__, RuntimeError)
-    assert str(exc_info.value.__context__) == "event record failed"
-    assert len(worker._buf_pool._pool) == 0
-    assert worker._inflight_descriptor_bufs == []
-    assert platform.compute_stream.waited_streams == []
-
-
-@pytest.mark.parametrize("block_ids", [[], [1, 1], [-1], [8]])
-def test_invalid_block_ids_are_rejected(block_ids):
+def test_flush_failure_clears_upstream_save_batch_state(monkeypatch):
     worker = make_worker()
-    metadata = ECCPUConnectorMetadata(loads={"hash": block_ids})
+    platform = FakePlatform()
+    bufs = worker._buf_pool.acquire(1)
+    worker._save_bufs = bufs
+    worker._save_stream = FakeStream()
+    worker._save_count = 1
+    worker._save_bytes = 16
+    worker._save_mm_hashes = ["hash"]
+    worker._inflight_saves = deque()
+    worker._acquire_event = lambda: FakeEvent()
+    monkeypatch.setattr(worker_mod, "current_platform", platform)
+    monkeypatch.setattr(upstream_worker_mod, "current_platform", platform)
+    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("copy failed"))
 
-    with pytest.raises(RuntimeError):
-        worker.start_load_caches({}, metadata)
+    with pytest.raises(RuntimeError, match="copy failed"):
+        worker.flush_saves()
+
+    assert worker._save_bufs is None
+    assert worker._save_stream is None
+    assert worker._save_count == 0
+    assert worker._save_bytes == 0
+    assert worker._save_mm_hashes == []
+    assert worker._buf_pool._pool == [bufs]
 
 
-def test_shutdown_synchronizes_releases_and_unregisters_before_cleanup(
-    monkeypatch,
-):
-    worker, _, npu = make_worker_env(monkeypatch, dtype=torch.int8)
-    order: list[str | tuple[str, object]] = []
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", lambda *args: None)
+def test_upstream_completion_recycles_npu_transfer_resources():
+    worker = make_worker()
+    worker._stream_pool = []
+    bufs = worker._buf_pool.acquire(1)
+    stream = FakeStream()
+    start_event = FakeEvent()
+    end_event = FakeEvent(completed=True)
+    inflight = deque(
+        [
+            Transfer(
+                start_event=start_event,
+                end_event=end_event,
+                completions=["hash"],
+                bufs=bufs,
+                stream=stream,
+                num_bytes=16,
+            )
+        ]
+    )
+
+    completed = worker._collect_finished(inflight, "save")
+
+    assert completed == ["hash"]
+    assert inflight == deque()
+    assert worker._buf_pool._pool == [bufs]
+    assert worker._stream_pool == [stream]
+    assert worker._event_pool == [start_event, end_event]
+
+
+def test_shutdown_waits_for_transfer_then_unregisters_and_cleans_up(monkeypatch):
+    worker = make_worker()
+    order = []
+    worker._dtype = torch.float32
+    worker._is_save_rank = True
+    worker._save_bufs = None
+    worker._save_stream = None
+    worker._save_count = 0
+    worker._save_bytes = 0
+    worker._save_mm_hashes = []
+    worker._stream_pool = []
+    worker._inflight_loads = deque()
+    bufs = worker._buf_pool.acquire(1)
+    end_event = FakeEvent(order=order)
+    worker._inflight_saves = deque(
+        [
+            Transfer(
+                start_event=FakeEvent(),
+                end_event=end_event,
+                completions=["hash"],
+                bufs=bufs,
+                stream=FakeStream(),
+                num_bytes=16,
+            )
+        ]
+    )
     worker._region.cleanup = lambda: order.append("cleanup")
-
-    def synchronize():
-        npu.synchronize_calls += 1
-        order.append("synchronize")
-
-    npu.synchronize = synchronize
     monkeypatch.setattr(
         worker_mod,
         "_unregister_pinned_host_mmap",
-        lambda blocks: order.append(("unregister", blocks.data_ptr())),
+        lambda blocks: order.append("unregister"),
     )
-
-    save_one_block(worker)
-    worker.flush_saves()
-    assert len(worker._buf_pool._pool) == 0
 
     worker.shutdown()
 
-    assert npu.synchronize_calls == 1
-    assert worker._inflight_descriptor_bufs == []
-    assert len(worker._buf_pool._pool) == 1
-    assert order == [
-        "synchronize",
-        ("unregister", worker._region.blocks.data_ptr()),
-        "cleanup",
-    ]
+    assert order == ["event_synchronize", "unregister", "cleanup"]
     assert worker._mmap_pinned is False
 
 
-def test_shutdown_preserves_mmap_when_device_synchronize_fails(monkeypatch):
+def test_unregister_failure_preserves_registration_for_retry(monkeypatch):
     worker = make_worker()
-    order: list[str | tuple[str, object]] = []
-    worker._region.cleanup = lambda: order.append("cleanup")
-    monkeypatch.setattr(
-        worker_mod,
-        "_unregister_pinned_host_mmap",
-        lambda blocks: order.append(("unregister", blocks.data_ptr())),
-    )
-
-    monkeypatch.setattr(
-        worker_mod.torch,
-        "npu",
-        SimpleNamespace(synchronize=raises("stream failed")),
-        raising=False,
-    )
-
-    with pytest.raises(RuntimeError, match="stream failed"):
-        worker.shutdown()
-
-    assert order == []
-    assert worker._mmap_pinned is True
-
-
-def test_shutdown_unregister_failure_preserves_mmap_and_allows_retry(monkeypatch):
-    worker = make_worker()
-    order = []
-    worker._save_bufs = worker._buf_pool.acquire(1)
-    worker._save_count = 1
-    worker._region.cleanup = lambda: order.append("cleanup")
-    monkeypatch.setattr(
-        worker_mod.torch,
-        "npu",
-        SimpleNamespace(synchronize=lambda: order.append("synchronize")),
-        raising=False,
-    )
-    unregister_calls = 0
+    calls = 0
 
     def fail_once(blocks):
         del blocks
-        nonlocal unregister_calls
-        unregister_calls += 1
-        order.append("unregister")
-        if unregister_calls == 1:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
             raise RuntimeError("unregister failed")
 
     monkeypatch.setattr(worker_mod, "_unregister_pinned_host_mmap", fail_once)
 
     with pytest.raises(RuntimeError, match="unregister failed"):
-        worker.shutdown()
+        worker._shutdown_transfer_backend()
 
-    assert worker._save_bufs is None
-    assert worker._save_count == 0
-    assert worker._inflight_descriptor_bufs == []
-    assert len(worker._buf_pool._pool) == 1
     assert worker._mmap_pinned is True
-    assert order == ["synchronize", "unregister"]
-
-    worker.shutdown()
-    assert unregister_calls == 2
-    assert len(worker._buf_pool._pool) == 1
+    worker._shutdown_transfer_backend()
+    assert calls == 2
     assert worker._mmap_pinned is False
-    assert order == [
-        "synchronize",
-        "unregister",
-        "synchronize",
-        "unregister",
-        "cleanup",
-    ]
