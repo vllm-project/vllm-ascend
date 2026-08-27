@@ -292,7 +292,7 @@ jobs:
           cutoff = sys.argv[1]
           for r in runs:
               if r.get('path', '').endswith('main2main-e2e.yaml') and r.get('created_at', '') >= cutoff:
-                  print(r['database_id'])
+                  print(r['id'])
                   break
           " "$DISPATCH_AT" || true)
             if [ -n "${RUN_ID:-}" ]; then
