@@ -633,7 +633,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
             t._pending_batches.append(batch)
         self.assertEqual(t.lookup_after_pending_saves(["k1"]), [1])
 
-    def test_save_batch_failure_releases_fence(self):
+    def test_save_batch_put_failure_is_nonfatal(self):
         t, store = self._make_thread([0])
         store.put = MagicMock(side_effect=RuntimeError("put failed"))
         t.start()
@@ -647,8 +647,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         batch = t.prepare_save_batch([req])
         self.assertTrue(batch.prepared.wait(timeout=1))
         t.commit_save_batch(batch, MagicMock())
-        with self.assertRaises(RuntimeError):
-            t.wait_for_batch(batch)
+        t.wait_for_batch(batch)
         self.assertTrue(batch.done.is_set())
         self.assertNotIn("r1", t.stored_requests)
 
