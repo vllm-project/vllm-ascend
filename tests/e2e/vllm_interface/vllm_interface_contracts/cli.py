@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Command-line interface for the upstream vLLM compatibility check."""
+"""Command-line interface for the vLLM PR compatibility check."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .range_analysis import (
     analyze_range,
-    render_upstream_pr_summary,
+    render_vllm_pr_summary,
 )
 
 
@@ -35,10 +35,10 @@ def _add_sources(parser: argparse.ArgumentParser) -> None:
 
 
 def _range_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    parser = subparsers.add_parser("analyze-range", help="Analyze an exact old-to-new vLLM range.")
+    parser = subparsers.add_parser("analyze-range", help="Analyze an exact vLLM PR base-to-head range.")
     _add_sources(parser)
-    parser.add_argument("--old", required=True)
-    parser.add_argument("--new", required=True)
+    parser.add_argument("--old", required=True, help="vLLM PR base commit")
+    parser.add_argument("--new", required=True, help="vLLM PR head commit")
     parser.add_argument("--fail-on", choices=("never", "introduced", "unresolved"), default="never")
     parser.add_argument("--analysis-workers", type=int, default=3)
 
@@ -53,7 +53,7 @@ def _analyze(args: argparse.Namespace) -> int:
         analysis_workers=args.analysis_workers,
         index_workers=args.index_workers,
     )
-    print(render_upstream_pr_summary(report))
+    print(render_vllm_pr_summary(report))
     actionable_introduced = report["summary"]["actionable_introduced_break"]
     if args.fail_on == "introduced" and actionable_introduced:
         return 1

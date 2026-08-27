@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""vLLM upstream interface compatibility tests and source analyzer."""
+"""vLLM PR interface compatibility test and source analyzer."""

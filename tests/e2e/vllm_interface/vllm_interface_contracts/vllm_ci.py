@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Helpers for running the interface analyzer from the upstream vLLM CI."""
+"""Helpers for running the interface analyzer from a vLLM PR job."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-VLLM_UPSTREAM_URL = "https://github.com/vllm-project/vllm.git"
-VLLM_UPSTREAM_BRANCH = "main"
+VLLM_REPOSITORY_URL = "https://github.com/vllm-project/vllm.git"
+VLLM_BASE_BRANCH = "main"
 
 
 def _git(root: Path, *args: str) -> str:
@@ -36,23 +36,23 @@ def _git(root: Path, *args: str) -> str:
 def resolve_vllm_range(
     vllm_root: Path,
     *,
-    upstream_url: str = VLLM_UPSTREAM_URL,
-    upstream_branch: str = VLLM_UPSTREAM_BRANCH,
+    repository_url: str = VLLM_REPOSITORY_URL,
+    base_branch: str = VLLM_BASE_BRANCH,
 ) -> tuple[str, str]:
-    """Resolve the exact merge-base-to-HEAD range for an upstream PR checkout."""
+    """Resolve the exact merge-base-to-HEAD range for this vLLM PR."""
     if not vllm_root.is_dir():
         raise ValueError(f"vLLM checkout does not exist: {vllm_root}")
     if not (vllm_root / ".git").exists():
         raise ValueError(f"vLLM checkout has no Git metadata: {vllm_root}")
 
     new_sha = _git(vllm_root, "rev-parse", "HEAD")
-    _git(vllm_root, "fetch", "--no-tags", upstream_url, upstream_branch)
+    _git(vllm_root, "fetch", "--no-tags", repository_url, base_branch)
     try:
         old_sha = _git(vllm_root, "merge-base", new_sha, "FETCH_HEAD")
     except subprocess.CalledProcessError:
         if _git(vllm_root, "rev-parse", "--is-shallow-repository") != "true":
             raise
-        _git(vllm_root, "fetch", "--no-tags", "--unshallow", upstream_url, upstream_branch)
+        _git(vllm_root, "fetch", "--no-tags", "--unshallow", repository_url, base_branch)
         old_sha = _git(vllm_root, "merge-base", new_sha, "FETCH_HEAD")
 
     _git(vllm_root, "merge-base", "--is-ancestor", old_sha, new_sha)
@@ -69,7 +69,7 @@ def build_analysis_command(
     analysis_workers: int = 3,
     index_workers: int = 1,
 ) -> list[str]:
-    """Build the repository CLI command used by the upstream pytest entry."""
+    """Build the repository CLI command used by the vLLM PR pytest entry."""
     command = [
         sys.executable,
         "-m",

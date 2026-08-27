@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Fixed execution plan for the upstream vLLM interface CI check."""
+"""Fixed execution plan for the vLLM PR interface CI check."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class AnalysisPlan:
         return {
             "scenario": self.scenario,
             "plan_version": ANALYSIS_PLAN_VERSION,
-            "report_style": "upstream-pr-introduced-only",
+            "report_style": "vllm-pr-introduced-only",
             "capabilities": self.capabilities(),
         }
 

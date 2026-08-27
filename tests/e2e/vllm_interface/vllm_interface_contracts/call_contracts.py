@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-"""Exact static contracts for downstream calls and callable return values.
+"""Exact static contracts for vllm-ascend calls into vLLM and return values.
 
 The analysis is conservative: a dependency is returned only when its callee is
 uniquely resolved, and dynamic argument or return shapes stay unknown.
@@ -91,7 +91,7 @@ class ReturnContract:
 
 @dataclass(frozen=True)
 class ReturnUse:
-    """How one downstream callsite immediately consumes a return value."""
+    """How one vllm-ascend call site immediately consumes a return value."""
 
     kind: str
     awaited: bool = False
@@ -636,7 +636,7 @@ def replacement_return_compatible(
     if upstream is None or downstream is None:
         return None, "return contract could not be resolved"
     if upstream.status == "bottom":
-        return None, "upstream has no observable normal return contract"
+        return None, "vLLM has no observable normal return contract"
     if downstream.status == "bottom":
         return None, "replacement has no observable normal return contract"
     if upstream.status != "exact" or downstream.status != "exact":
@@ -651,10 +651,10 @@ def replacement_return_compatible(
         if None in results:
             uncertain = True
             continue
-        return False, f"replacement return shape {candidate.kind} is outside the upstream contract"
+        return False, f"vllm-ascend return shape {candidate.kind} is outside the vLLM contract"
     if uncertain:
         return None, "nominal return compatibility could not be proven"
-    return True, "replacement return values satisfy the upstream return contract"
+    return True, "vllm-ascend return values satisfy the vLLM return contract"
 
 
 def _use_shape_compatible(shape: ReturnShape, use: ReturnUse) -> bool | None:
@@ -696,12 +696,12 @@ def return_use_compatible(
     if use.status != "exact":
         return None, "return value escapes or is consumed dynamically"
     if contract is None or contract.status != "exact":
-        return None, "upstream return contract could not be proven"
+        return None, "the vLLM return contract could not be proven"
     if use.awaited:
         if contract.protocol != "awaitable":
-            return False, "the downstream awaits a non-awaitable return protocol"
+            return False, "vllm-ascend awaits a non-awaitable vLLM return value"
     elif contract.protocol == "awaitable" and use.kind != "ignored":
-        return False, "the downstream consumes an awaitable without awaiting it"
+        return False, "vllm-ascend consumes an awaitable vLLM return value without awaiting it"
     if use.kind == "async_iterate":
         compatible = contract.protocol == "async_iterator"
         return compatible, "async iteration protocol matches" if compatible else "return is not an async iterator"
@@ -721,10 +721,10 @@ def return_use_compatible(
         return False, f"{contract.protocol} does not provide the consumed value protocol"
     results = [_use_shape_compatible(shape, use) for shape in contract.variants]
     if False in results:
-        return False, "at least one upstream return shape violates the downstream use"
+        return False, "at least one vLLM return shape is incompatible with its use in vllm-ascend"
     if results and all(result is True for result in results):
-        return True, "all upstream return shapes satisfy the downstream use"
-    return None, "the downstream return use could not be proven for every shape"
+        return True, "all vLLM return shapes are compatible with their use in vllm-ascend"
+    return None, "the vllm-ascend return-value use could not be proven for every vLLM shape"
 
 
 def _parents(tree: ast.AST) -> dict[int, ast.AST]:
@@ -852,7 +852,7 @@ def _annotation_reference(node: ast.AST | None) -> str | None:
 
 
 class DirectCallDetector:
-    """Discover exact downstream-to-upstream calls without changing golden relations."""
+    """Discover exact vllm-ascend-to-vLLM calls without changing golden relations."""
 
     def __init__(self, engine: InterfaceBoundaryGenerator):
         self.engine = engine
@@ -1348,7 +1348,7 @@ class DirectCallDetector:
         return callable_info is not None and callable_info.decorator_references == (_TRITON_JIT_DECORATOR,)
 
     def discover(self) -> list[DirectCallDependency]:
-        """Discover exact downstream calls and constrained return uses."""
+        """Discover exact vllm-ascend calls into vLLM and constrained return uses."""
         dependencies: list[DirectCallDependency] = []
         self.historical_candidates = []
         for module_info in self.engine.downstream.modules.values():

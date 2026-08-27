@@ -15,7 +15,7 @@
 """Analyze an exact vLLM commit range against live vllm-ascend dependencies.
 
 The dependency graph is generated consumer-first from the selected source pair.
-The range analyzer then resolves every dependency at both upstream endpoints so
+The range analyzer then resolves every dependency at both vLLM revisions so
 historical incompatibilities are separated from breaks introduced by the range.
 """
 
@@ -137,7 +137,7 @@ def verify_range(vllm_root: Path, old: str, new: str) -> tuple[str, str]:
         capture_output=True,
     )
     if ancestor.returncode != 0:
-        raise ValueError(f"old is not an ancestor of new: {old_sha} -> {new_sha}")
+        raise ValueError(f"the vLLM PR base is not an ancestor of its head: {old_sha} -> {new_sha}")
     return old_sha, new_sha
 
 
@@ -1350,11 +1350,11 @@ def _state(
 ) -> CompatibilityState:
     presence = _relation_symbol_presence(upstream)
     if presence is False:
-        return CompatibilityState(False, False, "upstream target does not exist")
+        return CompatibilityState(False, False, "the vLLM target does not exist")
     if presence is None:
-        return CompatibilityState(None, None, "upstream target binding could not be proven")
+        return CompatibilityState(None, None, "the vLLM target binding could not be proven")
     if upstream.symbol_kind != "callable":
-        return CompatibilityState(True, False, "upstream target is no longer callable")
+        return CompatibilityState(True, False, "the vLLM target is no longer callable")
     if (
         upstream.owner is not None
         and upstream.descriptor is not None
@@ -1364,14 +1364,14 @@ def _state(
         return CompatibilityState(
             True,
             False,
-            "installed descriptor does not preserve the upstream access protocol",
+            "the vllm-ascend descriptor does not preserve the vLLM access protocol",
         )
     if upstream_contract is not None:
         if upstream_contract.status != "exact":
             return CompatibilityState(
                 True,
                 None,
-                "upstream runtime signature transform could not be proven",
+                "the vLLM runtime signature transform could not be proven",
             )
         upstream_signature = upstream_contract.bound_call_signature
     else:
@@ -1379,7 +1379,7 @@ def _state(
             return CompatibilityState(
                 True,
                 None,
-                "upstream runtime signature transform could not be proven",
+                "the vLLM runtime signature transform could not be proven",
             )
         upstream_signature = _bound_signature(
             upstream.signature,
@@ -1393,22 +1393,22 @@ def _state(
         True,
         compatible,
         (
-            "downstream accepts the upstream call contract"
+            "the vllm-ascend implementation accepts the vLLM call contract"
             if compatible
-            else "downstream does not accept the upstream call contract"
+            else "the vllm-ascend implementation does not accept the vLLM call contract"
         ),
     )
 
 
 def _direct_call_state(upstream: SourceEndpoint, dependency: DirectCallDependency) -> CompatibilityState:
     if upstream.symbol_kind in {None, "unknown"}:
-        return CompatibilityState(None, None, "upstream call target binding could not be proven")
+        return CompatibilityState(None, None, "the vLLM call target binding could not be proven")
     if upstream.file is None or upstream.symbol_kind == "missing":
-        return CompatibilityState(False, False, "upstream call target does not exist")
+        return CompatibilityState(False, False, "the vLLM call target does not exist")
     if upstream.symbol_kind not in {"callable", "constructor"}:
-        return CompatibilityState(True, False, "upstream target is no longer callable")
+        return CompatibilityState(True, False, "the vLLM target is no longer callable")
     if upstream.signature_status == "unknown":
-        return CompatibilityState(True, None, "upstream runtime signature transform could not be proven")
+        return CompatibilityState(True, None, "the vLLM runtime signature transform could not be proven")
     compatible, reason = bind_call_shape(upstream.signature, dependency.call_shape)
     return CompatibilityState(True, compatible, reason)
 
@@ -1419,11 +1419,11 @@ def _replacement_return_state(
 ) -> CompatibilityState:
     presence = _relation_symbol_presence(upstream)
     if presence is False:
-        return CompatibilityState(False, False, "upstream target does not exist")
+        return CompatibilityState(False, False, "the vLLM target does not exist")
     if presence is None:
-        return CompatibilityState(None, None, "upstream target binding could not be proven")
+        return CompatibilityState(None, None, "the vLLM target binding could not be proven")
     if upstream.symbol_kind != "callable":
-        return CompatibilityState(True, False, "upstream target is no longer callable")
+        return CompatibilityState(True, False, "the vLLM target is no longer callable")
     compatible, reason = replacement_return_compatible(
         return_contract_from_dict(upstream.return_contract),
         return_contract_from_dict(downstream.return_contract),
@@ -1436,11 +1436,11 @@ def _return_use_state(
     dependency: DirectCallDependency,
 ) -> CompatibilityState:
     if upstream.symbol_kind in {None, "unknown"}:
-        return CompatibilityState(None, None, "upstream call target binding could not be proven")
+        return CompatibilityState(None, None, "the vLLM call target binding could not be proven")
     if upstream.file is None or upstream.symbol_kind == "missing":
-        return CompatibilityState(False, False, "upstream call target does not exist")
+        return CompatibilityState(False, False, "the vLLM call target does not exist")
     if upstream.symbol_kind not in {"callable", "constructor"}:
-        return CompatibilityState(True, False, "upstream target is no longer callable")
+        return CompatibilityState(True, False, "the vLLM target is no longer callable")
     compatible, reason = return_use_compatible(
         return_contract_from_dict(upstream.return_contract),
         dependency.return_use,
@@ -1480,58 +1480,71 @@ def _change_text(
     runtime_signature_changed: bool = False,
 ) -> str:
     if old.file is None and new.file is not None:
-        return "upstream target was added"
+        return "this PR added the vLLM target"
     if old.file is not None and new.file is None:
-        return "upstream target was removed"
+        return "this PR removed the vLLM target"
     if old.symbol_kind == "missing" and new.symbol_kind != "missing":
-        return "upstream symbol was added"
+        return "this PR added the vLLM symbol"
     if old.symbol_kind != "missing" and new.symbol_kind == "missing":
-        return "upstream symbol was removed"
+        return "this PR removed the vLLM symbol"
     if old.symbol_kind != new.symbol_kind:
-        return f"upstream symbol binding changed: {old.symbol_kind} -> {new.symbol_kind}"
+        return f"this PR changed the vLLM symbol binding: {old.symbol_kind} -> {new.symbol_kind}"
     if old.file != new.file:
-        return f"upstream target moved: {old.file} -> {new.file}"
+        return f"this PR moved the vLLM target: {old.file} -> {new.file}"
     if old.name != new.name:
-        return f"upstream callable renamed: {old.name} -> {new.name}"
+        return f"this PR renamed the vLLM callable: {old.name} -> {new.name}"
     if old.descriptor != new.descriptor:
-        return f"descriptor changed: {old.descriptor} -> {new.descriptor}"
+        return f"this PR changed the vLLM descriptor: {old.descriptor} -> {new.descriptor}"
     if runtime_signature_changed:
-        return "callable runtime signature contract changed"
+        return "this PR changed the vLLM runtime signature contract"
     if _ambiguous_binding_changed(old, new):
-        return "ambiguous callable binding changed and requires review"
+        return "this PR changed an ambiguous vLLM callable binding; manual review is required"
     if contract_kind == "return_usage" or contract_kind == "replacement_return":
         if old.return_contract != new.return_contract:
-            return "callable return contract changed"
+            return "this PR changed the vLLM return contract"
     elif old.signature != new.signature:
-        return "callable parameter contract changed"
-    return "no exact callable contract delta"
+        return "this PR changed the vLLM parameter contract"
+    return "this PR has no exact vLLM callable contract change"
 
 
 def _suggestion(relation: str, classification: str, old: SourceEndpoint, new: SourceEndpoint) -> str:
     if classification == "preexisting":
-        return "Track this as a pre-existing compatibility issue; do not attribute it to this upstream range."
+        return "Track this as a pre-existing compatibility issue; do not attribute it to this PR."
     if classification == "fixed":
         return (
-            "Upstream compatibility has been restored. "
-            "Confirm whether the downstream compatibility code is still needed."
+            "This PR restores compatibility with vllm-ascend. "
+            "Confirm whether the related vllm-ascend compatibility code is still needed."
         )
-    if new.file is None:
+    if new.file is None or new.symbol_kind == "missing":
+        if relation == "direct_call":
+            return (
+                "Replace or remove the affected vllm-ascend call to the deleted vLLM API, "
+                "then add a regression test for the replacement path."
+            )
+        if relation == "direct_import":
+            return (
+                "Replace or remove the affected vllm-ascend import of the deleted vLLM symbol, "
+                "then add an import-boundary regression test."
+            )
         return (
-            "Update the downstream override target. If upstream removed this capability, "
+            "Update the affected vllm-ascend override. If this PR removes the vLLM capability, "
             "remove the override and provide an alternative implementation if needed."
         )
     if old.name != new.name:
-        return f"Update the downstream dependency from {old.name} to {new.name}, and verify all forwarded arguments."
+        return (
+            f"Update the affected vllm-ascend dependency from {old.name} to {new.name}, "
+            "and verify all forwarded arguments."
+        )
     if relation == "override":
-        return "Update the downstream override signature, then verify super() calls and keyword forwarding."
+        return "Update the affected vllm-ascend override signature, then verify super() calls and keyword forwarding."
     if relation == "direct_import":
-        return "Update the imported module or symbol path and add an import-boundary regression test."
+        return "Update the vllm-ascend import path and add an import-boundary regression test."
     if relation == "direct_call":
         return (
-            "Update the downstream call arguments or return-value handling "
+            "Update the affected vllm-ascend call arguments or return-value handling "
             "and add a regression test for this call site."
         )
-    return "Update the downstream dependency to match the exact upstream contract and add an interface regression test."
+    return "Update the affected vllm-ascend dependency to match the vLLM contract and add an interface regression test."
 
 
 def _finding_id(*parts: object) -> str:
@@ -1837,7 +1850,7 @@ def _optional_override_dispatch_evidence(
     candidates: list[dict[str, object]],
     registered_overrides: dict[tuple[str, str], list[dict[str, object]]],
 ) -> list[dict[str, object]]:
-    """Keep only calls whose dispatch can reach this exact downstream override."""
+    """Keep only calls whose dispatch can reach this exact vllm-ascend override."""
 
     if endpoint.file is None or endpoint.owner is None or endpoint.name is None:
         return []
@@ -1966,14 +1979,14 @@ def _relation_findings(
         )
         if optional_contract_review:
             suggestion = (
-                "Review whether the new optional parameter can reach this downstream override at runtime. "
+                "Review whether this PR can pass the new optional parameter to the vllm-ascend override at runtime. "
                 "If it can, update the override signature and handle the new argument."
             )
         elif masked_preexisting_delta:
             suggestion = (
-                "This upstream range introduces another exact parameter difference, but the downstream override "
-                "was already incompatible at the old revision. Review the new difference separately; do not add "
-                "it to this range's repair list."
+                "This PR introduces another exact parameter difference, but the vllm-ascend override was already "
+                "incompatible at the base revision. Review the new difference separately; do not add it to this "
+                "PR's repair list."
             )
         else:
             suggestion = _suggestion(
@@ -2084,7 +2097,7 @@ def _relation_findings(
                 evidence=evidence,
                 gates=gates,
                 suggestion=(
-                    "Update the downstream override's return contract to satisfy the new upstream contract, and "
+                    "Update the affected vllm-ascend override's return contract to satisfy the new vLLM contract, and "
                     "add a return-value regression test."
                 ),
                 contract_kind="replacement_return",
@@ -2321,7 +2334,7 @@ def _direct_call_findings(
     old_snapshot: GitSnapshot,
     new_snapshot: GitSnapshot,
 ) -> tuple[list[RangeFinding], list[DirectCallDependency]]:
-    """Compare exact downstream call and return-use contracts at both SHAs."""
+    """Compare exact vllm-ascend call and return-use contracts at both vLLM SHAs."""
     findings: list[RangeFinding] = []
     exact_dependencies: list[DirectCallDependency] = []
     for dependency in dependencies:
@@ -2470,7 +2483,7 @@ def _direct_call_findings(
                 evidence=[dependency.as_dict()],
                 gates=gates,
                 suggestion=(
-                    "Update how this downstream call unpacks, indexes, or otherwise consumes the upstream return "
+                    "Update how the affected vllm-ascend call unpacks, indexes, or otherwise consumes the vLLM return "
                     "value, and add a regression test for the call site."
                 ),
                 source="direct_call_detector",
@@ -2495,10 +2508,10 @@ def _verified_historical_direct_calls(
 ) -> list[DirectCallDependency]:
     """Promote only old-proven/new-missing self or super call candidates.
 
-    The checked-out downstream tree proves the callsite and a complete new MRO
+    The checked-out vllm-ascend tree proves the call site and a complete head MRO
     proves that the member is absent.  The range still needs old-side evidence
-    before this is a dependency: otherwise a dynamic downstream ``self.foo()``
-    could be mistaken for a deleted upstream method merely because it shares a
+    before this is a dependency: otherwise a dynamic vllm-ascend ``self.foo()``
+    could be mistaken for a deleted vLLM method merely because it shares a
     class with some vLLM base.
     """
 
@@ -2622,7 +2635,7 @@ def analyze_range(
     analysis_workers: int = 3,
     index_workers: int = 1,
 ) -> dict[str, Any]:
-    """Run the upstream vLLM interface CI analysis for an exact range."""
+    """Run the vLLM PR interface analysis for an exact range."""
     analysis_started = time.perf_counter()
     phase_started = time.perf_counter()
     timings: dict[str, float | None] = {}
@@ -2810,7 +2823,7 @@ def analyze_range(
     }
 
 
-def _upstream_pr_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
+def _vllm_pr_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         item
         for item in report["findings"]
@@ -2820,7 +2833,7 @@ def _upstream_pr_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _upstream_pr_review_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
+def _vllm_pr_review_findings(report: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         item
         for item in report["findings"]
@@ -2851,9 +2864,9 @@ def _root_cause_key(item: dict[str, Any]) -> tuple[object, ...]:
     )
 
 
-def _upstream_pr_payload(report: dict[str, Any]) -> dict[str, Any]:
-    findings = _upstream_pr_findings(report)
-    review_findings = _upstream_pr_review_findings(report)
+def _vllm_pr_payload(report: dict[str, Any]) -> dict[str, Any]:
+    findings = _vllm_pr_findings(report)
+    review_findings = _vllm_pr_review_findings(report)
     relation_counts = Counter(item["relation"] for item in findings)
     contract_counts = Counter(item.get("contract_kind", "") for item in findings)
     review_reason_counts = Counter(item.get("details", {}).get("actionability_reason", "") for item in review_findings)
@@ -2874,7 +2887,7 @@ def _upstream_pr_payload(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _upstream_pr_finding_lines(
+def _vllm_pr_finding_lines(
     item: dict[str, Any],
     index: int,
     *,
@@ -2886,9 +2899,9 @@ def _upstream_pr_finding_lines(
         upstream = item["upstream"]["old"]
     downstream = item["downstream"]
     override_paths = details.get("override_paths") or []
-    path_lines = [f"- Override path: `{' -> '.join(path)}`" for path in override_paths if len(path) > 2]
+    path_lines = [f"- vllm-ascend override path: `{' -> '.join(path)}`" for path in override_paths if len(path) > 2]
     call_lines = [
-        "- Upstream call evidence: "
+        "- vLLM call in this PR: "
         f"`{evidence['file']}:{evidence['line']}` passes "
         f"`{', '.join(evidence['matched_parameters'])}`"
         for evidence in details.get("upstream_call_evidence", [])
@@ -2899,22 +2912,23 @@ def _upstream_pr_finding_lines(
         if details.get("optional_contract_only"):
             optional_parameters = details.get("new_optional_parameters") or []
             parameter_names = ", ".join(f"`{name}`" for name in optional_parameters)
-            parameter_reference = "it" if len(optional_parameters) == 1 else "them"
+            parameter_reference = "that parameter" if len(optional_parameters) == 1 else "those parameters"
             reason = (
-                f"The downstream override does not accept the new optional parameter {parameter_names}, and the "
-                f"analyzer found no upstream call in this range that passes {parameter_reference} to that override."
+                f"The vllm-ascend override does not accept the new optional parameter {parameter_names}, and the "
+                f"analyzer found no vLLM call added or changed by this PR that passes {parameter_reference} to this "
+                "implementation."
             )
         else:
             reason = (
-                "This range adds another contract difference, but the downstream code was already incompatible "
-                "at the old revision."
+                "This PR adds another contract difference, but the affected vllm-ascend code was already "
+                "incompatible with the base revision."
             )
         reason_lines.append(f"- Review reason: {reason}")
     return [
         f"### {index}. {item['priority']} {item['relation']} / {item.get('contract_kind', '')}",
         "",
-        f"- Upstream: `{upstream.get('file') or ''}:{upstream_name}`",
-        f"- Downstream: `{downstream.get('file') or ''}:{downstream.get('line') or ''}`",
+        f"- vLLM API changed by this PR: `{upstream.get('file') or ''}:{upstream_name}`",
+        f"- Affected vllm-ascend code: `{downstream.get('file') or ''}:{downstream.get('line') or ''}`",
         *path_lines,
         *call_lines,
         *reason_lines,
@@ -2924,45 +2938,45 @@ def _upstream_pr_finding_lines(
     ]
 
 
-def _upstream_pr_markdown(payload: dict[str, Any]) -> str:
+def _vllm_pr_markdown(payload: dict[str, Any]) -> str:
     meta = payload["metadata"]
     summary = payload["summary"]
     findings = payload["findings"]
     review_findings = payload["review_findings"]
     result = "BREAKS FOUND" if findings else "REVIEW" if review_findings else "PASS"
     lines = [
-        "# vLLM Interface Compatibility",
+        "# vLLM PR Compatibility with vllm-ascend",
         "",
         f"**Result: {result}**",
         "",
-        f"- vLLM range: `{meta['vllm_old_sha']}` -> `{meta['vllm_new_sha']}`",
-        f"- vllm-ascend baseline: `{meta['vllm_ascend_sha']}`",
-        "- Scope: downstream imports, overrides, and direct calls to vLLM",
+        f"- This PR: `{meta['vllm_old_sha']}` -> `{meta['vllm_new_sha']}`",
+        f"- vllm-ascend revision: `{meta['vllm_ascend_sha']}`",
+        "- Checked vllm-ascend usage: imports from vLLM, overrides of vLLM APIs, and calls to vLLM",
         "- Monkey patches, inheritance-only findings, generator reviews, "
         "and historical incompatibilities are intentionally excluded.",
-        "- If this range adds a new contract difference on top of an older incompatibility, "
+        "- If this PR adds a new contract difference on top of an older incompatibility, "
         "the report keeps it for manual review.",
-        f"- Introduced breaks: {summary['introduced_breaks']}",
-        f"- Root causes: {summary['root_causes']}",
-        f"- Review findings: {summary['review_findings']}",
-        f"- Review root causes: {summary['review_root_causes']}",
+        f"- Breaks introduced by this PR: {summary['introduced_breaks']}",
+        f"- Distinct vLLM API changes causing breaks: {summary['root_causes']}",
+        f"- Items for review: {summary['review_findings']}",
+        f"- Distinct vLLM API changes for review: {summary['review_root_causes']}",
         "",
-        "## Introduced breaks",
+        "## Breaks introduced by this PR",
         "",
     ]
     if not findings:
-        lines.extend(["No new downstream interface break was introduced by this range.", ""])
+        lines.extend(["This PR does not introduce a detected interface break in vllm-ascend.", ""])
     for index, item in enumerate(findings, start=1):
-        lines.extend(_upstream_pr_finding_lines(item, index, review=False))
-    lines.extend(["## Review findings", ""])
+        lines.extend(_vllm_pr_finding_lines(item, index, review=False))
+    lines.extend(["## Items for review", ""])
     if not review_findings:
         lines.append("No additional interface change requires manual review.")
     for index, item in enumerate(review_findings, start=1):
-        lines.extend(_upstream_pr_finding_lines(item, index, review=True))
+        lines.extend(_vllm_pr_finding_lines(item, index, review=True))
     return "\n".join(lines)
 
 
-def render_upstream_pr_summary(report: dict[str, Any]) -> str:
-    """Render the upstream PR Markdown summary without writing report files."""
+def render_vllm_pr_summary(report: dict[str, Any]) -> str:
+    """Render the vLLM PR summary without writing report files."""
 
-    return _upstream_pr_markdown(_upstream_pr_payload(report))
+    return _vllm_pr_markdown(_vllm_pr_payload(report))

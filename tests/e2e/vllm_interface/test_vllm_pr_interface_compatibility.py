@@ -21,27 +21,27 @@ from pathlib import Path
 import pytest
 
 from tests.e2e.vllm_interface.vllm_interface_contracts.range_analysis import git_head
-from tests.e2e.vllm_interface.vllm_interface_contracts.upstream_ci import (
+from tests.e2e.vllm_interface.vllm_interface_contracts.vllm_ci import (
     build_analysis_command,
     resolve_vllm_range,
     run_analysis,
 )
 
-VLLM_UPSTREAM_CHECKOUT = Path("/workspace/vllm")
+VLLM_CHECKOUT = Path("/workspace/vllm")
 
 
-def test_upstream_interface_compatibility() -> None:
-    """Report interface breaks introduced by the checked-out upstream PR."""
-    if not VLLM_UPSTREAM_CHECKOUT.exists():
-        pytest.skip("the upstream vLLM checkout is available only in the vLLM NPU job")
-    if not (VLLM_UPSTREAM_CHECKOUT / ".git").exists():
-        pytest.fail("the upstream vLLM checkout must retain Git metadata")
+def test_vllm_pr_interface_compatibility() -> None:
+    """Report vllm-ascend interface breaks introduced by this vLLM PR."""
+    if not VLLM_CHECKOUT.exists():
+        pytest.skip("the vLLM checkout is available only in the vLLM Ascend NPU job")
+    if not (VLLM_CHECKOUT / ".git").exists():
+        pytest.fail("the vLLM checkout must retain Git metadata")
 
     ascend_root = Path(__file__).resolve().parents[3]
-    old_sha, new_sha = resolve_vllm_range(VLLM_UPSTREAM_CHECKOUT)
+    old_sha, new_sha = resolve_vllm_range(VLLM_CHECKOUT)
     ascend_sha = git_head(ascend_root)
     command = build_analysis_command(
-        vllm_root=VLLM_UPSTREAM_CHECKOUT,
+        vllm_root=VLLM_CHECKOUT,
         ascend_root=ascend_root,
         old_sha=old_sha,
         new_sha=new_sha,
@@ -50,20 +50,20 @@ def test_upstream_interface_compatibility() -> None:
         index_workers=4,
     )
 
-    print("\n+++ vLLM interface compatibility inputs")
-    print(f"vllm_old_sha={old_sha}")
-    print(f"vllm_new_sha={new_sha}")
+    print("\n+++ vLLM PR compatibility inputs")
+    print(f"vllm_pr_base_sha={old_sha}")
+    print(f"vllm_pr_head_sha={new_sha}")
     print(f"vllm_ascend_sha={ascend_sha}")
     result = run_analysis(command, cwd=ascend_root)
     if result.stderr:
-        print("\n+++ vLLM interface compatibility timings")
+        print("\n+++ vLLM PR compatibility timings")
         print(result.stderr.rstrip())
 
-    print("\n+++ vLLM interface compatibility result")
+    print("\n+++ vLLM PR compatibility result for vllm-ascend")
     if result.stdout:
         print(result.stdout.rstrip())
 
     if result.returncode == 1:
-        pytest.fail("the upstream PR introduces a vllm-ascend interface break")
+        pytest.fail("this vLLM PR introduces an interface break in vllm-ascend")
     if result.returncode != 0:
         pytest.fail(f"interface analysis failed with exit code {result.returncode}")

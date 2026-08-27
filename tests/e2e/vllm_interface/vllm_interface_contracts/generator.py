@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate vLLM override relations required by the upstream interface CI.
+"""Generate vLLM override relations required by the vLLM PR interface CI.
 
-Inheritance is collected only to resolve the complete MRO behind a downstream
+Inheritance is collected only to resolve the complete MRO behind a vllm-ascend
 override. Monkey-patch collection and main2main-only review findings are outside
 this package's scope.
 
@@ -2155,7 +2155,7 @@ class Relation:
 
 @dataclass(frozen=True)
 class HistoricalOverrideCandidate:
-    """A downstream method whose new MRO has no upstream implementation.
+    """A vllm-ascend method whose head-revision MRO has no vLLM implementation.
 
     This is not yet a verified override relation.  The range layer must prove
     that the same lookup root resolved to a callable at ``old`` before it can
@@ -3791,14 +3791,14 @@ class InterfaceBoundaryGenerator:
                 "vllm",
                 ordinary_descriptor_decorators=ordinary_descriptor_decorators,
             )
-        self.repository_index_timings["upstream"] = round(time.perf_counter() - index_started, 6)
+        self.repository_index_timings["vllm"] = round(time.perf_counter() - index_started, 6)
         index_started = time.perf_counter()
         self.downstream = RepositoryIndex(
             ascend_root,
             "vllm_ascend",
             ordinary_descriptor_decorators=ordinary_descriptor_decorators,
         )
-        self.repository_index_timings["downstream"] = round(time.perf_counter() - index_started, 6)
+        self.repository_index_timings["vllm_ascend"] = round(time.perf_counter() - index_started, 6)
         parse_errors = [("vLLM", error) for error in self.upstream.parse_errors] + [
             ("vllm-ascend", error) for error in self.downstream.parse_errors
         ]
@@ -4472,7 +4472,7 @@ class InterfaceBoundaryGenerator:
             self._mro_resolution_seconds += time.perf_counter() - started
 
     def _collect_verified_overrides(self) -> None:
-        """Collect downstream overrides with a statically proven upstream owner."""
+        """Collect vllm-ascend overrides with a statically proven vLLM owner."""
         for class_info in self.downstream.classes.values():
             if self._conditional_class_dependency(class_info.qualified_name) is not None:
                 continue
@@ -4547,7 +4547,7 @@ class InterfaceBoundaryGenerator:
         method_name: str,
         seen: frozenset[str] = frozenset(),
     ) -> tuple[tuple[str, tuple[str, ...]], ...]:
-        """Resolve a downstream-owned override to its ultimate source root.
+        """Resolve a vllm-ascend-owned override to its ultimate vLLM source root.
 
         Attribute lookup stops at the first effective implementation.  That
         implementation can itself belong to another vllm-ascend subclass,
