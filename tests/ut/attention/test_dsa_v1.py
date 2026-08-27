@@ -35,6 +35,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
     build_dspark_swa_indices,
+    get_dspark_sparse_flash_mla_common_kwargs,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -112,6 +113,18 @@ def test_build_dspark_swa_indices_returns_logical_positions_and_lengths():
     assert indices[2, 0].tolist() == [3, 4, 5, 6, 7, 8, 9, -1]
     assert indices[3, 0].tolist() == [0, 1, 2, 3, -1, -1, -1, -1]
     assert topk_lengths[:, 0].tolist() == [7, 7, 7, 4, 4]
+
+
+def test_dspark_sparse_flash_mla_common_kwargs():
+    assert get_dspark_sparse_flash_mla_common_kwargs() == {
+        "cmp_ratio": 1,
+        "ori_mask_mode": 0,
+        "cmp_mask_mode": 3,
+        "ori_win_left": 0,
+        "ori_win_right": 0,
+        "layout_q": "TND",
+        "layout_kv": "PA_BBND",
+    }
 
 
 def test_build_dspark_swa_indices_legacy_physical_slot_fallback():

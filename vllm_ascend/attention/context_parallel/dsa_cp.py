@@ -23,6 +23,7 @@ from vllm_ascend.attention.dsa_v1 import (
     _dsa_swa_only_cmp_ratio,
     _has_weight_scale,
     build_dspark_swa_indices,
+    get_dspark_sparse_flash_mla_common_kwargs,
     get_dspark_sparse_sas_window,
 )
 from vllm_ascend.attention.utils import (
@@ -537,21 +538,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
 
         num_heads = self.model_config.hf_config.num_attention_heads
-        cu_seqlens_ori_kv = (
-            local_query_start_loc
-            if has_prefill
-            else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
-                None,
-                "draft_cu_seqlens_ori_kv",
-                local_seq_lens,
-                num_reqs,
-                self._zero_i32,
-                self.cu_seqlens_ori_kv,
-            )
-        )
-        cu_seqlens_cmp_kv = (
-            None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
-        )
         sparse_metadata_op = (
             DeviceOperator.get_dspark_sparse_flash_mla_metadata_op() if dspark_swa_indices is not None else None
         )
@@ -573,18 +559,26 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 max_seqlen_q=max_local_query_len,
                 max_seqlen_ori_kv=max_local_seq_lens,
                 ori_topk=dspark_swa_indices.shape[-1],
-                cmp_ratio=1,
-                ori_mask_mode=0,
-                # A2/A3 tiling requires cmp_mask_mode=3 even when cmp_kv is absent.
-                cmp_mask_mode=3,
-                ori_win_left=0,
-                ori_win_right=0,
-                layout_q="TND",
-                layout_kv="PA_BBND",
                 has_ori_kv=True,
                 has_cmp_kv=False,
+                **get_dspark_sparse_flash_mla_common_kwargs(),
             )
         else:
+            cu_seqlens_ori_kv = (
+                local_query_start_loc
+                if has_prefill
+                else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+                    None,
+                    "draft_cu_seqlens_ori_kv",
+                    local_seq_lens,
+                    num_reqs,
+                    self._zero_i32,
+                    self.cu_seqlens_ori_kv,
+                )
+            )
+            cu_seqlens_cmp_kv = (
+                None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
+            )
             kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
             metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
             metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
@@ -1767,6 +1761,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             DeviceOperator.get_dspark_sparse_flash_mla_op() if swa_req_metadata.dspark_swa_indices is not None else None
         )
         if self.compress_ratio <= 1 and sparse_flash_op is not None:
+            assert swa_req_metadata.dspark_swa_indices is not None
             assert swa_req_metadata.dspark_swa_topk_lengths is not None
             attn_output = sparse_flash_op(
                 q,
@@ -1779,15 +1774,8 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 sinks=self.attn_sink,
                 metadata=swa_metadata.req_metadata.sas_metadata,
                 softmax_scale=self.softmax_scale,
-                cmp_ratio=1,
-                ori_mask_mode=0,
-                # A2/A3 tiling requires cmp_mask_mode=3 even when cmp_kv is absent.
-                cmp_mask_mode=3,
-                ori_win_left=0,
-                ori_win_right=0,
-                layout_q="TND",
-                layout_kv="PA_BBND",
                 topk_value_mode=dsa_v1.SPARSE_FLASH_MLA_TOPK_VALUE_MODE,
+                **get_dspark_sparse_flash_mla_common_kwargs(),
             )[0]
         elif self.compress_ratio <= 1:
             attn_output = attn_op(
