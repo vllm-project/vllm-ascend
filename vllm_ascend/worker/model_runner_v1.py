@@ -4453,15 +4453,19 @@ class NPUModelRunner(GPUModelRunner):
                             for layer_name_inner in shared_layers:
                                 kv_cache_raw_tensors[layer_name_inner] = tensor
                     else:
-                        # main: every layer owns its own region; give each layer a
-                        # private tensor so blocks don't collide across layers.
+                        # main: every layer owns its own region; size each layer
+                        # from its own spec page so mixed-spec tensors stay exact.
                         for layer_name_inner in shared_layers:
+                            layer_size = (
+                                kv_cache_config.num_blocks
+                                * layer_kv_cache_spec[layer_name_inner].page_size_bytes
+                            )
                             if self.vllm_config.kv_transfer_config is None:
-                                tensor = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
+                                tensor = torch.zeros(layer_size, dtype=torch.int8, device=self.device)
                             else:
-                                cache_size_aligned = per_layer_size + alignment
+                                cache_size_aligned = layer_size + alignment
                                 tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                                tensor = self._align_memory(tensor, alignment)[: per_layer_size]
+                                tensor = self._align_memory(tensor, alignment)[: layer_size]
                             kv_cache_raw_tensors[layer_name_inner] = tensor
 
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
@@ -4548,16 +4552,14 @@ class NPUModelRunner(GPUModelRunner):
                     )
 
                     # vLLM #51718 packs every layer of a group into a single
-                    # KVCacheTensor on main (size = num_layers * page_size * num_blocks,
-                    # `layers` lists every layer). Each layer owns an equal share, so
-                    # divide by the layer count to recover the per-layer size that
-                    # v0.27.1 stored directly on the tensor. Dividing the tensor
-                    # directly (rather than via the spec's page_size_bytes) stays
-                    # correct even when a group spec reports the summed page size.
+                    # KVCacheTensor on main; the per-layer size is the block
+                    # count times this layer's own page size. Using the layer's
+                    # spec page (rather than dividing the tensor) stays correct
+                    # when the tensor's group is not the largest group.
                     kv_cache_tensor_size = (
                         kv_cache_tensor.size
                         if vllm_version_is("0.27.1")
-                        else kv_cache_tensor.size // len(shared_layers)
+                        else kv_cache_config.num_blocks * current_kv_cache_spec.page_size_bytes
                     )
                     if current_sparse_sfa_c8:
                         k_tensor_size = kv_cache_tensor_size
