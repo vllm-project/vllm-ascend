@@ -1392,6 +1392,10 @@ class _DecodeStreamSession:
                 if not choices:
                     return chunk
 
+        # 无 choices 的 chunk(纯 usage/畸形响应): 若上面未转发则跳过，避免落到
+        # choices[0] 越界(update_cached_tokens_in_chunk 在 chunk 无 usage 时返回 False)。
+        if not choices:
+            return None
         self._accumulate(choices[0], chunk_json)
         if self.retry:
             return None
