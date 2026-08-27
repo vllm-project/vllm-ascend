@@ -313,8 +313,11 @@ jobs:
           # Phase 2: wait until all three NPU runners picked up their
           # prepare jobs (status left queued).  Jobs are queried by the
           # prep run id itself, so prefix matching on prepare-<chip>- is
-          # unambiguous — no owner suffix needed in the job names.
-          PREP_RUN_ID=${MAIN2MAIN_E2E_PREP_RUN_ID}
+          # unambiguous — no owner suffix needed in the job names.  Use the
+          # local RUN_ID: MAIN2MAIN_E2E_PREP_RUN_ID was written to
+          # GITHUB_ENV for later steps and is not bound in this shell
+          # (set -u would abort on it).
+          PREP_RUN_ID=${RUN_ID}
           WAIT_MIN=${MAIN2MAIN_E2E_READY_TIMEOUT_MIN:-120}
           echo "Waiting for the three NPU runners (prepare-a2/a3/310p) — up to ${WAIT_MIN} min..."
           DEADLINE=$(( $(date +%s) + WAIT_MIN * 60 ))
