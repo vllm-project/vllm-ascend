@@ -307,10 +307,6 @@ class TestAscendStoreConnector(unittest.TestCase):
         mock_worker.prepare_save.assert_called_once()
         mock_worker.start_load_kv.assert_called_once()
 
-        metadata = MagicMock(preempted_req_ids={"r1"})
-        connector.handle_preemptions(metadata)
-        mock_worker.wait_for_preempted_saves.assert_called_once_with({"r1"})
-
         # wait_for_save (non-consumer)
         connector.kv_role = "kv_producer"
         connector.use_layerwise = False

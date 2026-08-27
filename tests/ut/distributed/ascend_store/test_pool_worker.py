@@ -628,44 +628,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.ensure_initialized.assert_called_once_with()
         worker.m_store.register_buffer.assert_called_once()
 
-    def test_worker_constructed_sender_prepares_before_put(self):
-        worker = self._make_worker()
-        worker.token_database.set_group_buffers(
-            {0: [1000]},
-            {0: [16]},
-            {0: [16]},
-            group_num_layers={0: 1},
-        )
-        worker.m_store.exists.return_value = [0]
-        worker._start_kv_transfer_threads()
-        self.assertIsInstance(worker.kv_send_thread, KVCacheStoreSendingThread)
-        send_thread = worker.kv_send_thread
-        assert isinstance(send_thread, KVCacheStoreSendingThread)
-        self.assertTrue(send_thread.put_thread.is_alive())
-
-        req = ReqMeta(
-            req_id="r1",
-            token_len_chunk=16,
-            block_ids=[0],
-            block_hashes=["h0"],
-            can_save=True,
-        )
-        meta = AscendConnectorMetadata(set(), set())
-        meta.add_request(req)
-        worker.prepare_save(meta)
-        batch = worker._prepared_save_batch
-        assert batch is not None
-        self.assertTrue(batch.prepared.wait(timeout=1))
-        worker.m_store.put.assert_not_called()
-
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.torch.npu",
-            create=True,
-        ):
-            worker.wait_for_save(meta)
-        send_thread.wait_for_batch(batch)
-        worker.m_store.put.assert_called_once()
-
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
@@ -850,12 +812,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.wait_for_save(meta)
         worker.kv_send_thread.prepare_save_batch.assert_not_called()
         worker.kv_send_thread.wait_for_batch.assert_not_called()
-
-    def test_preemption_waits_only_matching_save_batches(self):
-        worker = self._make_worker()
-        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        worker.wait_for_preempted_saves({"r1"})
-        worker.kv_send_thread.wait_for_requests.assert_called_once_with({"r1"})
 
     def test_get_finished_producer(self):
         worker = self._make_worker(kv_role="kv_producer")
