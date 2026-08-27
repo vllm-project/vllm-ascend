@@ -38,6 +38,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_hybrid_kv_cache_config(
@@ -353,6 +354,8 @@ def test_kimi_k3_mla_dspark_uses_four_groups_and_five_builders() -> None:
 def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> None:
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
     assert groups is not None
+    max_model_len = 133120
+    vllm_config = _make_vllm_config(enable_prefix_caching=True, dcp=1, block_size=384)
     worker_config = KVCacheConfig(
         num_blocks=100,
         kv_cache_tensors=[],
@@ -361,17 +364,19 @@ def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> No
 
     assert worker_config.has_mamba_layers
     assert worker_config.needs_kv_cache_zeroing
-    assert (
-        groups[1].kv_cache_spec.max_num_blocks_per_req(
-            _make_vllm_config(enable_prefix_caching=True, dcp=1, block_size=384),
-            3840,
-        )
-        == 17
-    )
+    worker_mamba_widths = {
+        group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len) for group in groups[1:]
+    }
+    assert worker_mamba_widths == {354}
 
     scheduler_config = generate_scheduler_kv_cache_config([worker_config])
     assert isinstance(scheduler_config.kv_cache_groups[0].kv_cache_spec, MLAAttentionSpec)
     assert all(isinstance(group.kv_cache_spec, MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
+    scheduler_mamba_widths = {
+        group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+        for group in scheduler_config.kv_cache_groups[1:]
+    }
+    assert scheduler_mamba_widths == worker_mamba_widths
     assert scheduler_config.needs_kv_cache_zeroing
 
 
@@ -399,10 +404,9 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     assert sum(tensor.size for tensor in tensors) == available_memory
 
 
-def test_kimi_k3_gqa_mixed_grouping_falls_back_on_partial_signature() -> None:
+def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
     specs = _make_kimi_k3_dspark_kv_cache_specs()
-    draft_layer = "model.layers.93.self_attn.attn"
-    specs.pop(draft_layer)
+    specs["unrecognized.layer"] = next(iter(specs.values()))
 
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
 
@@ -560,6 +564,10 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
 
 
 @pytest.mark.parametrize("num_prefill_lookahead", [0, 8])
+@pytest.mark.skipif(
+    vllm_version_is("0.27.1"),
+    reason="num_prefill_lookahead was added to the coordinator after v0.27.1",
+)
 def test_get_kv_cache_coordinator_forwards_prefill_lookahead(
     monkeypatch,
     num_prefill_lookahead: int,

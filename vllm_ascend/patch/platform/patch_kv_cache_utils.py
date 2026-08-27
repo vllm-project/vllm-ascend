@@ -28,6 +28,26 @@ _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cach
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
 
 
+if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
+
+    def _uniform_type_max_num_blocks_per_req(
+        self: UniformTypeKVCacheSpecs,
+        vllm_config: VllmConfig,
+        max_len: int,
+    ) -> int:
+        """Preserve the inner spec's block-table width."""
+        widths = {spec.max_num_blocks_per_req(vllm_config, max_len) for spec in self.kv_cache_specs.values()}
+        assert len(widths) == 1, (
+            "All layers in the same KV cache group must need the same number "
+            f"of block table entries, got {sorted(widths)}."
+        )
+        return next(iter(widths))
+
+    UniformTypeKVCacheSpecs.max_num_blocks_per_req = (  # type: ignore[method-assign]
+        _uniform_type_max_num_blocks_per_req
+    )
+
+
 def _ascend_resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
