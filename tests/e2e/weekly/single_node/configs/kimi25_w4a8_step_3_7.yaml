@@ -64,8 +64,8 @@ _benchmarks_perf: &benchmarks_perf
 
 # =======Eagle3 Speculative Reasoning Step Test_02 step=3===============
 test_cases:
-  - name: "kimi25_w4a8_static_m6_step_3"
-    model: "/mnt/weight/kimi25_w4a8_static_m6"
+  - name: "Kimi-K2.5-W4A8_step_3"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
@@ -78,8 +78,8 @@ test_cases:
     benchmarks:
       <<: *benchmarks_perf
 # =======Eagle3 Speculative Reasoning Step Test_04 step=7===============
-  - name: "kimi25_w4a8_static_m6_step_7"
-    model: "/mnt/weight/kimi25_w4a8_static_m6"
+  - name: "Kimi-K2.5-W4A8step_7"
+    model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
       <<: *envs
     server_cmd: *server_cmd
