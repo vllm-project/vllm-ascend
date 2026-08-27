@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING
 
 import torch
+import torch_npu
 from vllm.distributed import (
     get_ep_group,
 )
@@ -10,6 +11,8 @@ from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
     WorkerSentinel as GPUWorkerSentinel,
 )
+
+from vllm_ascend.platform import NPUPlatform
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
@@ -39,10 +42,6 @@ class WorkerSentinel(GPUWorkerSentinel):
         return {"mask": get_ep_group().world_size * [0]}
 
     def reset_device(self) -> None:
-        import torch_npu
-
-        from vllm_ascend.platform import NPUPlatform
-
         NPUPlatform.set_device(self.device)
         torch_npu.npu.stop_device(self.device.index)
         torch_npu.npu.restart_device(self.device.index)
