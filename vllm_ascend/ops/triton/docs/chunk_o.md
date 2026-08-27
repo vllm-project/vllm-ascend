@@ -1,71 +1,58 @@
 # chunk_fwd_o
 
-## 功能说明
+## Description
 
-- 算子功能：`chunk_fwd_o` 计算 Gated Delta Rule 前向中每个 chunk 的输出 $o$，融合了 chunk 间隐状态贡献（$q@h$）与 chunk 内注意力贡献（$A_{\text{intra}}@v$），并可选地融合门控 $g$。
+- **Function**: Computes the output of each chunk in the Gated Delta Rule forward pass by combining the inter-chunk hidden-state contribution (`q @ h`) with the intra-chunk attention contribution (`A_intra @ v`), with optional gating.
+- **Formula**: Combines the inter-chunk hidden-state contribution with the causal intra-chunk attention contribution:
+- Input `q`, `k`: `[B, T, Hg, K]`; input `v`: `[B, T, H, V]`; hidden state `h`: `[B * NT, H, K, V]`
+- Query-key correlation: `C[i, j, h] = sum_d(q[i, h_g, d] * k[j, h_g, d])`
+- Intra-chunk matrix: `A_intra[i, j, h] = indicator(i >= j) * C[i, j, h] * exp(g[i, h] - g[j, h])`
+- Inter-chunk contribution: `o_inter[i, h, d_v] = scale * exp(g[i, h]) * sum_d(q[i, h_g, d] * hidden[c, h, d, d_v])`
+- Intra-chunk contribution: `o_intra[i, h, d_v] = scale * sum_j(A_intra[i, j, h] * v[j, h, d_v])`
+- Output `o`: `[B, T, H, V]`, where `o = o_inter + o_intra`
+- Head mapping: `h_g = floor(h / (H / Hg))`; `scale = K**-0.5` when `scale=None`; gating is omitted when `g=None`
+- **Algorithm flow**:
+  1. Map each output head to the corresponding query/key head for GQA or MQA.
+  2. Load the hidden state accumulated before the current chunk and compute the inter-chunk contribution.
+  3. Compute the causal query-key correlation matrix within the chunk and apply the optional cumulative gate.
+  4. Multiply the intra-chunk correlation by `v`, combine both contributions, and store `o`.
+- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950 (Triton kernel); fixed-length and variable-length sequences; GQA/MQA; eager and graph-capture modes.
 
-- 计算公式：
+## Parameters
 
-  对于每个 chunk 内的位置 $i$，给定 query $Q\in\R^{B\times T\times H_g\times d}$、key $K\in\R^{B\times T\times H_g\times d}$、value $V\in\R^{B\times T\times H\times d_v}$、chunk 间隐状态 $h\in\R^{(\text{B}\cdot\text{NT})\times H\times d\times d_v}$、累积门控 $g\in\R^{B\times T\times H}$、缩放因子 $s$：
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `q` | Input | Query tensor `[B, T, Hg, K]` | fp32 / fp16 / bf16 | ND |
+| `k` | Input | Key tensor `[B, T, Hg, K]` | fp32 / fp16 / bf16 | ND |
+| `v` | Input | Value tensor `[B, T, H, V]` | fp32 / fp16 / bf16 | ND |
+| `h` | Input | Inter-chunk hidden state `[B * NT, H, K, V]` | fp32 / fp16 / bf16 | ND |
+| `g` | Input | Cumulative gate `[B, T, H]`; `None` disables gating | fp32 / fp16 / bf16 | ND |
+| `scale` | Input (attribute) | Scale factor; defaults to `K**-0.5` | fp32 | scalar |
+| `cu_seqlens` | Input | Cumulative sequence lengths `[N + 1]` | int32 / int64 | ND |
+| `chunk_size` | Input (attribute) | Number of tokens per chunk; default 64 | int32 | scalar |
+| `chunk_offsets` | Input | Per-sequence chunk offsets `[N + 1]`; generated when omitted | int32 / int64 | ND |
+| `o` | Output | Chunk output `[B, T, H, V]` | same as `v` | ND |
 
-  $$
-  A_{\text{intra}}[i, j, h] = \mathbb{1}_{i\ge j}\cdot\left(\sum_{d} Q[i, h_g, d]\cdot K[j, h_g, d]\right)\cdot \exp\big(g[i, h]-g[j, h]\big)
-  $$
+## Constraints
 
-  $$
-  o[i, h, d_v] = s\cdot\Big(\exp(g[i, h])\cdot\sum_{d} Q[i, h_g, d]\cdot h[c, h, d, d_v]\Big) + s\cdot\sum_{j} A_{\text{intra}}[i, j, h]\cdot V[j, h, d_v]
-  $$
+- `H` must be divisible by `Hg`.
+- The first dimension of `h` must match the total number of chunks; variable-length mode must use matching `chunk_offsets`.
+- The `(B, T)` dimensions of `q`, `k`, `v`, and `g` must match.
+- `g` should be the log-space cumulative gate produced by `chunk_local_cumsum`.
+- Input tensors must be contiguous in the last dimension.
+- The current default and recommended `chunk_size` is 64.
 
-    - $h_g = h\ //\ (H/H_g)$，把 query head 折回 kv-head，支持 GQA/MQA。
-    - $c$ 为当前 chunk 的索引，$h$ 为该 chunk 之前累积的隐状态。
-    - $A_{\text{intra}}$ 为 chunk 内下三角（含对角线）的 query-key 相关性矩阵。
-    - 当 `g=None` 时不应用门控项；当 `scale=None` 时默认 $s=d^{-1/2}$。
+## Origin and Differences
 
-## 参数说明
+- **Origin**: Based on the `chunk_fwd_o` implementation from the flash-linear-attention project (MIT license; see the source-file header).
+- **Differences**:
+    - Adapted to Ascend NPU with Triton and NPU-specific tiling and device-property selection.
+    - Supports vLLM Ascend variable-length metadata and graph capture while preserving the GQA/MQA head mapping.
 
-| 参数名 | 输入/输出/属性 | 描述 | 数据类型 |
-|---|---|---|---|
-| q | 输入 | query 张量，shape 为 `(B, T, Hg, K)`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| k | 输入 | key 张量，shape 为 `(B, T, Hg, K)`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| v | 输入 | value 张量，shape 为 `(B, T, H, V)`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| h | 输入 | chunk 间隐状态，shape 为 `(B*NT, H, K, V)`，`NT` 为每个序列的 chunk 数。 | FLOAT16、BFLOAT16、FLOAT32 |
-| g | 输入 | 累积门控（`chunk_local_cumsum` 的输出），shape 为 `(B, T, H)`。默认 `None`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| scale | 属性 | 缩放因子，默认 `K^{-1/2}`。 | FLOAT |
-| cu_seqlens | 输入 | 变长序列累积长度，shape 为 `(N+1,)`。默认 `None`。 | INT32、INT64 |
-| chunk_size | 属性 | chunk 大小，默认 64。 | INT |
-| chunk_offsets | 输入 | 变长模式下的 chunk 偏移，shape 为 `(N+1,)`。默认 `None` 时自动生成。 | INT32、INT64 |
-| o | 输出 | chunk 输出，shape 为 `(B, T, H, V)`。 | 与 `v` 一致 |
+## Test Cases
 
-## 约束说明
+The test compares the Triton result with a PyTorch reference for fixed-length and variable-length inputs, multiple head mappings, and supported floating-point dtypes.
 
-- 该接口支持图模式。
-- `H` 必须能被 `Hg` 整除（GQA 约束）。
-- `h` 的第一维必须等于 `B * NT`，其中 `NT = ceil(T / chunk_size)`；变长模式下需配合 `chunk_offsets`。
-- `g` 应为 `chunk_local_cumsum` 的输出（log 空间累积门控）。
-- 输入 `q`、`k`、`v`、`g` 的 `(B, T)` 维度需一致。
-- 输入张量需在最后一维连续。
-- `chunk_size` 当前默认且建议为 64。
-
-## 调用示例
-
-<table class="tg"><thead>
-  <tr>
-    <th class="tg-0pky">调用方式</th>
-    <th class="tg-0pky">样例代码</th>
-    <th class="tg-0pky">说明</th>
-  </tr></thead>
-<tbody>
-  <tr>
-    <td class="tg-9wq8" rowspan="6">Python接口</td>
-    <td class="tg-0pky">
-    <a href="../../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_chunk_fwd_o.py">test_chunk_fwd_o
-    </a>
-    </td>
-    <td class="tg-lboi" rowspan="6">
-    通过
-    <a href="./chunk_o.py">chunk_fwd_o
-    </a>
-    接口方式调用算子
-    </td>
-  </tr>
-</tbody></table>
+```bash
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_chunk_fwd_o.py
+```

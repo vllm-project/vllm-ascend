@@ -1,67 +1,53 @@
 # chunk_local_cumsum
 
-## 功能说明
+## Description
 
-- 算子功能：`chunk_local_cumsum` 对输入张量沿序列维度（T）按 `chunk_size` 分块后，在每个 chunk 内独立执行累积求和（cumsum），可选支持反向累积、缩放因子以及变长序列。该算子是 flash-linear-attention 系列（如 Gated Delta Rule）中用于对门控信号 `g` 进行 chunk 级局部 cumsum 的核心组件。
+- **Function**: Partitions the sequence dimension into chunks and independently computes a cumulative sum inside each chunk. Reverse accumulation, output scaling, head-first layout, and variable-length sequences are supported.
+- **Formula**: Computes an independent prefix sum within each sequence chunk:
+- Input `g`: `[B, T, H]` when `head_first=False`, or `[B, H, T]` when `head_first=True`
+- Forward accumulation: `output[b, t, h] = sum(g[b, chunk_start:t + 1, h])`
+- Reverse accumulation: `output[b, t, h] = sum(g[b, t:chunk_end, h])` when `reverse=True`
+- Optional scaling: `output = scale * output` when `scale` is provided
+- Output `output`: same shape as `g`, with each chunk accumulated independently
+- **Algorithm flow**:
+  1. Map each Triton program to a sequence chunk and head tile.
+  2. Load the valid input elements, respecting `cu_seqlens` in variable-length mode.
+  3. Perform a forward or reverse prefix sum within the chunk.
+  4. Apply the optional scale, cast to `output_dtype`, and store the result in the input layout.
+- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950 (Triton kernel); fixed-length and variable-length sequences; sequence-first and head-first layouts; eager and graph-capture modes.
 
-- 计算公式：
+## Parameters
 
-  对于输入 $g\in\R^{B\times T\times H}$（`head_first=False` 时），按 `chunk_size` 将 $T$ 切分为若干 chunk，对每个 chunk 内部沿 $T$ 维执行累积求和：
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `g` | Input | Input `[B, T, H]` if `head_first=False`, otherwise `[B, H, T]` | fp32 | ND |
+| `chunk_size` | Input (attribute) | Number of tokens per chunk; must be a power of two | int32 | scalar |
+| `reverse` | Input (attribute) | Compute a reverse cumulative sum when `True`; default `False` | bool | scalar |
+| `scale` | Input (attribute) | Optional output scale; default `None` | fp32 | scalar |
+| `cu_seqlens` | Input | Cumulative sequence lengths `[N + 1]` | int32 | ND |
+| `head_first` | Input (attribute) | Select `[B, H, T]` layout when `True`; default `False` | bool | scalar |
+| `output_dtype` | Input (attribute) | Requested output dtype; default `torch.float` | torch dtype | scalar |
+| `output` | Output | Chunk-local cumulative sum with the same shape as `g` | specified by `output_dtype` | ND |
 
-  $$
-  \text{out}[b, t, h] = \sum_{j=\text{chunk\_start}}^{t} g[b, j, h], \quad t\in[\text{chunk\_start},\ \text{chunk\_end})
-  $$
+## Constraints
 
-    - 当 `reverse=True` 时，在每个 chunk 内沿 $T$ 维反向累积：
+- `chunk_size` must be a power of two; otherwise, an `AssertionError` is raised.
+- Only three-dimensional inputs are supported; four-dimensional inputs are not supported.
+- Batch size must be 1 when `cu_seqlens` is provided.
+- Empty or non-contiguous inputs are not supported; the last dimension must be contiguous.
+- The default fp32 output helps prevent intermediate overflow during backward propagation and context-parallel execution.
 
-    $$
-    \text{out}[b, t, h] = \sum_{j=t}^{\text{chunk\_end}-1} g[b, j, h]
-    $$
+## Origin and Differences
 
-    - 当 `scale` 不为 `None` 时，对结果再做缩放：$\text{out} \leftarrow \text{scale}\cdot \text{out}$。
+- **Origin**: Based on the chunk-local cumulative-sum implementation from the flash-linear-attention project (MIT license; see the source-file header).
+- **Differences**:
+    - Adapted to Ascend NPU Triton execution and its supported tensor layouts.
+    - Adds vLLM Ascend validation and variable-length metadata handling for inference workloads.
 
-## 参数说明
+## Test Cases
 
-| 参数名 | 输入/输出/属性 | 描述 | 数据类型 |
-|---|---|---|---|
-| g | 输入 | 输入张量，shape 为 `(B, T, H)`（`head_first=False`）或 `(B, H, T)`（`head_first=True`）。不支持空 tensor 和非连续。 | FLOAT32 |
-| chunk_size | 属性 | 分块大小，必须是 2 的幂次。 | INT |
-| reverse | 属性 | 是否在每个 chunk 内反向执行 cumsum，默认 `False`。 | BOOL |
-| scale | 属性 | 输出缩放因子，默认 `None` 表示不缩放。 | FLOAT |
-| cu_seqlens | 输入 | 变长序列的累积长度，shape 为 `(N+1,)`。提供时 batch size 必须为 1。默认 `None`。 | INT32 |
-| head_first | 属性 | 是否 head 维度在前，默认 `False`。 | BOOL |
-| output_dtype | 属性 | 输出数据类型，默认 `torch.float`。 | - |
-| output | 输出 | 分块局部 cumsum 结果，shape 与输入一致。 | 由 `output_dtype` 决定，默认 FLOAT32 |
+The test compares forward and reverse accumulation with a PyTorch reference across chunk sizes, scaling options, layouts, variable-length inputs, and tail chunks.
 
-## 约束说明
-
-- 该接口支持图模式。
-- `chunk_size` 必须是 2 的幂次，否则抛出 `AssertionError`。
-- 当前算子仅支持 3 维输入 `(B, T, H)`，不支持 4 维输入。
-- 使用 `cu_seqlens` 时，batch size 必须为 1，否则抛出 `AssertionError`。
-- `output_dtype` 默认为 `torch.float`，在反向传播和 context parallel 场景下可有效防止中间结果溢出。
-- 输入张量需在最后一维连续。
-
-## 调用示例
-
-<table class="tg"><thead>
-  <tr>
-    <th class="tg-0pky">调用方式</th>
-    <th class="tg-0pky">样例代码</th>
-    <th class="tg-0pky">说明</th>
-  </tr></thead>
-<tbody>
-  <tr>
-    <td class="tg-9wq8" rowspan="6">Python接口</td>
-    <td class="tg-0pky">
-    <a href="../../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_chunk_local_cumsum.py">test_chunk_local_cumsum
-    </a>
-    </td>
-    <td class="tg-lboi" rowspan="6">
-    通过
-    <a href="./cumsum.py">chunk_local_cumsum
-    </a>
-    接口方式调用算子
-    </td>
-  </tr>
-</tbody></table>
+```bash
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_chunk_local_cumsum.py
+```

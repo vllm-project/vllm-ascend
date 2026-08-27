@@ -1,69 +1,58 @@
 # recompute_w_u_fwd
 
-## 功能说明
+## Description
 
-- 算子功能：`recompute_w_u_fwd` 在 Gated Delta Rule 的 chunk 扫描中，根据下三角变换矩阵 $A$（已求解逆矩阵）、key/value、缩放因子 $\beta$ 和累积门控 $g$，重计算 WY 表示中的中间变量 $w$ 与 $u$。$u$ 即后续计算使用的新 value。
+- **Function**: Recomputes the intermediate WY-representation tensors `w` and `u` during the Gated Delta Rule chunk scan from the solved transformation matrix `A`, key/value tensors, scale factor `beta`, and cumulative gate `g_cumsum`. The resulting `u` is the updated value used by subsequent computations.
+- **Formula**: Multiplies the solved chunk matrix by gated, scaled keys and scaled values:
+- Input `k`: `[B, T, Hg, K]`; input `v`: `[B, T, H, V]`; input `A`: `[B, T, H, BT]`
+- Scaled key: `k_scaled[j, h, d] = k[j, h_g, d] * beta[j, h] * exp(g_cumsum[j, h])`
+- Scaled value: `v_scaled[j, h, d_v] = v[j, h, d_v] * beta[j, h]`
+- Weighted key: `w[i, h, d] = sum_j(A[i, j, h] * k_scaled[j, h, d])`
+- Weighted value: `u[i, h, d_v] = sum_j(A[i, j, h] * v_scaled[j, h, d_v])`
+- Outputs `w`, `u`: `[B, T, H, K]` and `[B, T, H, V]`
+- Head mapping: `h_g = floor(h / (H / Hg))`; `A` is the unit lower-triangular inverse produced by `solve_tril`
+- **Algorithm flow**:
+  1. Partition each sequence into chunks and map output heads to KV heads.
+  2. Scale keys by `beta * exp(g_cumsum)` and values by `beta`.
+  3. Multiply the solved chunk matrix `A` by the scaled keys and values.
+  4. Store the weighted key `w` and updated value `u` in their original sequence layouts.
+- **Supported modes**: Atlas A2, Atlas A3, and Ascend 950 (Triton kernel); fixed-length and variable-length sequences; GQA/MQA; eager and graph-capture modes.
 
-- 计算公式：
+## Parameters
 
-  对于每个 chunk 内的位置 $i$，给定 $K\in\R^{B\times T\times H_g\times d}$、$V\in\R^{B\times T\times H\times d_v}$、$\beta\in\R^{B\times T\times H}$、$A\in\R^{B\times T\times H\times \text{BT}}$、累积门控 $g\in\R^{B\times T\times H}$：
+| Parameter | Input/Output/Attribute | Description | Data type | Data format |
+| --- | --- | --- | --- | --- |
+| `k` | Input | Key tensor `[B, T, Hg, K]` | fp32 / fp16 / bf16 | ND |
+| `v` | Input | Value tensor `[B, T, H, V]` | fp32 / fp16 / bf16 | ND |
+| `beta` | Input | Per-token scale tensor `[B, T, H]` | fp32 / fp16 / bf16 | ND |
+| `g_cumsum` | Input | Cumulative gate `[B, T, H]` from `chunk_local_cumsum` | fp32 / fp16 / bf16 | ND |
+| `A` | Input | Unit lower-triangular inverse `[B, T, H, BT]` from `solve_tril` | fp32 / fp16 / bf16 | ND |
+| `cu_seqlens` | Input | Cumulative sequence lengths `[N + 1]` | int32 / int64 | ND |
+| `chunk_indices` | Input | Variable-length chunk indices `[NT, 2]`; generated when omitted | int32 / int64 | ND |
+| `w` | Output | Weighted key `[B, T, H, K]` | same as `k` | ND |
+| `u` | Output | Weighted value `[B, T, H, V]` | same as `v` | ND |
 
-  $$
-  w[i, h, d] = \sum_{j} A[i, j, h]\cdot K[j, h_g, d]\cdot \beta[j, h]\cdot \exp\big(g[j, h]\big)
-  $$
+## Constraints
 
-  $$
-  u[i, h, d_v] = \sum_{j} A[i, j, h]\cdot V[j, h, d_v]\cdot \beta[j, h]
-  $$
+- `H` must be divisible by `Hg`.
+- The last dimension `BT` of `A` determines the chunk size.
+- The `(B, T)` dimensions of `k`, `v`, `beta`, `g_cumsum`, and `A` must match.
+- Fixed-length mode currently supports only `B=1`; represent multiple sequences as a flattened variable-length input with `B=1` and `cu_seqlens`.
+- `g_cumsum` should be the log-space cumulative gate produced by `chunk_local_cumsum`.
+- Input tensors must be contiguous in the last dimension.
+- Variable-length sequences are strictly isolated from one another.
 
-    - $h_g = h\ //\ (H/H_g)$，把 query head 折回 kv-head，支持 GQA/MQA。
-    - $A$ 为 `solve_tril` 求解后的单位下三角逆矩阵，shape 最后维 `BT` 为 chunk 大小。
+## Origin and Differences
 
-## 参数说明
+- **Origin**: Based on the WY recomputation implementation from the flash-linear-attention project (MIT license; see the source-file header).
+- **Differences**:
+    - Adapted to Ascend NPU Triton primitives and its matrix/vector execution characteristics.
+    - Supports vLLM Ascend GQA/MQA mapping, variable-length chunk metadata, and graph capture.
 
-| 参数名 | 输入/输出/属性 | 描述 | 数据类型 |
-|---|---|---|---|
-| k | 输入 | key 张量，shape 为 `(B, T, Hg, K)`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| v | 输入 | value 张量，shape 为 `(B, T, H, V)`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| beta | 输入 | 缩放因子，shape 为 `(B, T, H)`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| g_cumsum | 输入 | 累积门控（`chunk_local_cumsum` 的输出），shape 为 `(B, T, H)`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| A | 输入 | 下三角变换矩阵（`solve_tril` 的输出），shape 为 `(B, T, H, BT)`。 | FLOAT16、BFLOAT16、FLOAT32 |
-| cu_seqlens | 输入 | 变长序列累积长度，shape 为 `(N+1,)`。默认 `None`。 | INT32、INT64 |
-| chunk_indices | 输入 | 变长模式下的分块索引，shape 为 `(NT, 2)`。默认 `None` 时自动生成。 | INT32、INT64 |
-| w | 输出 | 加权 key，shape 为 `(B, T, H, K)`。 | 与 `k` 一致 |
-| u | 输出 | 加权 value，shape 为 `(B, T, H, V)`。 | 与 `v` 一致 |
+## Test Cases
 
-## 约束说明
+The test compares `w` and `u` with a PyTorch reference for fixed-length and variable-length inputs, GQA/MQA head mappings, multiple sequence lengths, and fp32/bf16 data.
 
-- 该接口支持图模式。
-- `H` 必须能被 `Hg` 整除（GQA 约束）。
-- `A` 的最后一个维度 `BT` 必须等于 `chunk_size`（取自 `A.shape[-1]`）。
-- `k` 和 `v` 的前三个维度 `(B, T, H)` 需一致（`k` 的 head 维为 `Hg`）。
-- 非变长（`cu_seqlens=None`）场景当前仅支持 `B=1`；多 batch 场景请使用变长输入（`B=1` 配合 `cu_seqlens`）。
-- `g_cumsum` 应为 `chunk_local_cumsum` 的输出（log 空间累积门控）。
-- 输入张量需在最后一维连续。
-- 变长模式下各序列之间严格隔离，不会互相影响。
-
-## 调用示例
-
-<table class="tg"><thead>
-  <tr>
-    <th class="tg-0pky">调用方式</th>
-    <th class="tg-0pky">样例代码</th>
-    <th class="tg-0pky">说明</th>
-  </tr></thead>
-<tbody>
-  <tr>
-    <td class="tg-9wq8" rowspan="6">Python接口</td>
-    <td class="tg-0pky">
-    <a href="../../../../../tests/e2e/nightly/single_node/ops/singlecard_ops/test_recompute_w_u_fwd.py">test_recompute_w_u_fwd
-    </a>
-    </td>
-    <td class="tg-lboi" rowspan="6">
-    通过
-    <a href="./wy_fast.py">recompute_w_u_fwd
-    </a>
-    接口方式调用算子
-    </td>
-  </tr>
-</tbody></table>
+```bash
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_recompute_w_u_fwd.py
+```
