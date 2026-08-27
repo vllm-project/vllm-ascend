@@ -65,14 +65,11 @@ def compute_slot_mapping_fused_kernel(
 ):
     """
     2D-grid fused slot-mapping kernel.
-
     Grid: ``(num_reqs + 1, num_groups)``
-
     Each program (req_idx, group_idx):
       1. Loads the per-group parameters for ``group_idx``.
       2. If ``req_idx`` is the last row → pads ``slot_mapping[group]``.
          Otherwise → computes the standard slot-mapping for that request.
-
     The normal-path logic mirrors ``_compute_slot_mapping_kernel`` in
     ``ops/triton/compute_slot_mapping.py`` (PR #13048), with ``block_size``,
     ``kv_cache_block_size`` and ``blocks_per_kv_block`` loaded dynamically
