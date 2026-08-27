@@ -549,7 +549,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.common_ratio_to_sas_metadata: dict | None = None
         self.seq_lens: torch.Tensor = None
 
-        self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
+        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
+        self.compressor_ratio = getattr(
+            kv_cache_spec,
+            "compress_ratio",
+            getattr(kv_cache_spec, "tokens_per_state", 0),
+        )
         self.hadamard = None
         self._init_hadamard(layer_names)
         self.start_pos_prefill: torch.Tensor = torch.zeros(
