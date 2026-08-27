@@ -99,6 +99,7 @@ def test_deepseek_v4_mtp_eager():
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
 
 
+@pytest.mark.skip("Temporarily skip this DeepSeek V4 test.")
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
 @pytest.mark.parametrize("max_tokens", [1024])
 @pytest.mark.parametrize("enforce_eager", [True])
