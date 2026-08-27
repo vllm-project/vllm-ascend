@@ -25,12 +25,11 @@
 #
 import math
 import typing
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
 import torch.nn.functional as F
-import torch_npu
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm._aiter_ops import rocm_aiter_ops
@@ -44,7 +43,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -56,7 +55,13 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
-from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -64,8 +69,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
     sequence_parallel_chunk,
 )
-from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache  # type: ignore[import-not-found,no-redef]
-from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ignore[import-not-found,no-redef]
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
@@ -74,168 +77,18 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.models.deepseek_v4.compressor import Compressor
+from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
-    vllm_version_is,
 )
-
-if not vllm_version_is("0.23.0"):
-    from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
-
-DSV4_STACKED_PARAMS_MAPPING = (
-    ("gate_up_proj", "gate_proj", 0),
-    ("gate_up_proj", "up_proj", 1),
-)
-
-
-def _normalize_dsv4_layer_weight_name(
-    name: str,
-    *,
-    preserve_wo_a_scale: bool = False,
-) -> str:
-    name = name.replace(".w1.", ".gate_proj.")
-    name = name.replace(".w2.", ".down_proj.")
-    name = name.replace(".w3.", ".up_proj.")
-    name = name.replace(".attn.", ".self_attn.")
-    name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
-    name = name.replace(".attn_norm.", ".input_layernorm.")
-    name = name.replace(".ffn.", ".mlp.")
-    if name.endswith(".scale") and not (preserve_wo_a_scale and name.endswith(".self_attn.wo_a.scale")):
-        name = name.removesuffix(".scale") + ".weight_scale"
-    return name.replace(".gate.bias", ".gate.e_score_correction_bias")
-
-
-def _hc_head_torch(
-    x: torch.Tensor,
-    hc_fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    norm_eps: float,
-    hc_eps: float,
-) -> torch.Tensor:
-    shape, dtype = x.size(), x.dtype
-    x_flat = x.flatten(1).float()
-    rsqrt = torch.rsqrt(x_flat.square().mean(-1, keepdim=True) + norm_eps)
-    mixes = F.linear(x_flat, hc_fn) * rsqrt
-    pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
-    y = torch.sum(pre.unsqueeze(-1) * x_flat.view(shape), dim=1)
-    return y.to(dtype)
-
-def _hc_post_torch(x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-    dtype = x.dtype
-    if x.dim() == 2 and residual.dim() == 3:
-        batch, hc_mult, dim = residual.shape
-        # x is (batch*hc_mult, dim) from attention/mlp output; reshape back
-        # to (batch, hc_mult, dim) to align with residual/post/comb.
-        x_f = x.reshape(batch, hc_mult, dim).float()
-        r_f = residual.float()
-        p_f = post.float()
-        c_f = comb.float()
-        y = p_f.unsqueeze(-1) * x_f
-        res_sum = torch.einsum("bij,bid->bjh", c_f, r_f)
-        y = y + res_sum
-        return y.to(dtype)
-    batch_r, hc_mult_r, dim_r = residual.shape
-    x_flat = x.reshape(batch_r, hc_mult_r, dim_r)
-    x_f = x_flat.float()
-    r_f = residual.float()
-    p_f = post.float()
-    c_f = comb.float()
-    y = p_f.unsqueeze(-1) * x_f
-    res_sum = torch.einsum("bij,bih->bjh", c_f, r_f)
-    y = y + res_sum
-    return y.to(dtype)
-
-def _get_ascend_dsa_backend():
-    # Keep this lazy to avoid vLLM model-inspection circular imports.
-    from vllm_ascend.attention.dsa_v1 import AscendDSABackend
-
-    return AscendDSABackend
-
-
-def _dsv4_block_sizes():
-    # Lazy import to avoid the circular import chain (layer -> dsa_v1 ->
-    # attention_v1 -> device_op) hit during vLLM subprocess model inspection.
-    from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
-
-    return DSV4_BLOCK_SIZES
-
-
-class AscendCompressorStateCache(CompressorStateCache):
-    def __init__(
-        self,
-        state_dim: int,
-        dtype: torch.dtype,
-        compress_ratio: int,
-        block_size: int,
-        prefix: str,
-    ):
-        super().__init__(state_dim, dtype, compress_ratio, prefix)
-        self.compress_ratio = compress_ratio
-        self.block_size = block_size
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        pads = _dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
-        page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
-
-        return AscendSlidingWindowMLASpec(
-            block_size=self.block_size,
-            num_kv_heads=1,
-            head_size=self.state_dim,
-            dtype=self.dtype,
-            sliding_window=self.sliding_window,
-            alignment=None,
-            page_size_padded=page_size_padded,
-        )
-
-    def forward(self): ...
-
-    def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
-
-
-class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
-    def __init__(
-        self,
-        head_dim: int,
-        dtype: torch.dtype,
-        prefix: str,
-        cache_config: CacheConfig,
-        compress_ratio: int = 1,
-    ):
-        super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-
-        from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-
-        return AscendMLAAttentionSpec(
-            block_size=_dsv4_block_sizes()[vllm_config.cache_config.block_size][0][0],
-            num_kv_heads=1,
-            head_size=self.head_dim,
-            dtype=self.dtype,
-            model_version="deepseek_v4",
-            compress_ratio=self.compress_ratio,
-            cache_dtype_str=self.cache_config.cache_dtype,
-            scale_dim=1 if self.head_dim == 128 else 0,
-            scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
-        )
-
-    def forward(self): ...
-
-    def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
 
 
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
@@ -248,27 +101,24 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         cache_config: CacheConfig,
     ):
         super().__init__(head_dim, window_size, torch.uint8, prefix, cache_config)
+        from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
+
         self.dtype = dtype
 
-        self.block_size = _dsv4_block_sizes()[cache_config.block_size][0][1]
+        self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        is_dspark_cache = getattr(self, "is_dspark_cache", False)
-        if get_ascend_device_type() in {AscendDeviceType.A5} and not is_dspark_cache:
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
             self.dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-        cached_head_size = (
-            self.head_dim + 128
-            if get_ascend_device_type() in {AscendDeviceType.A5} and not is_dspark_cache
-            else self.head_dim
-        )
+        cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=cached_head_size,
             dtype=self.dtype,
             sliding_window=self.window_size,
-            cache_dtype_str="auto" if is_dspark_cache else self.cache_config.cache_dtype,
+            cache_dtype_str=self.cache_config.cache_dtype,
             model_version="deepseek_v4",
             alignment=None,
         )
@@ -276,29 +126,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        return _get_ascend_dsa_backend()
+        from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend
 
-
-def hadamard_transform_ref(x: torch.Tensor, scale=1.0):
-    from scipy.linalg import hadamard  # type: ignore[import-untyped]
-
-    if hadamard is None:
-        raise ImportError("Please install scipy")
-    x_shape = x.shape
-    dim = x.shape[-1]
-    x = x.reshape(-1, dim)
-    log_dim = math.ceil(math.log2(dim))
-    dim_padded = 2**log_dim
-    if dim != dim_padded:
-        x = F.pad(x, (0, dim_padded - dim))
-    out = F.linear(x, torch.tensor(hadamard(dim_padded, dtype=float), dtype=x.dtype, device=x.device))
-    out = out * scale
-    return out[..., :dim].reshape(*x_shape)
-
-
-def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-    hidden_size = x.size(-1)
-    return hadamard_transform_ref(x, scale=hidden_size**-0.5)
+        return AscendDSASWABackend
 
 
 def precompute_freqs_cis_cpu(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow) -> torch.Tensor:
@@ -499,7 +329,7 @@ class DeepseekV4MoE(nn.Module):
             self.gate.tid2eid = None
             self.gate.e_score_correction_bias = nn.Parameter(torch.empty(config.n_routed_experts, dtype=torch.float32))
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -508,25 +338,29 @@ class DeepseekV4MoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=getattr(config, "n_group", 1),
-            topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
             # Keep scaling outside the router path so the order matches
             # DeepSeek V4: normalize top-k weights, then scale routed output.
             # AITER applies routed_scaling_factor internally.
             routed_scaling_factor=self.routed_scaling_factor,
+            swiglu_limit=self.swiglu_limit,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts if self.is_fusion_moe_shared_experts_enabled else 0,
-            hash=layer_idx < config.num_hash_layers and not is_draft_layer,
-            tid2eid=self.gate.tid2eid,
+            hash_indices_table=self.gate.tid2eid,
         )
 
-    def forward(self, hidden_states: torch.Tensor, input_ids=None) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.gate.tid2eid is not None and input_ids is None:
+            raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
+
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -538,12 +372,20 @@ class DeepseekV4MoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=hidden_states)
+            # In this case, the gate/router runs inside the FusedMoEFactory class
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states,
+                router_logits=hidden_states,
+                input_ids=input_ids,
+            )
         else:
             # router_logits: (num_tokens, n_experts)
-            router_logits = DeviceOperator.compute_gate_logits(hidden_states, self.gate.weight)
-            fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+            router_logits = F.linear(hidden_states.float(), self.gate.weight)
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                input_ids=input_ids,
+            )
 
         fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
         if fused_moe_out_is_tuple:
@@ -593,186 +435,6 @@ def _get_llama_4_scaling(
     scaling = 1 + scaling_beta * torch.log(1 + torch.floor(positions / original_max_position_embeddings))
     # Broadcast over num_heads and head_dim
     return scaling[..., None, None]
-
-
-class Indexer(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config,
-        compress_ratio: int,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.vllm_config = vllm_config
-        self.config = config
-        self.n_heads = config.index_n_heads
-        self.head_dim = config.index_head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
-        self.index_topk = config.index_topk
-        self.q_lora_rank = config.q_lora_rank
-        self.softmax_scale = self.head_dim**-0.5
-        self.compress_ratio = compress_ratio
-
-        self.wq_b = ReplicatedLinear(
-            self.q_lora_rank,
-            self.n_heads * self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wq_b",
-            return_bias=False,
-        )
-
-        self.weights_proj = ReplicatedLinear(
-            config.hidden_size,
-            self.n_heads,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.weights_proj",
-            return_bias=False,
-        )
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.int8
-
-        if self.compress_ratio == 4:
-            # TODO(cmq): change the dtype of cache
-            self.k_cache = AscendDeepseekV4IndexerCache(
-                head_dim=self.head_dim,
-                dtype=k_dtype,
-                prefix=f"{prefix}.k_cache",
-                cache_config=cache_config,
-                compress_ratio=self.compress_ratio,
-            )
-        self.compressor = None
-        if self.compress_ratio > 1:
-            self.compressor = Compressor(
-                vllm_config,
-                config,
-                self.compress_ratio,
-                head_dim=self.head_dim,
-                rotate=True,
-                quant_config=quant_config,
-                cache_config=cache_config,
-                prefix=f"{prefix}.compressor",
-            )  # Compressor(4, 128)
-
-    def forward(self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb) -> torch.Tensor:
-        return
-
-
-class Compressor(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        config: DeepseekV2Config | DeepseekV3Config | DeepseekV4Config,
-        compress_ratio: int = 4,
-        head_dim: int = 512,
-        rotate: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.vllm_config = vllm_config
-        self.config = config
-        self.dim = config.hidden_size
-        self.head_dim = head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
-        self.nope_head_dim = head_dim - config.qk_rope_head_dim
-        self.compress_ratio = compress_ratio
-        self.overlap = compress_ratio == 4
-        self.rotate = rotate
-        self.norm_eps = config.rms_norm_eps
-        self.coff = 1 + self.overlap
-
-        self.ape = nn.Parameter(torch.empty(compress_ratio, self.coff * self.head_dim, dtype=torch.float32))
-        self.wkv = ReplicatedLinear(
-            self.dim,
-            self.coff * self.head_dim,
-            bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
-            prefix=f"{prefix}.wkv",
-            return_bias=False,
-        )
-        self.wgate = ReplicatedLinear(
-            self.dim,
-            self.coff * self.head_dim,
-            bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
-            prefix=f"{prefix}.wgate",
-            return_bias=False,
-        )
-
-        # A5 compressor kernel needs float for norm_weight input
-        norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
-        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
-
-        state_dtype = torch.float32
-        # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
-        if compress_ratio == 4:
-            self.state_cache = AscendCompressorStateCache(
-                state_dim=2 * self.coff * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=_dsv4_block_sizes()[cache_config.block_size][0][2],  # type: ignore[union-attr]
-            )
-        elif compress_ratio == 128:
-            self.state_cache = AscendCompressorStateCache(
-                state_dim=2 * self.head_dim,  # kv_state + score_state
-                dtype=state_dtype,
-                compress_ratio=compress_ratio,
-                prefix=f"{prefix}.state_cache",
-                block_size=_dsv4_block_sizes()[cache_config.block_size][0][3],  # type: ignore[union-attr]
-            )
-        else:
-            raise ValueError(
-                f"Only support compress_ratio in [4, 128]. Got unsupported compress_ratio: {compress_ratio}"
-            )
-
-    def overlap_transform(self, tensor: torch.Tensor, value=0):
-        b, s, _, _ = tensor.size()
-        ratio, d = self.compress_ratio, self.head_dim
-        new_tensor = tensor.new_full((b, s, 2 * ratio, d), value)
-        new_tensor[:, :, ratio:] = tensor[:, :, :, d:]
-        new_tensor[:, 1:, :ratio] = tensor[:, :-1, :, :d]
-        return new_tensor
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        start_pos: int,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ) -> torch.Tensor:
-        pass
-
-    def rope_single(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        inverse: bool = False,
-    ) -> torch.Tensor:
-        dtype = x.dtype
-        if inverse:
-            sin = sin * -1
-        tnd_layout = 1
-        if len(x.shape) == 3:
-            num_tokens, num_heads, rotary_dim = x.shape
-        else:
-            tnd_layout = 0
-            _, num_tokens, num_heads, rotary_dim = x.shape
-        x_rot = torch_npu.npu_rotary_mul(
-            x.reshape(num_tokens, num_heads, 1, rotary_dim).to(torch.float32), cos, sin, rotary_mode="interleave"
-        )
-        if tnd_layout:
-            x = x_rot.reshape(num_tokens, -1, rotary_dim)
-        else:
-            x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
-        return x.to(dtype)
 
 
 class DeepseekV4Attention(nn.Module):
@@ -877,7 +539,28 @@ class DeepseekV4Attention(nn.Module):
         )
 
         self.compressor: Compressor | None = None
-        self.indexer: Indexer | None = None
+        self.indexer: DeepseekV4Indexer | None = None
+
+        use_index_cache = getattr(config, "use_index_cache", False)
+
+        # IndexCache: decide whether this layer reuses topk from a previous
+        # indexer-bearing layer. Refer: https://arxiv.org/abs/2603.12201
+        # Only meaningful when this layer actually owns an Indexer (c4) and
+        # IndexCache is enabled via hf-overrides. MTP layers are excluded
+        # because spec_decode shares topk_indices_buffer at the model level
+        # only, leaving impl-level references stale.
+        skip_topk = False
+        if self.compress_ratio == 4 and use_index_cache and ".mtp." not in prefix:
+            compress_ratios = getattr(config, "compress_ratios", None) or []
+            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
+            pattern = getattr(config, "index_topk_pattern", None)
+            freq = getattr(config, "index_topk_freq", 1)
+            if pattern is None:
+                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
+            else:
+                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
+                if 0 <= indexer_seq_idx < len(pattern):
+                    skip_topk = pattern[indexer_seq_idx] == "S"
 
         if self.compress_ratio > 1:
             self.compressor = Compressor(
@@ -891,33 +574,17 @@ class DeepseekV4Attention(nn.Module):
             )  # Compressor(4, 128)
 
             if self.compress_ratio == 4:
-                self.indexer = Indexer(
+                self.indexer = DeepseekV4Indexer(
                     vllm_config,
                     config,
                     self.compress_ratio,
+                    skip_topk=skip_topk,
+                    use_index_cache=use_index_cache,
                     quant_config=quant_config,
                     cache_config=cache_config,
                     prefix=f"{prefix}.indexer",
+                    topk_indices_buffer=topk_indices_buffer,
                 )
-
-        # IndexCache: decide whether this layer reuses topk from a previous
-        # indexer-bearing layer. Refer: https://arxiv.org/abs/2603.12201
-        # Only meaningful when this layer actually owns an Indexer (c4) and
-        # IndexCache is enabled via hf-overrides. MTP layers are excluded
-        # because spec_decode shares topk_indices_buffer at the model level
-        # only, leaving impl-level references stale.
-        skip_topk = False
-        if self.compress_ratio == 4 and getattr(config, "use_index_cache", False) and ".mtp." not in prefix:
-            compress_ratios = getattr(config, "compress_ratios", None) or []
-            indexer_seq_idx = sum(1 for r in compress_ratios[:config_layer_idx] if r == 4)
-            pattern = getattr(config, "index_topk_pattern", None)
-            freq = getattr(config, "index_topk_freq", 1)
-            if pattern is None:
-                skip_topk = max(indexer_seq_idx - 1, 0) % freq != 0
-            else:
-                assert pattern[0] == "F", "index_topk_pattern must start with 'F'"
-                if 0 <= indexer_seq_idx < len(pattern):
-                    skip_topk = pattern[indexer_seq_idx] == "S"
 
         ascend_device_type = get_ascend_device_type()
         k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
@@ -942,8 +609,6 @@ class DeepseekV4Attention(nn.Module):
             indexer=self.indexer,
             compressor=self.compressor,
             swa_cache_layer=swa_cache_layer,
-            topk_indices_buffer=topk_indices_buffer,
-            skip_topk=skip_topk,
         )
 
         self.dsa_attn = AscendDeepseekSparseAttention(
@@ -985,7 +650,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
         is_draft_layer: bool = False,
-        attn_cls: type[nn.Module] | None = None,
     ) -> None:
         super().__init__()
 
@@ -1003,8 +667,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
 
-        if attn_cls is None:
-            attn_cls = DeepseekV4Attention
+        attn_cls = DeepseekV4Attention
 
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
@@ -1045,8 +708,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         return y
 
     def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        if x.dim() == 2 and residual.dim() == 3:
-            return _hc_post_torch(x, residual, post, comb)
         y = torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0)
         )
@@ -1058,28 +719,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self._forward_hc_blocks(
-            positions,
-            hidden_states,
-            llama_4_scaling=llama_4_scaling,
-        )
-
-    def _forward_hc_blocks(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        *,
-        llama_4_scaling: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
-        extra_attn_kwargs: dict[str, torch.Tensor | None] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
-        if extra_attn_kwargs is not None:
-            attn_kwargs.update(extra_attn_kwargs)
         hidden_states = self.self_attn(**attn_kwargs)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
         residual = hidden_states.clone()
@@ -1092,7 +737,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class DeepseekV4Model(nn.Module):
+class DeepseekV4Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1166,30 +811,37 @@ class DeepseekV4Model(nn.Module):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
-        # Pre-hc_head residual stream buffer for the MTP draft. Stable
-        # address (outside the cudagraph pool) so the copy_ in forward()
-        # refreshes it correctly across captured shapes.
-        self._mtp_hidden_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
-            dtype=vllm_config.model_config.dtype,
-            device=self.device,
+        # Pre-hc_head residual stream buffer for the speculative draft
+        # (MTP / DSpark / DFlash). Only needed when the decoder consumes
+        # target-model hidden states; allocating it unconditionally would
+        # permanently cost max_num_batched_tokens * hc_dim per rank.
+        # Aligned with upstream DeepSeekV4 (see vllm PR #50312).
+        spec_config = vllm_config.speculative_config
+        needs_mtp_hidden_states = spec_config is not None and (
+            spec_config.use_eagle() or spec_config.uses_draft_model()
         )
-        self._dspark_target_layer_ids = list(getattr(config, "dspark_target_layer_ids", []) or [])
-        self._dspark_target_layer_id_set = frozenset(self._dspark_target_layer_ids)
-        if self._dspark_target_layer_ids:
-            self._dspark_hidden_buffer = torch.empty(
+        self._mtp_hidden_buffer = (
+            torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
-                len(self._dspark_target_layer_ids) * config.hidden_size,
+                hc_dim,
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
+            if get_pp_group().is_last_rank and needs_mtp_hidden_states
+            else None
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        return _hc_head_torch(x, hc_fn, hc_scale, hc_base, self.norm_eps, self.hc_eps)
+        shape, dtype = x.size(), x.dtype
+        x = x.flatten(1).float()
+        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
+        mixes = torch.nn.functional.linear(x, hc_fn) * rsqrt
+        pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.hc_eps
+        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
+        return y.to(dtype)
 
     def forward(
         self,
@@ -1223,41 +875,22 @@ class DeepseekV4Model(nn.Module):
 
         if get_pp_group().is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
-        dspark_hiddens: list[torch.Tensor] = []
+        aux_hidden_states: list[torch.Tensor] = []
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
-            if layer.layer_idx in self._dspark_target_layer_id_set:
-                # Average over the HC branch dimension, preserving [num_tokens, hidden_size].
-                dspark_hiddens.append(hidden_states.mean(dim=1))
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                llama_4_scaling,
+                input_ids=input_ids,
+            )
+            if layer.layer_idx + 1 in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states.mean(dim=1))
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        # When FlashComm1 (sequence parallelism) is enabled, tokens are
-        # partitioned across TP ranks via reduce_scatter in each layer's
-        # row-parallel output projection.  We must all_gather here so the
-        # MTP layers receive the full token set — otherwise only rank 0's
-        # partition is valid and the rest of the buffer holds stale data,
-        # leading to NaN values and low acceptance rate.
-        from vllm_ascend.ascend_forward_context import get_forward_context
-
-        forward_ctx = get_forward_context()
-        if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
-            h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
-            pad_size = forward_ctx.pad_size
-            if pad_size > 0:
-                h_states_flat = h_states_flat[:-pad_size]
-            num_tokens = h_states_flat.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
-        else:
+        if self._mtp_hidden_buffer is not None:
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
-        if self._dspark_target_layer_ids and dspark_hiddens:
-            dspark_states = torch.cat(dspark_hiddens, dim=-1)
-            if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
-                dspark_states = tensor_model_parallel_all_gather(dspark_states, dim=0)
-                pad_size = forward_ctx.pad_size
-                if pad_size > 0:
-                    dspark_states = dspark_states[:-pad_size]
-            self._dspark_hidden_buffer[: dspark_states.shape[0]].copy_(dspark_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1269,6 +902,8 @@ class DeepseekV4Model(nn.Module):
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
 
         hidden_states = self.norm(hidden_states)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
@@ -1296,22 +931,6 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
 
-    def set_moe_parameters_from_layers(self, layers: Iterator[nn.Module]) -> None:
-        self.expert_weights = []
-        self.num_expert_groups = getattr(self.config, "n_group", 1)
-        self.moe_layers = []
-        self.moe_mlp_layers = []
-        example_moe = None
-        for layer in layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-            assert isinstance(layer, DeepseekV2DecoderLayer)
-            if isinstance(layer.mlp, DeepseekV4MoE):
-                example_moe = layer.mlp
-                self.moe_mlp_layers.append(layer.mlp)
-                self.moe_layers.append(layer.mlp.experts)
-        self.extract_moe_parameters(example_moe)
-
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -1328,7 +947,7 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
             moe.experts.update_expert_map()
 
 
-class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle):
+class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle3):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
@@ -1358,7 +977,25 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.set_moe_parameters_from_layers(iter(self.model.layers))
+        self.expert_weights = []
+
+        self.num_expert_groups = getattr(self.config, "n_group", 1)
+
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
+            assert isinstance(layer, DeepseekV2DecoderLayer)
+            if isinstance(layer.mlp, DeepseekV4MoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+
+        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1383,61 +1020,44 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        if vllm_version_is("0.23.0"):
-            return FusedMoE.make_expert_params_mapping(
-                self.model,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts
-                + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
-                num_redundant_experts=0,
-            )
-        else:
-            return fused_moe_make_expert_params_mapping(
-                self.model,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts
-                + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
-                num_redundant_experts=0,
-            )
+        return fused_moe_make_expert_params_mapping(
+            self.model,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts
+            + (self.config.n_shared_experts if getattr(get_ascend_config(), "mix_placement", False) else 0),
+            num_redundant_experts=0,
+        )
 
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
-        if getattr(self.model, "_dspark_target_layer_ids", None):
-            return getattr(self.model, "_dspark_hidden_buffer", None)
         return getattr(self.model, "_mtp_hidden_buffer", None)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model._set_aux_hidden_state_layers(layers)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         rocm_aiter_moe_shared_expert_enabled = getattr(get_ascend_config(), "mix_placement", False)
+        stacked_params_mapping = [
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        if vllm_version_is("0.23.0"):
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
-                self.model,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts
-                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
-                num_redundant_experts=self.num_redundant_experts,
-            )
-        else:
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self.model,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts
-                + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
-                num_redundant_experts=self.num_redundant_experts,
-            )
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self.model,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts
+            + (self.config.n_shared_experts if rocm_aiter_moe_shared_expert_enabled else 0),
+            num_redundant_experts=self.num_redundant_experts,
+        )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -1458,16 +1078,34 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if not name.startswith("model"):
                 name = f"model.{name}"
 
+            if ".w1." in name:
+                name = name.replace(".w1.", ".gate_proj.")
+            if ".w2." in name:
+                name = name.replace(".w2.", ".down_proj.")
+            if ".w3." in name:
+                name = name.replace(".w3.", ".up_proj.")
+
             if "model.head." in name and "model.lm_head." not in name:
                 name = name.replace("model.head.", "lm_head.")
             if "model.lm_head." in name:
                 name = name.replace("model.lm_head.", "lm_head.")
             if "embed." in name and "embed_token." not in name:
                 name = name.replace("embed.", "embed_tokens.")
-            name = _normalize_dsv4_layer_weight_name(name)
+            if "attn" in name and "self_attn" not in name:
+                name = name.replace(".attn.", ".self_attn.")
+            if ".ffn." in name:
+                name = name.replace(".ffn.", ".mlp.")
+            if ".ffn_norm." in name:
+                name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
+            if ".attn_norm." in name:
+                name = name.replace(".attn_norm.", ".input_layernorm.")
+            if name.endswith(".scale"):
+                name = name.replace(".scale", ".weight_scale")
 
             if "rotary_emb.inv_freq" in name:
                 continue
+            if ".gate.bias" in name:
+                name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
@@ -1484,7 +1122,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
             is_fusion_moe_shared_experts_layer = rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
 
-            for param_name, weight_name, shard_id in DSV4_STACKED_PARAMS_MAPPING:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue

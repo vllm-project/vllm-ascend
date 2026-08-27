@@ -66,7 +66,7 @@ def prepare_inputs_padded_kernel(
 
 
 @triton.jit
-def copy_and_expand_dflash_inputs_kernel_single_grid(
+def copy_and_expand_dflash_and_dspark_inputs_kernel(
     # Inputs
     next_token_ids_ptr,  # [num_reqs]
     target_positions_ptr,  # [num_context]
@@ -93,48 +93,121 @@ def copy_and_expand_dflash_inputs_kernel_single_grid(
     total_input_tokens,  # tl.int32
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
+    SAMPLE_FROM_ANCHOR: tl.constexpr = False,
+    TILE_SIZE: tl.constexpr = 256,
 ):
-    for req_idx in range(0, batch_size):
-        ctx_start = tl.load(query_start_loc_ptr + req_idx)
-        ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
-        num_ctx = ctx_end - ctx_start
+    # Grid-stride kernel: launch grid is capped at the vector-core count by
+    # the caller (grid = min(cdiv(total_work, TILE_SIZE), num_vectorcore)),
+    # each program processes TILE_SIZE elements per iteration and strides by
+    # num_programs * TILE_SIZE. TILE_SIZE is the Triton program tile width,
+    # distinct from block_size (the KV-cache block size) above.
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+    block_start_step = num_programs * TILE_SIZE
 
-        for j in range(0, num_ctx):
-            ctx_pos_idx = ctx_start + j
-            pos = tl.load(target_positions_ptr + ctx_pos_idx)
-            tl.store(out_context_positions_ptr + ctx_pos_idx, pos)
+    # --- Part 1: context positions / slot_mapping copy ---
+    # query_start_loc is a contiguous partition of [0, total_input_tokens),
+    # so the per-request copy loops of the original kernel union into one
+    # flat range that can be vectorized directly.
+    block_start = pid * TILE_SIZE
+    while block_start < total_input_tokens:
+        offs = block_start + tl.arange(0, TILE_SIZE)
+        mask = offs < total_input_tokens
+        pos = tl.load(target_positions_ptr + offs, mask=mask)
+        tl.store(out_context_positions_ptr + offs, pos, mask=mask)
+        slot = tl.load(context_slot_mapping_ptr + offs, mask=mask)
+        tl.store(out_context_slot_mapping_ptr + offs, slot, mask=mask)
+        block_start += block_start_step
 
-            slot = tl.load(context_slot_mapping_ptr + ctx_pos_idx)
-            tl.store(out_context_slot_mapping_ptr + ctx_pos_idx, slot)
+    # --- Part 2: query block expand ---
+    # Flat offs covers [0, batch_size * num_query_per_req); req_idx / q_idx
+    # are recovered from offs instead of iterating two serial loops.
+    num_query_total = batch_size * num_query_per_req
+    block_start = pid * TILE_SIZE
+    while block_start < num_query_total:
+        offs = block_start + tl.arange(0, TILE_SIZE)
+        mask = offs < num_query_total
 
+        req_idx = offs // num_query_per_req
+        q_idx = offs % num_query_per_req
+
+        ctx_end = tl.load(query_start_loc_ptr + req_idx + 1, mask=mask, other=0)
         if HAS_NUM_REJECTED:
-            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
-            valid_ctx_end = ctx_end - num_rejected
+            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx, mask=mask, other=0)
         else:
-            num_rejected = 0
-            valid_ctx_end = ctx_end
+            num_rejected = tl.zeros([TILE_SIZE], dtype=tl.int32)
+        valid_ctx_end = ctx_end - num_rejected
 
-        seq_len = tl.load(seq_lens_ptr + req_idx)
+        seq_len = tl.load(seq_lens_ptr + req_idx, mask=mask, other=0)
         effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
 
-        for q_idx in range(0, num_query_per_req):
-            query_pos = last_pos + 1 + q_idx
-            query_out_idx = req_idx * num_query_per_req + q_idx
+        # RoPE position id of the query token, derived from the last context
+        # token's position. Written to out_query_positions for position embeddings.
+        query_pos = last_pos + 1 + q_idx
+        tl.store(out_query_positions_ptr + offs, query_pos, mask=mask)
 
-            tl.store(out_query_positions_ptr + query_out_idx, query_pos)
+        # Linear KV-cache token index used to look up the physical slot via the
+        # block_table. This is kept separate from query_pos for multimodal
+        # (e.g. M-RoPE) inputs: image/vision tokens can carry repeated or
+        # non-contiguous position ids, so the position id != the linear token
+        # index and the slot must be derived from the effective sequence length
+        # rather than from query_pos. For text-only inputs the two values are
+        # identical, so this only changes behaviour for multimodal inputs.
+        query_kv_slot_pos = effective_seq_len + q_idx
+        block_num_q = query_kv_slot_pos // block_size
+        block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
+            tl.int64
+        )
+        slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
+        tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
-            query_cache_pos = effective_seq_len + q_idx
-            block_num_q = query_cache_pos // block_size
-            block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q).to(tl.int64)
-            slot_q = block_id_q * block_size + (query_cache_pos % block_size)
-            tl.store(out_query_slot_mapping_ptr + query_out_idx, slot_q)
+        bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
+        in_id = tl.where(q_idx == 0, bonus, parallel_drafting_token_id)
+        tl.store(out_input_ids_ptr + offs, in_id, mask=mask)
 
-            if q_idx == 0:
-                bonus_token = tl.load(next_token_ids_ptr + req_idx)
-                tl.store(out_input_ids_ptr + query_out_idx, bonus_token)
-            else:
-                tl.store(out_input_ids_ptr + query_out_idx, parallel_drafting_token_id)
+        if SAMPLE_FROM_ANCHOR:
+            sample_out_idx = req_idx * num_speculative_tokens + q_idx
+            tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=mask)
+        else:
+            sample_mask = mask & (q_idx > 0)
+            sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
+            tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=sample_mask)
 
-                sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
-                tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
+        block_start += block_start_step
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def dflash2_greedy_selector_walk_kernel(
+    scores_ptr,
+    candidate_ids_ptr,
+    output_ptr,
+    num_reqs,
+    num_steps: tl.constexpr,
+    top_k: tl.constexpr,
+):
+    # The grid is one program per request, capped at the vector-core count by
+    # the caller; each program grid-strides over requests so any count up to
+    # the cap covers the batch. The walk is sequential per request (prev_idx
+    # depends on the previous step), so one request is handled at a time.
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+    offsets = tl.arange(0, top_k)
+
+    req = pid
+    while req < num_reqs:
+        # Slot 0 uses the verified anchor as predecessor.
+        prev_idx = 0
+        for step in range(num_steps):
+            score_base = (req * num_steps + step) * top_k * top_k + prev_idx * top_k
+            row = tl.load(scores_ptr + score_base + offsets).to(tl.float32)
+
+            # first/smallest index wins.
+            max_value = tl.max(row, axis=0)
+            next_idx = tl.min(tl.where(row == max_value, offsets, top_k), axis=0)
+
+            candidate_base = (req * num_steps + step) * top_k
+            token = tl.load(candidate_ids_ptr + candidate_base + next_idx)
+            tl.store(output_ptr + req * num_steps + step, token)
+            prev_idx = next_idx
+        req += num_programs

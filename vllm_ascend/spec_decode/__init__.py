@@ -18,6 +18,7 @@
 #
 
 
+from vllm_ascend.spec_decode.dflash2_proposer import AscendDflash2Proposer, is_dflash2_draft
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
@@ -30,7 +31,6 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend.utils import is_dspark_config
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -42,7 +42,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendSuffixDecodingProposer(vllm_config, runner)
     elif method == "medusa":
         return AscendMedusaProposer(vllm_config, device)
-    elif method == "mtp" and is_dspark_config(vllm_config):
+    elif method == "dspark":
         return AscendDSparkProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3", "mtp"):
         speculative_config = vllm_config.speculative_config
@@ -50,6 +50,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
             return AscendStep3p5MTPProposer(vllm_config, device, runner)
         return AscendEagleProposer(vllm_config, device, runner)
     elif method == "dflash":
+        if is_dflash2_draft(vllm_config.speculative_config):
+            return AscendDflash2Proposer(vllm_config, device, runner)
         return AscendDflashProposer(vllm_config, device, runner)
     elif method == "draft_model":
         return AscendDraftModelProposer(vllm_config, device, runner)
