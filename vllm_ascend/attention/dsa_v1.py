@@ -993,6 +993,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             dspark_swa_topk_lengths = dspark_swa_topk_lengths[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
+        cu_seqlens_cmp_kv = None
         sas_metadata = None
         if dspark_swa_indices is not None:
             assert dspark_swa_topk_lengths is not None

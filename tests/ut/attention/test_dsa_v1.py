@@ -646,6 +646,59 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     assert metadata.sin is sin
 
 
+def test_build_req_metadata_for_drafting_sparse_flash_skips_legacy_seqlens():
+    builder = _make_builder(compressor_ratio=1)
+    speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    builder.speculative_config = speculative_config
+    builder.vllm_config.speculative_config = speculative_config
+    builder.num_actual_tokens = 3
+    builder.num_prefills = 0
+    builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
+    builder.block_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+    builder.spec_slot_mapping = [torch.arange(16, dtype=torch.int32).reshape(8, 2)]
+    builder.spec_sas_metadata = [torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)]
+    query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=2,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        _seq_lens_cpu=torch.tensor([9, 7], dtype=torch.int32),
+        seq_lens_cpu=None,
+        seq_lens=torch.tensor([8, 6], dtype=torch.int32),
+        causal=False,
+    )
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
+
+    with (
+        patch.object(
+            DeviceOperator,
+            "get_dspark_sparse_flash_mla_op",
+            return_value=MagicMock(),
+        ),
+        patch.object(
+            DeviceOperator,
+            "get_dspark_sparse_flash_mla_metadata_op",
+            return_value=metadata_op,
+        ),
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv") as legacy_ori_seqlens,
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv") as legacy_cmp_seqlens,
+    ):
+        metadata = builder.build_req_metadata_for_drafting(
+            draft_index=1,
+            common_attn_metadata=common_attn_metadata,
+            cos=torch.ones((3, 1, 1, 2)),
+            sin=torch.zeros((3, 1, 1, 2)),
+        )
+
+    legacy_ori_seqlens.assert_not_called()
+    legacy_cmp_seqlens.assert_not_called()
+    metadata_op.assert_called_once()
+    assert metadata.cu_cmp_seqlen_list is None
+    assert metadata.dspark_swa_indices is not None
+    assert metadata.dspark_swa_topk_lengths is not None
+
+
 def _make_req_metadata() -> AscendDSAReqMetadata:
     return AscendDSAReqMetadata(
         block_table=torch.zeros((2, 1), dtype=torch.int32),
