@@ -1,37 +1,3 @@
 # Feature Guide
 
 This section provides a detailed usage guide of vLLM Ascend features.
-
-:::{toctree}
-:caption: Feature Guide
-:maxdepth: 1
-graph_mode
-cpu_binding
-Ai_QoS_introduction_en
-quantization
-sleep_mode
-structured_output
-lora
-expert_parallelism_load_balancer
-netloader
-rfork
-dynamic_batch
-epd_disaggregation
-kv_pool
-layerwise_kv_pool
-layerwise_and_sparse_kv_cache_offloading
-kv_cache_cpu_offload
-dyntra_lb
-large_scale_ep
-ucm_deployment
-Fine_grained_TP
-layer_sharding
-speculative_decoding
-context_parallel
-weight_prefetch
-sequence_parallelism
-batch_invariance
-lmcache_ascend_deployment
-dynamic_chunk_pipeline_parallel
-flash_attention
-:::

@@ -175,3 +175,39 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
             tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=sample_mask)
 
         block_start += block_start_step
+
+
+@triton.jit(do_not_specialize=["num_reqs"])
+def dflash2_greedy_selector_walk_kernel(
+    scores_ptr,
+    candidate_ids_ptr,
+    output_ptr,
+    num_reqs,
+    num_steps: tl.constexpr,
+    top_k: tl.constexpr,
+):
+    # The grid is one program per request, capped at the vector-core count by
+    # the caller; each program grid-strides over requests so any count up to
+    # the cap covers the batch. The walk is sequential per request (prev_idx
+    # depends on the previous step), so one request is handled at a time.
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+    offsets = tl.arange(0, top_k)
+
+    req = pid
+    while req < num_reqs:
+        # Slot 0 uses the verified anchor as predecessor.
+        prev_idx = 0
+        for step in range(num_steps):
+            score_base = (req * num_steps + step) * top_k * top_k + prev_idx * top_k
+            row = tl.load(scores_ptr + score_base + offsets).to(tl.float32)
+
+            # first/smallest index wins.
+            max_value = tl.max(row, axis=0)
+            next_idx = tl.min(tl.where(row == max_value, offsets, top_k), axis=0)
+
+            candidate_base = (req * num_steps + step) * top_k
+            token = tl.load(candidate_ids_ptr + candidate_base + next_idx)
+            tl.store(output_ptr + req * num_steps + step, token)
+            prev_idx = next_idx
+        req += num_programs

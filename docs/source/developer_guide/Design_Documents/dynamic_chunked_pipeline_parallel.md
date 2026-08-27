@@ -1,6 +1,6 @@
 # Dynamic Chunked Pipeline Parallel (CPP)
 
-TL;DR CPP uses profiling-based dynamic chunking to equalize per-chunk latency and eliminate pipeline bubbles in PP scenarios.
+CPP uses profiling-based dynamic chunking to equalize per-chunk latency and eliminate pipeline bubbles in PP scenarios.
 
 ## Background
 
@@ -147,7 +147,8 @@ After each batch, feature vectors `[Σ(C+H)·C, Σ(C+H), N]` and actual executio
 
 - **Pipeline Parallelism Required**: Must set `--pipeline-parallel-size > 1`
 - **Chunked Prefill Required**: Must enable `--enable-chunked-prefill`
-- **Incompatible with Balance Scheduling**: Cannot enable `VLLM_ASCEND_BALANCE_SCHEDULING`
+- **Incompatible with Balance Scheduling**: Cannot enable
+  `additional_config.scheduler_config.enable_balance_scheduling`
 - **Startup Overhead**: Profiling phase adds tens of seconds to initialization
 - **Memory**: No additional runtime memory overhead; profiling reuses existing dummy_run mechanism
 

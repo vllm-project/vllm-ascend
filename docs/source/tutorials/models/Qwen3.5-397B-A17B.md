@@ -1,4 +1,4 @@
-# Qwen3.5-397B-A17B Deployment Tutorial
+# Qwen3.5-397B-A17B
 
 ## 1 Introduction
 
@@ -6,24 +6,27 @@ Qwen3.5-397B-A17B is a large-scale Qwen3.5 MoE model that combines multimodal ca
 
 This document describes the main validation steps for the model, including supported features, prerequisites, installation, single-node online deployment, multi-node deployment, Prefill-Decode (PD) disaggregation, functional verification, accuracy and performance evaluation, performance tuning, and FAQs.
 
-The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Use `v0.17.0rc1` or later for this model. The examples below use the version placeholder configured by the documentation build system.
+The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Use `v0.17.0rc1` or later for this model. For Ascend95DT, the model is supported from `vllm-ascend:v0.23.0rc1`. The examples below use the version placeholder configured by the documentation build system.
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, speculative decoding, asynchronous scheduling, tensor parallelism, expert parallelism, data parallelism, PD disaggregation, and ACLGraph support.
+Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, speculative decoding, asynchronous scheduling, tensor parallelism, expert parallelism, data parallelism, PD disaggregation, and ACLGraph support.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
-!!! note
-
-    The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
+:::{note}
+The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
+:::
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
+- `Qwen3.5-397B-A17B` (BF16 version): requires 2 Ascend 950DT(96GB x 8) nodes or 2 Atlas 800 A3 (64GB x 16) nodes or 4 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-397B-A17B).
 - `Qwen3.5-397B-A17B-w8a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp).
+- `Qwen3.5-397B-A17B-w4a8` (quantized version): requires 1 Atlas 800 A3 (64GB x 16) node or 2 Atlas 800 A2 (64GB x 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a8-mtp).
+- `Qwen3.5-397B-A17B-w8a8-mxfp8` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w8a8-mxfp8)
+- `Qwen3.5-397B-A17B-w4a4-mxfp4` (quantized version): requires 1 Ascend 950DT(96GB x 8) node. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4)
 
 It is recommended to download the model weight to a shared directory across multiple nodes, such as `/root/.cache/`, so that all serving nodes can load the same path.
 
@@ -35,43 +38,120 @@ If you want to deploy the model in a multi-node environment, verify the communic
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas 800 A2 and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas 800 A3.
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
 
-Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
+The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Use `v0.17.0rc1` or later for this model.For Ascend95DT, the model is supported from `vllm-ascend:v0.23.0rc1`.
 
-```bash
+=== "Ascend 950DT series"
 
-# Update --device according to your device.
-# Atlas A2: /dev/davinci[0-7]
-# Atlas A3: /dev/davinci[0-15]
-# Download the model weight to /root/.cache in advance.
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-export NAME=vllm-ascend
+    Start the docker image on your each node.
 
-docker run --rm \
-  --name $NAME \
-  --net=host \
-  --shm-size=1g \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v /root/.cache:/root/.cache \
-  -it $IMAGE bash
-```
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950DT
+    export NAME=vllm-ascend
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/hisi_hdc \
+      --device /dev/ummu \
+      --device /dev/uburma \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+      -v /etc/hixlep/:/etc/hixlep/ \
+      -v /root/.cache:/root/.cache \
+      -v /usr/local/sbin:/usr/local/sbin \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+      -v /usr/lib64:/usr/lib64 \
+      -itd $IMAGE bash
+    ```
+
+=== "A3 series"
+
+    Start the docker image on your each node.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export NAME=vllm-ascend
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci8 \
+      --device /dev/davinci9 \
+      --device /dev/davinci10 \
+      --device /dev/davinci11 \
+      --device /dev/davinci12 \
+      --device /dev/davinci13 \
+      --device /dev/davinci14 \
+      --device /dev/davinci15 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+    ```
+
+=== "A2 series"
+
+    Start the docker image on your each node.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    export NAME=vllm-ascend
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /root/.cache:/root/.cache \
+      -it $IMAGE bash
+    ```
 
 After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
@@ -91,50 +171,100 @@ If you want to deploy a multi-node service, install the same version of vLLM and
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving, and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving.
 
-Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64GB x 16).
+=== "Ascend 950DT series"
 
-```shell
-#!/bin/sh
+    Run the following script to execute online inference on 1 Ascend 950DT (96G x 8). The quantized versions (`Qwen3.5-397B-A17B-w8a8-mxfp8` and `Qwen3.5-397B-A17B-w4a4-mxfp4`) can be deployed on a single Ascend 950DT node, needs `--quantization ascend`.
 
-# Load model from ModelScope to speed up download.
-export VLLM_USE_MODELSCOPE=True
+    ```shell
+    #!/bin/sh
 
-# Reduce memory fragmentation and avoid out-of-memory errors.
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Load model from ModelScope to speed up download.
+    export VLLM_USE_MODELSCOPE=True
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export OMP_NUM_THREADS=1
-export TASK_QUEUE_ENABLE=1
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --quantization ascend \
-  --served-model-name qwen3.5 \
-  --max-num-seqs 128 \
-  --max-model-len 133000 \
-  --max-num-batched-tokens 16384 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.90 \
-  --enable-prefix-caching \
-  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2":1, "enable_flashcomm1":true}'
-```
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_BUFFSIZE=400
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=100
+    export TASK_QUEUE_ENABLE=1
+    export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
+    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_INTRA_ROCE_ENABLE=0
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+    vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --distributed-executor-backend mp \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name qwen3.5 \
+      --max-num-seqs 128 \
+      --max-model-len 133000 \
+      --max-num-batched-tokens 8192 \
+      --trust-remote-code \
+      --enable-prefix-caching \
+      --gpu-memory-utilization 0.95 \
+      --async-scheduling \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{"enable_cpu_binding":true}'
+    ```
+
+=== "A3 series"
+
+    Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64GB x 16), and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
+
+    ```shell
+    #!/bin/sh
+
+    # Load model from ModelScope to speed up download.
+    export VLLM_USE_MODELSCOPE=True
+
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_BUFFSIZE=1024
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
+    echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+    sysctl -w vm.swappiness=0
+    sysctl -w kernel.numa_balancing=0
+    sysctl kernel.sched_migration_cost_ns=50000
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+
+    vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 16 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name qwen3.5 \
+      --max-num-seqs 128 \
+      --max-model-len 133000 \
+      --max-num-batched-tokens 16384 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.90 \
+      --enable-prefix-caching \
+      --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+      --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2":1}'
+    ```
+
+=== "A2 series"
+
+    For W8A8 deployment, 2 Atlas 800 A2 (64G x 8) nodes are required. Refer to [Section 5.2](#52-multi-node-deployment-with-mp-recommended) for multi-node MP deployment.
+
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 **Key parameters:**
 
@@ -148,7 +278,7 @@ Common Issues Tip: If the service fails to start, HBM is insufficient, or reques
 - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
 - `--speculative-config` enables Qwen3.5 MTP speculative decoding. Reduce `num_speculative_tokens` or remove this option if the workload is sensitive to first-token latency or if MTP is unstable in your environment.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-- `--additional-config` enables Ascend-specific optimizations. `enable_fused_mc2` enables MoE fused operators, `enable_flashcomm1` enables FlashComm1, and `enable_cpu_binding` enables Ascend-native CPU binding.
+- `--additional-config` enables Ascend-specific optimizations. `enable_fused_mc2` enables MoE fused operators, and `enable_cpu_binding` enables Ascend-native CPU binding.
 
 ### 5.2 Multi-Node Deployment with MP (Recommended)
 
@@ -197,12 +327,12 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --gpu-memory-utilization 0.9 \
   --no-enable-prefix-caching \
   --quantization ascend \
-  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
 
-Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
 
 Run the following script on node 1.
 
@@ -249,7 +379,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --gpu-memory-utilization 0.9 \
   --no-enable-prefix-caching \
   --quantization ascend \
-  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
@@ -286,18 +416,18 @@ For Ray-based distributed deployment, refer to [Ray Distributed (Qwen/Qwen3-235B
 
 Common Issues Tip: If Ray workers cannot discover each other, check Ray cluster status first, then verify the same HCCL and network interface settings used in MP deployment.
 
-### 5.4 Prefill-Decode Disaggregation
+### 5.4 Prefill-Decode Disaggregation (A3)
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. This mode is suitable for production serving scenarios where prefill and decode resource ratios need to be tuned separately.
 
 We recommend using Mooncake for deployment. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-Take Atlas 800 A3 (64GB x 16) as an example. We recommend deploying 1P1D with 3 nodes for `Qwen3.5-397B-A17B-w8a8-mtp`:
+For Atlas 800 A3 (64G x 16), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w8a8-mtp`:
 
-- 1 Prefill node: 1 Atlas 800 A3 (64GB x 16).
-- 2 Decode nodes: 2 Atlas 800 A3 (64GB x 16).
+- 1 Prefill node: 1 Atlas 800 A3 (64G x 16).
+- 1 Decode node: 1 Atlas 800 A3 (64G x 16).
 
-Deploy `run_p.sh`, `run_d0.sh`, and `run_d1.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
+Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
 
 #### 5.4.1 Prefill Node
 
@@ -337,13 +467,13 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --port 30060 \
   --no-enable-prefix-caching \
   --enable-expert-parallel \
-  --data-parallel-size 8 \
-  --data-parallel-size-local 8 \
+  --data-parallel-size 1 \
+  --data-parallel-size-local 1 \
   --api-server-count 1 \
   --data-parallel-address ${IP_ADDRESS} \
   --max-num-seqs 64 \
   --data-parallel-rpc-port 6884 \
-  --tensor-parallel-size 2 \
+  --tensor-parallel-size 16 \
   --seed 1024 \
   --distributed-executor-backend mp \
   --served-model-name qwen3.5 \
@@ -353,21 +483,21 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --quantization ascend \
   --no-disable-hybrid-kv-cache-manager \
   --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --additional-config '{"enable_cpu_binding": true, "enable_fused_mc2":1}' \
+  --additional-config '{"enable_cpu_binding": true}' \
   --gpu-memory-utilization 0.9 \
   --enforce-eager \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
+  '{"kv_connector": "MooncakeLayerwiseConnector",
     "kv_role": "kv_producer",
     "kv_port": "23010",
     "kv_connector_extra_config": {
       "prefill": {
-        "dp_size": 8,
-        "tp_size": 2
+        "dp_size": 1,
+        "tp_size": 16
       },
       "decode": {
-        "dp_size": 16,
-        "tp_size": 2
+        "dp_size": 1,
+        "tp_size": 16
       }
     }
   }'
@@ -375,9 +505,9 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
 
 Common Issues Tip: If the prefill service is not ready for a long time, check whether the model path is shared, `ASCEND_RT_VISIBLE_DEVICES` contains all 16 NPUs, and the Mooncake `kv_port` is available.
 
-#### 5.4.2 Decode Node 0
+#### 5.4.2 Decode Node
 
-Create `run_d0.sh` on the first decode node.
+Create `run_d.sh` on the decode node.
 
 ```shell
 #!/bin/bash
@@ -391,12 +521,8 @@ unset http_proxy
 nic_name="xxxx"
 local_ip="xxxx"
 
-# The value of node0_ip must be consistent with local_ip on the first decode node.
-node0_ip="xxxx"
-
 export VLLM_ENGINE_READY_TIMEOUT_S=30000
 export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-export MASTER_IP_ADDRESS=$node0_ip
 export IP_ADDRESS=$local_ip
 export NETWORK_CARD_NAME=$nic_name
 export HCCL_IF_IP=$IP_ADDRESS
@@ -417,14 +543,13 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --port 30050 \
   --no-enable-prefix-caching \
   --enable-expert-parallel \
-  --data-parallel-size 16 \
-  --data-parallel-size-local 8 \
-  --data-parallel-start-rank 0 \
+  --data-parallel-size 1 \
+  --data-parallel-size-local 1 \
   --api-server-count 1 \
-  --data-parallel-address ${MASTER_IP_ADDRESS} \
+  --data-parallel-address ${IP_ADDRESS} \
   --max-num-seqs 32 \
   --data-parallel-rpc-port 6884 \
-  --tensor-parallel-size 2 \
+  --tensor-parallel-size 16 \
   --seed 1024 \
   --distributed-executor-backend mp \
   --served-model-name qwen3.5 \
@@ -433,149 +558,264 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --trust-remote-code \
   --quantization ascend \
   --no-disable-hybrid-kv-cache-manager \
-  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "enable_fused_mc2":1}' \
+  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}' \
+  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --gpu-memory-utilization 0.96 \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
+  '{"kv_connector": "MooncakeLayerwiseConnector",
     "kv_buffer_device": "npu",
     "kv_role": "kv_consumer",
     "kv_port": "36010",
     "kv_connector_extra_config": {
       "prefill": {
-        "dp_size": 8,
-        "tp_size": 2
+        "dp_size": 1,
+        "tp_size": 16
       },
       "decode": {
-        "dp_size": 16,
-        "tp_size": 2
+        "dp_size": 1,
+        "tp_size": 16
       }
     }
   }'
 ```
 
-Common Issues Tip: If decode node 0 fails to initialize, check that `MASTER_IP_ADDRESS` points to decode node 0 itself, `--data-parallel-start-rank` is 0, and `kv_connector_extra_config.decode.dp_size` matches the global decode DP size.
-
-#### 5.4.3 Decode Node 1
-
-Create `run_d1.sh` on the second decode node.
-
-```shell
-#!/bin/bash
-
-unset ftp_proxy
-unset https_proxy
-unset http_proxy
-
-# Get these values through ifconfig.
-# nic_name is the network interface name corresponding to local_ip.
-nic_name="xxxx"
-local_ip="xxxx"
-
-# The value of node0_ip must be consistent with local_ip on the first decode node.
-node0_ip="xxxx"
-
-export VLLM_ENGINE_READY_TIMEOUT_S=30000
-export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-export MASTER_IP_ADDRESS=$node0_ip
-export IP_ADDRESS=$local_ip
-export NETWORK_CARD_NAME=$nic_name
-export HCCL_IF_IP=$IP_ADDRESS
-export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export VLLM_USE_V1=1
-export HCCL_BUFFSIZE=1536
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-
-vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --host ${IP_ADDRESS} \
-  --port 30050 \
-  --headless \
-  --no-enable-prefix-caching \
-  --enable-expert-parallel \
-  --data-parallel-size 16 \
-  --data-parallel-size-local 8 \
-  --data-parallel-start-rank 8 \
-  --data-parallel-address ${MASTER_IP_ADDRESS} \
-  --max-num-seqs 32 \
-  --data-parallel-rpc-port 6884 \
-  --tensor-parallel-size 2 \
-  --seed 1024 \
-  --distributed-executor-backend mp \
-  --served-model-name qwen3.5 \
-  --max-model-len 16384 \
-  --max-num-batched-tokens 128 \
-  --trust-remote-code \
-  --quantization ascend \
-  --no-disable-hybrid-kv-cache-manager \
-  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --additional-config '{"recompute_scheduler_enable": true, "enable_cpu_binding": true, "enable_fused_mc2":1}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --gpu-memory-utilization 0.96 \
-  --kv-transfer-config \
-  '{"kv_connector": "MooncakeConnectorV1",
-    "kv_buffer_device": "npu",
-    "kv_role": "kv_consumer",
-    "kv_port": "36010",
-    "kv_connector_extra_config": {
-      "prefill": {
-        "dp_size": 8,
-        "tp_size": 2
-      },
-      "decode": {
-        "dp_size": 16,
-        "tp_size": 2
-      }
-    }
-  }'
-```
-
-Common Issues Tip: If decode node 1 cannot join decode node 0, check that `--headless` is set, `--data-parallel-start-rank` is 8, and `--data-parallel-address` points to decode node 0.
+Common Issues Tip: If the decode node fails to initialize, check that `--tensor-parallel-size` is 16, `--data-parallel-size-local` matches the global decode DP size (1), and `kv_connector_extra_config.decode.dp_size` matches the global decode DP size.
 
 **Key parameters for PD disaggregation:**
 
 - `--distributed-executor-backend mp` uses multiprocessing on each node for the local workers.
-- Prefill uses `--data-parallel-size 8`, `--data-parallel-size-local 8`, and `--tensor-parallel-size 2`. This creates 8 local DP groups, each with TP2.
-- Decode uses `--data-parallel-size 16`, `--data-parallel-size-local 8`, and `--tensor-parallel-size 2`. Decode node 0 starts from DP rank 0 and decode node 1 starts from DP rank 8.
-- `--data-parallel-address` and `--data-parallel-rpc-port` define the DP control plane. For decode nodes, the address must point to decode node 0.
-- `--max-num-batched-tokens` is larger on the prefill node and smaller on decode nodes because prefill is prompt-token intensive while decode is latency sensitive.
-- `recompute_scheduler_enable` sends requests back to the prefill side to recompute KV cache when decode KV cache is insufficient. Enable it only on decode nodes in PD mode.
-- `--kv-transfer-config` sets the Mooncake V1 connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
+- Prefill uses `--data-parallel-size 1`, `--data-parallel-size-local 1`, and `--tensor-parallel-size 16`. This creates 1 DP group with TP16.
+- Decode uses `--data-parallel-size 1`, `--data-parallel-size-local 1`, and `--tensor-parallel-size 16`. This creates 1 local DP groups, each with TP16 .
+- `--data-parallel-address` and `--data-parallel-rpc-port` define the DP control plane.
+- `--max-num-batched-tokens` is larger on the prefill node and smaller on the decode node because prefill is prompt-token intensive while decode is latency sensitive.
+- `recompute_scheduler_enable` sends requests back to the prefill side to recompute KV cache when decode KV cache is insufficient. Enable it only on the decode node in PD mode.
+- `--kv-transfer-config` sets the Mooncake connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, the D-node prefix-cache known issue is tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944).
 - `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` is the timeout in seconds for automatically releasing the prefiller KV cache for a request.
-- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on decode nodes to reduce decode dispatch overhead.
+- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
 
-#### 5.4.4 Request Forwarding
+### 5.5 Prefill-Decode Disaggregation (Ascend 950DT series)
 
-Run a proxy server on the same node as the prefiller service instance. You can get the proxy program in the repository examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
+For Ascend 950DT (96G x 8), we recommend deploying 1P1D with 2 nodes for `Qwen3.5-397B-A17B-w4a4-mxfp4`:
+
+- 1 Prefill node: 1 Ascend 950DT (96G x 8). Runs an independent service with DP=1, TP=8.
+- 1 Decode node: 1 Ascend 950DT (96G x 8). Forms a global DP=1 group, with 1 local DP rank (TP=8).
+
+The prefill service pushes KV cache to the decode node via the Mooncake p2p connector.
+
+Deploy `run_p.sh` and `run_d.sh` on the corresponding nodes, and deploy a proxy script on the prefill master node to forward requests.
+
+#### 5.5.1 Prefill Node
+
+Create `run_p.sh` on the prefill node.
 
 ```shell
+#!/bin/bash
+
 unset ftp_proxy
 unset https_proxy
 unset http_proxy
-python3 load_balance_proxy_server_example.py \
-  --prefiller-hosts 141.xx.xx.1 \
-  --prefiller-ports 30060 \
-  --decoder-hosts 141.xx.xx.2 141.xx.xx.3 \
-  --decoder-ports 30050 30050 \
-  --host 141.xx.xx.1 \
-  --port 8010
+
+source /root/.bashrc
+export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
+export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
+
+# Get these values through ifconfig.
+# nic_name is the network interface name corresponding to local_ip.
+nic_name="xxx"
+local_ip="xxx"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export HCCL_ALGO=level0:fullmesh
+export VLLM_RPC_TIMEOUT=3600000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=204
+export HCCL_CONNECT_TIMEOUT=180
+export HCCL_BUFFSIZE=300
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export DYNAMIC_EPLB="true"
+
+vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
+  --host 0.0.0.0 \
+  --port 30060 \
+  --no-enable-prefix-caching \
+  --enable-expert-parallel \
+  --data-parallel-size 1 \
+  --data-parallel-size-local 1 \
+  --data-parallel-address $local_ip \
+  --data-parallel-rpc-port 6884 \
+  --tensor-parallel-size 8 \
+  --seed 1024 \
+  --distributed-executor-backend mp \
+  --served-model-name qwen3.5 \
+  --max-model-len 133000 \
+  --max-num-batched-tokens 8192 \
+  --max-num-seqs 64 \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.95 \
+  --quantization ascend \
+  --async-scheduling \
+  --enforce-eager \
+  --speculative-config '{"num_speculative_tokens": 1, "method": "qwen3_5_mtp", "enforce_eager": true}' \
+  --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true}' \
+  --kv-transfer-config \
+  '{"kv_connector": "MooncakeConnector",
+    "kv_role": "kv_producer",
+    "kv_port": "30100",
+    "engine_id": "1",
+    "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
+    "kv_connector_extra_config": {
+      "prefill": {
+        "dp_size": 1,
+        "tp_size": 8
+      },
+      "decode": {
+        "dp_size": 1,
+        "tp_size": 8
+      },
+      "ascend_local_comm_res_path": "/etc/hixlep"
+    }
+  }'
 ```
 
-For example:
+Common Issues Tip: If the prefill service is not ready for a long time, check whether `ASCEND_RT_VISIBLE_DEVICES` contains all 8 NPUs, the Mooncake `kv_port` is available, and `ascend_local_comm_res_path` points to a writable shared path.
+
+#### 5.5.2 Decode Node
+
+Create `run_d.sh` on the decode node.
 
 ```shell
-cd vllm-ascend/examples/disaggregated_prefill_v1/
-bash proxy.sh
+#!/bin/bash
+
+unset ftp_proxy
+unset https_proxy
+unset http_proxy
+
+source /root/.bashrc
+export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
+export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
+
+# Get these values through ifconfig.
+# nic_name is the network interface name corresponding to local_ip.
+nic_name="xxx"
+local_ip="xxx"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export HCCL_ALGO=level0:fullmesh
+export VLLM_RPC_TIMEOUT=3600000
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+export HCCL_EXEC_TIMEOUT=200
+export HCCL_CONNECT_TIMEOUT=1800
+export HCCL_BUFFSIZE=1200
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export DYNAMIC_EPLB="true"
+
+vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
+  --host 0.0.0.0 \
+  --port 30050 \
+  --no-enable-prefix-caching \
+  --enable-expert-parallel \
+  --data-parallel-size 1 \
+  --data-parallel-size-local 1 \
+  --api-server-count 1 \
+  --data-parallel-address $local_ip \
+  --data-parallel-rpc-port 6884 \
+  --tensor-parallel-size 8 \
+  --seed 1024 \
+  --distributed-executor-backend mp \
+  --served-model-name qwen3.5 \
+  --max-model-len 133000 \
+  --max-num-batched-tokens 240 \
+  --max-num-seqs 64 \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.95 \
+  --quantization ascend \
+  --async-scheduling \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "qwen3_5_mtp"}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --additional-config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": false}}' \
+  --kv-transfer-config \
+  '{"kv_connector": "MooncakeConnector",
+    "kv_role": "kv_consumer",
+    "kv_port": "30300",
+    "engine_id": "3",
+    "kv_connector_module_path": "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector",
+    "kv_connector_extra_config": {
+      "prefill": {
+        "dp_size": 1,
+        "tp_size": 8
+      },
+      "decode": {
+        "dp_size": 1,
+        "tp_size": 8
+      },
+      "ascend_local_comm_res_path": "/etc/hixlep"
+    }
+  }'
 ```
+
+Common Issues Tip: If decode node 0 fails to initialize, check that `--data-parallel-start-rank` is 0, `--tensor-parallel-size` is 8, and `kv_connector_extra_config.decode.dp_size` matches the global decode DP size (1).
+
+### 5.6 Request Forwarding
+
+Run a proxy server on the same node as the prefiller service instance. You can get the proxy program in the repository examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
+
+=== "A3 series"
+
+    For A3 PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
+
+    ```shell
+    unset ftp_proxy
+    unset https_proxy
+    unset http_proxy
+    python3 load_balance_proxy_server_example.py \
+      --prefiller-hosts 192.xx.xx.1 \
+      --prefiller-ports 30060 \
+      --decoder-hosts 192.xx.xx.2 \
+      --decoder-ports 30050 \
+      --host 192.xx.xx.1 \
+      --port 8010
+    ```
+
+    For example:
+
+    ```shell
+    cd vllm-ascend/examples/disaggregated_prefill_v1/
+    bash proxy.sh
+    ```
+
+=== "Ascend 950DT series"
+
+    For Ascend 950DT PD disaggregation (1P1D), the proxy forwards requests to 1 prefill node and 1 decode node. Use the layerwise proxy script.
+
+    ```shell
+    unset ftp_proxy
+    unset https_proxy
+    unset http_proxy
+    python3 load_balance_proxy_layerwise_server_example.py \
+      --prefiller-hosts 192.xx.xx.1 \
+      --prefiller-ports 30060 \
+      --decoder-hosts 192.xx.xx.2 \
+      --decoder-ports 30050 \
+      --host 192.xx.xx.1 \
+      --port 8010
+    ```
 
 Common Issues Tip: If requests reach the proxy but no output is returned, check that the proxy host list includes all healthy prefill and decode endpoints, and verify that the service verification request in Section 6 succeeds through the proxy port.
 
@@ -661,22 +901,24 @@ After several minutes, you can get the performance evaluation result.
 
 The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on hardware type, maximum input/output length, request concurrency, prefix cache hit rate, quantization, and prefill/decode ratio. Tune the parameters in Section 9.2 based on your actual workload.
 
-| Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
-| -------- | --------------- | ---------- | -------------- | ------------------ |
-| Long context | Single-node online serving | 16 A3 NPUs | W8A8 MTP | Use larger `--max-model-len` and reserve enough KV cache. Lower `--max-num-seqs` if OOM occurs. |
-| High throughput | Multi-node MP | 16 A2 NPUs | W8A8 MTP | Increase concurrency through DP and tune `--max-num-batched-tokens` for prefill throughput. |
-| Low latency | 1P1D PD disaggregation | 48 A3 NPUs | W8A8 MTP | Use separate prefill and decode DP/TP layouts and enable full decode ACLGraph on decode nodes. |
+| Scenario        | Deployment Mode            | Total NPUs          | Weight Version | Key Considerations                                                                                    |
+| --------------- | -------------------------- | ------------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
+| Long context    | Single-node online serving | 16 A3 NPUs          | W8A8 MTP       | Use larger `--max-model-len` and reserve enough KV cache. Lower `--max-num-seqs` if OOM occurs.       |
+| Long context    | Single-node online serving | 8 Ascend 950DT NPUs  | W4A4 MXFP4 MTP | Use TP=8 and reserve enough KV cache for 133K context. Lower `--max-num-seqs` if OOM occurs.          |
+| High throughput | Multi-node MP              | 16 A2 NPUs          | W8A8 MTP       | Increase concurrency through DP and tune `--max-num-batched-tokens` for prefill throughput.           |
+| Low latency     | 1P1D PD disaggregation     | 48 A3 NPUs          | W8A8 MTP       | Use separate prefill and decode DP/TP layouts and enable full decode ACLGraph on decode nodes.        |
+| Low latency     | 1P1D PD disaggregation     | 16 Ascend 950DT NPUs | W4A4 MXFP4 MTP | Use one 8-NPU prefill node and one 8-NPU decode node. Enable full decode ACLGraph on the decode node. |
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | MTP Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ---------- | ------------ | ------------------ |
-| Long context | Single node | 16 | 16 | 1 | 128 | 133000 | 16384 | 3 | On | FullGraph, FlashComm1, Fused MC2, CPU binding |
+| Long context | Single node | 16 | 16 | 1 | 128 | 133000 | 16384 | 3 | On | FullGraph, Fused MC2, CPU binding |
 | High throughput | MP node | 8 per node | 8 | 1 per node, 2 global | 16 per DP | 32768 | 4096 | 3 | Off | FullGraph, shared expert overlap, CPU binding |
 | Low latency | Prefill node | 16 | 2 | 8 | 64 | 16384 | 4096 | 3 | Off | Recompute scheduler, Fused MC2, CPU binding |
 | Low latency | Decode node | 16 per node | 2 | 8 per node, 16 global | 32 | 16384 | 128 | 3 | Off | FullGraph, recompute scheduler, Fused MC2, CPU binding |
 
 ### 9.2 Tuning Guidelines
 
-Refer to [public performance tuning documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
+Refer to [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
 
 Recommended tuning order:
 
@@ -686,7 +928,7 @@ Recommended tuning order:
 4. Tune `--max-num-seqs` according to service concurrency. Requests above this value wait in the queue and the waiting time is counted in TTFT and TPOT.
 5. Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, but leave headroom for runtime memory fluctuation and expert imbalance.
 6. Tune `--speculative-config`. MTP can improve decode throughput, but the best `num_speculative_tokens` depends on acceptance rate and workload.
-7. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With FlashComm1, use capture sizes that are multiples of TP size.
+7. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With sequence parallelism, use capture sizes that are multiples of TP size.
 
 ### 9.3 Model-Specific Optimizations
 
@@ -697,7 +939,6 @@ Recommended tuning order:
 | Zero-like elimination | Enabled by default | Removes unnecessary zero-like tensor operations in attention. | No extra configuration is required. |
 | Qwen3.5 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Improves decode throughput when acceptance rate is good. | Reduce speculative tokens if latency or stability regresses. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| FlashComm1 | `--additional-config '{"enable_flashcomm1": true}'` | Reduces communication overhead in large TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Fused MC2 | `--additional-config '{"enable_fused_mc2": 1}'` | Enables MoE fused operators to improve MoE prefill/decode efficiency. | If accuracy or performance regresses in multi-DP large-token scenarios, disable it and compare. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for MP throughput scenarios. |
 | Recompute scheduler | `--additional-config '{"recompute_scheduler_enable": true}'` | Recomputes KV through prefill when decode KV cache is insufficient in PD mode. | Only valid on decode nodes where `kv_role` is `kv_consumer`. |
@@ -705,7 +946,7 @@ Recommended tuning order:
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to [FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.5-397B-A17B.
+For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.5-397B-A17B.
 
 ### Q1: Why does the service report OOM during startup or soon after accepting requests?
 
@@ -731,13 +972,11 @@ For common environment, installation, and general parameter issues, refer to [FA
 
 **Solution:** Use `--no-enable-prefix-caching` for PD disaggregation until the limitation is resolved. For non-PD single-node serving, enable prefix caching only when the workload has repeated prefixes and the cache hit rate is meaningful.
 
-### Q4: Why does performance regress after enabling FlashComm1 or Fused MC2?
+### Q4: Why does performance regress after enabling sequence parallelism or Fused MC2?
 
 **Phenomenon:** Throughput decreases, latency increases, or MoE load becomes unstable after enabling communication or MoE fusion optimizations.
 
-**Cause:** These optimizations are workload dependent. FlashComm1 is most useful in high-concurrency TP scenarios. Fused MC2 may not be suitable for some multi-DP large-token cases where padded tokens overload certain experts.
-
-**Solution:** Compare with `enable_flashcomm1` disabled and `enable_fused_mc2` set to 0. If FlashComm1 is enabled and you tune `cudagraph_capture_sizes`, use values that are multiples of TP size. Keep the better setting for your actual concurrency and prompt length distribution.
+**Cause:** These optimizations are workload dependent. sequence parallelism is most useful in high-concurrency TP scenarios. Fused MC2 may not be suitable for some multi-DP large-token cases where padded tokens overload certain experts.
 
 ### Q5: How should I tune MTP speculative decoding for this model?
 

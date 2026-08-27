@@ -20,7 +20,6 @@ env_common: &env_common
   HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0
-  VLLM_ASCEND_ENABLE_FUSED_MC2: 1
 
 special_dependencies:
   transformers: "5.2.0"
@@ -35,7 +34,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
           --host 0.0.0.0
@@ -53,7 +51,7 @@ deployment:
           "torch_profiler_with_stack": false}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64
@@ -82,7 +80,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.1-w8a8
           --host 0.0.0.0
@@ -101,7 +98,7 @@ deployment:
           "torch_profiler_with_stack": false}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64
@@ -152,7 +149,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92
@@ -202,7 +199,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true},"enable_fused_mc2":1}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92
@@ -236,5 +233,5 @@ benchmarks:
     max_out_len: 1500
     batch_size: 40
     request_rate: 0
-    baseline: 1
+    baseline: 1231.1406
     threshold: 0.97

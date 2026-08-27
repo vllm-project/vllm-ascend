@@ -13,7 +13,6 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: 1
   HCCL_BUFFSIZE: 512
   VLLM_ASCEND_ENABLE_MLAPO: 1
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   VLLM_USE_MODELSCOPE: true
   SERVER_PORT: 8080
 
@@ -86,5 +85,5 @@ benchmarks:
     batch_size: 80
     trust_remote_code: True
     request_rate: 0
-    baseline: 1
+    baseline: 1347.100867
     threshold: 0.97

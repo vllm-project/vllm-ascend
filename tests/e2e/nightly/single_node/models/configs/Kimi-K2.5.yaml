@@ -11,7 +11,6 @@ _envs: &envs
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   TASK_QUEUE_ENABLE: "1"
   VLLM_ASCEND_ENABLE_MLAPO: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ASCEND_ENABLE_NZ: "1"
 
 _server_cmd: &server_cmd
@@ -74,7 +73,7 @@ _benchmarks: &benchmarks
     batch_size: 2
     trust_remote_code: true
     request_rate: 0
-    baseline: 1
+    baseline: 34.2463
     threshold: 0.97
 
 # ==========================================

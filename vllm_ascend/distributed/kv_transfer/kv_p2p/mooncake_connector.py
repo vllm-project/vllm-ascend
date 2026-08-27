@@ -55,7 +55,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -1109,7 +1108,7 @@ class KVCacheRecvingThread(threading.Thread):
         if not (need_cat_cache or need_nz_cache):
             return
 
-        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
+        use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
         for group_idx, reformat_block_ids, _, layer_indices in ready_attention_group_reformat_block_ids:
             group_spec = self.kv_group2layeridx[group_idx][0]
             if MooncakeConnectorWorker._group_skip_kv_reformat(group_spec):
@@ -1951,11 +1950,27 @@ class MooncakeConnectorScheduler:
             "MooncakeConnector request_finished, request_status=%s, kv_transfer_params=%s", request.status, params
         )
 
-        if (
-            params is None
-            or not params.get("do_remote_decode")
-            or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
-        ):
+        if params is None:
+            return False, None
+
+        # A remote-prefill request can be rejected before scheduler admission
+        # (for example, when prompt + max_tokens exceeds max_model_len). In
+        # that case update_state_after_alloc() never gets a chance to schedule
+        # the receive, so explicitly enqueue an empty receive. The worker skips
+        # the data transfer for empty block IDs but still sends the completion
+        # signal to the P node, allowing it to release the stranded KV blocks.
+        if params.get("do_remote_prefill"):
+            empty_block_ids: BlockIds = tuple([] for _ in self.kv_cache_groups)
+            self._reqs_need_recv[request.request_id] = (
+                request,
+                empty_block_ids,
+                empty_block_ids,
+                0,
+            )
+            params["do_remote_prefill"] = False
+            return False, None
+
+        if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False, None
 
         num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)

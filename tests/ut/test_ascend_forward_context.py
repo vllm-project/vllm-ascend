@@ -87,7 +87,7 @@ def _patch_select_moe_comm_method_deps(
 def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     from vllm.forward_context import ForwardContext, override_forward_context
 
-    from vllm_ascend.models import deepseek_v4
+    from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
 
     monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
     monkeypatch.setattr(
@@ -117,7 +117,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
         no_compile_layers={},
         attn_metadata={},
         slot_mapping={},
-        additional_kwargs={"flash_comm_v1_enabled": False},
+        additional_kwargs={},
     )
 
     with override_forward_context(forward_context):
@@ -344,23 +344,6 @@ def test_select_moe_comm_method_a3_quant_w8a8(
     vllm_config = _make_vllm_config(quant_type="w8a8")
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
-
-
-@pytest.mark.parametrize(
-    ("quant_type", "expected"),
-    [
-        ("w4a8", True),
-        ("w8a8", True),
-        ("w8a16", False),
-    ],
-)
-def test_cann_megamoe_supported_by_config_quant_type(
-    quant_type,
-    expected,
-):
-    vllm_config = _make_vllm_config(quant_type=quant_type)
-
-    assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
 
 
 @pytest.mark.parametrize(

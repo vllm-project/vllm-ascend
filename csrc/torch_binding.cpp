@@ -45,6 +45,8 @@
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
+#include "attention/k2q_csr/k2q_csr_torch_adpt.h"
+#include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
@@ -62,6 +64,10 @@
 #include <vector>
 
 namespace vllm_ascend {
+
+// Required by EXEC_NPU_CMD hash helpers in aclnn_torch_adapter/op_api_common.h
+thread_local char g_hashBuf[kHashBufSize];
+thread_local int g_hashOffset = 0;
 
 namespace {
 
@@ -1599,6 +1605,8 @@ int64_t get_type_code(at::ScalarType dst_type)
             return 35;
         case at::ScalarType::Float8_e4m3fn:
             return 36;
+        case at::ScalarType::Float4_e2m1fn_x2:
+            return 40;
         case at::ScalarType::Half:
             return 1;
         case at::ScalarType::BFloat16:
@@ -1872,6 +1880,46 @@ at::Tensor chunk_fwd_o(
     return o;
 }
 
+at::Tensor npu_sparse_attention_score_prefill(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &block_table,
+    const at::Tensor &k2q_row_ptr,
+    const at::Tensor &k2q_q_indices,
+    const at::Tensor &k2q_slot_indices,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv)
+{
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
+
+    EXEC_NPU_CMD(
+        aclnnMinimaxSparseAttentionSplitKv,
+        query,
+        key,
+        value,
+        block_table,
+        k2q_row_ptr,
+        k2q_q_indices,
+        k2q_slot_indices,
+        actual_seq_lengths,
+        actual_seq_lengths_kv,
+        num_key_value_heads,
+        scale_value,
+        block_size,
+        top_k,
+        inner_precise,
+        output
+    );
+
+    return output;
+}
+
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 {
     TORCH_CHECK(
@@ -2059,6 +2107,25 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
     );
     ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
+
+    // k2q_csr: q2k -> k2q CSR (Meta/Hist/RowPrefix/TilePrefix/Scatter)
+    ops.def(
+        "npu_k2q_csr(Tensor q2k, Tensor cu_seqlens, Tensor cu_block_lens, "
+        "int order_method=0, int total_rows=-1, int max_kv=-1, int use_simt=0, "
+        "int q_global_offset=0) "
+        "-> (Tensor row_ptr, Tensor q_ind, Tensor slot)"
+    );
+    ops.impl("npu_k2q_csr", torch::kPrivateUse1, &vllm_ascend::npu_k2q_csr);
+
+    ops.def(
+        "npu_sparse_attention_score_prefill(Tensor query, Tensor key, Tensor value,"
+        "                           Tensor block_table,Tensor k2q_row_ptr,Tensor k2q_q_indices,Tensor k2q_slot_indices,"
+        "                           int num_key_value_heads, float scale_value,"
+        "                           int block_size, int top_k, int inner_precise, *,"
+        "                           Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None"
+        "                           ) -> Tensor "
+    );
+    ops.impl("npu_sparse_attention_score_prefill", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attention_score_prefill);
 
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
@@ -2539,5 +2606,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
+
+    ops.def(
+        "npu_msa_index_score("
+        "Tensor query, Tensor key, Tensor block_table, Tensor start_loc, *, "
+        "Tensor? scale=None, Tensor? atten_mask=None, "
+        "Tensor? actual_seq_qlen=None, Tensor? actual_seq_klen=None, "
+        "str layout_key=\"BBND\", int sparse_mode=3, "
+        "int init_blocks=0, int local_blocks=0) -> Tensor"
+    );
+    ops.impl("npu_msa_index_score", torch::kPrivateUse1,
+             &vllm_ascend::npu_msa_index_score);
 }
 #endif

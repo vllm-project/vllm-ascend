@@ -10,9 +10,9 @@ This document is validated and written based on **vLLM-Ascend v0.20.0rc1**. The 
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -122,7 +122,7 @@ To use the tool_calls feature, please ensure that your transformers version is 4
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `Kimi-K2.6-w4a8` can be deployed on 1 Atlas 800 A3 (64G × 16).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `Kimi-K2.6-w4a8` can be deployed on 1 Atlas 800 A3 (64GB × 16).
 
 While a single-node setup supports all input/output scenarios, consider deploying multinodes for optimal performance.
 
@@ -146,8 +146,6 @@ sysctl -w kernel.numa_balancing=0
 sysctl -w kernel.sched_migration_cost_ns=50000
 
 export HCCL_BUFFSIZE=600
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=0
 
 vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --quantization ascend \
@@ -170,19 +168,19 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
     --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}' \
     --mm-processor-cache-gb 0 \
     --mm-encoder-tp-mode data \
-    --additional-config '{"enable_balance_scheduling": true}' \
+    --additional-config '{"scheduler_config":{"enable_balance_scheduling":false}}' \
     --speculative-config '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 15}'
 ```
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try increasing `--max-num-seqs` to improve system throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -258,15 +256,15 @@ In the standard single-node deployment mode, Prefill (prompt processing) and Dec
 
 PD (Prefill-Decode) separation addresses these issues by running Prefill and Decode on dedicated node groups, each configured independently:
 
-- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling FlashComm for Allreduce acceleration).
+- **Prefill nodes** focus on high-throughput prompt processing, optimized for compute and communication (e.g., enabling sequence parallelism for Allreduce acceleration).
 
 - **Decode nodes** focus on low-latency token generation, optimized for memory bandwidth (e.g., enabling MLAPO fusion operators).
 
 This architecture is recommended for production deployments with concurrent multi-user workloads, where stable latency and high throughput are both required.
 
-Take Atlas 800 A3 (64G × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory to serve high concurrency in 1P1D case.
+Take Atlas 800 A3 (64GB × 16) for example, we recommend to deploy 2P1D (4 nodes) rather than 1P1D (2 nodes), because there is not enough NPU memory to serve high concurrency in 1P1D case.
 
-- `Kimi-K2.6-w4a8 2P1D`: requires 4 Atlas 800 A3 (64G × 16) nodes.
+- `Kimi-K2.6-w4a8 2P1D`: requires 4 Atlas 800 A3 (64GB × 16) nodes.
 
 To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to deploy a `launch_online_dp.py` script and a `run_dp_template.sh` script on each node and deploy a `proxy.sh` script on prefill master node to forward requests.
 
@@ -292,7 +290,7 @@ Parameter descriptions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.1"
+    local_ip="192.xx.xx.1"
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
@@ -322,7 +320,6 @@ Parameter descriptions:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -374,7 +371,7 @@ Parameter descriptions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.2"
+    local_ip="192.xx.xx.2"
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
@@ -404,7 +401,6 @@ Parameter descriptions:
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
     export HCCL_BUFFSIZE=1536
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
@@ -455,7 +451,7 @@ Parameter descriptions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.3"
+    local_ip="192.xx.xx.3"
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
@@ -536,7 +532,7 @@ Parameter descriptions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.4"
+    local_ip="192.xx.xx.4"
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
@@ -613,7 +609,6 @@ Parameter descriptions:
 
     Key Parameter Descriptions:
 
-    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
     - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
     - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
@@ -622,13 +617,13 @@ Parameter descriptions:
 
     ```shell
     # p0
-    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 192.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
     # p1
-    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 4 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 192.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
     # d0
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     # d1
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
 3. Run the `proxy.sh` script on the prefill master node
@@ -638,30 +633,30 @@ Parameter descriptions:
     ```shell
     python load_balance_proxy_server_example.py \
       --port 1999 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --prefiller-hosts \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
       --prefiller-ports \
         7100 7101 7102 7103 7100 7101 7102 7103 \
       --decoder-hosts \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
       --decoder-ports \
         7100 7101 7102 7103 \
-        7100 7101 7102 7103 \
+        7100 7101 7102 7103
     ```
 
     ```shell
@@ -674,7 +669,7 @@ Deployment Verification:
 After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together:
 
 ```shell
-curl http://141.xx.xx.1:1999/v1/chat/completions \
+curl http://192.xx.xx.1:1999/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "kimi_k26",
@@ -719,7 +714,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 }
 ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -785,9 +780,9 @@ Here is one accuracy evaluation method.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 | ----- | ----- | ----- | ----- | ----- | ----- |
-| AIME2026 | - | accuracy | gen | 90.00 | 1 Atlas 800 A3 (64G × 16) |
-| GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (64G × 16) |
-| MMMU | - | accuracy | gen | 82.67 | 1 Atlas 800 A3 (64G × 16) |
+| AIME2026 | - | accuracy | gen | 90.00 | 1 Atlas 800 A3 (64GB × 16) |
+| GPQA | - | accuracy | gen | 89.90 | 1 Atlas 800 A3 (64GB × 16) |
+| MMMU | - | accuracy | gen | 82.67 | 1 Atlas 800 A3 (64GB × 16) |
 
 ## 8 Performance Evaluation
 
@@ -823,7 +818,7 @@ After about several minutes, you can get the performance evaluation result.
 
 #### Table 1: Scenario Overview
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
@@ -858,11 +853,11 @@ After about several minutes, you can get the performance evaluation result.
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: What transformer version is required for tool_calls feature?**
 
