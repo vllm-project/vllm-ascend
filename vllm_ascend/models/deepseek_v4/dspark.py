@@ -24,7 +24,7 @@ from vllm.distributed import (
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -153,13 +153,14 @@ class DeepseekV4DSparkModel(nn.Module):
             if _model_quant_cfg is not None and _model_quant_cfg.get("quant_method") == "fp8"
             else None
         )
-        self.main_proj = ReplicatedLinear(
+        self.main_proj = ColumnParallelLinear(
             config.hidden_size * len(self.target_layer_ids),
             config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=_main_proj_qconfig,
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
+            gather_output=True,
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         first_layer.main_proj = self.main_proj
