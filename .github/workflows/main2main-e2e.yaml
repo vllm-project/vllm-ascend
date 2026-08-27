@@ -303,10 +303,12 @@ jobs:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
         run: |
           source "$GITHUB_WORKSPACE/.venv/bin/activate"
-          # NPU runner memory can't take the CPU cache-builder parallelism
-          # (matrix.max_jobs=184): 54 parallel opc compiles were OOM-killed
-          # on the a2 runner.  Cap at the container default (4).
-          export MAX_JOBS=4
+          # Same as vllm-ascend CI (_e2e_nightly_single_node.yaml "Set
+          # MAX_JOBS based on runner"): MAX_JOBS = cards x 23.  The CPU
+          # cache-builder parallelism (matrix.max_jobs=184) OOM-killed all
+          # 54 opc compiles on the a2 runner; a2-1/310p-1 give 23.
+          CARDS=$(echo "${{ matrix.runner }}" | grep -oE '[0-9]+$')
+          export MAX_JOBS=$((CARDS * 23))
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
@@ -548,7 +550,9 @@ jobs:
             echo "$CHANGED"
             echo "Rebuilding kernels (one-time per csrc change)"
             source "$GITHUB_WORKSPACE/.venv/bin/activate"
-            export MAX_JOBS=4
+            # CI formula: MAX_JOBS = cards x 23 (see prepare job).
+            CARDS=$(echo "${{ matrix.runner }}" | grep -oE '[0-9]+$')
+            export MAX_JOBS=$((CARDS * 23))
             uv pip install -e . --no-build-isolation
           else
             echo "csrc unchanged - reusing built kernels"
