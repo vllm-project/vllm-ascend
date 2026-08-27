@@ -126,19 +126,8 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-  ensure-csrc-cache:
-    needs: resolve-source
-    uses: ./.github/workflows/_ensure_csrc_cache.yaml
-    with:
-      target_ids: '["a2-arm64-ubuntu"]'
-      repository: ${{ needs.resolve-source.outputs.source_repository }}
-      source_ref: ${{ needs.resolve-source.outputs.source_ref }}
-      base_repository: vllm-project/vllm-ascend
-      base_ref: ${{ needs.resolve-source.outputs.base_ref }}
-      base_sha: ${{ needs.resolve-source.outputs.base_sha }}
-
   main2main:
-    needs: [resolve-source, ensure-csrc-cache]
+    needs: resolve-source
     # All analysis/planning/adapter/QA/pre-CI/final-gate work runs on a pure
     # CPU runner; E2E runs on the A2/A3/310P NPU runners via the external
     # main2main-e2e workflows (dispatched by step 0 below).

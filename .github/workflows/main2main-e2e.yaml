@@ -456,6 +456,9 @@ jobs:
             runner: linux-aarch64-a3-800i-16-cn12-001
             image_tag: ${{ inputs.image_tag_a3 }}
             max_jobs: '184'
+            # Dual-die package: dies 0-1, 2-3, ... must be used as whole
+            # pairs — run_tests.py enforces pair-aligned device assignment.
+            pair_aligned: 'true'
           - chip: 310p
             runner: linux-aarch64-310p-4
             image_tag: 9.1.0-310p-ubuntu22.04-py3.12
@@ -598,6 +601,11 @@ jobs:
           PY
           exit 0
           fi
+          EXTRA_ARGS=()
+          if [ "${{ matrix.pair_aligned }}" = "true" ]; then
+            EXTRA_ARGS+=(--pair-aligned-devices)
+            echo "Dual-die A3: enforcing pair-aligned device assignment"
+          fi
           python3 "$GITHUB_WORKSPACE/main2main_flow/main2main_flow/scripts/utils/run_tests.py" \
             --vllm-path "$GITHUB_WORKSPACE/vllm-empty" \
             --vllm-commit "${{ inputs.vllm }}" \
@@ -607,6 +615,7 @@ jobs:
             --round "${{ inputs.round }}" \
             --skip-setup \
             --log-dir "$RESULTS_DIR" \
+            "${EXTRA_ARGS[@]}" \
             --test-cases "${CASES[@]}"
 
       - name: Upload E2E results
