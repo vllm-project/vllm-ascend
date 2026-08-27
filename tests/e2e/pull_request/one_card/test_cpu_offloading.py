@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import socket
 import time
+from typing import Any
 
 import msgspec
 import msgspec.msgpack
+import pytest
 import zmq
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
@@ -107,7 +109,11 @@ def _latency_test(llm: LLM, subscriber: MockSubscriber):
 
 def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     sampling_params = SamplingParams(max_tokens=1)
-    cpu_block_size = llm.llm_engine.vllm_config.kv_transfer_config.kv_connector_extra_config["block_size"]
+    vllm_config = llm.llm_engine.vllm_config
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    cpu_block_size = extra_config.get("block_size")
+    if cpu_block_size is None:
+        cpu_block_size = extra_config["blocks_per_chunk"] * vllm_config.cache_config.block_size
 
     subscriber.get_new_cpu_stored_events()
 
@@ -127,21 +133,35 @@ def _accuracy_test(llm: LLM, subscriber: MockSubscriber):
     assert success_count >= 0.5 * test_count
 
 
-def test_cpu_offloading() -> None:
+@pytest.mark.parametrize("enable_tiering", [False, True])
+def test_cpu_offloading(tmp_path, enable_tiering: bool) -> None:
     """
-    Tests OffloadingConnector with CPUOffloadingSpec.
+    Tests the native CPU-only and multi-tier offloading specs.
     """
 
-    # Configure OffloadingConnector with the Ascend transfer worker.
+    # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
+    extra_config: dict[str, Any] = {
+        # Keep CI host-memory and pinned-memory pressure bounded. The original
+        # CPU-only test already exercised eviction with a 1 GiB tier, which is
+        # also sufficient for validating the filesystem tiering path.
+        "cpu_bytes_to_use": 1 << 30,
+        # Keep prompt alignment bounded in this correctness test. Multi-block
+        # chunk pointer arithmetic is covered by the worker unit tests.
+        "blocks_per_chunk": 1,
+        "spec_name": ("TieringOffloadingSpec" if enable_tiering else "CPUOffloadingSpec"),
+    }
+    if enable_tiering:
+        extra_config["secondary_tiers"] = [
+            {
+                "type": "fs",
+                "root_dir": str(tmp_path / "native_kv_offload"),
+            }
+        ]
+
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
         kv_role="kv_both",
-        kv_connector_extra_config={
-            "cpu_bytes_to_use": 1 << 30,
-            "block_size": 128,
-            "spec_name": "NPUOffloadingSpec",
-            "spec_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu",
-        },
+        kv_connector_extra_config=extra_config,
     )
 
     port: int

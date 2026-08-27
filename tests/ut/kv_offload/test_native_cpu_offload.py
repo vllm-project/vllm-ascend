@@ -12,7 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
-from vllm.v1.kv_offload.base import CanonicalKVCaches
+from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingWorker
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
     OffloadingConfig,
@@ -20,10 +20,10 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
+import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
     NPUOffloadingWorker,
 )
@@ -31,7 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu import NP
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnector,
     AscendOffloadingConnectorWorker,
-    _canonicalize_split_attention_cache,
+    _canonicalize_split_cache,
 )
 from vllm_ascend.utils import vllm_version_is
 
@@ -89,28 +89,6 @@ def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
     assert isinstance(spec.get_manager(), CPUOffloadingManager)
 
 
-def test_npu_offloading_spec_supports_legacy_num_cpu_blocks() -> None:
-    extra_config: dict[str, object] = {"num_cpu_blocks": 10}
-    spec = NPUOffloadingSpec(_make_config(extra_config))
-    aligned_bytes_per_chunk = round_up(
-        64 * 2 * 2,
-        NPUOffloadingSpec.BLOCK_SIZE_ALIGNMENT,
-    )
-
-    assert spec.num_blocks == 10
-    assert spec.extra_config["cpu_bytes_to_use"] == 10 * aligned_bytes_per_chunk
-    assert "cpu_bytes_to_use" not in extra_config
-
-
-def test_legacy_num_cpu_blocks_is_preserved_on_scheduler() -> None:
-    config = _make_config({"num_cpu_blocks": 10})
-    object.__setattr__(config, "worker_kv_bytes_per_block", 0)
-
-    spec = NPUOffloadingSpec(config)
-
-    assert spec.num_blocks == 10
-
-
 def test_npu_offloading_spec_loads_through_vllm_factory() -> None:
     spec_cls = OffloadingSpecFactory.get_spec_cls(
         {
@@ -123,7 +101,7 @@ def test_npu_offloading_spec_loads_through_vllm_factory() -> None:
 
 
 def test_npu_worker_reuses_upstream_worker_protocol() -> None:
-    assert issubclass(NPUOffloadingWorker, CPUOffloadingWorker)
+    assert issubclass(NPUOffloadingWorker, OffloadingWorker)
 
 
 def test_npu_spec_caches_worker_without_upstream_platform_gate(monkeypatch) -> None:
@@ -183,7 +161,7 @@ def test_split_kv_cache_is_canonicalized_without_copy() -> None:
     key = torch.empty((4, 2, 3), dtype=torch.bfloat16)
     value = torch.empty((4, 2, 3), dtype=torch.bfloat16)
 
-    views = _canonicalize_split_attention_cache(
+    views = _canonicalize_split_cache(
         (key, value),
         num_blocks=4,
         unpadded_page_size_bytes=24,
@@ -200,7 +178,7 @@ def test_split_kv_cache_coalesces_kernel_blocks() -> None:
     key = torch.empty((8, 2), dtype=torch.int8)
     value = torch.empty((8, 2), dtype=torch.int8)
 
-    views = _canonicalize_split_attention_cache(
+    views = _canonicalize_split_cache(
         (key, value),
         num_blocks=4,
         unpadded_page_size_bytes=8,
@@ -214,7 +192,7 @@ def test_extra_physical_blocks_do_not_hide_separate_value_cache() -> None:
     key = torch.empty((10, 2), dtype=torch.int8)
     value = torch.empty((10, 2), dtype=torch.int8)
 
-    views = _canonicalize_split_attention_cache(
+    views = _canonicalize_split_cache(
         (key, value),
         num_blocks=4,
         unpadded_page_size_bytes=4,
@@ -231,7 +209,7 @@ def test_split_kv_cache_prefers_complete_overlapping_view() -> None:
     key = full[:, :4]
     scale = full[:, 4:]
 
-    views = _canonicalize_split_attention_cache(
+    views = _canonicalize_split_cache(
         (key, scale, full),
         num_blocks=4,
         unpadded_page_size_bytes=8,
@@ -248,14 +226,16 @@ def test_split_kv_cache_rejects_noncontiguous_block_payload() -> None:
     value = torch.empty((4, 3, 2), dtype=torch.int8)
 
     with pytest.raises(ValueError, match="block payload is non-contiguous"):
-        _canonicalize_split_attention_cache(
+        _canonicalize_split_cache(
             (key, value),
             num_blocks=4,
             unpadded_page_size_bytes=12,
         )
 
 
-def test_ascend_connector_worker_accepts_separate_kv_tensors() -> None:
+def test_ascend_connector_worker_accepts_separate_kv_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     layer_name = "model.layers.0.self_attn"
     spec = FullAttentionSpec(
         block_size=2,
@@ -270,8 +250,10 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors() -> None:
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
+    worker.vllm_config = object()
     captured: list[CanonicalKVCaches] = []
     worker._init_worker = captured.append
+    monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
 
     worker.register_kv_caches(
         {
@@ -295,7 +277,9 @@ def test_ascend_connector_worker_accepts_separate_kv_tensors() -> None:
     ]
 
 
-def test_ascend_connector_worker_accepts_aligned_mamba_states() -> None:
+def test_ascend_connector_worker_accepts_aligned_mamba_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     layer_name = "model.layers.0.mixer"
     spec = MambaSpec(
         block_size=1,
@@ -310,8 +294,10 @@ def test_ascend_connector_worker_accepts_aligned_mamba_states() -> None:
     )
     worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
     worker.kv_cache_config = kv_cache_config
+    worker.vllm_config = object()
     captured: list[CanonicalKVCaches] = []
     worker._init_worker = captured.append
+    monkeypatch.setattr(connector_mod, "derive_canonical_mappings", lambda *args: {})
 
     raw = torch.empty(1 + 4 * 2 + 4 * 3, dtype=torch.int8)
     first_state = raw[1:9].view(4, 2)
@@ -348,6 +334,7 @@ def test_offloading_connector_is_registered_with_ascend_adapter(
         registrations[name] = (module_path, class_name)
 
     monkeypatch.setattr(KVConnectorFactory, "_registry", {})
+    monkeypatch.setattr(OffloadingSpecFactory, "_registry", {})
     monkeypatch.setattr(
         KVConnectorFactory,
         "register_connector",
@@ -359,3 +346,7 @@ def test_offloading_connector_is_registered_with_ascend_adapter(
         "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector",
         "AscendOffloadingConnector",
     )
+    assert set(OffloadingSpecFactory._registry) == {
+        "CPUOffloadingSpec",
+        "TieringOffloadingSpec",
+    }

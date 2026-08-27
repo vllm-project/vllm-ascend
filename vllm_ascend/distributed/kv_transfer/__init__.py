@@ -19,6 +19,22 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 
 def register_connector():
+    # Override vLLM KV offloading specs with Ascend NPU handlers. The
+    # scheduler-side managers stay upstream; only worker-side transfers use
+    # torch.npu streams and the Ascend batched memcpy op.
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    for name, class_name in (
+        ("CPUOffloadingSpec", "NPUOffloadingSpec"),
+        ("TieringOffloadingSpec", "NPUTieringOffloadingSpec"),
+    ):
+        OffloadingSpecFactory._registry.pop(name, None)
+        OffloadingSpecFactory.register_spec(
+            name,
+            "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu",
+            class_name,
+        )
+
     # override multi_connector as ascend_multi_connector
     if "MultiConnector" in KVConnectorFactory._registry:
         KVConnectorFactory._registry.pop("MultiConnector")
