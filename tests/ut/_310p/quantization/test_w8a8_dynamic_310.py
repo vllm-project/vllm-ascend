@@ -119,7 +119,8 @@ class TestAscendW8A8DynamicLinearMethod310(TestBase):
         # kwargs
         self.assertTrue(torch.equal(kwargs["pertoken_scale"], expect_pertoken_scale_output))
         self.assertTrue(kwargs["bias"] is None)
-        self.assertEqual(kwargs["output_dtype"], layer.params_dtype)
+        # 310P keeps x.dtype (see _310p/quantization/methods/w8a8_dynamic.py).
+        self.assertEqual(kwargs["output_dtype"], x.dtype)
 
         self.assertTrue(torch.equal(output, expected_y_output))
 
@@ -139,9 +140,10 @@ class TestAscendW8A8DynamicLinearMethod310(TestBase):
 
         layer.weight_scale.data = torch.randn(128, 1, dtype=torch.bfloat16)
         layer.weight_offset.data = torch.randn(128, 1, dtype=torch.bfloat16)
-        # w2_weight_offset is reshaped to (N, -1); any (N, 1) is fine
-        layer.w2_weight_offset.data = torch.randn(128, 1, dtype=torch.bfloat16)
 
         self.method.process_weights_after_loading(layer)
 
         mock_npu_format_cast.assert_called_once()
+        self.assertEqual(layer.weight_scale.data.ndim, 1)
+        self.assertFalse(hasattr(layer, "weight_fp"))
+        self.assertEqual(layer.weight.data.shape, (256, 128))
