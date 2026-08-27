@@ -41,7 +41,9 @@ from vllm_ascend.lora.fused_moe import (
 from vllm_ascend.lora.quant_moe import validate_quant_moe_lora_activation_input
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
+    MoEAllToAllCombineHandle,
     MoEAllToAllCombineMetadata,
+    MoEAllToAllDispatchHandle,
     MoEMC2CombineMetadata,
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
@@ -471,6 +473,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.num_local_experts = kwargs.get("num_local_experts", 0)
+        self._comm_stream = None
 
         assert self.num_local_experts > 0, "Expected at least one expert"
         if self.num_local_experts > 1:
@@ -494,10 +497,15 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         backend = self.ep_group._get_backend(torch.device("npu"))
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
 
-    def token_dispatch(
+    def _get_comm_stream(self):
+        if self._comm_stream is None:
+            self._comm_stream = torch_npu.npu.Stream(device=torch.npu.current_device())
+        return self._comm_stream
+
+    def dispatch_start(
         self,
         token_dispatch_input: MoETokenDispatchInput,
-    ):
+    ) -> MoEAllToAllDispatchHandle:
         use_mxfp_quant = token_dispatch_input.quant.is_mxfp
         with_quant = token_dispatch_input.quant.dispatch_with_quant
         if has_lora(self.lora_context) and token_dispatch_input.quant.is_quant:
@@ -512,7 +520,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             with_quant = False
         dst_type = token_dispatch_input.quant.get_dst_type
         hidden_states = token_dispatch_input.hidden_states
-        topk_weights = token_dispatch_input.topk_weights
         topk_ids = token_dispatch_input.topk_ids
 
         (
@@ -527,77 +534,131 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         ) = self._dispatch_preprocess(hidden_states, topk_ids)
 
         dynamic_scale_after_all2all = None
+        scale_input = None
+        scale_work = None
         if with_quant:
             permutated_local_input_tokens, dynamic_scale = DeviceOperator.npu_dynamic_quant(
                 permutated_local_input_tokens, act_quant_type=dst_type, use_mxfp_quant=use_mxfp_quant
             )
-            _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(
-                dynamic_scale, output_splits, input_splits, self.ep_group
-            )
-            permute2_ep_all_to_all_handle.wait()
-            dynamic_scale.untyped_storage().resize_(0)
 
-        _, global_input_tokens, permute1_ep_all_to_all_handle = async_all_to_all(
-            permutated_local_input_tokens, output_splits, input_splits, self.ep_group
+        ready_event = torch.npu.current_stream().record_event()
+        comm_stream = self._get_comm_stream()
+        if with_quant:
+            scale_input, dynamic_scale_after_all2all, scale_work = async_all_to_all(
+                dynamic_scale,
+                output_splits,
+                input_splits,
+                self.ep_group,
+                event=ready_event,
+                comm_stream=comm_stream,
+            )
+
+        hidden_input, global_input_tokens, hidden_work = async_all_to_all(
+            permutated_local_input_tokens,
+            output_splits,
+            input_splits,
+            self.ep_group,
+            event=ready_event,
+            comm_stream=comm_stream,
         )
-        permute1_ep_all_to_all_handle.wait()
-        permutated_local_input_tokens.untyped_storage().resize_(0)
+
+        return MoEAllToAllDispatchHandle(
+            token_dispatch_input=token_dispatch_input,
+            hidden_input=hidden_input,
+            global_input_tokens=global_input_tokens,
+            hidden_work=hidden_work,
+            scale_input=scale_input,
+            dynamic_scale_after_all2all=dynamic_scale_after_all2all,
+            scale_work=scale_work,
+            reversed_local_input_permutation_mapping=reversed_local_input_permutation_mapping,
+            tokens_per_expert=tokens_per_expert,
+            input_splits=input_splits,
+            output_splits=output_splits,
+            global_input_tokens_local_experts_indices=global_input_tokens_local_experts_indices,
+            hidden_shape=hidden_shape,
+            hidden_shape_before_permute=hidden_shape_before_permute,
+            with_quant=with_quant,
+            dst_type=dst_type,
+        )
+
+    def dispatch_finish(
+        self,
+        dispatch_handle: MoEAllToAllDispatchHandle,
+    ) -> MoETokenDispatchOutput[MoEAllToAllCombineMetadata]:
+        token_dispatch_input = dispatch_handle.token_dispatch_input
+        if dispatch_handle.scale_work is not None:
+            dispatch_handle.scale_work.wait()
+        dispatch_handle.hidden_work.wait()
 
         if self.lora_context is not None:
             all2all_lora_indices(
                 self.lora_context,
-                output_splits=output_splits,
-                input_splits=input_splits,
+                output_splits=dispatch_handle.output_splits,
+                input_splits=dispatch_handle.input_splits,
                 ep_group=self.ep_group,
             )
 
-        # Postprocess
         global_input_tokens, dynamic_scale_final, reversed_global_input_permutation_mapping = (
             self._dispatch_postprocess(
-                global_input_tokens,
-                dynamic_scale_after_all2all,
-                global_input_tokens_local_experts_indices,
-                with_quant,
-                dst_type,
+                dispatch_handle.global_input_tokens,
+                dispatch_handle.dynamic_scale_after_all2all,
+                dispatch_handle.global_input_tokens_local_experts_indices,
+                dispatch_handle.with_quant,
+                dispatch_handle.dst_type,
             )
         )
 
         return MoETokenDispatchOutput(
             hidden_states=global_input_tokens,
             dynamic_scale=dynamic_scale_final,
-            group_list=tokens_per_expert,
+            group_list=dispatch_handle.tokens_per_expert,
             group_list_type=1,
             combine_metadata=MoEAllToAllCombineMetadata(
-                input_splits=input_splits,
-                output_splits=output_splits,
-                topk_weights=topk_weights,
-                reversed_local_input_permutation_mapping=reversed_local_input_permutation_mapping,
+                input_splits=dispatch_handle.input_splits,
+                output_splits=dispatch_handle.output_splits,
+                topk_weights=token_dispatch_input.topk_weights,
+                reversed_local_input_permutation_mapping=dispatch_handle.reversed_local_input_permutation_mapping,
                 reversed_global_input_permutation_mapping=reversed_global_input_permutation_mapping,
-                hidden_shape=hidden_shape,
-                hidden_shape_before_permute=hidden_shape_before_permute,
+                hidden_shape=dispatch_handle.hidden_shape,
+                hidden_shape_before_permute=dispatch_handle.hidden_shape_before_permute,
             ),
         )
 
-    def token_combine(self, hidden_states, combine_metadata, bias=None):
+    def token_dispatch(
+        self,
+        token_dispatch_input: MoETokenDispatchInput,
+    ):
+        return self.dispatch_finish(self.dispatch_start(token_dispatch_input))
+
+    def combine_start(self, hidden_states, combine_metadata, bias=None) -> MoEAllToAllCombineHandle:
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
 
-        # 1. Preprocess using metadata
         hidden_states = self._combine_preprocess(hidden_states, combine_metadata)
-
-        # 2. AllToAll
-        _, permutated_local_input_tokens, handle = async_all_to_all(
+        ready_event = torch.npu.current_stream().record_event()
+        hidden_input, permutated_local_input_tokens, work = async_all_to_all(
             hidden_states,
             combine_metadata.input_splits,
             combine_metadata.output_splits,
             self.ep_group,
+            event=ready_event,
+            comm_stream=self._get_comm_stream(),
         )
-        handle.wait()
-        hidden_states.untyped_storage().resize_(0)
+        return MoEAllToAllCombineHandle(
+            hidden_input=hidden_input,
+            permutated_local_input_tokens=permutated_local_input_tokens,
+            work=work,
+            combine_metadata=combine_metadata,
+        )
 
-        # 3. Postprocess using metadata
-        output = self._combine_postprocess(permutated_local_input_tokens, combine_metadata)
+    def combine_finish(self, combine_handle: MoEAllToAllCombineHandle) -> torch.Tensor:
+        combine_handle.work.wait()
+        return self._combine_postprocess(
+            combine_handle.permutated_local_input_tokens,
+            combine_handle.combine_metadata,
+        )
 
-        return output
+    def token_combine(self, hidden_states, combine_metadata, bias=None):
+        return self.combine_finish(self.combine_start(hidden_states, combine_metadata, bias))
 
     def _dispatch_preprocess(self, hidden_states, topk_ids):
         hidden_shape = hidden_states.shape

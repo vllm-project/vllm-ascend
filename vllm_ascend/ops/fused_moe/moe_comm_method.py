@@ -16,9 +16,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 import torch
+import torch.distributed as dist
+from vllm.config import get_current_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -44,6 +48,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithMC2,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import AscendDeviceType, enable_dsa_cp, get_ascend_device_type
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
 
@@ -64,7 +69,10 @@ def setup_moe_comm_method(moe_config):
 
 @dataclass
 class FusedExpertsResult:
-    routed_out: torch.Tensor
+    routed_out: torch.Tensor | None
+    # DSA-CP MoE DBO can leave C1 in flight while independent full-batch
+    # shared-expert work runs.
+    finish_routed_out: Callable[[], torch.Tensor] | None = None
     # This field is for shared experts and should be set by the MoE
     # communication method that supports shared experts in parallel with routed
     # experts.
@@ -74,6 +82,34 @@ class FusedExpertsResult:
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
+
+
+def _split_fused_experts_input(
+    fused_experts_input: MoEFusedExpertsInput,
+) -> tuple[MoEFusedExpertsInput, MoEFusedExpertsInput]:
+    """Split token-indexed MoE inputs while preserving original token order."""
+
+    num_tokens = fused_experts_input.hidden_states.shape[0]
+    split_point = (num_tokens + 1) // 2
+    token_slices = (slice(0, split_point), slice(split_point, num_tokens))
+    micro_batches = []
+    for token_slice in token_slices:
+        pertoken_scale = fused_experts_input.routing.pertoken_scale
+        if pertoken_scale is not None:
+            pertoken_scale = pertoken_scale[token_slice]
+        micro_batches.append(
+            replace(
+                fused_experts_input,
+                hidden_states=fused_experts_input.hidden_states[token_slice],
+                topk_ids=fused_experts_input.topk_ids[token_slice],
+                topk_weights=fused_experts_input.topk_weights[token_slice],
+                routing=replace(
+                    fused_experts_input.routing,
+                    pertoken_scale=pertoken_scale,
+                ),
+            )
+        )
+    return micro_batches[0], micro_batches[1]
 
 
 class MoECommMethod(ABC):
@@ -245,6 +281,161 @@ class AlltoAllCommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
+
+    def _local_dsa_cp_moe_dbo_candidate(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+    ) -> tuple[bool, str]:
+        ascend_config = get_ascend_config()
+        vllm_config = get_current_vllm_config()
+        hidden_states = fused_experts_input.hidden_states
+        num_tokens = hidden_states.shape[0] if hidden_states.ndim > 0 else 0
+
+        if get_ascend_device_type() != AscendDeviceType.A5:
+            return False, "only A5 is supported"
+        if not enable_dsa_cp():
+            return False, "DSA-CP is disabled"
+        if _EXTRA_CTX.moe_comm_type != MoECommType.ALLTOALL:
+            return False, "the selected MoE communication method is not AllToAllV"
+        if not vllm_config.model_config.enforce_eager:
+            return False, "only eager execution is supported"
+        if self.moe_config.ep_size <= 1:
+            return False, "EP size must be greater than one"
+        if fused_experts_input.lora_context is not None or self.lora_context is not None:
+            return False, "LoRA is unsupported"
+        if fused_experts_input.dynamic_eplb:
+            return False, "dynamic EPLB is unsupported"
+        if ascend_config.multistream_overlap_shared_expert:
+            return False, "shared-expert multistream overlap is unsupported"
+        if hidden_states.ndim != 2:
+            return False, "hidden states must be token-major 2-D"
+        if fused_experts_input.topk_ids.shape[0] != num_tokens:
+            return False, "top-k ids are not token-aligned"
+        if fused_experts_input.topk_weights.shape[0] != num_tokens:
+            return False, "top-k weights are not token-aligned"
+        if fused_experts_input.routing.mc2_mask is not None:
+            return False, "MC2 mask is incompatible with AllToAllV DBO"
+        pertoken_scale = fused_experts_input.routing.pertoken_scale
+        if pertoken_scale is not None and pertoken_scale.shape[0] != num_tokens:
+            return False, "per-token scale is not token-aligned"
+        if num_tokens < ascend_config.dsa_cp_moe_dbo_token_threshold:
+            return False, "local token count is below the configured threshold"
+        split_point = (num_tokens + 1) // 2
+        if split_point <= 0 or split_point >= num_tokens:
+            return False, "the second micro-batch would be empty"
+        return True, "eligible"
+
+    def _dsa_cp_moe_dbo_eligible(self, fused_experts_input: MoEFusedExpertsInput) -> bool:
+        if not get_ascend_config().enable_dsa_cp_moe_dbo:
+            return False
+
+        forward_context = get_forward_context()
+        cache_attr = "_ascend_dsa_cp_moe_dbo_eligible"
+        cached = getattr(forward_context, cache_attr, None)
+        if isinstance(cached, bool):
+            return cached
+
+        local_eligible, local_reason = self._local_dsa_cp_moe_dbo_candidate(fused_experts_input)
+        eligibility = torch.tensor(
+            int(local_eligible),
+            dtype=torch.int32,
+            device=fused_experts_input.hidden_states.device,
+        )
+        # This synchronization occurs once per forward and is cached. It is
+        # required so every EP rank chooses the same collective protocol even
+        # when DSA-CP gives ranks different local token payloads.
+        dist.all_reduce(
+            eligibility,
+            op=dist.ReduceOp.MIN,
+            group=self.token_dispatcher.ep_group,
+        )
+        globally_eligible = bool(eligibility.item())
+        setattr(forward_context, cache_attr, globally_eligible)
+        if globally_eligible:
+            logger.info_once(
+                "DSA-CP MoE DBO is active: ep_size=%d, local_tokens=%d, collective_order=D0,D1,C0,C1",
+                self.moe_config.ep_size,
+                fused_experts_input.hidden_states.shape[0],
+            )
+        else:
+            logger.debug(
+                "DSA-CP MoE DBO falls back to synchronous AllToAllV. local_reason=%s",
+                local_reason,
+            )
+        return globally_eligible
+
+    def _fused_experts_dsa_cp_moe_dbo(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+    ) -> FusedExpertsResult:
+        assert isinstance(self.token_dispatcher, TokenDispatcherWithAll2AllV)
+        before_dispatch_evt = torch.npu.current_stream().record_event()
+        micro_batch0, micro_batch1 = _split_fused_experts_input(fused_experts_input)
+
+        # Every rank launches the same global collective order: D0, D1, C0,
+        # C1. Payload sizes are allowed to differ across DSA-CP ranks.
+        dispatch0 = self.token_dispatcher.dispatch_start(build_token_dispatch_input(fused_experts_input=micro_batch0))
+        dispatch1 = self.token_dispatcher.dispatch_start(build_token_dispatch_input(fused_experts_input=micro_batch1))
+
+        dispatch_output0 = self.token_dispatcher.dispatch_finish(dispatch0)
+        mlp_output0, before_gmm2_evt = self._apply_mlp(
+            build_mlp_compute_input(
+                fused_experts_input=micro_batch0,
+                token_dispatch_output=dispatch_output0,
+                moe_config=self.moe_config,
+            )
+        )
+
+        # D1 overlaps MLP0. C0 then overlaps MLP1.
+        dispatch_output1 = self.token_dispatcher.dispatch_finish(dispatch1)
+        before_combine_evt = torch.npu.current_stream().record_event()
+        combine0 = self.token_dispatcher.combine_start(
+            mlp_output0,
+            dispatch_output0.combine_metadata,
+        )
+        mlp_output1, _ = self._apply_mlp(
+            build_mlp_compute_input(
+                fused_experts_input=micro_batch1,
+                token_dispatch_output=dispatch_output1,
+                moe_config=self.moe_config,
+            )
+        )
+        combine1 = self.token_dispatcher.combine_start(
+            mlp_output1,
+            dispatch_output1.combine_metadata,
+        )
+        routed_out0 = self.token_dispatcher.combine_finish(combine0)
+
+        routed_out: torch.Tensor | None = None
+
+        def finish_routed_out() -> torch.Tensor:
+            nonlocal routed_out
+            if routed_out is None:
+                routed_out1 = self.token_dispatcher.combine_finish(combine1)
+                routed_out = torch.cat((routed_out0, routed_out1), dim=0)
+            return routed_out
+
+        defer_final_combine = get_ascend_config().enable_dsa_cp_moe_dbo_shared_expert_overlap
+        if not defer_final_combine:
+            routed_out = finish_routed_out()
+
+        return FusedExpertsResult(
+            routed_out=routed_out,
+            finish_routed_out=finish_routed_out if defer_final_combine else None,
+            before_dispatch_evt=before_dispatch_evt,
+            before_gmm2_evt=before_gmm2_evt,
+            before_combine_evt=before_combine_evt,
+            group_list_type=dispatch_output0.group_list_type,
+            expert_tokens=dispatch_output0.group_list + dispatch_output1.group_list,
+        )
+
+    def fused_experts(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+    ):
+        if not self._dsa_cp_moe_dbo_eligible(fused_experts_input):
+            return super().fused_experts(fused_experts_input)
+        return self._fused_experts_dsa_cp_moe_dbo(fused_experts_input)
 
 
 class FusedMC2CommImpl(MoECommMethod):

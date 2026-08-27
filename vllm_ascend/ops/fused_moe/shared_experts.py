@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import wraps
@@ -44,6 +45,7 @@ class FusedMoEEvents:
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
+    finish_routed_out: Callable[[], torch.Tensor] | None = field(default=None)
 
 
 class SharedExpertParallelMode(Enum):

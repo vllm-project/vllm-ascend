@@ -33,7 +33,14 @@ _CANN_MEGA_MOE_QUANT_MODE_None = 0
 _CANN_MEGA_MOE_QUANT_MODE_INT8 = 2
 
 
-def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None):
+def async_all_to_all(
+    input_,
+    output_split_sizes,
+    input_split_sizes,
+    group,
+    event=None,
+    comm_stream=None,
+):
     if output_split_sizes is None:
         # Equal split (all2all)
         a2a_out = torch.empty_like(input_)
@@ -45,16 +52,23 @@ def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event
             device=torch.npu.current_device(),
         )
 
+    # Keep the exact storage submitted to HCCL alive until the returned work
+    # handle completes. Returning ``input_`` is insufficient when contiguous()
+    # has to allocate a temporary tensor.
+    input_contiguous = input_.contiguous()
+
     if event:
         # multi stream wait event
         global COMM_STREAM
-        if COMM_STREAM is None:
-            COMM_STREAM = torch_npu.npu.Stream(device=torch.npu.current_device())
-        with torch_npu.npu.stream(COMM_STREAM):
+        if comm_stream is None:
+            if COMM_STREAM is None:
+                COMM_STREAM = torch_npu.npu.Stream(device=torch.npu.current_device())
+            comm_stream = COMM_STREAM
+        with torch_npu.npu.stream(comm_stream):
             event.wait()
             handle = dist.all_to_all_single(
                 a2a_out,
-                input_.contiguous(),
+                input_contiguous,
                 output_split_sizes=output_split_sizes,
                 input_split_sizes=input_split_sizes,
                 group=group,
@@ -63,13 +77,13 @@ def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event
     else:
         handle = dist.all_to_all_single(
             a2a_out,
-            input_.contiguous(),
+            input_contiguous,
             output_split_sizes=output_split_sizes,
             input_split_sizes=input_split_sizes,
             group=group,
             async_op=True,
         )
-    return input_, a2a_out, handle
+    return input_contiguous, a2a_out, handle
 
 
 def _gather_along_first_dim(input_, group, output_split_sizes=None):

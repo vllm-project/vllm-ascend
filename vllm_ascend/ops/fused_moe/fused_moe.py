@@ -25,6 +25,7 @@ from vllm.distributed import (
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
@@ -79,6 +80,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
+            routed_experts.defer_dsa_cp_moe_dbo_final_combine = (
+                get_ascend_config().enable_dsa_cp_moe_dbo_shared_expert_overlap
+            )
             self.ascend_shared_experts = AscendSharedExperts(
                 shared_experts,
                 self.moe_config,
@@ -213,6 +217,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if self.ascend_shared_experts is not None:
             self.ascend_shared_experts.set_lora_context(lora_context)
 
+    @staticmethod
+    def _finish_deferred_routed_out(
+        routed_out: torch.Tensor | None,
+        fused_moe_events,
+    ) -> torch.Tensor:
+        if routed_out is None:
+            assert fused_moe_events.finish_routed_out is not None
+            routed_out = fused_moe_events.finish_routed_out()
+        return routed_out
+
     if vllm_version_is("0.27.1"):
 
         def _forward_impl(
@@ -257,6 +271,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     hidden_states,
                     fused_moe_events,
                 )
+                routed_out = self._finish_deferred_routed_out(routed_out, fused_moe_events)
                 return shared_out, routed_out
 
     else:
@@ -315,4 +330,5 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     hidden_states,
                     fused_moe_events,
                 )
+                routed_out = self._finish_deferred_routed_out(routed_out, fused_moe_events)
                 return shared_out, routed_out

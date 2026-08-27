@@ -242,6 +242,11 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
+    # Experimental DSA-CP MoE-only dual micro-batch overlap. These switches
+    # are independent of upstream model-runner DBO, which Ascend disables.
+    enable_dsa_cp_moe_dbo: bool = False
+    enable_dsa_cp_moe_dbo_shared_expert_overlap: bool = False
+    dsa_cp_moe_dbo_token_threshold: int = 32
     draft_window_size: int | None = None
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
@@ -326,6 +331,10 @@ class AscendConfig:
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
+        if self.dsa_cp_moe_dbo_token_threshold < 2:
+            raise ValueError(
+                f"dsa_cp_moe_dbo_token_threshold must be at least 2; got {self.dsa_cp_moe_dbo_token_threshold}"
+            )
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
