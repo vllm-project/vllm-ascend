@@ -3093,7 +3093,12 @@ class NPUModelRunner(GPUModelRunner):
             raise RuntimeError(f"DSA LoRA does not support multiple token splits in one model step: {dsa_splits}.")
         num_decode_tokens, num_actual_tokens = dsa_splits.pop()
 
-        lora_manager = getattr(self, "lora_manager", None)
+        worker_lora_manager = getattr(self, "lora_manager", None)
+        # ``self.lora_manager`` is a WorkerLoRAManager. The Punica wrappers
+        # belong to its inner LoRAModelManager returned by
+        # ``create_lora_manager``. Keep the direct-manager fallback for tests
+        # and compatibility with runners that expose the model manager itself.
+        lora_manager = getattr(worker_lora_manager, "_adapter_manager", worker_lora_manager)
         punica_wrappers = getattr(lora_manager, "punica_wrapper_mapping", {}).values()
         prepared_wrapper_ids: set[int] = set()
         for punica_wrapper in punica_wrappers:
