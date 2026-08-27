@@ -4996,12 +4996,21 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                    if self.hybrid_with_attn_and_mamba and (
-                        self.use_hybrid_blocks or not vllm_version_is("0.27.1")
-                    ):
-                        # vLLM #51718 can pad hybrid pages even when virtual
-                        # block splitting is disabled. Strip that page padding
-                        # before viewing the contiguous Ascend K/V regions.
+                    should_trim_page_padding = (
+                        self.hybrid_with_attn_and_mamba and self.use_hybrid_blocks
+                    ) or (
+                        not vllm_version_is("0.27.1")
+                        and (
+                            raw_kv_is_combined
+                            or getattr(current_kv_cache_spec, "page_size_padded", None) is not None
+                        )
+                    )
+                    if should_trim_page_padding:
+                        # vLLM #51718 groups KVCacheTensor.layers by spec, so an
+                        # attention tensor no longer has to list a Mamba layer
+                        # even though its page is padded to the hybrid common
+                        # size. Use the main-lane page contract, rather than the
+                        # legacy shared-layer heuristic, to strip that padding.
                         if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                             attn_tensor_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                 current_kv_cache_spec.dtype
