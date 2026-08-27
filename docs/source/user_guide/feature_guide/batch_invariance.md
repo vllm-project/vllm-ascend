@@ -30,6 +30,11 @@ We will support Ascend 950 Products and other NPUs in the future.
 
 Batch invariance requires a custom operator library for Atlas A2 and A3 inference products, and users need to set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to build `batch_invariant_ops` wheel during the installation process. Here's a specific example of the operation:
 
+The `batch_invariant_ops` build and installation process consists of two stages as in the [build_batch_invariant_ops.sh](https://github.com/vllm-project/vllm-ascend/blob/main/csrc/build_batch_invariant_ops.sh), which must run in order:
+
+1. Install the operator run package. It provides the device-side batch-invariant operators implemented with AscendC.
+2. Build and install the `batch_invariant_ops` wheel. It provides the PyTorch extension interfaces that invoke the AscendC operators.
+
 ### Option 1: vllm-ascend is NOT installed
 
 The `batch_invariant_ops` wheel are built into the vllm-ascend installation flow. Set `VLLM_BATCH_INVARIANT=1` to enable the building of `batch_invariant_ops` wheel:
@@ -48,13 +53,6 @@ VLLM_BATCH_INVARIANT=1 pip install \
 ## Option 2: vllm-ascend is ALREADY installed
 
 Enter the vllm-ascend installation directory and build and install the `batch_invariant_ops` wheel:
-
-The `batch_invariant_ops` build and installation process consists of two stages, which must run in order:
-
-1. Install the operator run package. It provides the device-side batch-invariant operators implemented with AscendC.
-2. Build and install the `batch_invariant_ops` wheel. It provides the PyTorch extension interfaces that invoke the AscendC operators.
-
-The following script performs both stages in this order:
 
 **A2:**
 ```bash
