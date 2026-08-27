@@ -431,10 +431,15 @@ class TestAscendConfig(TestBase):
 
         self.assertFalse(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
+        self.assertFalse(ascend_compilation_config.enable_super_kernel)
         warning_messages = [call.args[0] for call in mock_warning.call_args_list]
         self.assertIn("npugraph_ex is not supported on Ascend 310P. Disabling it.", warning_messages)
         self.assertIn(
             "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it.",
+            warning_messages,
+        )
+        self.assertIn(
+            "super kernel requires static kernel, which is not supported on Ascend 310P. Disabling it.",
             warning_messages,
         )
 
@@ -876,7 +881,8 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaises(ValueError):
             AscendCompilationConfig(unknown_key=1)
 
-    def test_ascend_compilation_config_super_kernel_defaults_to_static_kernel(self):
+    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    def test_ascend_compilation_config_super_kernel_defaults_to_static_kernel(self, mock_is_310p):
         cfg = AscendCompilationConfig(enable_static_kernel=True)
         self.assertTrue(cfg.enable_static_kernel)
         self.assertTrue(cfg.enable_super_kernel)
@@ -895,6 +901,11 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         cfg = AscendCompilationConfig()
         self.assertFalse(cfg.enable_static_kernel)
         self.assertFalse(cfg.enable_super_kernel)
+
+    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    def test_ascend_compilation_config_rejects_super_kernel_without_static_kernel(self, mock_is_310p):
+        with self.assertRaisesRegex(ValueError, "Super kernel generation requires static kernel to be enabled"):
+            AscendCompilationConfig(enable_static_kernel=False, enable_super_kernel=True)
 
     def test_profiling_chunk_config_int_lax_and_range(self):
         # int string "2" coerces to 2 (fixes "2"==2 silent failure)
