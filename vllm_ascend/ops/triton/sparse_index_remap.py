@@ -78,21 +78,11 @@ def remap_sparse_indices_fused_kernel(
     # below overwrite the compacted front in program order.
     tl.store(out_ptr + row * topk_count + offsets, -1, mask=in_bounds)
     cnt = 0
-    if NUM_CHUNKS == 1:
-        # Fast path: with a single chunk the row order is already final, so
-        # write the compacted entries straight to the output and skip the
-        # gather kernel entirely.
-        for i in range(BLOCK):
-            if get_element(valid_i32, (i,)) == 1:
-                tl.store(out_ptr + row * topk_count + cnt, get_element(remapped, (i,)))
-                cnt += 1
-        tl.store(chunk_count_ptr + row * NUM_CHUNKS + chunk, cnt)
-    else:
-        for i in range(BLOCK):
-            if get_element(valid_i32, (i,)) == 1:
-                tl.store(chunk_out + cnt, get_element(remapped, (i,)))
-                cnt += 1
-        tl.store(chunk_count_ptr + row * NUM_CHUNKS + chunk, cnt)
+    for i in range(BLOCK):
+        if get_element(valid_i32, (i,)) == 1:
+            tl.store(chunk_out + cnt, get_element(remapped, (i,)))
+            cnt += 1
+    tl.store(chunk_count_ptr + row * NUM_CHUNKS + chunk, cnt)
 
 
 @triton.jit(do_not_specialize=["topk_count"])
@@ -183,15 +173,14 @@ def remap_sparse_indices_triton(
         NUM_CHUNKS=num_chunks,
         multibuffer=False,
     )
-    if num_chunks > 1:
-        remap_sparse_indices_compact_gather_kernel[(rows,)](
-            chunk_out,
-            chunk_count,
-            out,
-            topk_count,
-            BLOCK=block,
-            NUM_CHUNKS=num_chunks,
-            multibuffer=False,
-        )
+    remap_sparse_indices_compact_gather_kernel[(rows,)](
+        chunk_out,
+        chunk_count,
+        out,
+        topk_count,
+        BLOCK=block,
+        NUM_CHUNKS=num_chunks,
+        multibuffer=False,
+    )
     out = out.view(orig_shape)
     return out if orig_dtype == torch.int32 else out.to(orig_dtype)
