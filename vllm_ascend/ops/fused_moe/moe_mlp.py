@@ -722,7 +722,7 @@ def unquant_apply_mlp(
     if activation == MoEActivation.SITU:
         gate_up_out = _apply_situ(
             gate_up_out,
-            beta=activation_situ_beta,
+            beta=1.0 if activation_situ_beta is None else activation_situ_beta,
             linear_beta=activation_situ_linear_beta,
         )
     elif activation == MoEActivation.SWIGLUOAI:
