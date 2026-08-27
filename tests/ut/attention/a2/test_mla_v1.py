@@ -2194,6 +2194,49 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)
 
+    @patch("vllm_ascend.attention.mla_v1.DeviceOperator.reshape_and_cache")
+    @patch("torch_npu.npu_interleave_rope")
+    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    def test_mla_preprocess_prefill_without_rope(self, mock_rope_cache, mock_rope, mock_cache):
+        self.impl.use_mla_rope = False
+        self.impl.num_heads = self.impl.num_kv_heads = 1
+        self.impl.qk_nope_head_dim = self.impl.qk_rope_head_dim = 2
+        self.impl.qk_head_dim = 4
+        self.impl.kv_lora_rank = self.impl.v_head_dim = 2
+        self.impl.q_proj.side_effect = lambda x: (x,)
+        self.impl.kv_a_layernorm = torch.nn.Identity()
+        self.impl.kv_b_proj.side_effect = lambda x: (torch.cat((x, x), dim=-1),)
+
+        q_c = torch.arange(16, dtype=torch.float32).view(4, 4)
+        kv_no_split = q_c + 100
+        kv_cache = (torch.empty(4, 1, 2), torch.empty(4, 1, 2))
+        for num_decode_tokens in (0, 1):
+            with self.subTest(num_decode_tokens=num_decode_tokens):
+                num_actual_tokens = num_decode_tokens + 2
+                metadata = SimpleNamespace(
+                    num_decode_tokens=num_decode_tokens,
+                    num_actual_tokens=num_actual_tokens,
+                    slot_mapping=torch.arange(4),
+                    prefill=SimpleNamespace(cos=None, sin=None),
+                )
+                result = self.impl.mla_preprocess_prefill(q_c, kv_no_split, kv_cache, metadata)
+
+                q = q_c[num_decode_tokens:num_actual_tokens].unsqueeze(1)
+                kv = kv_no_split[num_decode_tokens:num_actual_tokens].unsqueeze(1)
+                torch.testing.assert_close(result.q_nope, q[..., :2])
+                torch.testing.assert_close(result.q_pe, q[..., 2:])
+                torch.testing.assert_close(result.k_nope, kv[..., :2])
+                torch.testing.assert_close(result.k_pe, kv[..., 2:])
+                torch.testing.assert_close(result.value, kv[..., :2])
+                torch.testing.assert_close(mock_cache.call_args.kwargs["key"], kv[..., :2])
+                torch.testing.assert_close(mock_cache.call_args.kwargs["value"], kv[..., 2:])
+                torch.testing.assert_close(
+                    mock_cache.call_args.kwargs["slot_mapping"],
+                    metadata.slot_mapping[num_decode_tokens:num_actual_tokens],
+                )
+        mock_rope.assert_not_called()
+        mock_rope_cache.assert_not_called()
+
     @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
     def test_exec_kv_prefill(self, mock_kv_rmsnorm_rope_cache):
         B = 2
