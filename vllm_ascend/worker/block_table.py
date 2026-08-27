@@ -39,8 +39,8 @@ class BlockTable:
             and hasattr(kv_cache_group, "kv_cache_spec")
             and get_kv_cache_spec_kind(kv_cache_group.kv_cache_spec) == KVCacheSpecKind.MAMBA
         )
-        if self.dcp_world_size > 1 and is_mamba_group:
-            max_num_blocks_per_req = max_num_blocks_per_req * self.dcp_world_size
+        # The KV cache spec already provides the per-rank table capacity.
+        # Mamba state is replicated across DCP ranks, not sharded then expanded.
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory

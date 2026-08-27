@@ -7,6 +7,8 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.sampling_params import SamplingParams
+from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -14,6 +16,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
@@ -67,6 +71,147 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
         )
 
         self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
+
+
+class TestAcceptedTokenSnapshot(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.use_async_scheduling = True
+        runner.speculative_config = object()
+        runner.model_config = SimpleNamespace(is_hybrid=True)
+        runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+        runner.num_accepted_tokens = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
+        runner.prev_positions = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
+        batch_counts = torch.ones(12, dtype=torch.int32)
+        runner.input_batch = SimpleNamespace(
+            num_accepted_tokens_cpu=batch_counts.numpy(),
+            num_accepted_tokens_cpu_tensor=batch_counts,
+        )
+        runner.num_accepted_tokens_event = MagicMock()
+        return runner
+
+    def test_snapshot_survives_request_replacement_and_backend_reorder(self):
+        runner = self._build_runner()
+        with patch("vllm.v1.worker.gpu_input_batch.PIN_MEMORY", False):
+            batch = InputBatch(
+                max_num_reqs=12,
+                max_model_len=32,
+                max_num_batched_tokens=32,
+                device=torch.device("cpu"),
+                vocab_size=128,
+                block_sizes=[4],
+                kernel_block_sizes=[4],
+                max_num_blocks_per_req=[8],
+                num_spec_tokens=3,
+            )
+        runner.input_batch = batch
+        for req_id in ("A", "B", "C"):
+            batch.add_request(
+                CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=[10, 11],
+                    mm_features=[],
+                    sampling_params=SamplingParams(temperature=0),
+                    generator=None,
+                    block_ids=([1],),
+                    num_computed_tokens=2,
+                    output_token_ids=[],
+                )
+            )
+        batch.refresh_metadata()
+        batch.prev_req_id_to_index = dict(batch.req_id_to_index)
+        runner._get_mamba_bufs = MagicMock()
+        runner.kv_cache_config = object()
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
+        runner.model = MagicMock()
+
+        # Only replace the device kernel boundary; use real InputBatch mutations.
+        def postprocess(**kwargs):
+            kwargs["num_accepted_tokens_cpu_tensor"][:3].copy_(kwargs["num_accepted_tokens_gpu"][:3])
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu",
+            side_effect=postprocess,
+        ):
+            runner._update_states_after_model_execute(
+                torch.tensor([[10, 11, -1, -1], [10, 11, 12, -1], [10, 11, 12, 13]]),
+                SimpleNamespace(),
+            )
+        runner.num_accepted_tokens_event.record.assert_called_once()
+        np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], [2, 3, 4])
+
+        batch.remove_request("A")
+        batch.add_request(
+            CachedRequestState(
+                req_id="D",
+                prompt_token_ids=[10] * 16,
+                mm_features=[],
+                sampling_params=SamplingParams(temperature=0),
+                generator=None,
+                block_ids=([2],),
+                num_computed_tokens=0,
+                output_token_ids=[],
+            )
+        )
+        batch.condense()
+        self.assertTrue(
+            reorder_batch_to_split_decodes_and_prefills(
+                batch,
+                SimpleNamespace(num_scheduled_tokens={"B": 4, "C": 4, "D": 16}),
+                decode_threshold=4,
+            )
+        )
+        batch.refresh_metadata()
+        runner._compute_prev_positions(batch.num_reqs)
+        runner._sync_num_accepted_tokens(batch.num_reqs, has_prev_mapping=True)
+
+        expected = [{"B": 3, "C": 4, "D": 1}[req_id] for req_id in batch.req_ids]
+        np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], expected)
+        np.testing.assert_array_equal(batch.num_accepted_tokens_cpu[:3], expected)
+
+    def test_sync_respects_snapshot_and_current_batch_ownership(self):
+        for async_scheduling, has_prev_mapping, expected in (
+            (True, True, [4, 1, 3]),
+            (True, False, [1, 1, 1]),
+            (False, True, [5, 6, 7]),
+        ):
+            with self.subTest(async_scheduling=async_scheduling, has_prev_mapping=has_prev_mapping):
+                runner = self._build_runner()
+                runner.use_async_scheduling = async_scheduling
+                runner.num_accepted_tokens.np[:] = np.arange(12)
+                runner.num_accepted_tokens.np[[11, 4]] = [4, 3]
+                runner.prev_positions.np[:3] = [11, -1, 4]
+                runner.input_batch.num_accepted_tokens_cpu[:3] = [5, 6, 7]
+
+                runner._sync_num_accepted_tokens(3, has_prev_mapping=has_prev_mapping)
+
+                np.testing.assert_array_equal(runner.num_accepted_tokens.np[:3], expected)
+                np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:3], expected)
+
+    def test_non_align_postprocess_keeps_an_independent_snapshot(self):
+        for mode in ("none", "all"):
+            with self.subTest(mode=mode):
+                runner = self._build_runner()
+                runner.cache_config.mamba_cache_mode = mode
+                runner.kv_cache_config = object()
+                runner.requests = {}
+                runner.mamba_state_idx = {}
+                runner.num_spec_tokens = 3
+                with patch("vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_all") as postprocess_all:
+                    runner._update_states_after_model_execute(torch.tensor([[10, -1], [11, 12]]), SimpleNamespace())
+                np.testing.assert_array_equal(runner.num_accepted_tokens.np[:2], [1, 2])
+                np.testing.assert_array_equal(runner.input_batch.num_accepted_tokens_cpu[:2], [1, 1])
+                self.assertEqual(postprocess_all.call_count, int(mode == "all"))
+                runner.num_accepted_tokens_event.record.assert_called_once()
+
+    def test_non_async_postprocess_keeps_upstream_behavior(self):
+        runner = self._build_runner()
+        runner.use_async_scheduling = False
+        output_token_ids = torch.tensor([[10, -1]])
+        scheduler_output = SimpleNamespace()
+        with patch("vllm.v1.worker.gpu_model_runner.GPUModelRunner._update_states_after_model_execute") as upstream:
+            runner._update_states_after_model_execute(output_token_ids, scheduler_output)
+        upstream.assert_called_once_with(output_token_ids, scheduler_output)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
