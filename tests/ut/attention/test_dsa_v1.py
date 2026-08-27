@@ -86,9 +86,7 @@ def _make_builder(
     physical_block_size = 128
     logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
     ratio_kwargs = (
-        {"tokens_per_state": compressor_ratio}
-        if use_tokens_per_state
-        else {"compress_ratio": compressor_ratio}
+        {"tokens_per_state": compressor_ratio} if use_tokens_per_state else {"compress_ratio": compressor_ratio}
     )
     kv_cache_spec = SimpleNamespace(
         block_size=physical_block_size * logical_compress_ratio,
