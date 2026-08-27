@@ -285,8 +285,8 @@ test_cases:
       - "--disable-log-stats"
       - "--compilation_config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      - benchmarks:
-      - <<: *benchmarks_per1
+    benchmarks:
+      <<: *benchmarks_per1
   - name: "Deepseek_31_nofeature_mtp_perf_001"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
@@ -351,7 +351,7 @@ test_cases:
       - "--enforce-eager"
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--reasoning-parser"
       - "deepseek_r1"
       - "--additional-config"
@@ -388,7 +388,7 @@ test_cases:
       - "--enforce-eager"
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--reasoning-parser"
       - "deepseek_r1"
       - "--additional-config"
@@ -423,7 +423,7 @@ test_cases:
       - "--enforce-eager"
       - "--gpu-memory-utilization"
       - "0.92"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--reasoning-parser"
       - "deepseek_r1"
       - "--additional-config"
@@ -457,7 +457,7 @@ test_cases:
       - "--max-num-batched-tokens"
       - "2048"
       - "--trust-remote-code"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--gpu-memory-utilization"
       - "0.9"
       - "--enable-auto-tool-choice"
@@ -500,7 +500,7 @@ test_cases:
       - "--max-num-batched-tokens"
       - "2048"
       - "--trust-remote-code"
-      - "--no-enable-perfix-caching"
+      - "--no-enable-prefix-caching"
       - "--gpu-memory-utilization"
       - "0.9"
       - "--enable-auto-tool-choice"

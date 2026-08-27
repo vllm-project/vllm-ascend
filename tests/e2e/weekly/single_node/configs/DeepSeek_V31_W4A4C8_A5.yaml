@@ -87,6 +87,6 @@ test_cases:
       - "8"
       - "--max-num-seqs"
       - "96"
-      - "--enable-perfix-caching"
+      - "--enable-prefix-caching"
       - "--additional-config"
       - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"dp_allreduce_on_npu":false,"enable_balance_scheduling":true}'
