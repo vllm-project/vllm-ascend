@@ -915,10 +915,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_end=local_end,
             tp_rank=tp_group.rank_in_group,
             min_input_tokens=min_input_tokens,
-            request_ids=common_attn_metadata.req_ids,
-            request_continues=common_attn_metadata.prefill_continues,
-            rank_offsets=common_attn_metadata.compressor_sp_rank_offsets,
-            rotate_chunk_owners=common_attn_metadata.compressor_sp_rotate_owners,
         )
         metadata = self._to_compressor_sp_metadata(plan)
         self.common_ratio_to_sas_metadata[cache_key] = metadata
@@ -1613,6 +1609,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
         comm_stream: torch.npu.Stream | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, Any | None]:
         max_rows = max(row_counts)
+        # Fixed owners produce global row order directly in rank-major order.
+        # Uniform shards therefore take the Megatron-style regular path: the
+        # local tensor is gathered without padding and the collective output is
+        # consumed by Scatter as-is.
         if local_rows.shape[0] < max_rows:
             padded_local = local_rows.new_zeros((max_rows, *local_rows.shape[1:]))
             padded_local[: local_rows.shape[0]].copy_(local_rows)
@@ -1891,7 +1891,13 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 row_counts,
             )
         valid_slot_mapping = full_slot_mapping[:expected_global]
-        if plan.gather_compact_slice is not None:
+        direct_global_layout = gathered.shape[0] == expected_global and plan.gather_compact_slice == (
+            0,
+            expected_global,
+        )
+        if direct_global_layout:
+            DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, valid_slot_mapping)
+        elif plan.gather_compact_slice is not None:
             start, length = plan.gather_compact_slice
             compact_rows = gathered.narrow(0, start, length)
             DeviceOperator.dsa_kv_compress_scatter(kv_cache, compact_rows, valid_slot_mapping)

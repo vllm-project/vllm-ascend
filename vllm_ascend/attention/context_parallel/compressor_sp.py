@@ -188,10 +188,6 @@ def build_compressor_sp_plan(
     local_end: int,
     tp_rank: int = 0,
     min_input_tokens: int = 0,
-    request_ids: Sequence[str] | None = None,
-    request_continues: Sequence[bool] | None = None,
-    rank_offsets: Sequence[int] | None = None,
-    rotate_chunk_owners: bool = False,
 ) -> CompressorSPPlan:
     """Plan Compressor sequence-parallel execution for prefill batches.
 
@@ -250,27 +246,13 @@ def build_compressor_sp_plan(
         ):
             return disabled("noncontiguous_positions")
 
-    normalized_request_ids = tuple(request_ids[:num_reqs]) if request_ids is not None else ()
-    normalized_request_continues = (
-        tuple(bool(value) for value in request_continues[:num_reqs]) if request_continues is not None else ()
-    )
-    normalized_rank_offsets = (
-        tuple(int(value) % tp_size for value in rank_offsets[:num_reqs]) if rank_offsets is not None else ()
-    )
-    rotate_chunk_owners = bool(
-        rotate_chunk_owners
-        and compress_ratio == 4
-        and len(normalized_request_ids) == num_reqs
-        and all(normalized_request_ids)
-        and len(normalized_request_continues) == num_reqs
-        and len(normalized_rank_offsets) == num_reqs
-    )
-    if num_input_tokens < min_input_tokens and not rotate_chunk_owners:
+    if num_input_tokens < min_input_tokens:
         return disabled("adaptive_small_chunk")
 
     num_tokens_pad = ((num_input_tokens + tp_size - 1) // tp_size) * tp_size
     tokens_per_rank = num_tokens_pad // tp_size
     expected_owned_start = tp_rank * tokens_per_rank
+    expected_owned_end_with_pad = expected_owned_start + tokens_per_rank
     expected_owned_end = min(expected_owned_start + tokens_per_rank, num_input_tokens)
 
     # A compressed row is emitted on every token where ``(position + 1) % ratio
@@ -321,49 +303,30 @@ def build_compressor_sp_plan(
     owned_token_counts = [0] * tp_size
     owned_row_runs: list[list[tuple[int, int]]] = [[] for _ in range(tp_size)]
     sp_row_counts = [0] * tp_size
-    if rotate_chunk_owners:
-        # Per-request logical partitioning with a rotating owner offset. The
-        # offset is a bijection over logical ranks, so each request still hands
-        # every owner at most one run, preserving ascending row order per rank.
-        for req_index in range(num_reqs):
-            req_start = query_start_loc[req_index]
-            req_end = query_start_loc[req_index + 1]
-            req_tokens_per_rank = (query_lens[req_index] + tp_size - 1) // tp_size
-            offset = normalized_rank_offsets[req_index]
-            for logical_rank in range(tp_size):
-                shard_start = req_start + logical_rank * req_tokens_per_rank
-                shard_end = req_end if logical_rank == tp_size - 1 else min(shard_start + req_tokens_per_rank, req_end)
-                if shard_start >= shard_end:
-                    continue
-                owner = (logical_rank + offset) % tp_size
-                owned_token_counts[owner] += shard_end - shard_start
-                row_lo, row_hi = output_rows_in_range(req_index, shard_start, shard_end)
-                if row_hi > row_lo:
-                    owned_row_runs[owner].append((row_lo, row_hi - row_lo))
-                    sp_row_counts[owner] += row_hi - row_lo
-    else:
-        # owner = min(flat_index // tokens_per_rank, tp_size - 1).
-        rank_bounds: list[tuple[int, int]] = []
-        for rank in range(tp_size):
-            shard_start = rank * tokens_per_rank
-            shard_end = (
-                num_input_tokens if rank == tp_size - 1 else min(shard_start + tokens_per_rank, num_input_tokens)
-            )
-            rank_bounds.append((shard_start, shard_end))
-            owned_token_counts[rank] = max(0, shard_end - shard_start)
-        for req_index in range(num_reqs):
-            if req_output_count[req_index] == 0:
-                continue
-            for rank, (shard_start, shard_end) in enumerate(rank_bounds):
-                row_lo, row_hi = output_rows_in_range(req_index, shard_start, shard_end)
-                if row_hi > row_lo:
-                    owned_row_runs[rank].append((row_lo, row_hi - row_lo))
-                    sp_row_counts[rank] += row_hi - row_lo
+    # owner = min(flat_index // tokens_per_rank, tp_size - 1).
+    rank_bounds: list[tuple[int, int]] = []
+    for rank in range(tp_size):
+        shard_start = rank * tokens_per_rank
+        shard_end = num_input_tokens if rank == tp_size - 1 else min(shard_start + tokens_per_rank, num_input_tokens)
+        rank_bounds.append((shard_start, shard_end))
+        owned_token_counts[rank] = max(0, shard_end - shard_start)
+    for req_index in range(num_reqs):
+        if req_output_count[req_index] == 0:
+            continue
+        for rank, (shard_start, shard_end) in enumerate(rank_bounds):
+            row_lo, row_hi = output_rows_in_range(req_index, shard_start, shard_end)
+            if row_hi > row_lo:
+                owned_row_runs[rank].append((row_lo, row_hi - row_lo))
+                sp_row_counts[rank] += row_hi - row_lo
 
     if any(count == 0 for count in owned_token_counts):
         return disabled("zero_token_rank")
-    if local_start != expected_owned_start or local_end != expected_owned_end:
+    if local_start != expected_owned_start or local_end not in (
+        expected_owned_end,
+        expected_owned_end_with_pad,
+    ):
         return disabled("invalid_local_range")
+    local_end = expected_owned_end
 
     token_runs: list[tuple[int, int]] = []
     num_local_tokens = 0
@@ -377,14 +340,8 @@ def build_compressor_sp_plan(
     for req_index in range(num_reqs):
         req_start = query_start_loc[req_index]
         req_end = query_start_loc[req_index + 1]
-        if rotate_chunk_owners:
-            req_tokens_per_rank = (query_lens[req_index] + tp_size - 1) // tp_size
-            logical_rank = (tp_rank - normalized_rank_offsets[req_index]) % tp_size
-            true_start = req_start + logical_rank * req_tokens_per_rank
-            true_end = min(true_start + req_tokens_per_rank, req_end)
-        else:
-            true_start = max(req_start, local_start)
-            true_end = min(req_end, local_end)
+        true_start = max(req_start, local_start)
+        true_end = min(req_end, local_end)
         if true_start >= true_end:
             continue
 
@@ -459,17 +416,12 @@ def build_compressor_sp_plan(
         [(gather_position, run_length) for _, gather_position, run_length in gather_runs]
     )
 
-    replay_req_indices = (
-        tuple(req_index for req_index, continues in enumerate(normalized_request_continues) if not continues)
-        if rotate_chunk_owners
-        else tuple(range(num_reqs))
-    )
     state_replay = (
         _build_c4_state_replay(
             query_start_loc,
             request_start_positions,
             rope_source_rows,
-            replay_req_indices,
+            tuple(range(num_reqs)),
             output_rows_in_range,
         )
         if compress_ratio == 4
@@ -506,11 +458,7 @@ def build_compressor_sp_plan(
     )
     state_sync_max_rows = max(state_sync_row_counts, default=0)
     state_sync_gather_compact_indices, state_sync_gather_compact_slice = _selector_from_runs(
-        [
-            (rank * state_sync_max_rows, count)
-            for rank, count in enumerate(state_sync_row_counts)
-            if count
-        ]
+        [(rank * state_sync_max_rows, count) for rank, count in enumerate(state_sync_row_counts) if count]
     )
 
     return CompressorSPPlan(

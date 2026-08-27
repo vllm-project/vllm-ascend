@@ -235,7 +235,7 @@ def test_c4_chunked_prefill_uses_absolute_start_position():
     assert plan.state_replay_rope_row_slice == (0, 5)
 
 
-def test_c4_continuing_chunk_rotates_head_owner_without_replay():
+def test_c4_continuing_chunk_replays_boundary_state():
     plan = _plan(
         input_positions=list(range(8192, 16384)),
         query_start_loc=[0, 8192],
@@ -243,62 +243,15 @@ def test_c4_continuing_chunk_rotates_head_owner_without_replay():
         local_start=6144,
         local_end=8192,
         tp_rank=3,
-        request_ids=["request-0"],
-        request_continues=[True],
-        rank_offsets=[3],
-        rotate_chunk_owners=True,
     )
 
     assert plan.enabled
-    assert plan.token_slice == (0, 2048)
-    assert plan.output_keep_slice == (0, 512)
-    assert plan.state_replay_token_indices == ()
-    assert plan.state_replay_start_pos == ()
-    assert plan.gather_compact_slice is None
-    assert plan.gather_compact_indices[:512] == tuple(range(1536, 2048))
-    assert plan.gather_compact_indices[512:] == tuple(range(1536))
-
-
-def test_c4_terminal_rotated_chunk_replays_final_state_once():
-    plan = _plan(
-        input_positions=list(range(8192, 16384)),
-        query_start_loc=[0, 8192],
-        seq_lens=[16384],
-        local_start=6144,
-        local_end=8192,
-        tp_rank=3,
-        request_ids=["request-0"],
-        request_continues=[False],
-        rank_offsets=[3],
-        rotate_chunk_owners=True,
-    )
-
-    assert plan.enabled
+    assert plan.token_slice == (6136, 2056)
+    assert plan.output_keep_slice == (2, 512)
+    assert plan.gather_compact_slice == (0, 2048)
+    assert not plan.requires_state_sync
     assert plan.state_replay_token_slice == (8176, 16)
     assert plan.state_replay_start_pos == (16368,)
-
-
-def test_c4_packed_requests_support_independent_owner_offsets():
-    positions = list(range(16)) + list(range(16))
-    plan = _plan(
-        tp_size=2,
-        input_positions=positions,
-        query_start_loc=[0, 16, 32],
-        seq_lens=[16, 16],
-        local_start=16,
-        local_end=32,
-        tp_rank=1,
-        request_ids=["request-0", "request-1"],
-        request_continues=[True, True],
-        rank_offsets=[0, 1],
-        rotate_chunk_owners=True,
-    )
-
-    assert plan.enabled
-    assert plan.sp_row_counts_per_rank == (4, 4)
-    assert plan.gather_compact_indices == (0, 1, 4, 5, 6, 7, 2, 3)
-    assert plan.req_indices == (0, 1)
-    assert plan.state_replay_req_indices == ()
 
 
 def test_c4_multi_request_replay_uses_full_batch_rope_shape():
@@ -408,16 +361,16 @@ def _ref_sp_row_counts(num_tokens, ratio, tp_size):
     return tuple(counts)
 
 
-@pytest.mark.parametrize("num_tokens", [4096, 8192, 12288])
+@pytest.mark.parametrize("num_tokens", [4096, 4097, 8192, 8193, 12288])
 @pytest.mark.parametrize("ratio", [4, 128])
 @pytest.mark.parametrize("tp_size", [2, 4, 8])
 def test_closed_form_owned_counts_match_per_token_reference(num_tokens, ratio, tp_size):
-    """The specialized non-rotate owner pass must match the per-token walk."""
+    """The fixed-owner planner must match the per-token walk."""
     tokens_per_rank = (num_tokens + tp_size - 1) // tp_size
     reference = _ref_sp_row_counts(num_tokens, ratio, tp_size)
     for tp_rank in range(tp_size):
         local_start = tp_rank * tokens_per_rank
-        local_end = min(local_start + tokens_per_rank, num_tokens)
+        local_end = local_start + tokens_per_rank
         plan = _plan(
             tp_size=tp_size,
             compress_ratio=ratio,
@@ -562,49 +515,6 @@ def test_packed_requests_keep_per_request_output_phase(ratio, lens):
         assert plan.enabled, plan.reason
         assert plan.sp_row_counts_per_rank == reference["sp_row_counts_per_rank"]
         assert _selector_values(plan, "gather_compact") == reference["gather_compact_indices"]
-
-
-@pytest.mark.parametrize("tp_size", [2, 4])
-@pytest.mark.parametrize("offset", [0, 1])
-def test_rotated_owner_runs_match_per_token_reference(tp_size, offset):
-    """Rotating ownership must produce the same rank-major gather layout."""
-    num_tokens = 8192
-    chunk_start = 8192
-    positions = list(range(chunk_start, chunk_start + num_tokens))
-    tokens_per_rank = num_tokens // tp_size
-
-    for tp_rank in range(tp_size):
-        plan = _plan(
-            tp_size=tp_size,
-            input_positions=positions,
-            query_start_loc=[0, num_tokens],
-            seq_lens=[chunk_start + num_tokens],
-            local_start=tp_rank * tokens_per_rank,
-            local_end=(tp_rank + 1) * tokens_per_rank,
-            tp_rank=tp_rank,
-            request_ids=["request-0"],
-            request_continues=[True],
-            rank_offsets=[offset],
-            rotate_chunk_owners=True,
-        )
-        assert plan.enabled, plan.reason
-
-        # Per-token reference for the rotated owner assignment.
-        owned_rows = [[] for _ in range(tp_size)]
-        row = 0
-        for flat_index, position in enumerate(positions):
-            if (position + 1) % 4 == 0:
-                logical = min(flat_index // tokens_per_rank, tp_size - 1)
-                owned_rows[(logical + offset) % tp_size].append(row)
-                row += 1
-        max_rows = max(len(rows) for rows in owned_rows)
-        gather = [0] * row
-        for rank, rows in enumerate(owned_rows):
-            for local_row, global_row in enumerate(rows):
-                gather[global_row] = rank * max_rows + local_row
-
-        assert plan.sp_row_counts_per_rank == tuple(len(rows) for rows in owned_rows)
-        assert _selector_values(plan, "gather_compact") == tuple(gather)
 
 
 def test_contiguous_slice_rejects_permuted_selectors():

@@ -272,11 +272,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # resident LRU (adler32-hashed request ids and token->request mapping).
     req_ids_tensor: torch.Tensor | None = None
     token_to_req: torch.Tensor | None = None
-    # Host metadata for stateful Compressor-SP ownership across scheduler steps.
-    req_ids: tuple[str, ...] | None = None
-    prefill_continues: tuple[bool, ...] | None = None
-    compressor_sp_rank_offsets: tuple[int, ...] | None = None
-    compressor_sp_rotate_owners: bool = False
 
     # TODO: Remove it when vLLM no longer uses this function.
     def unpadded(self, num_actual_tokens: int, num_actual_reqs: int) -> "AscendCommonAttentionMetadata":
@@ -334,16 +329,6 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             group_key_cache_idx=self.group_key_cache_idx,
             req_ids_tensor=_slice_reqs(self.req_ids_tensor),
             token_to_req=(self.token_to_req[:num_actual_tokens] if self.token_to_req is not None else None),
-            req_ids=(self.req_ids[:num_actual_reqs] if self.req_ids is not None else None),
-            prefill_continues=(
-                self.prefill_continues[:num_actual_reqs] if self.prefill_continues is not None else None
-            ),
-            compressor_sp_rank_offsets=(
-                self.compressor_sp_rank_offsets[:num_actual_reqs]
-                if self.compressor_sp_rank_offsets is not None
-                else None
-            ),
-            compressor_sp_rotate_owners=self.compressor_sp_rotate_owners,
         )
 
 
