@@ -50,20 +50,6 @@ def get_subscribed_compute_streams() -> set:
     return _SUBSCRIBED_COMPUTE_STREAMS
 
 
-def get_host_device_memory_usage_ratio(kv_cache_specs: dict[str, KVCacheSpec]) -> float:
-    page_size_bytes_host = 0
-    page_size_bytes_device = 0
-    for kv_cache_spec in kv_cache_specs.values():
-        assert isinstance(kv_cache_spec, KVCacheSpec)
-        if getattr(kv_cache_spec, "store_on_host", False):
-            page_size_bytes_host += kv_cache_spec.page_size_bytes
-        else:
-            page_size_bytes_device += kv_cache_spec.page_size_bytes
-
-    assert page_size_bytes_device > 0, "Case of no device kv cache is not considered."
-    return page_size_bytes_host / page_size_bytes_device
-
-
 def allocate_kv_offload_topk_buffer_pair(
     vllm_config: VllmConfig,
     sparse_kv_offload_config: SparseKVOffloadConfig,
@@ -226,6 +212,17 @@ def plan_sparse_kv_offload_memory(
         "dram": dram_limit_blocks,
         "workload": workload_limit_blocks,
     }
+    if dram_limit_blocks < npu_limit_blocks:
+        logger.warning_once(
+            "Sparse KV offload: host DRAM budget allows only %d KV blocks while NPU "
+            "memory could hold %d, so batch size / max_model_len capacity is limited "
+            "by host memory. Consider increasing sparse_kv_offload_config."
+            "dram_size_per_dp_GB (current budget %.2f GiB) to use more of the NPU "
+            "capacity.",
+            dram_limit_blocks,
+            npu_limit_blocks,
+            dram_limit_bytes / (1 << 30),
+        )
     limiting_factor = min(limits, key=lambda name: limits[name])
     final_num_blocks = limits[limiting_factor]
     final_planner_bytes = final_num_blocks * total_page_size_bytes
