@@ -48,6 +48,11 @@ class LoRAIntermediate:
     sgmv_metadata: DSASGMVMetadataLike
 
 
+@dataclass
+class _DSALoRAShrinkBuffer:
+    tensor: torch.Tensor | None = None
+
+
 @dataclass(frozen=True)
 class DSALoRAContext:
     """LoRA state published on the original Linear cached by the DSA impl."""
@@ -60,6 +65,7 @@ class DSALoRAContext:
     fully_sharded: bool
     tp_size: int
     tp_rank: int
+    shrink_buffer: _DSALoRAShrinkBuffer | None = None
 
 
 def _is_direct_dsa_projection(source_layer: nn.Module, names: frozenset[str]) -> bool:
@@ -81,6 +87,18 @@ class _AscendDSALoRAContextMixin:
 
     def set_mapping(self, punica_wrapper) -> None:
         super().set_mapping(punica_wrapper)
+        prefix = getattr(self.base_layer, "prefix", "")
+        projection_name = prefix.rsplit(".", 1)[-1]
+        buffer_key = (
+            projection_name,
+            len(self.lora_a_stacked),
+            self.lora_a_stacked[0].shape[-2],
+        )
+        buffer_pool = getattr(punica_wrapper, "_dsa_lora_shrink_buffer_pool", None)
+        if buffer_pool is None:
+            buffer_pool = {}
+            punica_wrapper._dsa_lora_shrink_buffer_pool = buffer_pool
+        shrink_buffer = buffer_pool.setdefault(buffer_key, _DSALoRAShrinkBuffer())
         context = DSALoRAContext(
             punica_wrapper=punica_wrapper,
             lora_a_stacked=self.lora_a_stacked,
@@ -90,8 +108,8 @@ class _AscendDSALoRAContextMixin:
             fully_sharded=(self._dsa_parallel_mode in ("column", "row") and bool(self.lora_config.fully_sharded_loras)),
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
+            shrink_buffer=shrink_buffer,
         )
-        projection_name = getattr(self.base_layer, "prefix", "").rsplit(".", 1)[-1]
         if projection_name in _DSA_QKV_PROJECTIONS:
             # Lets the model runner avoid preparing DSA SGMV metadata when a
             # DSA model enables LoRA only for unrelated modules or o-proj.
@@ -271,6 +289,52 @@ DSA_LORA_CLASSES: tuple[type[BaseLinearLayerWithLoRA], ...] = (
 )
 
 
+def _get_reusable_shrink_buffer(
+    linear: nn.Module,
+    context: DSALoRAContext,
+    *,
+    num_slices: int,
+    num_rows: int,
+    rank: int,
+    row_multiplier: int = 1,
+) -> torch.Tensor:
+    """Return a reusable FP32 buffer shared across equal DSA projections.
+
+    DSA executes q, kv, and o projections on different streams, so each
+    projection name owns a separate buffer. Equal projections share the same
+    buffer across transformer layers. Shrink overwrites active rows and expand
+    skips negative adapter indices, so clearing the buffer is unnecessary.
+    """
+
+    state = context.shrink_buffer
+    if state is None:
+        state = getattr(linear, "_ascend_dsa_lora_shrink_buffer", None)
+        if state is None:
+            state = _DSALoRAShrinkBuffer()
+            linear._ascend_dsa_lora_shrink_buffer = state
+
+    mapping_buffer = getattr(context.punica_wrapper, "_token_lora_indices", None)
+    mapping_capacity = mapping_buffer.shape[0] if isinstance(mapping_buffer, torch.Tensor) else num_rows
+    capacity = max(num_rows, mapping_capacity * row_multiplier)
+    buffer = state.tensor
+    device = context.lora_a_stacked[0].device
+    if (
+        buffer is None
+        or buffer.device != device
+        or buffer.dtype != torch.float32
+        or buffer.shape[0] != num_slices
+        or buffer.shape[1] < capacity
+        or buffer.shape[2] != rank
+    ):
+        buffer = torch.empty(
+            (num_slices, capacity, rank),
+            dtype=torch.float32,
+            device=device,
+        )
+        state.tensor = buffer
+    return buffer[:, :num_rows]
+
+
 def prepare_dsa_lora(
     linear: nn.Module,
     x: torch.Tensor,
@@ -299,10 +363,12 @@ def prepare_dsa_lora(
         if context.parallel_mode != "column":
             raise ValueError("Only column-parallel DSA CV projections may shard LoRA A.")
         local_rank = context.lora_a_stacked[0].shape[-2]
-        buffers = torch.zeros(
-            (len(context.lora_a_stacked), x_2d.shape[0], local_rank),
-            dtype=torch.float32,
-            device=x.device,
+        buffers = _get_reusable_shrink_buffer(
+            linear,
+            context,
+            num_slices=len(context.lora_a_stacked),
+            num_rows=x_2d.shape[0],
+            rank=local_rank,
         )
         context.punica_wrapper.add_shrink(
             buffers,
@@ -314,14 +380,14 @@ def prepare_dsa_lora(
         buffers = tensor_model_parallel_all_gather(buffers)
         return LoRAIntermediate(buffers, sgmv_metadata)
 
-    buffers = tuple(
-        torch.zeros(
-            (x_2d.shape[0], lora_a.shape[-2]),
-            dtype=torch.float32,
-            device=x.device,
-        )
-        for lora_a in context.lora_a_stacked
+    reusable_buffer = _get_reusable_shrink_buffer(
+        linear,
+        context,
+        num_slices=len(context.lora_a_stacked),
+        num_rows=x_2d.shape[0],
+        rank=context.lora_a_stacked[0].shape[-2],
     )
+    buffers = tuple(reusable_buffer[slice_idx] for slice_idx in range(len(context.lora_a_stacked)))
     context.punica_wrapper.add_shrink(
         buffers,
         x_2d,
@@ -411,11 +477,14 @@ def apply_grouped_dsa_lora(
     x_2d = x.reshape(num_tokens * num_groups, input_size)
     a_flat = lora_a[:, 0].contiguous()
     rank = a_flat.shape[-2]
-    shrink_output = torch.zeros(
-        (x_2d.shape[0], rank),
-        dtype=torch.float32,
-        device=x.device,
-    )
+    shrink_output = _get_reusable_shrink_buffer(
+        linear,
+        context,
+        num_slices=1,
+        num_rows=x_2d.shape[0],
+        rank=rank,
+        row_multiplier=num_groups,
+    )[0]
     context.punica_wrapper.bgmv_shrink(
         x_2d,
         a_flat,
@@ -473,11 +542,13 @@ def forward_with_dsa_lora(
         raise ValueError("DSA wo_b expects exactly one LoRA weight slice.")
     lora_a = context.lora_a_stacked[0]
     lora_b = context.lora_b_stacked[0]
-    shrink_output = torch.zeros(
-        (x_2d.shape[0], lora_a.shape[-2]),
-        dtype=torch.float32,
-        device=x.device,
-    )
+    shrink_output = _get_reusable_shrink_buffer(
+        linear,
+        context,
+        num_slices=1,
+        num_rows=x_2d.shape[0],
+        rank=lora_a.shape[-2],
+    )[0]
     context.punica_wrapper.bgmv_shrink(
         x_2d,
         lora_a[:, 0].contiguous(),
