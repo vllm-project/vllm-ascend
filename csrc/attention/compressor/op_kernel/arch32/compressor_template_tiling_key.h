@@ -35,22 +35,20 @@ ASCENDC_TPL_ARGS_DECL(compressor, // 算子唯一标识，与opType保持一致
     ASCENDC_TPL_UINT_DECL(ROTARY_MODE, ASCENDC_TPL_2_BW, ASCENDC_TPL_UI_LIST, 1, 2),
     // bit:9-10  cache_mode 1:CONTINUOUS 2:cycle
     ASCENDC_TPL_UINT_DECL(CACHE_MODE, ASCENDC_TPL_2_BW, ASCENDC_TPL_UI_LIST, 1, 2),
-    // bit:11-12  template_id 0:empty_tensor 1:normal 2:full load
+    // bit:11-12  template_id 0:normal 1:empty_tensor 2:full load
     ASCENDC_TPL_UINT_DECL(TEMPLATE_ID, ASCENDC_TPL_2_BW, ASCENDC_TPL_UI_LIST, 0, 1, 2),
-    // bit:13 rope dtype 0:same as x 1:fp32
-    ASCENDC_TPL_UINT_DECL(ROPE_DTYPE, ASCENDC_TPL_1_BW, ASCENDC_TPL_UI_LIST, 0, 1),
 );
 
 ASCENDC_TPL_SEL(
 
-    // A3场景: TH/BF16/interleave/continuous/FP32 rope, 保留EMPTY_X与PERF
+    // A3场景: TH/BF16/interleave/continuous, 保留EMPTY_X与NORMAL
+    // （TH布局不会触发FULL_LOAD，新kernel已移除rope_dtype维度）
     ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_UINT_SEL(X_LAYOUT, ASCENDC_TPL_UI_LIST, 1),
                         ASCENDC_TPL_UINT_SEL(X_DTYPE, ASCENDC_TPL_UI_LIST, 0),
                         ASCENDC_TPL_UINT_SEL(COFF, ASCENDC_TPL_UI_LIST, 1, 2),
                         ASCENDC_TPL_UINT_SEL(ROTARY_MODE, ASCENDC_TPL_UI_LIST, 2),
                         ASCENDC_TPL_UINT_SEL(CACHE_MODE, ASCENDC_TPL_UI_LIST, 1),
-                        ASCENDC_TPL_UINT_SEL(TEMPLATE_ID, ASCENDC_TPL_UI_LIST, 1, 2),
-                        ASCENDC_TPL_UINT_SEL(ROPE_DTYPE, ASCENDC_TPL_UI_LIST, 1),
+                        ASCENDC_TPL_UINT_SEL(TEMPLATE_ID, ASCENDC_TPL_UI_LIST, 0, 1),
                         ASCENDC_TPL_TILING_STRUCT_SEL(optiling::CompressorTilingData)),
 );
 
