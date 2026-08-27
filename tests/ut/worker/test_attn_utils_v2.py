@@ -8,6 +8,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -16,6 +17,7 @@ from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_v1
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -70,6 +72,56 @@ def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttent
 def _spec_compress_ratio(spec) -> int:
     """Compression ratio of an MLA spec on either vLLM lane."""
     return spec.compress_ratio if vllm_version_is("0.27.1") else spec.tokens_per_state
+
+
+@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #51718 only changed the main allocation entry point")
+def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
+    layer_name = "model.layers.0.self_attn.attn"
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    num_blocks = 3
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [layer_name],
+                spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    layer = SimpleNamespace(
+        get_attn_backend=lambda: AscendAttentionBackend,
+        kv_sharing_target_layer_name=None,
+        num_heads=8,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
+
+    kv_caches = attn_utils.allocate_kv_cache_main(
+        kv_cache_config,
+        device=torch.device("cpu"),
+        layout=None,
+        kernel_block_sizes=[spec.block_size],
+    )
+
+    key_cache, value_cache = kv_caches[layer_name]
+    expected_shape = (num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
+    assert key_cache.shape == expected_shape
+    assert value_cache.shape == expected_shape
 
 
 @pytest.mark.parametrize(

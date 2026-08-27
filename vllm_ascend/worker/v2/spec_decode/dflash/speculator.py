@@ -121,8 +121,11 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
+        sync_state = num_tokens_across_dp if vllm_version_is("0.27.1") else dp_sync
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
@@ -136,7 +139,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,

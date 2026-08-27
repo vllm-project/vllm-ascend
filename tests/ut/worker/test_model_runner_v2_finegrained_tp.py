@@ -34,6 +34,10 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner.sampler = create_autospec(Sampler, instance=True)
     runner.rejection_sampler = create_autospec(RejectionSampler, instance=True)
     runner.speculator = MagicMock()
+    # vLLM #50465 added batch-sharded sampling to GPUModelRunner.sample().
+    # The production initializer always defines this field; mirror that
+    # contract in this bare CPU-only fixture.
+    runner.batch_sharder = None
     runner.structured_outputs_worker = create_autospec(StructuredOutputsWorker, instance=True)
     return runner
 
@@ -42,6 +46,9 @@ def _make_input_batch(logits_indices):
     return SimpleNamespace(
         logits_indices=logits_indices,
         num_draft_tokens=0,
+        # vLLM #50465 lets a sharded rank own no requests and checks this
+        # before dispatching to the sampler.
+        num_reqs=1,
     )
 
 
