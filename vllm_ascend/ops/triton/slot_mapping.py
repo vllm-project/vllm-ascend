@@ -37,12 +37,7 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-import torch
 from vllm.triton_utils import tl, triton
-
-from vllm_ascend.ops.triton.compute_slot_mapping import _next_power_of_2
 
 
 @triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
@@ -70,14 +65,11 @@ def compute_slot_mapping_fused_kernel(
 ):
     """
     2D-grid fused slot-mapping kernel.
-
     Grid: ``(num_reqs + 1, num_groups)``
-
     Each program (req_idx, group_idx):
       1. Loads the per-group parameters for ``group_idx``.
       2. If ``req_idx`` is the last row → pads ``slot_mapping[group]``.
          Otherwise → computes the standard slot-mapping for that request.
-
     The normal-path logic mirrors ``_compute_slot_mapping_kernel`` in
     ``ops/triton/compute_slot_mapping.py`` (PR #13048), with ``block_size``,
     ``kv_cache_block_size`` and ``blocks_per_kv_block`` loaded dynamically
@@ -156,99 +148,3 @@ def compute_slot_mapping_fused_kernel(
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
         tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
-
-
-# ---------------------------------------------------------------------------
-# Convenience wrapper  (kept for standalone testing / external callers)
-# ---------------------------------------------------------------------------
-
-
-def launch_slot_mapping_fused(
-    block_tables: list[Any],
-    num_reqs: int,
-    query_start_loc: torch.Tensor,
-    positions: torch.Tensor,
-) -> None:
-    """One-shot launcher that builds per-group param arrays on the fly.
-
-    .. note::
-       In production the ``MultiGroupBlockTable`` pre-caches param tensors
-       during ``__init__`` and calls the kernel directly, avoiding the
-       ``torch.tensor(…)`` construction overhead (~5 ms / call).
-
-    Args:
-        block_tables: List of non-mamba ``BlockTable`` instances.
-        num_reqs: Number of requests in the batch.
-        query_start_loc: GPU tensor ``[num_reqs + 1]`` (int32).
-        positions: GPU tensor ``[num_tokens]`` (int64).
-    """
-    num_groups = len(block_tables)
-    if num_groups <= 1:
-        if num_groups == 1:
-            block_tables[0].compute_slot_mapping(num_reqs, query_start_loc, positions)
-        return
-
-    device = query_start_loc.device
-    num_tokens = positions.shape[0]
-    num_reqs_plus_one = num_reqs + 1
-
-    # ---- build per-group parameter arrays (costly — done here only) ---
-    group_block_table_ptrs = torch.tensor(
-        [bt.block_table.gpu.data_ptr() for bt in block_tables],
-        dtype=torch.int64,
-        device=device,
-    )
-    group_block_table_strides = torch.tensor(
-        [bt.block_table.gpu.stride(0) for bt in block_tables],
-        dtype=torch.int32,
-        device=device,
-    )
-    group_block_sizes = torch.tensor(
-        [bt.block_size for bt in block_tables],
-        dtype=torch.int32,
-        device=device,
-    )
-    group_slot_mapping_ptrs = torch.tensor(
-        [bt.slot_mapping.gpu.data_ptr() for bt in block_tables],
-        dtype=torch.int64,
-        device=device,
-    )
-    group_kv_cache_block_sizes = torch.tensor(
-        [bt.physical_block_size for bt in block_tables],
-        dtype=torch.int32,
-        device=device,
-    )
-    group_blocks_per_kv = torch.tensor(
-        [bt.blocks_per_phys_block for bt in block_tables],
-        dtype=torch.int32,
-        device=device,
-    )
-
-    # ---- CP parameters & compile-time constants -----------------------
-    bt0 = block_tables[0]
-    total_cp_world_size = bt0.dcp_world_size
-    total_cp_rank = bt0.dcp_rank
-
-    tile_block_size = 1024
-    min_block_size = min(bt.block_size for bt in block_tables)
-    window_size = _next_power_of_2(((tile_block_size + min_block_size - 1) // min_block_size) + 1)
-
-    # ---- launch -------------------------------------------------------
-    compute_slot_mapping_fused_kernel[(num_reqs_plus_one, num_groups)](
-        num_tokens,
-        bt0.max_num_batched_tokens,
-        query_start_loc,
-        positions,
-        group_block_table_ptrs,
-        group_block_table_strides,
-        group_block_sizes,
-        group_slot_mapping_ptrs,
-        group_kv_cache_block_sizes,
-        group_blocks_per_kv,
-        TOTAL_CP_WORLD_SIZE=total_cp_world_size,
-        TOTAL_CP_RANK=total_cp_rank,
-        CP_KV_CACHE_INTERLEAVE_SIZE=bt0.cp_kv_cache_interleave_size,
-        PAD_ID=-1,
-        TILE_BLOCK_SIZE=tile_block_size,
-        BLOCK_TABLE_WINDOW_SIZE=window_size,
-    )
