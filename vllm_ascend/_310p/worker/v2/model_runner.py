@@ -282,7 +282,7 @@ class NPUModelRunner310V2(NPUModelRunner):
 
     if vllm_version_is("0.27.1"):
 
-        def prepare_inputs(
+        def prepare_inputs(  # type: ignore[misc, override]
             self,
             scheduler_output: SchedulerOutput,
             batch_desc: BatchExecutionDescriptor,
