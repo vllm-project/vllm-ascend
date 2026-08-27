@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from dataclasses import replace
+from inspect import signature
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -29,9 +30,15 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.worker.v2 import states as states_module
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
+    AscendAutoRegressiveSpeculator,
+)
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
+from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 
 def _mock_async_copy_to_cpu(value, out=None, device=None):
@@ -608,6 +615,17 @@ def test_validate_config_rejects_unsupported_speculator_options(
 
     with pytest.raises(NotImplementedError, match=error):
         AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+
+
+def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
+    """Lock the keyword contracts added by vLLM #53694 and #53869."""
+    for speculator_cls in (
+        AscendAutoRegressiveSpeculator,
+        AscendDFlashSpeculator,
+        AscendDSparkSpeculator,
+    ):
+        assert "dp_sync" in signature(speculator_cls.propose).parameters
+    assert "pcp_manager" in signature(ModelAclGraphManager.capture).parameters
 
 
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:

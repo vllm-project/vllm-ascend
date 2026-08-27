@@ -748,6 +748,69 @@ def _allocate_kv_cache(
     return kv_cache_raw_tensors
 
 
+def allocate_kv_cache_main(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    layout: Any,
+    kernel_block_sizes: list[int],
+) -> dict[str, Any]:
+    """Allocate Ascend KV cache through vLLM main's #51718 entry point.
+
+    vLLM #51718 replaced ``_allocate_kv_cache`` + ``_reshape_kv_cache`` with
+    ``allocate_kv_cache`` and generic ``[B, H, N, C]`` views. Ascend attention
+    still consumes separate K/V (and backend-specific state) tensors, so keep
+    the Ascend allocation/reshape contract behind the new entry point.
+    """
+    del layout
+    vllm_config = get_current_vllm_config()
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
+    shared_layers = {
+        layer_name: target_layer
+        for layer_name, layer in attn_layers.items()
+        if (target_layer := getattr(layer, "kv_sharing_target_layer_name", None))
+    }
+
+    raw_tensors = _allocate_kv_cache(
+        kv_cache_config,
+        shared_layers=shared_layers,
+        device=device,
+    )
+
+    attn_groups: list[AttentionGroup] = []
+    for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        group_map: dict[tuple[str, KVCacheSpec, int], AttentionGroup] = {}
+        group_order: list[tuple[str, KVCacheSpec, int]] = []
+        for layer_name in kv_cache_group.layer_names:
+            if layer_name in shared_layers:
+                continue
+            layer = attn_layers[layer_name]
+            layer_spec = kv_cache_group.kv_cache_spec
+            if isinstance(layer_spec, UniformTypeKVCacheSpecs):
+                layer_spec = layer_spec.kv_cache_specs[layer_name]
+            backend = layer.get_attn_backend()
+            key = (backend.full_cls_name(), layer_spec, getattr(layer, "num_heads", 0))
+            if key not in group_map:
+                group_map[key] = AttentionGroup(
+                    backend=backend,
+                    layer_names=[layer_name],
+                    kv_cache_spec=layer_spec,
+                    kv_cache_group_id=group_id,
+                )
+                group_order.append(key)
+            else:
+                group_map[key].layer_names.append(layer_name)
+        attn_groups.extend(group_map[key] for key in group_order)
+
+    return _reshape_kv_cache_v2(
+        attn_groups=attn_groups,
+        kv_cache_raw_tensors=raw_tensors,
+        cache_dtype=vllm_config.cache_config.cache_dtype,
+        kernel_block_sizes=kernel_block_sizes,
+        shared_kv_cache_layers=shared_layers,
+        kv_cache_config=kv_cache_config,
+    )
+
+
 def _reshape_mamba_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_spec: MambaSpec,
