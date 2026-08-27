@@ -250,7 +250,7 @@ Reference Top-1 on ImageNet val (approximate):
 
 ## 8 Performance Evaluation
 
-Benchmark `/v1/embeddings` over HTTP with the script below. 
+Benchmark `/v1/embeddings` over HTTP with the script below.
 
 Start the server from [§5 Online Service Deployment](#5-online-service-deployment), then run:
 
