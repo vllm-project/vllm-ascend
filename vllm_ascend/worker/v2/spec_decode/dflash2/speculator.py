@@ -17,8 +17,8 @@
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 from vllm.v1.worker.gpu.sample.gumbel import tl_rand32
+from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     AscendDFlashSpeculator,
@@ -88,9 +88,7 @@ def _selector_walk_kernel_ascend(
             # helper, __multi3, is unavailable); seeds, token ids and
             # positions all fit int32.
             gumbel_seed = tl.randint(seed.to(tl.int32), position.to(tl.int32))
-            uniform = tl_rand32(
-                gumbel_seed, candidates.to(tl.int32), includes_zero=False
-            )
+            uniform = tl_rand32(gumbel_seed, candidates.to(tl.int32), includes_zero=False)
             noise = -tl.log(-tl.log(1.0 - uniform))
             sampled_scores = tl.where(mask, scores / effective_temp + noise, -float("inf"))
             best = tl.max(sampled_scores, axis=0)
