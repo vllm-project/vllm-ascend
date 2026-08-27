@@ -78,7 +78,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_perf
 # =======Eagle3 Speculative Reasoning Step Test_04 step=7===============
-  - name: "Kimi-K2.5-W4A8step_7"
+  - name: "Kimi-K2.5-W4A8_step_7"
     model: "Eco-Tech/Kimi-K2.5-W4A8"
     envs:
       <<: *envs
