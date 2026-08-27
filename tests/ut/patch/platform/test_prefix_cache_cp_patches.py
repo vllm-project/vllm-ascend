@@ -23,16 +23,16 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.core.kv_cache_interface import is_deepseek_v4_kv_cache_spec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
-    _is_deepseek_v4_kv_cache_spec,
     get_kv_cache_coordinator,
 )
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _ascend_resolve_kv_cache_block_sizes,
-    group_and_unify_kv_cache_specs,
-)
+from vllm_ascend.patch.platform.patch_kv_cache_utils import _ascend_resolve_kv_cache_block_sizes
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.worker.kv_cache_config_builder import (
+    _ascend_group_and_unify_kv_cache_specs as group_and_unify_kv_cache_specs,
+)
 
 
 def _make_hybrid_kv_cache_config(
@@ -444,8 +444,8 @@ def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
     )
     unknown_spec = SimpleNamespace(kv_cache_specs=object())
 
-    assert _is_deepseek_v4_kv_cache_spec(kv_cache_spec)
-    assert not _is_deepseek_v4_kv_cache_spec(unknown_spec)
+    assert is_deepseek_v4_kv_cache_spec(kv_cache_spec)
+    assert not is_deepseek_v4_kv_cache_spec(unknown_spec)
 
 
 def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> None:

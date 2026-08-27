@@ -191,6 +191,14 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+#    Note (vLLM PR #53558, pluggable KVCacheConfigBuilder):
+#       The DeepSeekV4 KV cache planning (group_and_unify_kv_cache_specs /
+#       _get_kv_cache_groups_uniform_groups / non-packed tensor layout) that used
+#       to be patched here has moved to AscendKVCacheConfigBuilder
+#       (vllm_ascend.worker.kv_cache_config_builder), wired via
+#       NPUPlatform.get_kv_cache_config_builder_cls. Only resolve_kv_cache_block_sizes
+#       is still monkey-patched here.
+#
 # ** 10. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
