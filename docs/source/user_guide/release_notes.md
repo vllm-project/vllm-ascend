@@ -1,4 +1,42 @@
 # Release Notes
+## v0.25.1rc1 - 2026.08.22
+
+We're excited to announce v0.25.1rc1, this is the first release candidate of v0.25.1 for vllm-ascend, aligned with upstream vLLM v0.25.1. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest/) to get started.
+
+### Highlights
+
+- **DeepSeek V4 Enhancements**: Improved DeepSeek V4 support with DSpark speculative decoding, Flash DSpark configurations, and various bug fixes for tool calling and reasoning effort alignment. [#13320](https://github.com/vllm-project/vllm-ascend/pull/13320) [#13840](https://github.com/vllm-project/vllm-ascend/pull/13840) [#14521](https://github.com/vllm-project/vllm-ascend/pull/14521) [#13519](https://github.com/vllm-project/vllm-ascend/pull/13519)
+- **DSpark Speculative Decoding**: Added support for DSpark speculative method with synchronized reorder batch threshold calculation. [#12662](https://github.com/vllm-project/vllm-ascend/pull/12662)
+- **Mega MoE Support**: Added Mega MoE support for A3 hardware. [#11701](https://github.com/vllm-project/vllm-ascend/pull/11701)
+- **KV Pool Improvements**: Enhanced AscendStore with better key construction, miss path optimization, and Memcache SSD cache configuration support. [#12814](https://github.com/vllm-project/vllm-ascend/pull/12814) [#13238](https://github.com/vllm-project/vllm-ascend/pull/13238)
+
+### Features
+
+- Added MiniMax M3 layer and model runner support. [#12835](https://github.com/vllm-project/vllm-ascend/pull/12835)
+- Added support for splitting mixed ChunkedPrefill into separate decode and prefill attention calls. [#11948](https://github.com/vllm-project/vllm-ascend/pull/11948)
+- Added eager mode support for MTP in Model Runner V2. [#12810](https://github.com/vllm-project/vllm-ascend/pull/12810)
+- Parallelized spec_decode input copy kernel across batch dimension for performance improvement. [#14066](https://github.com/vllm-project/vllm-ascend/pull/14066)
+
+### Stability and Bug Fixes
+
+- Fixed DeepSeek V4 reasoning effort alignment, system tool rendering, and tool string argument streaming. [#13519](https://github.com/vllm-project/vllm-ascend/pull/13519) [#14035](https://github.com/vllm-project/vllm-ascend/pull/14035) [#14521](https://github.com/vllm-project/vllm-ascend/pull/14521)
+- Fixed AscendStore save/load operations with synchronous saves and error reporting. [#13117](https://github.com/vllm-project/vllm-ascend/pull/13117) [#13119](https://github.com/vllm-project/vllm-ascend/pull/13119)
+- Fixed RecomputeScheduler in_flight_tokens patch error. [#13423](https://github.com/vllm-project/vllm-ascend/pull/13423)
+- Fixed compressed prefix-cache hit length accounting. [#13330](https://github.com/vllm-project/vllm-ascend/pull/13330)
+- Fixed various DSA-CP and GQA issues. [#12840](https://github.com/vllm-project/vllm-ascend/pull/12840) [#13460](https://github.com/vllm-project/vllm-ascend/pull/13460)
+- Fixed npu_dequant_swiglu_quant operator precision issue. [#12965](https://github.com/vllm-project/vllm-ascend/pull/12965)
+
+### Dependencies
+
+- **Upstream vLLM**: v0.25.1
+- **Python**: >= 3.10, < 3.13
+- **CANN**: 9.1.0 (Note: temporarily reverted due to compatibility issues)
+- **PyTorch**: 2.10.0.post4 (temporarily reverted)
+- **Triton**: 3.2.2 (temporarily reverted)
+
+### Known Issues
+
+- The CANN 9.1.0 / PTA 2.10.0.post4 / Triton 3.2.2 upgrade was temporarily reverted due to compatibility issues. See [#14561](https://github.com/vllm-project/vllm-ascend/pull/14561) for details.
 
 ## v0.23.0 - 2026.08.16
 
