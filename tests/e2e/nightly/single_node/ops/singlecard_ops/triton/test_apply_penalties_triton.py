@@ -7,9 +7,14 @@ import gc
 
 import pytest
 import torch
+from vllm.config import VllmConfig
 from vllm.v1.sample.ops.penalties import apply_all_penalties as v1_apply_all_penalties
 
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties as ascend_apply_all_penalties
+
+# TODO(realliujiaxu): delete this after `enable_reduce_sample` is removed
+init_ascend_config(VllmConfig())
 
 # Same scenario grid as test_apply_penalties_model_executor (equivalence + boundaries).
 APPLY_PENALTY_CASES = [
@@ -40,7 +45,6 @@ def _make_tokens(
     return tokens
 
 
-@pytest.mark.skip("Probabilistic failure, need zengtian after fix")
 @pytest.mark.parametrize("num_seqs", [1, 8, 32, 128])
 @pytest.mark.parametrize("vocab_size", [5120, 151936])
 @pytest.mark.parametrize(
