@@ -1,5 +1,6 @@
 import unittest
 from collections import deque
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -15,6 +16,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -23,9 +26,13 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.utils import AscendDeviceType
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _align_hybrid_sliding_window_block_sizes
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):
@@ -207,6 +214,178 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
+    def _hybrid_swa_specs(self):
+        return {
+            "full": FullAttentionSpec(
+                block_size=1536,
+                num_kv_heads=1,
+                head_size=1,
+                head_size_v=1,
+                dtype=torch.bfloat16,
+                page_size_padded=8192,
+            ),
+            "swa": SlidingWindowSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.bfloat16,
+                sliding_window=2048,
+                extra_retained_tokens=16,
+                page_size_padded=8192,
+            ),
+            "mamba": MambaSpec(
+                block_size=1536,
+                shapes=((1,), (1,)),
+                dtypes=(torch.bfloat16, torch.float32),
+                page_size_padded=8192,
+            ),
+        }
+
+    def test_hybrid_swa_aligns_logical_block_not_attention_window(self):
+        specs = self._hybrid_swa_specs()
+        original = specs.copy()
+        _align_hybrid_sliding_window_block_sizes(specs)
+        self.assertEqual(specs["swa"].block_size, 1536)
+        self.assertEqual(specs["swa"].sliding_window, 2048)
+        self.assertEqual(specs["swa"].extra_retained_tokens, 16)
+        self.assertEqual(specs["swa"].page_size_padded, 8192)
+        self.assertEqual(original["swa"].block_size, 128)
+        self.assertIs(specs["full"], original["full"])
+        self.assertIs(specs["mamba"], original["mamba"])
+        aligned = specs["swa"]
+        _align_hybrid_sliding_window_block_sizes(specs)
+        self.assertIs(specs["swa"], aligned)
+
+    def test_hybrid_swa_without_mamba_is_unchanged(self):
+        specs = self._hybrid_swa_specs()
+        del specs["mamba"]
+        original = specs["swa"]
+        _align_hybrid_sliding_window_block_sizes(specs)
+        self.assertIs(specs["swa"], original)
+
+    def test_hybrid_swa_specialized_attention_specs_are_unchanged(self):
+        specialized_specs = (
+            (
+                "full",
+                AscendMLAAttentionSpec(
+                    block_size=1536,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.bfloat16,
+                    page_size_padded=8192,
+                ),
+            ),
+            (
+                "full",
+                AscendSFAIndexerCacheSpec(
+                    block_size=1536,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.bfloat16,
+                    page_size_padded=8192,
+                ),
+            ),
+            (
+                "swa",
+                AscendSlidingWindowMLASpec(
+                    block_size=128,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.bfloat16,
+                    sliding_window=2048,
+                    page_size_padded=8192,
+                ),
+            ),
+        )
+
+        for name, specialized_spec in specialized_specs:
+            with self.subTest(spec_type=type(specialized_spec).__name__):
+                specs = self._hybrid_swa_specs()
+                specs[name] = specialized_spec
+                original_swa = specs["swa"]
+                _align_hybrid_sliding_window_block_sizes(specs)
+                self.assertIs(specs["swa"], original_swa)
+
+    def test_hybrid_swa_matches_equal_kv_width_with_different_head_shapes(self):
+        # Qwen3.8-27B / DFlash2 with TP2: both store 512 K and V values
+        # per token, despite different head counts and head dimensions.
+        specs = self._hybrid_swa_specs()
+        specs["full"] = replace(
+            specs["full"], num_kv_heads=2, head_size=256, head_size_v=256, page_size_padded=4 * 1024**2
+        )
+        specs["swa"] = replace(
+            specs["swa"], num_kv_heads=4, head_size=128, head_size_v=128, page_size_padded=4 * 1024**2
+        )
+        _align_hybrid_sliding_window_block_sizes(specs)
+        self.assertEqual(specs["swa"].block_size, 1536)
+        self.assertEqual(specs["swa"].num_kv_heads, 4)
+        self.assertEqual(specs["swa"].head_size, 128)
+        self.assertEqual(specs["swa"].sliding_window, 2048)
+
+    def test_hybrid_swa_does_not_match_different_value_width(self):
+        specs = self._hybrid_swa_specs()
+        specs["full"] = replace(specs["full"], head_size_v=2)
+        original = specs["swa"]
+        _align_hybrid_sliding_window_block_sizes(specs)
+        self.assertIs(specs["swa"], original)
+
+    def test_hybrid_swa_does_not_match_other_dense_layouts(self):
+        for changes in (
+            {"num_kv_heads": 2},
+            {"head_size": 2},
+            {"dtype": torch.float32},
+            {"block_size": 1024},
+            {"block_size": 3072},
+        ):
+            with self.subTest(changes=changes):
+                specs = self._hybrid_swa_specs()
+                specs["swa"] = replace(specs["swa"], **changes)
+                original = specs["swa"]
+                _align_hybrid_sliding_window_block_sizes(specs)
+                self.assertIs(specs["swa"], original)
+
+    def test_hybrid_swa_ambiguous_full_block_width_is_unchanged(self):
+        specs = self._hybrid_swa_specs()
+        specs["other_full"] = replace(specs["full"], block_size=1024)
+        original = specs["swa"]
+        _align_hybrid_sliding_window_block_sizes(specs)
+        self.assertIs(specs["swa"], original)
+
+    @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=False)
+    def test_hybrid_swa_distinct_pool_blocks_do_not_alias(self, _mock_quant):
+        runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        runner.hybrid_with_attn_and_mamba = True
+        runner.attn_backend.get_supported_kernel_block_sizes.return_value = [128]
+        specs = self._hybrid_swa_specs()
+        # Scaled target/draft geometries have equal flat K/V widths but
+        # different head shapes, as in the actual TP2 deployment.
+        specs["full"] = replace(specs["full"], head_size=2, head_size_v=2, page_size_padded=16384)
+        specs["swa"] = replace(specs["swa"], num_kv_heads=2, page_size_padded=16384)
+        specs["mamba"] = replace(specs["mamba"], page_size_padded=16384)
+        _align_hybrid_sliding_window_block_sizes(specs)
+        groups = [
+            SimpleNamespace(
+                kv_cache_spec=specs[name],
+                backend=runner.attn_backend,
+                layer_names=[name],
+            )
+            for name in ("full", "swa")
+        ]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        runner._get_layer_kv_cache_specs = lambda config: specs
+        raw = torch.zeros(24 * 16384, dtype=torch.int8)
+        caches = runner._reshape_kv_cache_tensors(
+            SimpleNamespace(num_blocks=24),
+            {"full": raw, "swa": raw},
+        )
+        # Global pool IDs 20 and 0 may be simultaneously owned by different
+        # cache groups. The old 128-token SWA view overlapped these two IDs.
+        caches["full"][1][20 * 12 : 21 * 12].fill_(7)
+        self.assertEqual(torch.count_nonzero(caches["swa"][0][:12]).item(), 0)
+        self.assertEqual(caches["full"][0].data_ptr(), caches["swa"][0].data_ptr())
+        self.assertEqual(caches["full"][1].data_ptr(), caches["swa"][1].data_ptr())
+
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")

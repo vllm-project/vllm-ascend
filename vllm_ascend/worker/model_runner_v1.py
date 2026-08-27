@@ -76,11 +76,13 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -5079,6 +5081,7 @@ class NPUModelRunner(GPUModelRunner):
                 if spec := mamba_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     mamba_page_size_padded = spec.page_size_bytes
+            _align_hybrid_sliding_window_block_sizes(kv_cache_spec)
             # align attn_page_size to mamba_page_size_padded
             for layer_name in attn_layer_names:
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
@@ -5223,6 +5226,46 @@ class NPUModelRunner(GPUModelRunner):
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=(self.compilation_config.static_forward_context),
         )
+
+
+def _align_hybrid_sliding_window_block_sizes(specs: dict[str, KVCacheSpec]) -> None:
+    """Keep dense SWA and full-attention pages on the same hybrid byte layout.
+
+    Ascend stores hybrid caches as contiguous conv/K/V columns, rather than
+    interleaving the components of each logical page. Padding page_size_bytes
+    alone therefore cannot make different K/V block strides safe to share:
+    a full-attention block can overlap a *different* SWA block ID. Match the
+    logical block width when the two dense attention formats have the same
+    per-token K/V widths. Head counts and dimensions may factor differently.
+    The backend still splits these pages into its supported kernel blocks.
+    """
+    if not any(isinstance(spec, MambaSpec) for spec in specs.values()):
+        return
+
+    def layout_key(spec: AttentionSpec) -> tuple:
+        return (
+            spec.num_kv_heads * spec.head_size,
+            spec.num_kv_heads * (getattr(spec, "head_size_v", None) or spec.head_size),
+            spec.dtype,
+            getattr(spec, "cache_dtype_str", None),
+            getattr(spec, "kv_quant_mode", None),
+        )
+
+    full_block_sizes: dict[tuple, set[int]] = defaultdict(set)
+    for spec in specs.values():
+        # Restrict this helper to the exact dense layouts validated below.
+        # MLA and other subclasses can use different physical cache layouts.
+        if type(spec) is FullAttentionSpec:
+            full_block_sizes[layout_key(spec)].add(spec.block_size)
+    for name, spec in specs.items():
+        if type(spec) is not SlidingWindowSpec:
+            continue
+        matching = full_block_sizes.get(layout_key(spec), set())
+        if len(matching) != 1:
+            continue
+        block_size = next(iter(matching))
+        if block_size > spec.block_size and block_size % spec.block_size == 0:
+            specs[name] = replace(spec, block_size=block_size)
 
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
