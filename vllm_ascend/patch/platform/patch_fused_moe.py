@@ -28,6 +28,7 @@
 
 import sys
 from collections.abc import Callable
+from functools import cache
 from inspect import signature
 from types import MethodType
 from typing import Any
@@ -47,6 +48,28 @@ _EPLB_ROUTER_ADAPTED = "_vllm_ascend_eplb_router_adapted"
 
 # Capture the real original before fused_moe.py's module-level code runs.
 _original_FusedMoE = _fused_moe_layer.FusedMoEFactory
+
+
+@cache
+def _adapt_routed_experts_cls(routed_experts_cls: Any | None) -> Any | None:
+    if routed_experts_cls is None:
+        return None
+
+    from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
+
+    if issubclass(routed_experts_cls, AscendRoutedExperts):
+        return routed_experts_cls
+
+    # vLLM #52209 passes GptOssRoutedExperts explicitly. PluggableLayer's OOT
+    # dispatch is class-name based, so an explicit subclass bypasses the
+    # registered AscendRoutedExperts implementation. Compose both contracts:
+    # keep the model-specific loading overrides first in the MRO while using
+    # AscendRoutedExperts for initialization and device execution.
+    return type(
+        f"Ascend{routed_experts_cls.__name__}",
+        (routed_experts_cls, AscendRoutedExperts),
+        {"__module__": __name__},
+    )
 
 
 def _ascend_apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
@@ -149,6 +172,7 @@ def _ascend_FusedMoE(
             tid2eid=hash_indices_table_for_legacy_path,
             eplb_state=AscendEplbLayerState() if enable_router_eplb else None,
         )
+    routed_experts_cls = _adapt_routed_experts_cls(routed_experts_cls)
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
     routed_experts_args["n_shared_experts"] = n_shared_experts
     if hash_indices_table_for_legacy_path is not None:
