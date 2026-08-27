@@ -390,7 +390,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         from safetensors.torch import load_file
 
-        descriptor_path = Path(target_model_path) / "quant_model_description.json"
+        model_path = Path(target_model_path)
+        descriptor_path = model_path / "quant_model_description.json"
         if not descriptor_path.exists():
             logger.info(
                 "[spec_decode/quarot] No descriptor found at %s; treating the target as non-QuaRot.",
@@ -414,13 +415,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             return None
 
-        rotation_path = Path(target_model_path) / relative_path
+        rotation_path = model_path / relative_path
+        default_rotation_path = model_path / "optional/quarot.safetensors"
         if not rotation_path.exists():
-            logger.warning(
-                "[spec_decode/quarot] Rotation file %s is missing; skipping draft alignment.",
-                rotation_path,
-            )
-            return None
+            if default_rotation_path.exists():
+                logger.warning(
+                    "[spec_decode/quarot] Configured rotation file %s is missing; using %s.",
+                    rotation_path,
+                    default_rotation_path,
+                )
+                rotation_path = default_rotation_path
+            else:
+                logger.warning(
+                    "[spec_decode/quarot] Rotation file %s is missing; skipping draft alignment.",
+                    rotation_path,
+                )
+                return None
         logger.info("[spec_decode/quarot] Loading global rotation from %s.", rotation_path)
         try:
             return load_file(rotation_path)["global_rotation"]
@@ -665,10 +675,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     " lm_head."
                 )
             elif draft_has_own_lm_head and self.method == "dspark":
-                logger.info(
-                    "[spec_decode/base] Detected DSpark model with distinct lm_head weights."
-                    " Keeping separate lm_head weights from the target model."
-                )
+                maybe_share = getattr(self, "_maybe_share_dspark_lm_head", None)
+                if maybe_share is None or not maybe_share(model):
+                    logger.info(
+                        "[spec_decode/base] Detected DSpark model with distinct lm_head weights."
+                        " Keeping separate lm_head weights from the target model."
+                    )
             else:
                 logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
                 target_lm_head = None

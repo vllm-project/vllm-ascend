@@ -338,6 +338,8 @@ class AscendConfig:
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
 
+        self.reuse_dsv4_lm_head = additional_config.get("reuse_dsv4_lm_head", False)
+
         # Enable Block Verify and Entropy Verify in Rejection Sampler
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
