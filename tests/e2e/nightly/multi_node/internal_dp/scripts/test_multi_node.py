@@ -6,6 +6,7 @@ import subprocess
 import sys
 from typing import Any
 
+import requests
 import pytest
 import vllm
 
@@ -21,6 +22,7 @@ from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     filter_environment,
     write_results_json,
 )
+from tests.e2e.nightly.multi_node.scripts.utils import ProxyServer
 from tools.aisbench import run_aisbench_cases
 
 logger = logging.getLogger(__name__)
@@ -126,6 +128,89 @@ def _build_serve_cmd(config: MultiNodeConfig) -> dict[str, Any]:
     return {"dp": {f"node{node.index}": node.server_cmd for node in config.nodes}}
 
 
+def _build_server_adapters(config: MultiNodeConfig) -> tuple[ProxyServer, ProxyServer, ProxyServer]:
+    host, port = config.benchmark_endpoint
+    completion_server = ProxyServer(host, port)
+
+    if config.disagg_cfg:
+        prefill_idx = config.disagg_cfg.prefiller_indices[0]
+        decode_idx = config.disagg_cfg.decoder_indices[0]
+        sp = config.server_port
+        tokenize_server = ProxyServer(config.nodes[prefill_idx].ip, sp)
+        metrics_server = ProxyServer(config.nodes[decode_idx].ip, sp)
+    else:
+        tokenize_server = completion_server
+        metrics_server = completion_server
+
+    return completion_server, tokenize_server, metrics_server
+
+
+def _run_chat_completion(
+    config: MultiNodeConfig,
+    completion_server: ProxyServer,
+    tokenize_server: ProxyServer,
+) -> None:
+    from tools.send_request import resolve_prompt, send_v1_chat_completions
+
+    prompts = config.chat_prompts or ["Hello!"]
+    expected = config.expected_response or {}
+
+    max_model_len_str = _extract_server_cmd_value(config.server_cmd_list, "--max-model-len")
+    max_model_len = int(max_model_len_str) if max_model_len_str else None
+
+    if isinstance(config.api_keyword_args, list):
+        api_args_list = config.api_keyword_args
+        if len(api_args_list) != len(prompts):
+            raise ValueError(f"""
+api_keyword_args list length ({len(api_args_list)}) must match prompts length ({len(prompts)})""")
+    else:
+        api_args_list = [config.api_keyword_args] * len(prompts)
+
+    if isinstance(expected.get("per_prompt"), list):
+        expected_list = expected["per_prompt"]
+    else:
+        expected_list = [expected] * len(prompts)
+
+    for prompt_raw, api_args, exp in zip(prompts, api_args_list, expected_list):
+        prompt, actual_prompt_tokens = resolve_prompt(tokenize_server, prompt_raw, use_chat=True)
+        if actual_prompt_tokens is not None:
+            exp = dict(exp) if exp else {}
+            exp.setdefault("prompt_tokens", actual_prompt_tokens)
+        send_v1_chat_completions(
+            prompt,
+            model=config.model,
+            server=completion_server,
+            request_args=api_args,
+            expected=exp,
+            max_model_len=max_model_len,
+        )
+
+
+def _run_spec_decode_acceptance(
+    config: MultiNodeConfig,
+    metrics_server: ProxyServer,
+    baseline: tuple[int, list[int]] | None = None,
+) -> None:
+    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rate
+
+    spec_config = _parse_json_flag(config.server_cmd_list, "--speculative-config")
+    num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
+
+    acceptance_cfg = config.acceptance_rate or {}
+    baseline_val = acceptance_cfg.get("baseline")
+    tolerance = acceptance_cfg.get("tolerance", 0.05)
+
+    if baseline_val is None:
+        logger.warning("acceptance_rate.baseline not set in config, skipping validation")
+        baseline_val = 0.0
+
+    if baseline is None:
+        baseline = (0, [0] * num_speculative_tokens)
+
+    _, all_rates = measure_acceptance_rate(metrics_server, num_speculative_tokens, baseline)
+    validate_acceptance_rate(all_rates[0], float(baseline_val), float(tolerance))
+
+
 def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) -> None:
     """Serialize acc & perf benchmark results to a JSON file under benchmark_results/."""
     runner = os.environ.get("VLLM_CI_RUNNER", "")
@@ -189,6 +274,31 @@ async def test_multi_node() -> None:
         host, port = config.benchmark_endpoint
 
         if config.is_master:
+            completion_server, tokenize_server, metrics_server = _build_server_adapters(config)
+
+            if "chat_completion" in config.test_content:
+                _run_chat_completion(config, completion_server, tokenize_server)
+
+            spec_baseline = None
+            if "spec_decode_acceptance" in config.test_content:
+                from tools.spec_decode_metrics import capture_baseline
+
+                spec_config = _parse_json_flag(config.server_cmd_list, "--speculative-config")
+                num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
+
+                def warmup_fn():
+                    requests.post(
+                        completion_server.url_for("v1", "chat", "completions"),
+                        json={
+                            "model": config.model,
+                            "messages": [{"role": "user", "content": "Hello!"}],
+                            "max_tokens": 16,
+                        },
+                        timeout=120,
+                    )
+
+                spec_baseline = capture_baseline(metrics_server, num_spec_tokens, warmup_fn)
+
             results = run_aisbench_cases(
                 model=config.model,
                 port=port,
@@ -196,6 +306,8 @@ async def test_multi_node() -> None:
                 host_ip=host,
             )
             _save_benchmark_results_json(config, results)
+
+            if "spec_decode_acceptance" in config.test_content:
+                _run_spec_decode_acceptance(config, metrics_server, spec_baseline)
         else:
-            # We should keep listening on the master node's server url determining when to exit.
             server.hang_until_terminated(f"http://{host}:{config.server_port}/health")

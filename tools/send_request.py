@@ -30,35 +30,40 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int,
     if target_tokens <= single_count:
         return seed, single_count
 
-    est = max(1, target_tokens // single_count)
-    body = "\n".join([seed] * est)
-    actual = _tokenize_count(server, body, use_chat=use_chat)
+    lo, hi = 1, max(target_tokens // single_count * 2 + 2, 2)
+    best_k, best_count = 1, single_count
 
-    while actual > target_tokens and est > 1:
-        est -= 1
-        body = "\n".join([seed] * est)
-        actual = _tokenize_count(server, body, use_chat=use_chat)
-
-    if actual == target_tokens:
-        return body, actual
-
-    gap = target_tokens - actual
-    if gap <= 0:
-        return body, actual
-
-    lo, hi = 0, max(gap * 4, 1)
-    best_pad, best_count = 0, actual
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        cand = body + "a" * mid
-        cand_count = _tokenize_count(server, cand, use_chat=use_chat)
-        if cand_count <= target_tokens:
-            lo = mid
-            best_pad, best_count = mid, cand_count
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        body = "\n".join([seed] * mid)
+        act = _tokenize_count(server, body, use_chat=use_chat)
+        if act <= target_tokens:
+            best_k, best_count = mid, act
+            lo = mid + 1
         else:
             hi = mid - 1
 
-    return body + "a" * best_pad, best_count
+    body = "\n".join([seed] * best_k)
+    if best_count == target_tokens:
+        return body, best_count
+
+    gap = target_tokens - best_count
+    if gap <= 0:
+        return body, best_count
+
+    pad_lo, pad_hi = 0, gap * 8 + 1
+    best_pad, best_pad_count = 0, best_count
+    while pad_lo < pad_hi:
+        mid = (pad_lo + pad_hi + 1) // 2
+        cand = body + "a" * mid
+        cand_count = _tokenize_count(server, cand, use_chat=use_chat)
+        if cand_count <= target_tokens:
+            best_pad, best_pad_count = mid, cand_count
+            pad_lo = mid
+        else:
+            pad_hi = mid - 1
+
+    return body + "a" * best_pad, best_pad_count
 
 
 def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, Optional[int]]:
@@ -153,7 +158,8 @@ def send_v1_chat_completions(prompt, model, server, request_args=None, expected:
     print(f"Status Code: {response.status_code}")
     response_json = response.json()
     print(f"Response json: {response_json}")
-    response_text = response_json["choices"][0]["message"]["content"]
+    message = response_json["choices"][0]["message"]
+    response_text = message.get("content") or message.get("reasoning", "")
     print(f"Response: {response_text}")
     assert response_text, "empty response"
     validate_response(response_json, expected, max_model_len)

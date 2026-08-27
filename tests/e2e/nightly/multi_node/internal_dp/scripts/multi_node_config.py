@@ -1,5 +1,6 @@
 import logging
 import os
+import shlex
 import subprocess
 from dataclasses import dataclass
 from typing import Any
@@ -89,17 +90,19 @@ class DistEnvBuilder:
     def build(self) -> dict:
         envs = dict(self.base_envs)
 
-        envs.update(
-            {
-                "HCCL_IF_IP": self.cur_ip,
-                "HCCL_SOCKET_IFNAME": self.nic_name,
-                "GLOO_SOCKET_IFNAME": self.nic_name,
-                "TP_SOCKET_IFNAME": self.nic_name,
-                "LOCAL_IP": self.cur_ip,
-                "NIC_NAME": self.nic_name,
-                "MASTER_IP": self.master_ip,
-            }
-        )
+        auto = {
+            "HCCL_IF_IP": self.cur_ip,
+            "GLOO_SOCKET_IFNAME": self.nic_name,
+            "TP_SOCKET_IFNAME": self.nic_name,
+            "LOCAL_IP": self.cur_ip,
+            "NIC_NAME": self.nic_name,
+            "MASTER_IP": self.master_ip,
+        }
+        for key, val in auto.items():
+            if key not in envs:
+                envs[key] = val
+        if "HCCL_SOCKET_IFNAME" not in envs:
+            envs["HCCL_SOCKET_IFNAME"] = self.nic_name
 
         return {k: str(v) for k, v in envs.items()}
 
@@ -177,12 +180,22 @@ class MultiNodeConfig:
         disaggregated_prefill: dict | None,
         benchmark_cases: list[dict],
         special_dependencies: dict,
+        test_content: list[str] | None = None,
+        chat_prompts: list[Any] | None = None,
+        acceptance_rate: dict[str, Any] | None = None,
+        api_keyword_args: dict[str, Any] | list | None = None,
+        expected_response: dict[str, Any] | None = None,
     ):
         self.model = model
         self.test_name = test_name
         self.nodes = nodes
         self.npu_per_node = npu_per_node
         self.benchmark_cases = benchmark_cases
+        self.test_content = test_content or []
+        self.chat_prompts = chat_prompts or []
+        self.acceptance_rate = acceptance_rate or {}
+        self.api_keyword_args = api_keyword_args
+        self.expected_response = expected_response or {}
 
         self.cur_index = self._resolve_cur_index()
         self.cur_node = self.nodes[self.cur_index]
@@ -214,6 +227,16 @@ class MultiNodeConfig:
             return self.envs.get(key, m.group(0))
 
         return pattern.sub(repl, cmd)
+
+    @property
+    def server_cmd_list(self) -> list[str]:
+        cmd = self.server_cmd
+        if isinstance(cmd, str):
+            try:
+                return shlex.split(cmd)
+            except ValueError:
+                return cmd.split()
+        return list(cmd)
 
     @property
     def world_size(self) -> int:
@@ -264,6 +287,11 @@ class MultiNodeConfigLoader:
             disaggregated_prefill=config.get("disaggregated_prefill"),
             special_dependencies=config.get("special_dependencies", {}),
             benchmark_cases=list(benchmarks.values()),
+            test_content=config.get("test_content", []),
+            chat_prompts=config.get("chat_prompts", []),
+            acceptance_rate=config.get("acceptance_rate", {}),
+            api_keyword_args=config.get("api_keyword_args"),
+            expected_response=config.get("expected_response", {}),
         )
 
     @classmethod

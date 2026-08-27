@@ -163,6 +163,17 @@ def get_net_interface(ip: str | None = None) -> str:
     raise RuntimeError(f"No network interface found for IP {ip}")
 
 
+class ProxyServer:
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.url_root = f"http://{host}:{port}"
+
+    def url_for(self, *parts: str) -> str:
+        return self.url_root + "/" + "/".join(parts)
+
+
 def get_all_ipv4() -> list[str]:
     ipv4s = {"127.0.0.1"}
     hostname = socket.gethostname()
