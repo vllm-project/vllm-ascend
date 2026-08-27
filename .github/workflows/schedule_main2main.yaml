@@ -274,39 +274,75 @@ jobs:
             VLLM_COMMIT=$(git -C vllm-upstream rev-parse HEAD)
           fi
           echo "Pre-starting main2main E2E env prep for vllm=${VLLM_COMMIT} (A2/A3/310P)..."
-          # gh 2.4.0 on this runner has no `run list --jq` (silently no-op);
-          # dispatch time is captured first so the API poll below can reject
-          # stale runs from earlier prep dispatches.
-          DISPATCH_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          gh workflow run main2main-e2e.yaml \
-            --repo "${HEAD_FORK}" \
-            --ref main \
-            -f "vllm=${VLLM_COMMIT}" -f "base_ref=main" -f "round=prep" \
-            -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}"
-          POLL_ERR=""
-          for i in $(seq 1 12); do
-            RUN_ID=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main" 2>/tmp/prep-poll.err \
-              | python3 -c "
+          # Reuse the most recent completed+successful run whose vllm input
+          # matches: the GPU runners' env persists across runs (.ready
+          # marker keyed by vllm/base_ref/image_tag), so a matching run
+          # means the env is already prepared — dispatching again would
+          # only queue an idempotent no-op.  Falls back to a fresh prep
+          # dispatch when nothing matches (first run, vllm bump).
+          REUSED_ID=""
+          for rid in $(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main&per_page=10" \
+            | python3 -c "
           import json, sys
           runs = json.load(sys.stdin).get('workflow_runs', [])
-          cutoff = sys.argv[1]
           for r in runs:
-              if r.get('path', '').endswith('main2main-e2e.yaml') and r.get('created_at', '') >= cutoff:
+              if r.get('path', '').endswith('main2main-e2e.yaml') \
+                      and r.get('status') == 'completed' \
+                      and r.get('conclusion') == 'success':
                   print(r['id'])
-                  break
-          " "$DISPATCH_AT" || true)
-            if [ -n "${RUN_ID:-}" ]; then
+          " 2>/dev/null | head -5); do
+            RV=$(gh api "repos/${HEAD_FORK}/actions/runs/${rid}" \
+              | python3 -c "
+          import json, sys
+          r = json.load(sys.stdin).get('inputs') or {}
+          print(r.get('vllm', ''))
+          print(r.get('base_ref', ''))
+          " 2>/dev/null || true)
+            if [ "$(echo "$RV" | sed -n 1p)" = "${VLLM_COMMIT}" ] \
+               && [ "$(echo "$RV" | sed -n 2p)" = "main" ]; then
+              REUSED_ID=${rid}
               break
             fi
-            POLL_ERR=$(tail -1 /tmp/prep-poll.err 2>/dev/null || true)
-            echo "prep run not found (poll ${i}/12)${POLL_ERR:+ — gh api: ${POLL_ERR}}"
-            sleep 5
           done
-          if [ -n "${RUN_ID:-}" ]; then
-            echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
-            echo "Prep run ${RUN_ID} started"
+          if [ -n "${REUSED_ID:-}" ]; then
+            echo "MAIN2MAIN_E2E_PREP_RUN_ID=${REUSED_ID}" >> "$GITHUB_ENV"
+            echo "Reusing prep run ${REUSED_ID} — env for vllm=${VLLM_COMMIT} already prepared"
           else
-            echo "::warning::prep run id not found after 12 polls (gh $(gh --version 2>/dev/null | head -1)) — the flow will dispatch prep itself"
+            echo "No matching prep run — dispatching fresh prep"
+            # gh 2.4.0 on this runner has no `run list --jq` (silently no-op);
+            # dispatch time is captured first so the API poll below can
+            # reject stale runs from earlier prep dispatches.
+            DISPATCH_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            gh workflow run main2main-e2e.yaml \
+              --repo "${HEAD_FORK}" \
+              --ref main \
+              -f "vllm=${VLLM_COMMIT}" -f "base_ref=main" -f "round=prep" \
+              -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}"
+            POLL_ERR=""
+            for i in $(seq 1 12); do
+              RUN_ID=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main" 2>/tmp/prep-poll.err \
+                | python3 -c "
+            import json, sys
+            runs = json.load(sys.stdin).get('workflow_runs', [])
+            cutoff = sys.argv[1]
+            for r in runs:
+                if r.get('path', '').endswith('main2main-e2e.yaml') and r.get('created_at', '') >= cutoff:
+                    print(r['id'])
+                    break
+            " "$DISPATCH_AT" || true)
+              if [ -n "${RUN_ID:-}" ]; then
+                break
+              fi
+              POLL_ERR=$(tail -1 /tmp/prep-poll.err 2>/dev/null || true)
+              echo "prep run not found (poll ${i}/12)${POLL_ERR:+ — gh api: ${POLL_ERR}}"
+              sleep 5
+            done
+            if [ -n "${RUN_ID:-}" ]; then
+              echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+              echo "Prep run ${RUN_ID} started"
+            else
+              echo "::warning::prep run id not found after 12 polls (gh $(gh --version 2>/dev/null | head -1)) — the flow will dispatch prep itself"
+            fi
           fi
 
       - name: Install opencode + main2main-flow
