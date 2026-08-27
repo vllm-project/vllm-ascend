@@ -40,7 +40,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
 
 # isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
-    KVCacheStoreBatch,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
@@ -604,34 +603,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
         self.assertEqual(len(store.put_calls), 1)
         self.assertEqual(len(store.put_calls[0][0]), 1)
-
-    def test_lookup_waits_only_for_conflicting_pending_batch(self):
-        t, _ = self._make_thread([1])
-        batch = KVCacheStoreBatch([])
-        batch.pending_keys.add("k1")
-        batch.prepared.set()
-        with t._pending_batches_lock:
-            t._pending_batches.append(batch)
-
-        result = []
-        lookup_thread = threading.Thread(target=lambda: result.extend(t.lookup_after_pending_saves(["k1"])))
-        lookup_thread.start()
-        lookup_thread.join(timeout=0.05)
-        self.assertTrue(lookup_thread.is_alive())
-
-        batch.done.set()
-        lookup_thread.join(timeout=1)
-        self.assertFalse(lookup_thread.is_alive())
-        self.assertEqual(result, [1])
-
-    def test_non_conflicting_lookup_does_not_wait_for_put(self):
-        t, _ = self._make_thread([1])
-        batch = KVCacheStoreBatch([])
-        batch.pending_keys.add("other-key")
-        batch.prepared.set()
-        with t._pending_batches_lock:
-            t._pending_batches.append(batch)
-        self.assertEqual(t.lookup_after_pending_saves(["k1"]), [1])
 
     def test_save_batch_put_failure_is_nonfatal(self):
         t, store = self._make_thread([0])

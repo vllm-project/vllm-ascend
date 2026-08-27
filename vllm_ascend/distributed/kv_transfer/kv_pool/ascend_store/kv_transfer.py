@@ -723,27 +723,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 raise RuntimeError("Preempted request reached an uncommitted AscendStore save batch")
             self.wait_for_batch(batch)
 
-    def lookup_after_pending_saves(
-        self,
-        keys: list[str],
-        exclude_batch: KVCacheStoreBatch | None = None,
-    ) -> list[int]:
-        """Fence only save batches that may publish one of ``keys``."""
-        observed: set[KVCacheStoreBatch] = set()
-        key_set = set(keys)
-        while True:
-            with self._pending_batches_lock:
-                batches = [
-                    batch for batch in self._pending_batches if batch is not exclude_batch and batch not in observed
-                ]
-                if not batches:
-                    return self.m_store.exists(keys)
-            for batch in batches:
-                batch.prepared.wait()
-                observed.add(batch)
-                if key_set & batch.pending_keys:
-                    self.wait_for_batch(batch)
-
     def _remove_pending_batch(self, batch: KVCacheStoreBatch) -> None:
         with self._pending_batches_lock:
             if batch in self._pending_batches:
@@ -997,7 +976,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             if not keys:
                 continue
-            exists_states = [value == 1 for value in self.lookup_after_pending_saves(keys, exclude_batch=batch)]
+            exists_states = self.lookup(keys)
             if batch is not None and batch.pending_keys:
                 exists_states = [
                     exists or key in batch.pending_keys for key, exists in zip(keys, exists_states, strict=True)

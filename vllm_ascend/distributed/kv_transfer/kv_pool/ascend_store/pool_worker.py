@@ -2182,12 +2182,6 @@ class KVPoolWorker:
         if ensure_initialized is not None:
             ensure_initialized()
 
-    def _exists_after_save_fence(self, keys: list[str]) -> list[int]:
-        send_thread = getattr(self, "kv_send_thread", None)
-        if isinstance(send_thread, KVCacheStoreSendingThread):
-            return send_thread.lookup_after_pending_saves(keys)
-        return self.m_store.exists(keys)
-
     def _build_lookup_keys(
         self,
         token_len: int,
@@ -2245,7 +2239,7 @@ class KVPoolWorker:
                     hits.append(0)
                     continue
 
-                res = self._exists_after_save_fence(keys)
+                res = self.m_store.exists(keys)
 
                 if use_layerwise:
                     res = self.check_all_layers_exists(res, self.num_layers)
@@ -2381,7 +2375,7 @@ class KVPoolWorker:
 
             if not keys:
                 continue
-            res = self._exists_after_save_fence(keys)
+            res = self.m_store.exists(keys)
             offset = 0
             for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
                 values = res[offset : offset + count]  # type: ignore[index]
@@ -2448,7 +2442,7 @@ class KVPoolWorker:
 
                 multi_tp_keys = self._expand_lookup_keys_by_rank(keys, group_id)
                 num_ranks = len(multi_tp_keys) // len(keys)
-                res = self._exists_after_save_fence(multi_tp_keys)
+                res = self.m_store.exists(multi_tp_keys)
                 num_block = len(keys)
                 if use_layerwise:
                     res = self.check_all_layers_exists(res, self.num_layers)
