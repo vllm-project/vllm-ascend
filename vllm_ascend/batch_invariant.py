@@ -26,7 +26,8 @@ from vllm.triton_utils import HAS_TRITON
 
 # in case recursive call in reduce_sum.
 torch_sum = torch.sum
-torch_tensor_sum = torch.Tensor.sum
+
+_BATCH_INVARIANT_SUM_DTYPES = {torch.float16, torch.float32, torch.bfloat16}
 
 
 if HAS_TRITON:
@@ -63,25 +64,59 @@ def add_rms_norm(
     return x_, None, residual_
 
 
-def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
-    """npu_reduce_sum_batch_invariant requires dim to be specified, but torch.sum
-    doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
+def reduce_sum(
+    x: torch.Tensor,
+    dim: int | tuple[int, ...] | list[int] | None = None,
+    keepdim: bool = False,
+    *,
+    dtype: torch.dtype | None = None,
+    out: torch.Tensor | None = None,
+    **kwargs,
+) -> torch.Tensor:
+    """Route last-dimension NPU reductions through the batch-invariant sum op.
+
+    The AscendC operator currently supports only the last dimension. Reductions
+    over other or multiple dimensions keep the native PyTorch implementation.
     """
-    dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and dim is not None:
-        return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
-    # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
-    return torch_sum(x, dim, keepdim)
+    if "axis" in kwargs:
+        dim = kwargs.pop("axis")
+    if "keepdims" in kwargs:
+        keepdim = kwargs.pop("keepdims")
+    if kwargs:
+        unexpected = next(iter(kwargs))
+        raise TypeError(f"sum() got an unexpected keyword argument '{unexpected}'")
 
+    def native_sum() -> torch.Tensor:
+        native_kwargs = {"dim": dim, "keepdim": keepdim}
+        if dtype is not None:
+            native_kwargs["dtype"] = dtype
+        if out is not None:
+            native_kwargs["out"] = out
+        return torch_sum(x, **native_kwargs)
 
-def tensor_sum(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-    """Use the batch-invariant op only for the MoE top-k normalization sum."""
-    dim = args[0] if args else kwargs.get("dim", kwargs.get("axis"))
-    keepdim = args[1] if len(args) > 1 else kwargs.get("keepdim", kwargs.get("keepdims", False))
-    dtype = kwargs.get("dtype")
-    if x.device.type == "npu" and dim == -1 and keepdim and dtype is None:
-        return reduce_sum(x, dim, keepdim)
-    return torch_tensor_sum(x, *args, **kwargs)
+    target_dtype = dtype or x.dtype
+    if x.device.type != "npu" or target_dtype not in _BATCH_INVARIANT_SUM_DTYPES or x.dim() == 0:
+        return native_sum()
+
+    if dim is None and x.dim() == 1:
+        reduce_dim = -1
+    elif isinstance(dim, int):
+        reduce_dim = dim
+    elif isinstance(dim, (tuple, list)) and len(dim) == 1 and isinstance(dim[0], int):
+        reduce_dim = dim[0]
+    else:
+        return native_sum()
+
+    if reduce_dim < -x.dim() or reduce_dim >= x.dim() or reduce_dim % x.dim() != x.dim() - 1:
+        return native_sum()
+
+    result = x.to(dtype=dtype) if dtype is not None and x.dtype != dtype else x
+    result = torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(result, -1, keepdim)
+
+    if out is not None:
+        out.copy_(result)
+        return out
+    return result
 
 
 def override_envs_for_invariance():
@@ -135,8 +170,8 @@ def enable_batch_invariant_mode():
         torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
-        # Keep native Tensor.sum behavior except for MoE top-k normalization.
-        torch.Tensor.sum = tensor_sum
+        # Tensor.sum and torch.sum share the same batch-invariant implementation.
+        torch.Tensor.sum = reduce_sum
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
