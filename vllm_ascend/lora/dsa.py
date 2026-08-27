@@ -271,80 +271,6 @@ DSA_LORA_CLASSES: tuple[type[BaseLinearLayerWithLoRA], ...] = (
 )
 
 
-def _dsa_lora_active_slots(token_lora_indices: torch.Tensor) -> tuple[int, ...]:
-    return tuple(int(slot) for slot in torch.unique(token_lora_indices).detach().cpu().tolist() if slot >= 0)
-
-
-def _should_log_dsa_lora_delta(
-    linear: nn.Module,
-    context: DSALoRAContext,
-    token_lora_indices: torch.Tensor,
-    *,
-    module_name: str,
-    path: str,
-) -> bool:
-    active_slots = _dsa_lora_active_slots(token_lora_indices)
-    if not active_slots:
-        return False
-
-    diagnostic_key = (context.tp_rank, module_name, path, active_slots)
-    logged_keys = getattr(_log_dsa_lora_delta_once, "logged_keys", None)
-    return logged_keys is None or diagnostic_key not in logged_keys
-
-
-def _log_dsa_lora_delta_once(
-    linear: nn.Module,
-    context: DSALoRAContext,
-    token_lora_indices: torch.Tensor,
-    *,
-    module_name: str,
-    path: str,
-    delta: torch.Tensor,
-    local_rank: int,
-    lora_a: torch.Tensor,
-    lora_b: torch.Tensor,
-) -> None:
-    """Temporary eager-only diagnostic for validating DSA o-proj LoRA."""
-
-    if not _should_log_dsa_lora_delta(
-        linear,
-        context,
-        token_lora_indices,
-        module_name=module_name,
-        path=path,
-    ):
-        return
-
-    active_slots = _dsa_lora_active_slots(token_lora_indices)
-    diagnostic_key = (context.tp_rank, module_name, path, active_slots)
-    logged_keys = getattr(_log_dsa_lora_delta_once, "logged_keys", None)
-    if logged_keys is None:
-        logged_keys = set()
-        _log_dsa_lora_delta_once.logged_keys = logged_keys  # type: ignore[attr-defined]
-    logged_keys.add(diagnostic_key)
-
-    # This intentionally synchronizes NPU->CPU. It is diagnostic code for an
-    # enforce-eager validation run and must not be used for performance tests.
-    delta_float = delta.float()
-    layer_name = getattr(linear, "prefix", type(linear).__name__)
-    message = (
-        f"[DSA_LORA_DIAG] module={module_name} layer={layer_name} "
-        f"tp_rank={context.tp_rank} slots={active_slots} routing=Tensor "
-        f"path={path} fully_sharded={context.fully_sharded} "
-        f"local_rank={local_rank} tokens={token_lora_indices.shape[0]} "
-        f"lora_a_shape={tuple(lora_a.shape)} lora_b_shape={tuple(lora_b.shape)} "
-        f"delta_abs_max={delta_float.abs().max().item():.8e} "
-        f"delta_l2={torch.linalg.vector_norm(delta_float).item():.8e}"
-    )
-    logger.info("%s", message)
-    with open(
-        "/home/ltc/dsv4_wo_lora_delta_direct_20260827.log",
-        "a",
-        encoding="utf-8",
-    ) as diagnostic_log:
-        diagnostic_log.write(message + "\n")
-
-
 def prepare_dsa_lora(
     linear: nn.Module,
     x: torch.Tensor,
@@ -501,14 +427,6 @@ def apply_grouped_dsa_lora(
     output = output.contiguous()
     output_2d = output.view(num_tokens * num_groups, output_size)
     b_flat = lora_b[:, 0].view(-1, output_size, rank).contiguous()
-    should_log_delta = _should_log_dsa_lora_delta(
-        linear,
-        context,
-        token_lora_indices,
-        module_name="wo_a",
-        path="bgmv",
-    )
-    diagnostic_output = output_2d.clone() if should_log_delta else None
     context.punica_wrapper.bgmv_expand(
         shrink_output,
         b_flat,
@@ -516,18 +434,6 @@ def apply_grouped_dsa_lora(
         combined_indices,
         True,
     )
-    if diagnostic_output is not None:
-        _log_dsa_lora_delta_once(
-            linear,
-            context,
-            token_lora_indices,
-            module_name="wo_a",
-            path="bgmv",
-            delta=output_2d - diagnostic_output,
-            local_rank=rank,
-            lora_a=lora_a,
-            lora_b=lora_b,
-        )
     return output
 
 
@@ -585,16 +491,6 @@ def forward_with_dsa_lora(
         if context.tp_size > 1:
             shrink_output = tensor_model_parallel_all_reduce(shrink_output)
         output_offset = context.tp_rank * lora_b.shape[-2]
-    should_log_delta = _should_log_dsa_lora_delta(
-        linear,
-        context,
-        token_lora_indices,
-        module_name="wo_b",
-        path="bgmv",
-    )
-    diagnostic_output = (
-        output_2d[:, output_offset : output_offset + lora_b.shape[-2]].clone() if should_log_delta else None
-    )
     context.punica_wrapper.bgmv_expand_slice(
         shrink_output,
         lora_b[:, 0].contiguous(),
@@ -604,18 +500,6 @@ def forward_with_dsa_lora(
         lora_b.shape[-2],
         True,
     )
-    if diagnostic_output is not None:
-        _log_dsa_lora_delta_once(
-            linear,
-            context,
-            token_lora_indices,
-            module_name="wo_b",
-            path="bgmv",
-            delta=output_2d[:, output_offset : output_offset + lora_b.shape[-2]] - diagnostic_output,
-            local_rank=lora_a.shape[-2],
-            lora_a=lora_a,
-            lora_b=lora_b,
-        )
 
     if base_layer.reduce_results and base_layer.tp_size > 1:
         output_parallel = tensor_model_parallel_all_reduce(output_parallel)
