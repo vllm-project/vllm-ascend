@@ -715,6 +715,8 @@ After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Serve](https://docs.vllm.ai/en/stable/cli/serve/), [vLLM Features](https://docs.vllm.ai/en/stable/features), [vLLM Ascend Additional Configuration](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html) and [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) for detailed key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
