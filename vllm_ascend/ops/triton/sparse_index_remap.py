@@ -59,21 +59,18 @@ def remap_sparse_indices_fused_kernel(
     in_bounds = offsets < topk_count
 
     idx = tl.load(indices_ptr + row * topk_count + offsets, mask=in_bounds, other=-1)
-    idx_f = idx.to(tl.float32)
-    il_f = interleave_size.to(tl.float32)
-    dcp_size_f = dcp_size.to(tl.float32)
-    dcp_rank_f = dcp_rank.to(tl.float32)
-
-    block_idx_f = tl.floor(idx_f / il_f)
-    owner_f = block_idx_f - tl.floor(block_idx_f / dcp_size_f) * dcp_size_f
-    valid = (idx >= 0) & (owner_f == dcp_rank_f)
+    # Integer remap math: matches the fp32 torch fallback bit-exactly
+    # (indices are far below 2^24), and the int32/fp32 variants measured
+    # identically on NPU.
+    block_idx = idx // interleave_size
+    owner = block_idx - (block_idx // dcp_size) * dcp_size
+    valid = (idx >= 0) & (owner == dcp_rank)
 
     if INTERLEAVE_ONE:
-        remapped = tl.floor(idx_f / dcp_size_f).to(tl.int32)
+        remapped = idx // dcp_size
     else:
-        local_offsets_f = idx_f - block_idx_f * il_f
-        remapped_f = tl.floor(idx_f / (dcp_size_f * il_f)) * il_f + local_offsets_f
-        remapped = remapped_f.to(tl.int32)
+        local_offsets = idx - block_idx * interleave_size
+        remapped = (idx // (dcp_size * interleave_size)) * interleave_size + local_offsets
 
     valid_i32 = valid.to(tl.int32)
     chunk_out = chunk_out_ptr + (row * NUM_CHUNKS + chunk) * BLOCK

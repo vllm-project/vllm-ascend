@@ -5,6 +5,12 @@ import torch
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPImpl
 
+try:
+    import torch_npu
+    HAS_NPU = torch.npu.is_available()
+except ImportError:
+    HAS_NPU = False
+
 
 def _make_impl(
     rank: int,
@@ -80,12 +86,13 @@ def test_sfa_dcp_sparse_indices_interleave_size_one() -> None:
     )
 
 
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("dcp_size", [2, 4])
 @pytest.mark.parametrize("interleave_size", [1, 2, 4])
 @pytest.mark.parametrize("topk", [1, 8, 48, 256])
 def test_sfa_dcp_sparse_indices_triton_matches_reference(dcp_size: int, interleave_size: int, topk: int) -> None:
     device = torch.device("npu")
-    gen = torch.Generator(device="cpu").manual_seed(dcp_size * 100 + interleave_size * 10 + topk)
+    gen = torch.Generator(device=device).manual_seed(dcp_size * 100 + interleave_size * 10 + topk)
     max_global_idx = topk * dcp_size * interleave_size
     indices = torch.randint(
         -1,
@@ -105,12 +112,13 @@ def test_sfa_dcp_sparse_indices_triton_matches_reference(dcp_size: int, interlea
         )
 
 
+@pytest.mark.skipif(not HAS_NPU, reason="NPU is not available")
 @pytest.mark.parametrize("interleave_size", [1, 2, 4])
 def test_sfa_dcp_sparse_indices_3d_input(interleave_size: int) -> None:
-    # 真实 DCP 场景: dcp_group.all_gather(dim=0) 后输入为 [dcp_size, 1, topk].
+    # Real DCP case: input is [dcp_size, 1, topk] after dcp_group.all_gather(dim=0).
     device = torch.device("npu")
     dcp_size, topk = 6, 2048
-    gen = torch.Generator(device="cpu").manual_seed(interleave_size)
+    gen = torch.Generator(device=device).manual_seed(interleave_size)
     indices = torch.randint(
         -1,
         topk * dcp_size * interleave_size + 1,
