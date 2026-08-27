@@ -425,7 +425,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         return self.moe_config.ep_rank
 
     def _get_force_eplb_top_k(self) -> int | None:
-        for owner in (self, self.moe_config, self.router):
+        for owner in filter(None, (self, self.moe_config, self.router)):
             top_k = getattr(owner, "top_k", None)
             if top_k is None:
                 top_k = getattr(owner, "num_experts_per_tok", None)
