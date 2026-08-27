@@ -145,7 +145,9 @@ class AscendDSABackend(AttentionBackend):
 
     @classmethod
     def get_supported_kernel_block_sizes(cls) -> list[int]:
-        return cls._kernel_block_sizes
+        # Return a copy: callers previously received a fresh literal per
+        # call, so mutating the result must not corrupt the class default.
+        return list(cls._kernel_block_sizes)
 
 
 class AscendDSAC4Backend(AscendDSABackend):
