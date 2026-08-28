@@ -200,6 +200,12 @@ jobs:
           # Keep untracked leftovers (main2main_flow, results dirs) across
           # rebuilds; tracked files are still reset to base_ref.
           clean: false
+          # Without this, checkout persists http.<...>.extraheader with the
+          # repo-scoped GITHUB_TOKEN into the workspace .git — that header
+          # OVERRIDES the PAT embedded in the resident loop's push URLs, so
+          # results pushes authenticate as github-actions[bot] and are
+          # denied on the signal fork (observed 2026-08-28 run 33142811816).
+          persist-credentials: false
 
       - name: Checkout vllm-project/vllm repo
         if: steps.env-check.outputs.fresh != 'true'
