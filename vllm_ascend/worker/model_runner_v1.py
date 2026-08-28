@@ -4671,7 +4671,10 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         v_shape = (*k_shape[:-1], head_size_v)
-                        if attn_backend.get_name() == "QWEN4_EXP_QSA_TRITON":
+                        if attn_backend.get_name() in (
+                            "QWEN4_EXP_QSA_TRITON",
+                            "QWEN4_EXP_QSA_ASCEND",
+                        ):
                             merged_shape = (
                                 *k_shape[:-1],
                                 current_kv_cache_spec.head_size + head_size_v,

@@ -38,15 +38,144 @@ def apply_qsa_rope(
     positions: torch.Tensor,
     tensor: torch.Tensor,
 ) -> torch.Tensor:
-    """Use the Ascend-patched vLLM rotary module for 1D RoPE and MRoPE."""
-    original_shape = tensor.shape
-    flattened = tensor.flatten(1)
-    rotated, _ = rotary_emb(positions, flattened, flattened)
-    return rotated.reshape(original_shape)
+    """Apply RoPE using the QSA head width rather than the main Q/K width."""
+    rotary_dim = int(rotary_emb.rotary_dim)
+    cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
+    cos_sin = cache[positions]
+    cos, sin = cos_sin.chunk(2, dim=-1)
+
+    if positions.ndim == 2:
+        sections = list(rotary_emb.mrope_section)
+        if getattr(rotary_emb, "mrope_interleaved", False):
+            merged_cos = cos[0].clone()
+            merged_sin = sin[0].clone()
+            merged_cos[..., 1 : sections[1] * 3 : 3] = cos[
+                1, ..., 1 : sections[1] * 3 : 3
+            ]
+            merged_cos[..., 2 : sections[2] * 3 : 3] = cos[
+                2, ..., 2 : sections[2] * 3 : 3
+            ]
+            merged_sin[..., 1 : sections[1] * 3 : 3] = sin[
+                1, ..., 1 : sections[1] * 3 : 3
+            ]
+            merged_sin[..., 2 : sections[2] * 3 : 3] = sin[
+                2, ..., 2 : sections[2] * 3 : 3
+            ]
+            cos, sin = merged_cos, merged_sin
+        else:
+            cos = torch.cat(
+                [part[i] for i, part in enumerate(cos.split(sections, dim=-1))],
+                dim=-1,
+            )
+            sin = torch.cat(
+                [part[i] for i, part in enumerate(sin.split(sections, dim=-1))],
+                dim=-1,
+            )
+
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    rotary = tensor[..., :rotary_dim]
+    if getattr(rotary_emb, "is_neox_style", False):
+        first, second = rotary.chunk(2, dim=-1)
+        rotated = torch.cat(
+            (first * cos - second * sin, second * cos + first * sin),
+            dim=-1,
+        )
+    else:
+        even = rotary[..., ::2]
+        odd = rotary[..., 1::2]
+        rotated = torch.stack(
+            (even * cos - odd * sin, odd * cos + even * sin),
+            dim=-1,
+        ).flatten(-2)
+    return torch.cat((rotated, tensor[..., rotary_dim:]), dim=-1)
 
 
 class AscendQSAIndexer(upstream_indexer.QSAIndexer):
     """QSA indexer using NPU-compatible cache, RoPE and top-k operators."""
+
+    def _metadata(
+        self,
+    ) -> tuple[QSAForwardMetadata, QSAForwardMetadata] | None:
+        """Read paired QSA metadata without a graph-breaking host sync."""
+        metadata = get_forward_context().attn_metadata
+        if isinstance(metadata, list):
+            metadata = metadata[0]
+        if not isinstance(metadata, dict):
+            return None
+        raw = cast(QSAForwardMetadata, metadata[self.raw_key_cache.prefix])
+        compressed = cast(
+            QSAForwardMetadata,
+            metadata[self.compressed_key_cache.prefix],
+        )
+        if raw.num_actual_tokens != compressed.num_actual_tokens:
+            raise RuntimeError("QSA side-cache metadata token counts disagree")
+        # The common Ascend builder creates the paired logical positions
+        # together. Avoid torch.equal here because checking an NPU tensor on
+        # the host would synchronize the stream during FULL graph capture.
+        return raw, compressed
+
+    def normalize_compressed_keys(
+        self,
+        pooled: torch.Tensor,
+        first_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the reference K normalization and RoPE to compressed keys."""
+        compressed_keys = upstream_indexer._gemma_rmsnorm(
+            pooled.reshape(-1, self.index_head_dim),
+            self.k_layernorm.weight,
+            self.k_layernorm.variance_epsilon,
+        ).reshape(-1, 1, self.index_head_dim)
+        if getattr(self.rotary_emb, "mrope_section", None):
+            first_positions = first_positions.transpose(0, 1)
+        else:
+            first_positions = first_positions[:, 0]
+        return apply_qsa_rope(
+            self.rotary_emb,
+            first_positions,
+            compressed_keys,
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Run the portable Ascend path instead of upstream Triton kernels."""
+        metadata = self._metadata()
+        if metadata is None:
+            # Preserve step-0 indices when later MTP steps reuse the buffer.
+            if self.skip_topk and out is not None:
+                return out
+            result = torch.full(
+                (hidden_states.shape[0], self.output_width),
+                -1,
+                dtype=torch.int32,
+                device=hidden_states.device,
+            )
+            if out is not None:
+                out.copy_(result)
+                return out
+            return result
+
+        raw_metadata, compressed_metadata = metadata
+        num_tokens = raw_metadata.num_actual_tokens
+        hidden_states = hidden_states[:num_tokens]
+        positions = positions[..., :num_tokens]
+        query, token_k = self.project_qk(hidden_states, positions)
+        self._update_and_compress(
+            token_k,
+            positions,
+            raw_metadata,
+            compressed_metadata,
+        )
+
+        if self.skip_topk:
+            if out is None:
+                raise RuntimeError("QSA top-k reuse requires an output buffer")
+            return out
+        return self._select(query, compressed_metadata, out)
 
     def project_qk(
         self,

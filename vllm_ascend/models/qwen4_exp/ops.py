@@ -91,24 +91,43 @@ def qsa_store_cache_rows(
     rows: torch.Tensor,
 ) -> None:
     """Store QSA rows using device-native indexed writes."""
-    if cache.ndim != 4 or cache.shape[2] <= 0:
+    if (
+        cache.ndim != 4
+        or cache.shape[0] <= 0
+        or cache.shape[1] <= 0
+        or cache.shape[2] <= 0
+    ):
         raise ValueError("QSA cache must be [blocks, block_size, heads, width]")
     if rows.ndim == 2:
         rows = rows.unsqueeze(1)
     if rows.ndim != 3 or rows.shape[1:] != cache.shape[2:]:
         raise ValueError("QSA cache rows have an incompatible shape")
     slots = slot_mapping.reshape(-1).long()
+    # Target prefill can have more padded slots than rows, while a draft pass
+    # can have more rows than active slots. Only the aligned prefix represents
+    # cache updates; the remainder is capacity padding.
+    num_updates = min(slots.shape[0], rows.shape[0])
+    slots = slots[:num_updates]
     cache_capacity = cache.shape[0] * cache.shape[1]
     valid = (slots >= 0) & (slots < cache_capacity)
-    safe_slots = slots.masked_select(valid)
-    safe_rows = rows[: slots.shape[0]][valid]
+    # Keep the update width static for NPU graph capture. ``masked_select``
+    # creates a data-dependent output shape. Invalid rows map to slot 0 but
+    # contribute a zero delta, so they cannot overwrite a real row there.
+    safe_slots = slots.clamp(0, cache_capacity - 1)
     physical_blocks = torch.div(safe_slots, cache.shape[1], rounding_mode="floor")
     block_offsets = safe_slots.remainder(cache.shape[1])
     # Do not flatten the cache here. With an HND cache, ``cache`` is a
     # non-contiguous logical [block, token, head, dim] view and reshape may
     # silently materialize a copy. Two-dimensional indexed assignment keeps
     # writes attached to the original KV-cache allocation for both layouts.
-    cache[physical_blocks, block_offsets] = safe_rows.to(cache.dtype)
+    current_rows = cache[physical_blocks, block_offsets]
+    update_rows = rows[:num_updates].to(cache.dtype)
+    deltas = (update_rows - current_rows) * valid.view(-1, 1, 1).to(cache.dtype)
+    cache.index_put_(
+        (physical_blocks, block_offsets),
+        deltas,
+        accumulate=True,
+    )
 
 
 def qsa_compress_groups_with_ratio(
