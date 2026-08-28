@@ -59,6 +59,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 __all__ = [
     "build_local_reload_plan",
+    "build_orig_to_dense_rank_table",
     "check_redundancy_sufficient",
     "compute_dead_ep_ranks",
     "densify_routing_table_physical_ids",
@@ -75,6 +76,21 @@ _W13_WEIGHT_SUFFIXES = ("gate_up_proj.weight", "gate_proj.weight", "up_proj.weig
 _W2_WEIGHT_SUFFIX = "down_proj.weight"
 _W13_SCALE_SUFFIXES = ("gate_up_proj.weight_scale", "gate_proj.weight_scale", "up_proj.weight_scale")
 _W2_SCALE_SUFFIX = "down_proj.weight_scale"
+
+
+def build_orig_to_dense_rank_table(ep_world_size: int, dead_ranks: set[int]) -> torch.Tensor:
+    """Build the orig-rank -> densified-rank mapping table.
+
+    Returns a ``[ep_world_size]`` int32 tensor where ``table[orig_rank]`` is
+    the densified rank (-1 for dead ranks), i.e. the kernel's table1 view of
+    the elastic_info layout. Densified ranks are assigned in ascending
+    original-rank order over the survivors.
+    """
+    table = torch.full((ep_world_size,), -1, dtype=torch.int32)
+    alive = sorted(set(range(ep_world_size)) - dead_ranks)
+    for dense_rank, orig_rank in enumerate(alive):
+        table[orig_rank] = dense_rank
+    return table
 
 
 def densify_routing_table_physical_ids(
@@ -126,17 +142,21 @@ def build_local_reload_plan(
     ep_rank: int,
     num_local_experts: int,
 ) -> dict[int, list[tuple[int, int]]]:
-    """Diff this rank's physical-slot block before/after redistribution.
+    """Find this rank's slots whose logical expert changed after redistribution.
+
+    A surviving rank keeps its physical slot block, but some slots may now host
+    a different logical expert. This diffs this rank's block of
+    ``physical_to_logical_map`` before/after and reports the changed slots.
 
     Args:
-        p2l_before/p2l_after: full-width physical_to_logical_map snapshots
-            (CPU), before and after mark_dead + redistribute.
-        ep_rank: this worker's original EP rank (never rewritten).
+        p2l_before/p2l_after: full ``physical_to_logical_map`` snapshots
+            (``[num_layers, ep_world_size * num_local_experts]``, CPU).
+        ep_rank: this rank's original EP rank; selects the slot block.
         num_local_experts: physical slots per EP rank.
 
     Returns:
-        {moe_layer_idx: [(local_slot, logical_expert_id), ...]} for slots on
-        this rank whose logical expert changed.
+        ``{moe_layer_idx: [(local_slot, new_logical_expert_id), ...]}`` of the
+        changed slots, for ``reload_experts_from_disk``.
     """
     start = ep_rank * num_local_experts
     block_before = p2l_before[:, start : start + num_local_experts]
