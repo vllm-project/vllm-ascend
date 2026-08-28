@@ -125,9 +125,16 @@ class AscendPCPManager(PCPManager):
         if cudagraph_mode.has_full_cudagraphs() and cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
             raise NotImplementedError("MRV2 PCP supports FULL_DECODE_ONLY CUDA graphs only.")
 
-    def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
+    def partition_batch(
+        self,
+        input_batch: AscendInputBatch,
+        padded_num_tokens: int | None = None,
+    ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        local_batch = super().partition_batch(input_batch)
+        local_batch = super().partition_batch(
+            input_batch,
+            padded_num_tokens=padded_num_tokens,
+        )
         assert isinstance(local_batch, AscendInputBatch)
 
         # PCP builds the local layout from actual tokens, but a FULL decode
