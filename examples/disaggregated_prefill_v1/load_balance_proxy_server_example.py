@@ -202,6 +202,13 @@ class BackendServer:
     active_tokens: float = 0.0
     active_kv_cache: float = 0.0
     heap_seq: int = 0
+    # Round-robin / LRU tiebreaker: monotonically increasing counter stamped on
+    # the server each time it is picked. When priorities tie (typically at low
+    # concurrency, where in-flight load has already been released to zero), the
+    # heap pops the server that was picked LEAST recently instead of always the
+    # first-added one (the old ``ordinal`` tiebreak), so instances are used in
+    # rotation while least-loaded semantics at high concurrency are preserved.
+    pick_seq: int = 0
 
 
 @dataclass
@@ -275,6 +282,8 @@ class SharedProxyScheduler:
             ServerRole.DECODE: RolePools(),
         }
         self._ordinal = 0
+        # Global monotonic counter backing BackendServer.pick_seq (LRU tiebreak).
+        self._pick_counter = 0
 
         for host, port in prefiller_instances:
             self._add_server_no_lock(ServerRole.PREFILL, host, port)
@@ -308,7 +317,9 @@ class SharedProxyScheduler:
         pool = self._pool(role)
         entry = pool.servers[key]
         entry.heap_seq += 1
-        heapq.heappush(pool.heap, (self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
+        # Tiebreak by pick_seq (least-recently-picked first) instead of the
+        # static ordinal, so equal-priority servers rotate at low concurrency.
+        heapq.heappush(pool.heap, (self._priority(role, entry, key), entry.pick_seq, entry.heap_seq, key))
         if len(pool.heap) > 2 * len(pool.servers):
             self._reset_heap(role)
 
@@ -329,7 +340,7 @@ class SharedProxyScheduler:
         for key, entry in pool.servers.items():
             if bump_seq:
                 entry.heap_seq += 1
-            heap.append((self._priority(role, entry, key), entry.ordinal, entry.heap_seq, key))
+            heap.append((self._priority(role, entry, key), entry.pick_seq, entry.heap_seq, key))
         heapq.heapify(heap)
         pool.heap = heap
 
@@ -383,6 +394,11 @@ class SharedProxyScheduler:
     ) -> dict[str, Any]:
         key = self._pop_valid(role)
         entry = self._pool(role).servers[key]
+        # Stamp the LRU counter so that, when priorities tie later, this server
+        # is only picked again after every other equal-priority server has had
+        # its turn (round-robin at low concurrency).
+        entry.pick_seq = self._pick_counter
+        self._pick_counter += 1
         if active_tokens:
             entry.active_tokens += load
         if kv_cache:
