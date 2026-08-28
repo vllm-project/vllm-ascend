@@ -696,7 +696,13 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        x_views = [x[slice_idx].view(-1, x[slice_idx].shape[-1]) for slice_idx in range(len(lora_b_stacked))]
+        # aclnnGroupedMatmulV4 forbids a transposed X when group_type=0.
+        # TP all-gather can return a logically transposed view even though its
+        # shape is already [tokens, rank], so normalize it at the dispatcher
+        # boundary. This is a no-op for the common contiguous case.
+        x_views = [
+            x[slice_idx].view(-1, x[slice_idx].shape[-1]).contiguous() for slice_idx in range(len(lora_b_stacked))
+        ]
         if sgmv_metadata is not None:
             if sgmv_metadata.no_lora:
                 return
