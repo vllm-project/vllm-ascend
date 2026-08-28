@@ -62,7 +62,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size
+from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -222,6 +222,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    get_kv_cache_tensor_layer_names,
 )
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -3649,7 +3650,9 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
+    ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -3664,7 +3667,7 @@ class NPUModelRunner(GPUModelRunner):
         apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
-        self.initialize_attn_backend(kv_cache_config)
+        self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any(
@@ -3706,7 +3709,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.sparse_kv_offload_enabled:
             assert self.sparse_kv_offload_manager is not None
             self.sparse_kv_offload_manager.register_kv_caches(kv_caches)
-        if has_kv_transfer_group():
+        if has_kv_transfer_group() and not is_profiling:
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
         if self.model_config.enable_return_routed_experts:
@@ -3763,6 +3766,60 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         return kv_caches
+
+    def post_kv_cache_wake_up(self) -> None:
+        self.init_fp8_kv_scales()
+
+    @torch.inference_mode()
+    def init_fp8_kv_scales(self) -> None:
+        """
+        Re-initialize the KV cache and FP8 scales after waking from sleep.
+        1. Zero out the KV cache tensors to remove garbage data from re-allocation.
+        2. Reset Attention layer scaling factors (_k_scale, _v_scale) to 1.0.
+          If these are left at 0.0 (default after wake_up), all KV cache values
+          become effectively zero, causing gibberish output.
+        """
+        if not is_quantized_kv_cache(self.cache_config.cache_dtype):
+            return
+
+        kv_caches = getattr(self, "kv_caches", [])
+        for cache_entry in kv_caches:
+            if cache_entry is None:
+                continue
+            # Hybrid models (Mamba, DeltaNet) store per-layer state as a
+            # list of tensors rather than a single tensor.
+            if isinstance(cache_entry, list):
+                for t in cache_entry:
+                    t.zero_()
+            else:
+                cache_entry.zero_()
+
+        k_attr_names = ("_k_scale", "k_scale")
+        v_attr_names = ("_v_scale", "v_scale")
+
+        attn_layers = self.compilation_config.static_forward_context
+        for name, module in attn_layers.items():
+            if isinstance(module, (Attention, MLAAttention)):
+                # Generally, scale is 1.0 if user uses on-the-fly fp8
+                # kvcache quant. However, to get better accuracy, compression
+                # frameworks like llm-compressors allow users to tune the
+                # scale. We may need to restore the specific calibrated scales
+                # here in the future.
+                k_scale_val, v_scale_val = 1.0, 1.0
+
+                # Processing K Scale
+                for attr in k_attr_names:
+                    if hasattr(module, attr):
+                        param = getattr(module, attr)
+                        if isinstance(param, torch.Tensor):
+                            param.fill_(k_scale_val)
+
+                # Processing V Scale
+                for attr in v_attr_names:
+                    if hasattr(module, attr):
+                        param = getattr(module, attr)
+                        if isinstance(param, torch.Tensor):
+                            param.fill_(v_scale_val)
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
         compilation_config = getattr(self, "compilation_config", None)
@@ -3915,15 +3972,16 @@ class NPUModelRunner(GPUModelRunner):
         # have only linear or attention layers, for example, the mtp layer.
         self.hybrid_with_attn_and_mamba = False
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            shared_layer_names = get_kv_cache_tensor_layer_names(kv_cache_tensor)
             use_mamba, use_attn = False, False
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_layer_names:
                 if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
                     use_mamba = True
                 if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
                     use_attn = True
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
+            for idx in range(len(shared_layer_names)):
+                layer_name = shared_layer_names[idx]
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
                 if (
                     "linear_attn" in layer_name
@@ -3937,11 +3995,11 @@ class NPUModelRunner(GPUModelRunner):
                     # bfloat16 hidden-states data (same bytes, different interpretation).
                     has_mamba = any(
                         isinstance(layer_kv_cache_spec.get(ln), MambaSpec)
-                        for ln in kv_cache_tensor.shared_by
+                        for ln in shared_layer_names
                     )
                     has_hidden = any(
                         is_hidden_state_cache_spec(layer_kv_cache_spec.get(ln))
-                        for ln in kv_cache_tensor.shared_by
+                        for ln in shared_layer_names
                     )
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
@@ -3959,13 +4017,13 @@ class NPUModelRunner(GPUModelRunner):
                             cache_size_aligned = kv_cache_tensor.size + alignment
                             tensor_hs = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                             tensor_hs = self._align_memory(tensor_hs, alignment)[: kv_cache_tensor.size]
-                        for layer_name_inner in kv_cache_tensor.shared_by:
+                        for layer_name_inner in shared_layer_names:
                             if is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name_inner)):
                                 kv_cache_raw_tensors[layer_name_inner] = tensor_hs
                             else:
                                 kv_cache_raw_tensors[layer_name_inner] = tensor
                     else:
-                        for layer_name_inner in kv_cache_tensor.shared_by:
+                        for layer_name_inner in shared_layer_names:
                             kv_cache_raw_tensors[layer_name_inner] = tensor
 
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
@@ -3977,7 +4035,7 @@ class NPUModelRunner(GPUModelRunner):
                         cache_size_aligned = kv_cache_tensor.size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layer_names:
                         # shared the kvcache between the self_attn specs in the same group
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif (
@@ -4018,7 +4076,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         raw_cache = (k_tensor,)
 
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layer_names:
                         kv_cache_raw_tensors[layer_name_inner] = raw_cache
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
@@ -4062,7 +4120,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.sparse_kv_offload_config.keep_device_kv_cache,
                             self._allocate_int8_cache_tensor,
                         )
-                        assert len(kv_cache_tensor.shared_by) == 1, "Sparse KV offload do not support HMA."
+                        assert len(shared_layer_names) == 1, "Sparse KV offload do not support HMA."
                         kv_cache_raw_tensors[layer_name] = raw_tensors
                         continue
                     # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
@@ -4079,7 +4137,7 @@ class NPUModelRunner(GPUModelRunner):
                             alignment,
                         )
 
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layer_names:
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
                             if current_sparse_sfa_c8:
@@ -4302,12 +4360,23 @@ class NPUModelRunner(GPUModelRunner):
                         assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
                         num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
                         assert num_blocks >= kv_cache_config.num_blocks
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
-                            num_blocks,
-                            current_kv_cache_spec.block_size,
-                            current_kv_cache_spec.num_kv_heads,
-                            current_kv_cache_spec.head_size,
-                        )
+                        if vllm_version_is("0.27.1"):
+                            kv_cache_shape = attn_backend.get_kv_cache_shape(
+                                num_blocks,
+                                current_kv_cache_spec.block_size,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.head_size,
+                            )
+                        else:
+                            # Upstream removed CacheOnlyAttentionBackend
+                            # .get_kv_cache_shape and standardized the cache-only
+                            # view to [B, H, N, C].
+                            kv_cache_shape = (
+                                num_blocks,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.block_size,
+                                current_kv_cache_spec.head_size,
+                            )
                         raw_tensor = raw_tensor.view(current_kv_cache_spec.dtype)
                         page_size_padded = getattr(
                             current_kv_cache_spec, "page_size_padded", None
@@ -4572,7 +4641,9 @@ class NPUModelRunner(GPUModelRunner):
                 reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
             )
 
-    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_attn_backend(
+        self, kv_cache_config: KVCacheConfig, is_profiling: bool = False
+    ) -> None:
         """
         Initialize the attention backends and attention metadata builders.
         """
@@ -4665,6 +4736,7 @@ class NPUModelRunner(GPUModelRunner):
         self._check_and_update_cudagraph_mode(
             attention_backend_list,
             kv_cache_config.kv_cache_groups,
+            is_profiling=is_profiling,
         )
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
@@ -4820,6 +4892,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
+        is_profiling: bool = False,
     ) -> None:
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_attn_backend = None
@@ -4837,15 +4910,27 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
-            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                min_cg_support=min_cg_support,
-                min_cg_attn_backend=min_cg_attn_backend,
-                uniform_decode_query_len=self.uniform_decode_query_len,
-                use_v2_model_runner=False,
-                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
-                kv_cache_config=self.kv_cache_config,
-                max_num_reqs=self.max_num_reqs,
-            )
+            if vllm_version_is("0.27.1"):
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support=min_cg_support,
+                    min_cg_attn_backend=min_cg_attn_backend,
+                    uniform_decode_query_len=self.uniform_decode_query_len,
+                    use_v2_model_runner=False,
+                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                    kv_cache_config=self.kv_cache_config,
+                    max_num_reqs=self.max_num_reqs,
+                )
+            else:
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support=min_cg_support,
+                    min_cg_attn_backend=min_cg_attn_backend,
+                    uniform_decode_query_len=self.uniform_decode_query_len,
+                    use_v2_model_runner=False,
+                    tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                    kv_cache_config=self.kv_cache_config,
+                    max_num_reqs=self.max_num_reqs,
+                    is_profiling=is_profiling,
+                )
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
             )

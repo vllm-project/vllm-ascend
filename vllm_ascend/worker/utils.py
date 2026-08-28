@@ -66,7 +66,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
         self._ids_pinned: torch.Tensor | None = None
         self._ids_gpu: torch.Tensor | None = None
 
-    def init_meta(
+    def init_meta(  # type: ignore[override]
         self,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[list[int]],

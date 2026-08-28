@@ -11,9 +11,6 @@ from dataclasses import replace
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    is_kv_cache_tensor_packed,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
@@ -31,6 +28,24 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
 )
+
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_tensor_layer_names
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.27.1"):
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (  # type: ignore[import-not-found]
+        is_kv_cache_tensor_packed,
+    )
+else:
+
+    def is_kv_cache_tensor_packed(kv_cache_tensor) -> bool:
+        """Return whether a KV cache tensor uses a packed block stride.
+
+        Upstream removed this helper during the KV cache layout refactor;
+        on main every tensor carries a block stride, so packed tensors are
+        the ones that offset or share layers within one backing allocation.
+        """
+        return bool(kv_cache_tensor.offset) or len(kv_cache_tensor.layers) > 1
 
 
 def _make_int8_block_view(
@@ -192,7 +207,7 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
         layer_is_packed = {
             layer_name: is_kv_cache_tensor_packed(kv_tensor)
             for kv_tensor in kv_cache_config.kv_cache_tensors
-            for layer_name in kv_tensor.shared_by
+            for layer_name in get_kv_cache_tensor_layer_names(kv_tensor)
         }
 
         canonical_tensors: list[CanonicalKVCacheTensor] = []

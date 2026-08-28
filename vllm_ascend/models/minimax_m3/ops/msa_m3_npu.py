@@ -50,7 +50,7 @@ def _npu_k2q_csr(
     """Convert MiniMax-M3 q2k indices to k2q CSR on NPU."""
     # A5 disables the generic custom-op loader, so register the in-tree
     # MiniMax M3 operators lazily after the NPU runtime has been initialized.
-    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-not-found, import-untyped]  # noqa: F401, PLC0415
 
     enable_custom_op()
     if total_rows < 0 or max_kv < 0:

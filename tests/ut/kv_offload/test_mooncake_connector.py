@@ -64,7 +64,10 @@ patch(
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
 patch("torch.npu.set_device").start()
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
+from vllm_ascend.core.kv_cache_interface import (  # noqa: E402
+    AscendSFAIndexerCacheSpec,
+    get_kv_cache_tensor_layer_names,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
     GroupPull,
@@ -347,7 +350,9 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
             available_memory=uniform_spec.page_size_bytes * num_blocks,
         )
-        allocated_sizes = {tensor.shared_by[0]: tensor.size for tensor in allocated_config.kv_cache_tensors}
+        allocated_sizes = {
+            get_kv_cache_tensor_layer_names(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors
+        }
         self.assertEqual(allocated_config.num_blocks, num_blocks)
         self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
         self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
@@ -1923,7 +1928,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_trims_mtp_blocks_in_params(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -1944,7 +1949,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.scheduler.pcp_size = 1
         self.scheduler.dcp_size = 4
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
@@ -1964,7 +1969,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_clips_sliding_window_blocks_in_params(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -1983,7 +1988,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_trims_mtp_before_swa_tail_clip(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
@@ -2002,17 +2007,17 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
     def test_request_finished_handles_mtp_swa_and_state_groups_together(self):
         self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=False,
             ),
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=3,
                 is_state_group=False,
             ),
-            types.SimpleNamespace(
+            types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
                 blocks_per_window=0,
                 is_state_group=True,
@@ -2652,7 +2657,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker._prefill_tp_size = 1
         worker._is_hma_required = False
         # No CP, so the remote rank choice is irrelevant to the expansion under test.
-        worker._get_remote_rank = lambda *a, **k: [0]
+        worker._get_remote_rank = lambda *a, **k: [0]  # type: ignore[method-assign]
         return worker
 
     def test_get_kv_split_metadata_non_cp_prefix_skip_and_trim(self):
@@ -3156,21 +3161,25 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.kv_recv_thread = MagicMock()
         worker._prefill_tp_size = 4
         worker.remote_port_send_num = {"remote_engine": {31001: {"num": 1, "host": "localhost"}}}
-        worker._get_sfa_replicate_k_block_ids = MagicMock(return_value=(([40],), ([20],)))
-        worker._get_kv_split_metadata = MagicMock(
+        worker._get_sfa_replicate_k_block_ids = MagicMock(  # type: ignore[method-assign]
+            return_value=(([40],), ([20],))
+        )
+        worker._get_kv_split_metadata = MagicMock(  # type: ignore[method-assign]
             return_value=(
                 [[31001], [31003]],
                 [([10],), ([11],)],
                 [([30],), ([31],)],
             )
         )
-        worker._get_group_pulls_metadata = MagicMock(
+        worker._get_group_pulls_metadata = MagicMock(  # type: ignore[method-assign]
             return_value=[
                 [[GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1)]],
                 [[GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1)]],
             ]
         )
-        worker._get_remote_host_info_by_port = MagicMock(return_value=("localhost", "remote_engine"))
+        worker._get_remote_host_info_by_port = MagicMock(  # type: ignore[method-assign]
+            return_value=("localhost", "remote_engine")
+        )
         meta = types.SimpleNamespace(
             remote_request_id="remote_req",
             remote_engine_id="remote_engine",

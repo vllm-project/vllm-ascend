@@ -30,6 +30,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.cpu_test
 
@@ -215,13 +216,18 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     request_a = _make_request("a", request_a_tokens, physical_block_size)
     request_b = _make_request("b", request_b_tokens, physical_block_size)
+    spec_kwargs = {}
+    if vllm_version_is("0.27.1"):
+        spec_kwargs["compress_ratio"] = 4
+    else:
+        spec_kwargs["tokens_per_state"] = 4
     compressed_spec = MLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        compress_ratio=4,
         model_version="deepseek_v4",
+        **spec_kwargs,
     )
     full_spec = FullAttentionSpec(
         block_size=physical_block_size,
@@ -269,7 +275,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         request_b.block_hashes,
         max_cache_hit_length=logical_block_size,
     )
-    hit_blocks, hit_length, _ = hit_result
+    hit_blocks, hit_length, _ = hit_result  # type: ignore[misc]
 
     assert hit_length == 0
     assert hit_blocks == ([], [])

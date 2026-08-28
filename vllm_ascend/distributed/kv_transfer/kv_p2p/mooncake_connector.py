@@ -56,7 +56,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
+    get_kv_cache_tensor_layer_names,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -2392,7 +2396,7 @@ class MooncakeConnectorWorker:
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_addrs: list[int] = []
             has_mtp = False
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in get_kv_cache_tensor_layer_names(kv_cache_tensor):
                 has_mtp = has_mtp or "mtp" in layer_name
                 layer_spec = self._get_layer_spec(layer_name)
                 conv_padding = max(conv_padding, self._get_mamba_conv_padding(layer_spec))
@@ -2418,7 +2422,7 @@ class MooncakeConnectorWorker:
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_addrs: list[int] = []
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in get_kv_cache_tensor_layer_names(kv_cache_tensor):
                 for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
                     shared_addrs.append(single_kv_cache.data_ptr())
 

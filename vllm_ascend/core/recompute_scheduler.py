@@ -58,6 +58,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     diagnostics_enabled,
     print_scheduler_summary,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -724,11 +725,17 @@ class RecomputeScheduler(Scheduler):
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
-                        num_new_tokens = 1 + self.num_spec_tokens
-                        if num_new_tokens > token_budget or num_computed_tokens + num_new_tokens > self.max_model_len:
-                            # Prefer to not schedule than schedule un-padded here.
-                            break
-                        pad_spec_decode = True
+                        padded_num_tokens = 1 + self.num_spec_tokens
+                        # Pad only when there is room for the sampled token(s).
+                        if (
+                            num_computed_tokens + padded_num_tokens + self.num_sampled_tokens_per_step
+                            <= self.max_model_len
+                        ):
+                            if padded_num_tokens > token_budget:
+                                # Prefer to not schedule than schedule un-padded here.
+                                break
+                            num_new_tokens = padded_num_tokens
+                            pad_spec_decode = True
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -1213,7 +1220,11 @@ class RecomputeScheduler(Scheduler):
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
-            elif getattr(self, "is_encoder_only", False) and request.num_computed_tokens >= request.num_prompt_tokens:
+            elif (
+                getattr(self, "is_encoder_only", False)
+                if vllm_version_is("0.27.1")
+                else getattr(self, "is_mm_encoder_only", False)
+            ) and request.num_computed_tokens >= request.num_prompt_tokens:
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 

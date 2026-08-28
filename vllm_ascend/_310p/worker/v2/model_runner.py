@@ -33,6 +33,7 @@ from vllm.v1.worker.utils import bind_kv_cache
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_tensor_layer_names
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -291,7 +292,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             # the new layout is gathered and copied to attention metadata.
             torch.npu.current_stream().synchronize()
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig, is_profiling: bool = False) -> None:
         """Allocate the 310P attention cache as separate K/V NZ tensors."""
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
@@ -402,7 +403,9 @@ class NPUModelRunner310V2(NPUModelRunner):
         }
         kv_caches: dict[str, Any] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            layer_names = [name for name in kv_cache_tensor.shared_by if name not in shared_layers]
+            layer_names = [
+                name for name in get_kv_cache_tensor_layer_names(kv_cache_tensor) if name not in shared_layers
+            ]
             if not layer_names:
                 continue
             cache_groups: dict[tuple[Any, ...], list[str]] = {}

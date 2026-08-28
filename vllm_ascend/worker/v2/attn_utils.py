@@ -18,9 +18,9 @@
 #
 
 from collections.abc import Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -53,9 +53,16 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    get_kv_cache_tensor_layer_names,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    calc_split_factor,
+    enable_sfa,
+    get_ascend_device_type,
+    vllm_version_is,
+)
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -150,11 +157,17 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # the backend's logical cache shape starts with the K/V dimension.
             # Consequently, padded pages are indexed by their runtime block
             # stride and are safe for hybrid Attention/Mamba allocations.
-            kv_cache_spec[layer_name] = replace(
-                spec,
-                page_size_padded=page_size_padded,
-                indexes_kv_by_block_stride=True,
-            )
+            if vllm_version_is("0.27.1"):
+                kv_cache_spec[layer_name] = replace(
+                    spec,
+                    page_size_padded=page_size_padded,
+                    indexes_kv_by_block_stride=True,
+                )
+            else:
+                # Upstream removed AttentionSpec.indexes_kv_by_block_stride
+                # during the KV cache layout refactor; Ascend always reads
+                # padded pages by their runtime block stride.
+                kv_cache_spec[layer_name] = replace(spec, page_size_padded=page_size_padded)
         for layer_name, spec in mamba_specs.items():
             if spec.page_size_bytes < common_page_size:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
@@ -571,7 +584,8 @@ def _allocate_kv_cache(
     use_hybrid_layout = has_mamba and has_attention
 
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        if not kv_cache_tensor.shared_by:
+        shared_layer_names = get_kv_cache_tensor_layer_names(kv_cache_tensor)
+        if not shared_layer_names:
             continue
 
         if is_dsv4_model:
@@ -585,18 +599,18 @@ def _allocate_kv_cache(
                     device=device,
                 )
                 raw_tensor = _align_memory(raw_tensor, alignment)[: kv_cache_tensor.size]
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_layer_names:
                 kv_cache_raw_tensors[layer_name] = raw_tensor
             continue
 
-        example_layer_name = kv_cache_tensor.shared_by[0]
+        example_layer_name = shared_layer_names[0]
         example_spec = layer_kv_cache_spec[example_layer_name]
 
         # Use one raw allocation for Mamba and hybrid caches. The reshape step
         # creates the V1-compatible contiguous state views and overlaps
         # Attention K/V with the aligned tail of the same buffer.
         contains_mamba = any(
-            isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in kv_cache_tensor.shared_by
+            isinstance(layer_kv_cache_spec[layer_name], MambaSpec) for layer_name in shared_layer_names
         )
         if contains_mamba or use_hybrid_layout:
             tensor_size = kv_cache_tensor.size
@@ -609,7 +623,7 @@ def _allocate_kv_cache(
                     device=device,
                 )
                 tensor = _align_memory(tensor, alignment)[:tensor_size]
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_layer_names:
                 kv_cache_raw_tensors[layer_name] = tensor
             continue
         assert isinstance(example_spec, AttentionSpec)
@@ -651,7 +665,7 @@ def _allocate_kv_cache(
                 )
                 raw_cache = (k_tensor,)
 
-            for layer_name_inner in kv_cache_tensor.shared_by:
+            for layer_name_inner in shared_layer_names:
                 kv_cache_raw_tensors[layer_name_inner] = raw_cache
 
             continue
@@ -660,7 +674,7 @@ def _allocate_kv_cache(
         if enable_sfa(vllm_config) and bool(getattr(example_spec, "cache_sparse_sfa_c8", False)):
             k_size = kv_cache_tensor.size
             k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_layer_names:
                 kv_cache_raw_tensors[layer_name] = k_tensor
         else:
             k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
@@ -674,7 +688,7 @@ def _allocate_kv_cache(
             v_size = int(kv_cache_tensor.size // v_factor)
             k_tensor = _allocate_int8_cache_tensor(k_size, alignment, device)
             v_tensor = _allocate_int8_cache_tensor(v_size, alignment, device)
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in shared_layer_names:
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
     layer_names = {layer_name for group in kv_cache_config.kv_cache_groups for layer_name in group.layer_names}
@@ -735,9 +749,10 @@ def _reshape_kv_cache_v2(
             continue
 
         group_spec = group.kv_cache_spec
+        group_storage_block_size = getattr(group_spec, "storage_block_size", group_spec.block_size)
         kernel_block_size = (
-            group_spec.storage_block_size
-            if group_spec.storage_block_size != group_spec.block_size
+            group_storage_block_size
+            if group_storage_block_size != group_spec.block_size
             else kernel_block_sizes[group.kv_cache_group_id]
         )
 
@@ -823,7 +838,8 @@ def _reshape_kv_cache_v2(
             if total_bytes % kv_cache_spec.page_size_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
-            num_blocks_per_kv_block = kv_cache_spec.storage_block_size // kernel_block_size
+            storage_block_size = getattr(kv_cache_spec, "storage_block_size", kernel_block_size)
+            num_blocks_per_kv_block = storage_block_size // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
@@ -880,6 +896,76 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
+    return kv_caches
+
+
+def _build_attn_groups_from_config(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+) -> list[AttentionGroup]:
+    """Rebuild flattened attention groups from the KV cache config.
+
+    The KV cache layout refactor removed the per-group ``attn_groups`` and
+    ``cache_dtype`` parameters from ``init_kv_cache``. Ascend's reshape still
+    needs the per-layer backend/spec mapping, so reconstruct the groups here.
+    """
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+
+    groups: list[AttentionGroup] = []
+    layer_type = cast(type[Any], AttentionLayerBase)
+    for group_id, group_spec in enumerate(kv_cache_config.kv_cache_groups):
+        attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, group_spec.layer_names)
+        for layer_name in group_spec.layer_names:
+            backend = attn_layers[layer_name].get_attn_backend()
+            spec = group_spec.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                spec = spec.kv_cache_specs[layer_name]
+            groups.append(AttentionGroup(backend, [layer_name], spec, group_id))
+    return groups
+
+
+def _ascend_init_kv_cache(
+    runner_kv_caches: list[torch.Tensor],
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    kernel_block_sizes: list[int],
+    vllm_config: VllmConfig,
+    kv_cache_allocation_context: AbstractContextManager | None = None,
+) -> dict[str, Any]:
+    """Ascend-compatible v2 ``init_kv_cache``.
+
+    The upstream KV cache layout refactor replaced the per-layer
+    ``_allocate_kv_cache`` / ``_reshape_kv_cache`` flow with a single
+    layout-based ``allocate_kv_cache`` that packs K and V into one
+    ``[B, H, N, C]`` view. Ascend still needs K/V-split, 2M-aligned buffers,
+    so keep the Ascend allocation + reshape flow.
+    """
+    from vllm.v1.worker.gpu.attn_utils import get_shared_kv_cache_layers
+
+    from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache
+
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
+    allocation_context = kv_cache_allocation_context or nullcontext()
+    with allocation_context:
+        kv_cache_raw_tensors = _allocate_kv_cache(
+            kv_cache_config,
+            shared_kv_cache_layers,
+            device,
+        )
+    attn_groups = _build_attn_groups_from_config(kv_cache_config, vllm_config)
+    kv_caches = _reshape_kv_cache_v2(
+        attn_groups=attn_groups,
+        kv_cache_raw_tensors=kv_cache_raw_tensors,
+        kernel_block_sizes=kernel_block_sizes,
+        cache_dtype=vllm_config.cache_config.cache_dtype,
+        shared_kv_cache_layers=shared_kv_cache_layers,
+        kv_cache_config=kv_cache_config,
+    )
+    num_attn_module = (
+        2 if vllm_config.model_config.hf_config.model_type in ("longcat_flash", "longcat_flash_ngram") else 1
+    )
+    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
     return kv_caches
 
 

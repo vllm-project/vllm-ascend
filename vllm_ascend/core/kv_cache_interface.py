@@ -12,11 +12,44 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, Slid
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+from vllm_ascend.utils import vllm_version_is
+
+
+def get_kv_cache_tensor_layer_names(kv_cache_tensor: KVCacheTensor) -> list[str]:
+    """Return the layer names sharing one KV cache tensor, across vLLM versions.
+
+    Upstream renamed ``KVCacheTensor.shared_by`` to ``layers`` during the KV
+    cache layout refactor; vllm-ascend still needs the shared layer list.
+    Tests and mocks built for the old field keep working via the fallback
+    (the default expression must itself use getattr, since it is evaluated
+    eagerly even when ``layers`` is present).
+    """
+    if vllm_version_is("0.27.1"):
+        return kv_cache_tensor.shared_by
+    return getattr(kv_cache_tensor, "layers", getattr(kv_cache_tensor, "shared_by", []))
+
+
+def make_kv_cache_tensor(
+    size: int,
+    layer_names: list[str],
+    page_size: int,
+) -> KVCacheTensor:
+    """Build a KVCacheTensor with the current vLLM version's field contract."""
+    if vllm_version_is("0.27.1"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=page_size,
+        block_stride=page_size,
+    )
 
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
@@ -46,6 +79,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
+    # Declared explicitly so the spec is self-contained: upstream
+    # MLAAttentionSpec removed this field during the KV cache layout refactor,
+    # but Ascend's DSA kernels still consume a compressed page.
+    compress_ratio: int = 1
 
     @property
     def storage_block_size(self) -> int:

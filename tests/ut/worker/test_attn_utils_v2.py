@@ -8,7 +8,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheTensor,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
@@ -22,11 +21,14 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    make_kv_cache_tensor,
+)
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -120,9 +122,10 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=num_blocks * spec.page_size_bytes,
-                shared_by=[layer_name],
+                layer_names=[layer_name],
+                page_size=spec.page_size_bytes,
             )
         ],
         kv_cache_groups=[
@@ -140,16 +143,26 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     runner_kv_caches: list[Any] = []
 
-    kv_caches = upstream_attn_utils.init_kv_cache(
-        runner_kv_caches=runner_kv_caches,
-        forward_context={layer_name: cache_layer},
-        kv_cache_config=kv_cache_config,
-        attn_groups=[[attn_group]],
-        device=torch.device("cpu"),
-        cache_dtype=cache_config.cache_dtype,
-        kernel_block_sizes=[spec.block_size],
-        vllm_config=vllm_config,
-    )
+    if vllm_version_is("0.27.1"):
+        kv_caches = upstream_attn_utils.init_kv_cache(  # type: ignore[call-arg]
+            runner_kv_caches=runner_kv_caches,
+            forward_context={layer_name: cache_layer},
+            kv_cache_config=kv_cache_config,
+            attn_groups=[[attn_group]],
+            device=torch.device("cpu"),
+            cache_dtype=cache_config.cache_dtype,
+            kernel_block_sizes=[spec.block_size],
+            vllm_config=vllm_config,
+        )
+    else:
+        kv_caches = upstream_attn_utils.init_kv_cache(  # type: ignore[call-arg]
+            runner_kv_caches=runner_kv_caches,
+            forward_context={layer_name: cache_layer},
+            kv_cache_config=kv_cache_config,
+            device=torch.device("cpu"),
+            kernel_block_sizes=[spec.block_size],
+            vllm_config=vllm_config,
+        )
 
     cache_components = kv_caches[layer_name]
     assert cache_layer.kv_cache is cache_components
@@ -359,7 +372,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             attn_state=None,
         )
         metadata = model_state.prepare_attn(
-            input_batch=input_batch,
+            input_batch=input_batch,  # type: ignore[arg-type]
             cudagraph_mode=cudagraph_mode,
             block_tables=block_tables,
             slot_mappings=slot_mappings,

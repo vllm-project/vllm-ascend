@@ -21,6 +21,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
 
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_tensor_layer_names, make_kv_cache_tensor
 from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
     RecomputeCPUOffloadMetadata,
     RecomputeCPUOffloadWorkerMetadata,
@@ -148,20 +149,20 @@ class RecomputeCPUOffloadScheduler:
     @staticmethod
     def _derive_cpu_config(gpu_config: "KVCacheConfig", cpu_capacity_bytes: int) -> "KVCacheConfig":
         from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
-        from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert gpu_config.kv_cache_tensors
         gpu_kv_cache_tensors = []
         for t in gpu_config.kv_cache_tensors:
-            if t.shared_by:
+            if get_kv_cache_tensor_layer_names(t):
                 gpu_kv_cache_tensors.append(t)
         gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
         cpu_tensors = [
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=t.size // num_gpu_blocks * num_cpu_blocks,
-                shared_by=list(t.shared_by),
+                layer_names=list(get_kv_cache_tensor_layer_names(t)),
+                page_size=t.size // num_gpu_blocks,
             )
             for t in gpu_kv_cache_tensors
         ]

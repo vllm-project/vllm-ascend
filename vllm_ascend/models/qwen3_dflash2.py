@@ -20,6 +20,8 @@ from vllm.model_executor.models.qwen3_dflash import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def _grouped_conv(
     hidden_states: torch.Tensor,
@@ -224,6 +226,11 @@ class CandidateSelector(nn.Module):
 
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
+    # Upstream PR 52816 adds decoder_layer_cls; the new upstream ctor builds
+    # layers via self.decoder_layer_cls, so DFlash2 layers must be supplied
+    # through the class attribute instead of a module-global swap.
+    decoder_layer_cls = DFlash2Qwen3DecoderLayer
+
     def __init__(
         self,
         *,
@@ -233,10 +240,12 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
     ) -> None:
         import vllm.model_executor.models.qwen3_dflash as dflash_mod
 
-        # Upstream PR 52816 adds decoder_layer_cls; until that pin lands, swap
-        # the parent ctor's global so it builds DFlash2 layers.
-        original_layer = dflash_mod.DFlashQwen3DecoderLayer
-        dflash_mod.DFlashQwen3DecoderLayer = DFlash2Qwen3DecoderLayer
+        # The 0.27.1 pin's parent ctor references the module-global
+        # DFlashQwen3DecoderLayer, so swap it to build DFlash2 layers.
+        original_layer = None
+        if vllm_version_is("0.27.1"):
+            original_layer = dflash_mod.DFlashQwen3DecoderLayer
+            dflash_mod.DFlashQwen3DecoderLayer = DFlash2Qwen3DecoderLayer
         try:
             super().__init__(
                 vllm_config=vllm_config,
@@ -244,7 +253,8 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
                 prefix=prefix,
             )
         finally:
-            dflash_mod.DFlashQwen3DecoderLayer = original_layer
+            if original_layer is not None:
+                dflash_mod.DFlashQwen3DecoderLayer = original_layer
 
         draft_config = self.config.dflash_config
         self.input_embedding_scale = float(draft_config.get("input_embedding_scale", 1.0))
@@ -268,16 +278,25 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     # Share the target LM head so compute_candidates can top-k the full vocab.
     has_own_lm_head = False
+    # Upstream PR 52816 adds model_cls; the new upstream ctor builds the model
+    # via self.model_cls, so the DFlash2 model must be supplied through the
+    # class attribute instead of a module-global swap.
+    model_cls = DFlash2Qwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         import vllm.model_executor.models.qwen3_dflash as dflash_mod
 
-        original_model = dflash_mod.DFlashQwen3Model
-        dflash_mod.DFlashQwen3Model = DFlash2Qwen3Model
+        # The 0.27.1 pin's parent ctor references the module-global
+        # DFlashQwen3Model, so swap it to build DFlash2 layers.
+        original_model = None
+        if vllm_version_is("0.27.1"):
+            original_model = dflash_mod.DFlashQwen3Model
+            dflash_mod.DFlashQwen3Model = DFlash2Qwen3Model
         try:
             super().__init__(vllm_config=vllm_config, prefix=prefix)
         finally:
-            dflash_mod.DFlashQwen3Model = original_model
+            if original_model is not None:
+                dflash_mod.DFlashQwen3Model = original_model
 
         draft_config = self.config.dflash_config
         self.output_multiplier = float(draft_config.get("output_multiplier", 1.0))

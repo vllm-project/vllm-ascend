@@ -189,15 +189,21 @@ class NPUModelRunner(GPUModelRunner):
             self.pp_handler.broadcast_draft_tokens()
         return output
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig, is_profiling: bool = False) -> None:
         with graph_manager_wrapper(self):
-            super().initialize_kv_cache(kv_cache_config)
+            if vllm_version_is("0.27.1"):
+                super().initialize_kv_cache(kv_cache_config)
+            else:
+                super().initialize_kv_cache(kv_cache_config, is_profiling=is_profiling)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config
                 self.model_state.pcp_manager = self.pcp_manager
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def post_kv_cache_wake_up(self) -> None:
+        self.block_tables.init_block_table_layout_tensors()
 
     @torch.inference_mode()
     def execute_model(

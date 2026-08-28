@@ -29,6 +29,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
     runner = object.__new__(NPUModelRunner)
     runner.max_num_reqs = max_num_reqs
     runner.decode_query_len = decode_query_len
+    runner.batch_sharder = None
     runner.model = MagicMock()
     runner.model.compute_logits.side_effect = lambda x: torch.zeros(x.shape[0], vocab)
     runner.sampler = create_autospec(Sampler, instance=True)
@@ -41,6 +42,7 @@ def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
 def _make_input_batch(logits_indices):
     return SimpleNamespace(
         logits_indices=logits_indices,
+        num_reqs=len(logits_indices),
         num_draft_tokens=0,
     )
 
