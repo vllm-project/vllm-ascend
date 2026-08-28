@@ -281,7 +281,7 @@ class ChunkedTokenDatabase:
         self._key_prefix_cache: dict[tuple[int, str, str], str] = {}
         self.cache_coordinator: Any | None = None
 
-    def _get_key_prefix(
+    def get_key_prefix(
         self,
         kv_cache_group_id: int,
         cache_role: str = "kv",
@@ -492,12 +492,11 @@ class ChunkedTokenDatabase:
         num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, effective_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         candidate_index = 0
+        first_chunk_id = min(cdiv(mask_num, effective_block_size), num_logical_blocks) if mask_num > 0 else 0
 
-        for chunk_id in range(num_logical_blocks):
+        for chunk_id in range(first_chunk_id, num_logical_blocks):
             start_token = chunk_id * effective_block_size
             end_token = min(start_token + effective_block_size, token_len)
-            if start_token < mask_num:
-                continue
             start_idx = start_token // cache_family_ratio
             end_idx = end_token // cache_family_ratio
             if end_idx <= start_idx:
@@ -561,7 +560,25 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
-        prefix = self._get_key_prefix(kv_cache_group_id)
+        prefix = self.get_key_prefix(kv_cache_group_id)
+        for start, end, hash_val in self.process_token_hashes(
+            token_len,
+            block_hashes,
+            mask_num,
+            kv_cache_group_id,
+            chunk_filter,
+        ):
+            yield start, end, prefix + block_hash_to_str(hash_val), hash_val
+
+    def process_token_hashes(
+        self,
+        token_len: int,
+        block_hashes: BlockHashList | list[str],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        chunk_filter: Callable[[int], bool] | None = None,
+    ) -> Iterable[tuple[int, int, BlockHash | str]]:
+        """Yield filtered chunks without constructing serialized cache keys."""
         for start, end, hash_val, _ in self._iter_token_chunks(
             token_len,
             block_hashes,
@@ -569,7 +586,7 @@ class ChunkedTokenDatabase:
             kv_cache_group_id,
             chunk_filter=chunk_filter,
         ):
-            yield start, end, prefix + block_hash_to_str(hash_val), hash_val
+            yield start, end, hash_val
 
     def process_token_key_strings_with_block_ids(
         self,
@@ -584,7 +601,7 @@ class ChunkedTokenDatabase:
         shard_size: int | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
-        prefix = self._get_key_prefix(kv_cache_group_id)
+        prefix = self.get_key_prefix(kv_cache_group_id)
         for start, end, hash_val, block_id in self._iter_token_chunks(
             token_len,
             block_hashes,

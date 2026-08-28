@@ -791,6 +791,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 token_len,
                 req_meta.block_hashes,
                 block_ids,
+                mask_num=req_meta.save_start_token,
                 kv_cache_group_id=group_id,
                 skip_null_blocks=skip_null_blocks,
                 chunk_filter=chunk_filter,

@@ -145,15 +145,16 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.cache_coordinator.lcm_block_size = 128
         worker.cache_coordinator.lookup_mask.return_value = ([True],)
         worker.cache_coordinator.store_mask.return_value = ([False],)
-        worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
+        worker.cache_coordinator.find_longest_cache_hit_length.return_value = 128
         worker.m_store = MagicMock()
         worker.m_store.exists.return_value = [1]
 
         worker.token_database = MagicMock()
         worker.token_database.get_block_size.return_value = 128
+        worker.token_database.get_key_prefix.return_value = "prefix@"
         worker.token_database.group_cache_families = {"kv": {0: "default"}}
-        worker.token_database.process_token_key_strings.side_effect = lambda *args, chunk_filter, **kwargs: (
-            [(0, 128, "key", "ab" * 32)] if chunk_filter(0) else []
+        worker.token_database.process_token_hashes.side_effect = lambda *args, chunk_filter, **kwargs: (
+            [(0, 128, "ab" * 32)] if chunk_filter(0) else []
         )
 
         hit = worker._lookup_with_coordinator(
@@ -167,10 +168,46 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(hit, 128)
         worker.cache_coordinator.lookup_mask.assert_called_once_with(128)
         worker.cache_coordinator.store_mask.assert_not_called()
-        worker.m_store.exists.assert_called_once_with(["key"])
-        worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
-        self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
+        worker.m_store.exists.assert_called_once_with(["prefix@" + "ab" * 32])
+        worker.cache_coordinator.find_longest_cache_hit_length.assert_called_once()
+        self.assertFalse(worker.cache_coordinator.find_longest_cache_hit_length.call_args.kwargs["apply_eagle"])
         worker.token_database.process_tokens.assert_not_called()
+
+    def test_external_coordinator_lookup_expands_rank_prefix_once(self):
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.hash_block_size = 128
+        worker.num_kv_cache_groups = 1
+        worker.cache_coordinator = MagicMock()
+        worker.cache_coordinator.lcm_block_size = 128
+        worker.cache_coordinator.lookup_mask.return_value = (None,)
+        worker.cache_coordinator.find_longest_cache_hit_length.return_value = 256
+        worker.m_store = MagicMock()
+        worker.m_store.exists.return_value = [1, 1, 1, 1]
+        worker._expand_lookup_keys_by_rank = MagicMock(return_value=["rank0@", "rank1@"])  # type: ignore[method-assign]
+
+        worker.token_database = MagicMock()
+        worker.token_database.get_block_size.return_value = 128
+        worker.token_database.get_key_prefix.return_value = "local@"
+        worker.token_database.group_cache_families = {"kv": {0: "default"}}
+        worker.token_database.process_token_hashes.return_value = [
+            (0, 128, "aa" * 32),
+            (128, 256, "bb" * 32),
+        ]
+
+        hit = worker._lookup_with_coordinator(
+            256,
+            [b"h0", b"h1"],
+            [0],
+            use_layerwise=False,
+            include_all_ranks=True,
+        )
+
+        self.assertEqual(hit, 256)
+        worker._expand_lookup_keys_by_rank.assert_called_once_with(["local@"], 0)
+        worker.m_store.exists.assert_called_once_with(
+            ["rank0@" + "aa" * 32, "rank1@" + "aa" * 32, "rank0@" + "bb" * 32, "rank1@" + "bb" * 32]
+        )
 
     def test_layerwise_multi_group_layout_includes_mtp(self):
         import torch

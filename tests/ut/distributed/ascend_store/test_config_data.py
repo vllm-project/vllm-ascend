@@ -144,6 +144,20 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][0], 16)
 
+    def test_process_token_hashes_skips_key_construction(self):
+        hashes = ["a", "b", "c"]
+
+        result = list(self.db.process_token_hashes(48, hashes, mask_num=16))
+
+        self.assertEqual(result, [(16, 32, "b"), (32, 48, "c")])
+
+    def test_process_tokens_with_unaligned_mask_starts_at_next_chunk(self):
+        hashes = ["a", "b", "c"]
+
+        result = list(self.db.process_tokens(48, hashes, mask_num=17))
+
+        self.assertEqual([(start, end) for start, end, _ in result], [(32, 48)])
+
     def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]

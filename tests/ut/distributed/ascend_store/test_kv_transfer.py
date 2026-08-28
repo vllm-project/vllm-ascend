@@ -484,6 +484,48 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 0)
 
+    def test_handle_request_starts_at_unsaved_watermark(self):
+        t, store = self._make_thread([0, 0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=32,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        keys, addrs, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        self.assertTrue(keys[0].endswith("@6832"))
+        self.assertTrue(keys[1].endswith("@6833"))
+        self.assertEqual(addrs, [[1002], [1003]])
+
+    def test_handle_request_applies_raw_watermark_to_compressed_group(self):
+        t, store = self._make_thread([0])
+        t.token_database.group_cache_families["kv"][0] = "c4"
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=128,
+            save_start_token=64,
+            block_ids=[0, 1],
+            block_hashes=[f"h{i}" for i in range(8)],
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+
+        t._handle_request(req)
+
+        keys, addrs, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertTrue(keys[0].endswith("@h7"))
+        self.assertEqual(addrs, [[1001]])
+
     def test_handle_request_not_in_stored(self):
         t, store = self._make_thread([0])
         req = ReqMeta(

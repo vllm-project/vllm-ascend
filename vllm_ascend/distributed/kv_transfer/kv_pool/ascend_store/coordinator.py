@@ -158,6 +158,23 @@ class AscendStoreCoordinator:
         masks = tuple([block is not cached_block_pool.null_block for block in blocks] for blocks in blocks_per_group)
         return masks, hit_length
 
+    def find_longest_cache_hit_length(
+        self,
+        block_hashes: list[BlockHash],
+        max_length: int,
+        cached_block_pool: ExternalCachedBlockPool,
+        *,
+        apply_eagle: bool = True,
+    ) -> int:
+        """Return only the hit length for callers that do not consume masks."""
+        _, hit_length = self._find_hit_blocks(
+            block_hashes,
+            max_length,
+            cached_block_pool,
+            apply_eagle=apply_eagle,
+        )
+        return hit_length
+
     def load_mask(
         self,
         block_hashes: list[BlockHash],
