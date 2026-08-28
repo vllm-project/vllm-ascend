@@ -272,6 +272,32 @@
 #       Remove this patch once upstream adds a backend hook for KV cache spec
 #       construction or v2 worker no longer depends on the shared v1 helper.
 #
+# ** 10ac. File: platform/patch_stop_token_ids_validation.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.sampling_params.SamplingParams.verify`
+#      `vllm.sampling_params.SamplingParams._validate_stop_token_ids`
+#    Why:
+#       Upstream vLLM (as of 0.23.0) validates logit_bias and allowed_token_ids
+#       against the vocabulary but not stop_token_ids. Out-of-vocab stop token
+#       ids flow into all_stop_token_ids and are later used as logits indices
+#       on the device side (min_tokens / EOS masking does logits.index_put_).
+#       On CANN 9.1.x the inserted IndexCheck kernel traps on the OOB index
+#       and the whole engine dies with an unrecoverable vector core exception;
+#       on older CANN the write silently corrupts logits of neighboring
+#       requests in the same batch. A single client request can therefore
+#       crash a production instance (vllm-ascend issue #15200).
+#    How：
+#       Monkey-patch SamplingParams.verify to run a vocabulary-range check on
+#       stop_token_ids (mirroring upstream _validate_logit_bias) and reject
+#       invalid requests with a 400 before they reach the engine. The patch
+#       self-disables once the bundled vLLM already ships
+#       `_validate_stop_token_ids`.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54196
+#    Future Plan:
+#       Remove this patch once the upstream fix lands in a vLLM release used
+#       by vLLM Ascend.
+#
 # ** 10. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
