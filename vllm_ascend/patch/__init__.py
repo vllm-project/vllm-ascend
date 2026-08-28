@@ -1175,3 +1175,30 @@
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
 #
+# ** 37. File: worker/patch_gemma4.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.gemma4.Gemma4Attention.forward` and
+#      `vllm.model_executor.models.gemma4.Gemma4Attention.__init__`
+#    Why:
+#       Gemma4 runs its pre-attention chain (qkv split, q/k RMSNorm, RoPE and
+#       a weight-less v RMSNorm) as separate ops. The existing qknorm_rope
+#       fusion pass can't replace it: it doesn't cover the v RMSNorm, and
+#       Gemma4 alternates sliding and full attention layers with different
+#       head_dim, number of kv heads and RoPE type, while torch.compile
+#       matches one pattern against every attention layer.
+#    How:
+#       Monkey-patch Gemma4Attention.forward to call
+#       split_qkv_rmsnorm_rope_vnorm on both attention types. Sliding layers
+#       rotate a full 256-dim head; full attention layers use proportional
+#       RoPE, which Gemma4RotaryEmbedding builds by zero-padding inv_freq and
+#       passing rotary_dim=head_size to the base class, so its cos/sin cache is
+#       an ordinary full-width cache and the kernel needs no layer-type
+#       knowledge. The upstream chain is kept for KV-shared layers and for any
+#       layer whose tiles do not fit the vector core unified buffer (which
+#       excludes full attention layers below tensor parallel size 4).
+#       Gemma4Attention.__init__ is patched as well to resolve and log that
+#       decision at build time, keeping the branch out of the traced graph.
+#    Future Plan:
+#       Skip the separate V pass on k_eq_v full attention layers, whose V slot
+#       holds a copy of K, and remove this patch once torch.compile can match
+#       one pattern per attention layer type.
