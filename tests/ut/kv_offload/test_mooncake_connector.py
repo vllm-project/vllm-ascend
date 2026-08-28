@@ -2062,6 +2062,33 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertFalse(delay_free)
         self.assertIsNone(params)
 
+    def test_request_finished_advertises_decode_dcp_size(self):
+        self.scheduler.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda key, default: (
+            {"dcp_size": 8} if key == "decode" else default
+        )
+        request = self._make_remote_decode_request(prompt_len=33, request_id="req_remote_dcp")
+
+        delay_free, params = self.scheduler.request_finished(request, ([10, 11, 12],))
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(params["remote_dcp_size"], 8)
+
+    def test_request_finished_falls_back_when_decode_topology_is_none(self):
+        self.scheduler.dcp_size = 4
+        self.scheduler.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda key, default: (
+            None if key == "decode" else default
+        )
+        request = self._make_remote_decode_request(prompt_len=33, request_id="req_remote_dcp_fallback")
+
+        delay_free, params = self.scheduler.request_finished(request, ([10, 11, 12],))
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(params["remote_dcp_size"], 4)
+
     def test_request_finished_rejected_remote_prefill_enqueues_empty_recv(self):
         request = MockRequest(
             "req1",
