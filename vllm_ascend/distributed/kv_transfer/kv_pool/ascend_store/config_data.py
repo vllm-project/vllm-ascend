@@ -266,7 +266,6 @@ class ChunkedTokenDatabase:
         self.group_kv_caches_base_addr: dict[int, list[int]] = {}
         self.group_block_len: dict[int, list[int]] = {}
         self.group_block_stride: dict[int, list[int]] = {}
-        self._group_buffer_arrays: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
         self.group_layer_cache_entry_offsets: dict[int, list[int]] = {}
         self.group_cache_families: dict[str, dict[int, str]] = {
             "kv": {},
@@ -386,23 +385,6 @@ class ChunkedTokenDatabase:
             self.group_block_len = group_block_len
             self.group_block_stride = group_block_stride or {}
             self.group_layer_cache_entry_offsets = group_layer_cache_entry_offsets or {}
-            self._group_buffer_arrays = {}
-            for group_id, group_addrs in group_kv_caches_base_addr.items():
-                block_lens = group_block_len.get(group_id, [])
-                if not block_lens:
-                    continue
-                entry_indices = np.arange(len(group_addrs)) % len(block_lens)
-                base_addrs_array = np.asarray(group_addrs, dtype=np.int64)
-                block_lens_array = np.asarray(block_lens, dtype=np.int64)[entry_indices]
-                block_strides = self.group_block_stride.get(group_id)
-                block_strides_array = (
-                    np.asarray(block_strides, dtype=np.int64)[entry_indices] if block_strides else block_lens_array
-                )
-                self._group_buffer_arrays[group_id] = (
-                    base_addrs_array,
-                    block_lens_array,
-                    block_strides_array,
-                )
         if group_cache_families is not None:
             self.group_cache_families[cache_role] = group_cache_families.copy()
             self._key_prefix_cache.clear()
@@ -464,13 +446,16 @@ class ChunkedTokenDatabase:
         if len(block_ids) == 0:
             return [], []
 
-        if cache_role == "state":
-            return ([[] for _ in block_ids], [[] for _ in block_ids])
-        layout = self._group_buffer_arrays.get(kv_cache_group_id)
-        if layout is None:
+        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
+        if not group_block_len:
             return ([[] for _ in block_ids], [[] for _ in block_ids])
 
-        base_addrs, block_lens, block_strides = layout
+        entry_indices = np.arange(len(group_addrs)) % len(group_block_len)
+        base_addrs = np.asarray(group_addrs, dtype=np.int64)
+        block_lens = np.asarray(group_block_len, dtype=np.int64)[entry_indices]
+        block_strides = (
+            np.asarray(group_block_stride, dtype=np.int64)[entry_indices] if group_block_stride else block_lens
+        )
         block_ids_array = np.asarray(block_ids, dtype=np.int64)
         token_spans = np.asarray(ends, dtype=np.int64) - np.asarray(starts, dtype=np.int64)
         group_block_size = self.get_block_size(kv_cache_group_id)
@@ -649,7 +634,6 @@ class ChunkedTokenDatabase:
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
         prefix = self.get_key_prefix(kv_cache_group_id)
-        hashes_are_strings = bool(block_hashes) and isinstance(block_hashes[0], str)
         for start, end, hash_val, block_id in self._iter_token_chunks(
             token_len,
             block_hashes,
@@ -662,8 +646,7 @@ class ChunkedTokenDatabase:
             shard_size=shard_size,
         ):
             assert block_id is not None
-            hash_string = hash_val if hashes_are_strings else block_hash_to_str(hash_val)
-            yield start, end, prefix + hash_string, hash_val, block_id
+            yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
 
     def decode_adaptor_prefill_pp(self, key, addr, size, kv_cache_group_id: int = 0, cache_role: str = "kv"):
         if self.partitions is None or len(self.partitions) == 1:

@@ -16,9 +16,7 @@
 #
 
 import unittest
-from unittest.mock import MagicMock, patch
-
-import numpy as np
+from unittest.mock import MagicMock
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -296,24 +294,6 @@ class TestChunkedTokenDatabase(unittest.TestCase):
 
         self.assertEqual(addrs, [addr for addr, _ in expected])
         self.assertEqual(sizes, [size for _, size in expected])
-
-    def test_prepare_values_reuses_cached_layout_arrays(self):
-        with patch.object(np, "asarray", wraps=np.asarray) as asarray:
-            addrs, sizes = self.db.prepare_values([0, 16], [16, 24], [5, 9])
-
-        self.assertEqual(asarray.call_count, 3)
-        self.assertEqual(addrs, [[1800, 3600], [2440, 4880]])
-        self.assertEqual(sizes, [[160, 320], [80, 160]])
-
-    def test_set_group_buffers_refreshes_cached_layout_arrays(self):
-        old_layout = self.db._group_buffer_arrays[0]
-
-        self.db.set_group_buffers({0: [3000]}, {0: [640]}, {0: [1024]})
-        addrs, sizes = self.db.prepare_values([0], [16], [2])
-
-        self.assertIsNot(self.db._group_buffer_arrays[0], old_layout)
-        self.assertEqual(addrs, [[5048]])
-        self.assertEqual(sizes, [[640]])
 
     def test_prepare_values_matches_dsv4_compressed_groups(self):
         metadata = [KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=group_id) for group_id in range(3)]
