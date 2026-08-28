@@ -78,17 +78,41 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat:
 
 
 def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None]:
+    # if isinstance(raw, dict):
+    #     seed = str(raw.get("seed", ""))
+    #     target = int(raw.get("target_tokens", 0))
+    #     if not seed or not target:
+    #         raise ValueError(f"prompt dict needs both 'seed' and 'target_tokens', got {raw}")
+    #     prompt, actual = _generate_prompt_for_length(server, seed, target, use_chat=use_chat)
+    #     print(f"[generate_prompt] seed={seed!r} target_tokens={target} actual={actual}")
+    #     if overhead > 0:
+    #         actual = raw_count + overhead
+    #     else:
+    #         actual = None
+    #     return prompt, actual
+    # return raw, None
     if isinstance(raw, dict):
         seed = str(raw.get("seed", ""))
         target = int(raw.get("target_tokens", 0))
         if not seed or not target:
             raise ValueError(f"prompt dict needs both 'seed' and 'target_tokens', got {raw}")
-        prompt, actual = _generate_prompt_for_length(server, seed, target, use_chat=use_chat)
-        print(f"[generate_prompt] seed={seed!r} target_tokens={target} actual={actual}")
+
+        overhead = _detect_chat_overhead(server) if use_chat else 0
+        if use_chat:
+            if overhead > 0:
+                print(f"[generate_prompt] chat template overhead = {overhead} tokens")
+            else:
+                print("[generate_prompt] chat template overhead not detected, skipping prompt_tokens validation")
+
+        adjusted_target = max(target - overhead, 1)
+        prompt, raw_count = _generate_prompt_for_length(server, seed, adjusted_target)
+
         if overhead > 0:
             actual = raw_count + overhead
         else:
             actual = None
+
+        print(f"[generate_prompt] seed={seed!r} target_tokens={target} overhead={overhead} raw={raw_count} actual={actual}")
         return prompt, actual
     return raw, None
 
