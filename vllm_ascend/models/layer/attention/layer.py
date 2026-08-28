@@ -23,6 +23,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC128Backend,
     AscendDSASWABackend,
+    select_dsa_backend,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.utils import (
@@ -111,12 +112,14 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
+        use_pcp = get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
         if self.compress_ratio == 4:
             self.attn_backend = AscendDSAC4Backend
         elif self.compress_ratio == 128:
             self.attn_backend = AscendDSAC128Backend
         else:
             self.attn_backend = AscendDSASWABackend
+        self.attn_backend = select_dsa_backend(self.attn_backend, use_pcp=use_pcp)
 
         # NOTE(zxr): vllm_is_batch_invariant is delete during updating to v0.20.1
         if (

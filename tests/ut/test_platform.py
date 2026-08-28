@@ -1539,6 +1539,61 @@ class TestNPUPlatform(TestBase):
         result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
         self.assertEqual(result, "vllm_ascend.attention.attention_v1.AscendAttentionBackend")
 
+    @patch("vllm_ascend.platform.get_ascend_config")
+    def test_get_attn_backend_cls_selects_context_parallel_variants(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.rl_config.enabled = False
+        mock_get_ascend_config.return_value.rl_config.enable_training_consistency = False
+        cases = [
+            (
+                dict(use_mla=False, use_sparse=False, use_pcp=True),
+                "vllm_ascend.attention.attention_v1.AscendAttentionPCPBackend",
+            ),
+            (
+                dict(use_mla=True, use_sparse=False, use_pcp=True),
+                "vllm_ascend.attention.mla_v1.AscendMLAPCPBackend",
+            ),
+            (
+                dict(use_mla=False, use_sparse=False, use_dcp=True),
+                "vllm_ascend.attention.attention_v1.AscendAttentionDCPBackend",
+            ),
+            (
+                dict(use_mla=True, use_sparse=False, use_dcp=True),
+                "vllm_ascend.attention.mla_v1.AscendMLADCPBackend",
+            ),
+            (
+                dict(use_mla=True, use_sparse=True, use_dcp=True),
+                "vllm_ascend.attention.sfa_v1.AscendSFADCPBackend",
+            ),
+        ]
+
+        for selector_overrides, expected in cases:
+            with self.subTest(selector_overrides=selector_overrides):
+                attn_selector_config = AttentionSelectorConfig(
+                    dtype=torch.float16,
+                    head_size=0,
+                    kv_cache_dtype=None,
+                    block_size=128,
+                    **selector_overrides,
+                )
+                result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+                self.assertEqual(result, expected)
+
+    @patch("vllm_ascend.platform.get_ascend_config")
+    def test_get_attn_backend_cls_rejects_combined_pcp_dcp(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.rl_config.enabled = False
+        mock_get_ascend_config.return_value.rl_config.enable_training_consistency = False
+        attn_selector_config = AttentionSelectorConfig(
+            dtype=torch.float16,
+            head_size=0,
+            kv_cache_dtype=None,
+            block_size=128,
+            use_pcp=True,
+            use_dcp=True,
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "PCP and DCP"):
+            self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+
     @patch("vllm_ascend.platform.import_module")
     @patch("vllm_ascend.platform.util.find_spec", return_value=object())
     @patch("vllm_ascend.platform.get_ascend_config")

@@ -218,6 +218,9 @@ class NPUPlatform(Platform):
         use_compress = getattr(attn_selector_config, "use_compress", False)
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
+        if attn_selector_config.use_pcp and attn_selector_config.use_dcp:
+            raise NotImplementedError("Ascend MRV2 does not support PCP and DCP simultaneously yet.")
+
         if _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
@@ -240,7 +243,26 @@ class NPUPlatform(Platform):
         if is_310p():
             return backend_map_310.get(key, backend_map_310[(False, False)])
 
-        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
+        backend_key = (attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)
+        if attn_selector_config.use_pcp:
+            pcp_backend_map = {
+                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLAPCPBackend",
+                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionPCPBackend",
+                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSAPCPBackend",
+            }
+            if backend_key in pcp_backend_map:
+                return pcp_backend_map[backend_key]
+
+        if attn_selector_config.use_dcp:
+            dcp_backend_map = {
+                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLADCPBackend",
+                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionDCPBackend",
+                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFADCPBackend",
+            }
+            if backend_key in dcp_backend_map:
+                return dcp_backend_map[backend_key]
+
+        return backend_map[backend_key]
 
     @classmethod
     def import_kernels(cls) -> None:

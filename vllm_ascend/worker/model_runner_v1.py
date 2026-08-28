@@ -424,7 +424,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.use_sparse,
             )
         self.sfa_dcp_replicated_indexer_size = 1
-        if enable_sfa_dcp_replicated_indexer():
+        if enable_sfa_dcp_replicated_indexer(self.vllm_config):
             self.sfa_dcp_replicated_indexer_size = self.dcp_size
 
         # Create a CPU numpy buffer for positions computation when

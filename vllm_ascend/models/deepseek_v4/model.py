@@ -104,10 +104,12 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         self.dtype = dtype
+        self._use_pcp = False
 
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        self._use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         if get_ascend_device_type() in {AscendDeviceType.A5}:
             self.dtype = torch.float8_e4m3fn
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
@@ -126,9 +128,9 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
     def forward(self): ...
 
     def get_attn_backend(self):
-        from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend
+        from vllm_ascend.attention.dsa_v1 import AscendDSASWABackend, select_dsa_backend
 
-        return AscendDSASWABackend
+        return select_dsa_backend(AscendDSASWABackend, use_pcp=getattr(self, "_use_pcp", False))
 
 
 def precompute_freqs_cis_cpu(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow) -> torch.Tensor:

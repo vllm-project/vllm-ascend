@@ -8,7 +8,9 @@ from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
+    AscendAttentionDCPBackend,
     AscendAttentionMetadataBuilder,
+    AscendAttentionPCPBackend,
     AscendAttentionPCPImpl,
     AscendAttentionPCPMetadata,
     AscendAttentionPCPMetadataBuilder,
@@ -56,28 +58,6 @@ class TestAttentionGraphHelpers(TestBase):
 
 
 class TestAscendAttentionBackend(TestBase):
-    def setUp(self):
-        self.mock_config = MagicMock()
-
-        mock_parallel_config = MagicMock()
-        mock_parallel_config.prefill_context_parallel_size = 1
-        mock_parallel_config.decode_context_parallel_size = 1
-
-        self.mock_config.parallel_config = mock_parallel_config
-
-        self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
-        self.utils_patcher.start()
-
-        from vllm_ascend.attention.utils import enable_dcp, enable_pcp
-
-        self.enable_dcp = enable_dcp
-        self.enable_pcp = enable_pcp
-        enable_dcp.cache_clear()
-        enable_pcp.cache_clear()
-        self.addCleanup(self.utils_patcher.stop)
-        self.addCleanup(enable_dcp.cache_clear)
-        self.addCleanup(enable_pcp.cache_clear)
-
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
 
@@ -88,33 +68,25 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
     def test_get_impl_cls_with_pcp(self):
-        self.mock_config.parallel_config.prefill_context_parallel_size = 2
-        self.enable_pcp.cache_clear()
-
         self.assertIs(
-            AscendAttentionBackend.get_impl_cls(),
+            AscendAttentionPCPBackend.get_impl_cls(),
             AscendAttentionPCPImpl,
         )
 
     def test_get_builder_cls_with_pcp(self):
-        self.mock_config.parallel_config.prefill_context_parallel_size = 2
-        self.enable_pcp.cache_clear()
-
         self.assertIs(
-            AscendAttentionBackend.get_builder_cls(),
+            AscendAttentionPCPBackend.get_builder_cls(),
             AscendAttentionPCPMetadataBuilder,
         )
 
-    def test_pcp_and_dcp_are_rejected_together(self):
-        self.mock_config.parallel_config.prefill_context_parallel_size = 2
-        self.mock_config.parallel_config.decode_context_parallel_size = 2
-        self.enable_pcp.cache_clear()
-        self.enable_dcp.cache_clear()
+    def test_dcp_backend_uses_dcp_classes(self):
+        from vllm_ascend.attention.context_parallel.attention_cp import (
+            AscendAttentionDCPImpl,
+            AscendAttentionDCPMetadataBuilder,
+        )
 
-        with self.assertRaisesRegex(NotImplementedError, "PCP and DCP"):
-            AscendAttentionBackend.get_impl_cls()
-        with self.assertRaisesRegex(NotImplementedError, "PCP and DCP"):
-            AscendAttentionBackend.get_builder_cls()
+        self.assertIs(AscendAttentionDCPBackend.get_impl_cls(), AscendAttentionDCPImpl)
+        self.assertIs(AscendAttentionDCPBackend.get_builder_cls(), AscendAttentionDCPMetadataBuilder)
 
     def test_get_kv_cache_shape_not(self):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)

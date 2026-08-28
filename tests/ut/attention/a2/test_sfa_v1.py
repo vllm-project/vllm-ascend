@@ -22,6 +22,7 @@ from vllm_ascend.attention.sfa_kv_offload import (
 )
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFABackend,
+    AscendSFADCPBackend,
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
@@ -81,20 +82,16 @@ class TestAscendSFABackend(TestBase):
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_get_builder_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
+    def test_get_builder_cls_with_dcp(self, mock_get_ascend_config):
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        builder_cls = AscendSFABackend.get_builder_cls()
+        builder_cls = AscendSFADCPBackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_get_impl_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
+    def test_get_impl_cls_with_dcp(self, mock_get_ascend_config):
         mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
-        impl_cls = AscendSFABackend.get_impl_cls()
+        impl_cls = AscendSFADCPBackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
 
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
