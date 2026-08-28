@@ -473,4 +473,3 @@ class RankResolver:
                 )
             )
         return ranks
-

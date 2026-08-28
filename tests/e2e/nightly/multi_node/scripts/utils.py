@@ -193,4 +193,3 @@ class ProxyServer:
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
-

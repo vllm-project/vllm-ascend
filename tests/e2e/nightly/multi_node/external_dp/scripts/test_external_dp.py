@@ -15,8 +15,8 @@ import requests
 from tests.e2e.nightly.multi_node.external_dp.scripts.external_dp_config import (
     ExternalDPConfig,
     ExternalDPConfigLoader,
-    RankResolver,
     RankInfo,
+    RankResolver,
     resolve_current_node_index,
 )
 from tests.e2e.nightly.multi_node.external_dp.scripts.runtime import (
@@ -124,9 +124,7 @@ def _parse_json_flag_ext(cmd: list[str], flag: str) -> dict[str, Any]:
         return {}
 
 
-def _get_first_server_cmd(
-    config: ExternalDPConfig, ranks: list[RankInfo], all_commands: list
-) -> list[str]:
+def _get_first_server_cmd(config: ExternalDPConfig, ranks: list[RankInfo], all_commands: list) -> list[str]:
     if all_commands:
         return all_commands[0].cmd
     return []
@@ -256,15 +254,11 @@ def test_external_dp() -> None:
 
                 all_commands = build_all_server_commands(config, ranks)
                 first_server_cmd = _get_first_server_cmd(config, ranks, all_commands)
-                completion_server, tokenize_server, metrics_server = (
-                    _build_external_dp_servers(config, ranks)
-                )
+                completion_server, tokenize_server, metrics_server = _build_external_dp_servers(config, ranks)
 
                 if "chat_completion" in config.test_content:
                     logger.info("Running chat_completion tests")
-                    _run_chat_completion_ext(
-                        config, completion_server, tokenize_server, first_server_cmd
-                    )
+                    _run_chat_completion_ext(config, completion_server, tokenize_server, first_server_cmd)
 
                 spec_baseline = None
                 if "spec_decode_acceptance" in config.test_content:
@@ -326,4 +320,3 @@ def test_external_dp() -> None:
                     wait_master_rank_stopped(ranks, timeout=max_wait_seconds)
     finally:
         _archive_rank_logs(log_root, current_node_index)
-
