@@ -43,7 +43,9 @@
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
+#include "moe/dcut_causal_conv1d/dcut_causal_conv1d_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
+#include "attention/dcut_recurrent_gated_delta_rule/dcut_recurrent_gated_delta_rule_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
@@ -2005,6 +2007,23 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                               Tensor? gk=None) -> Tensor");
     ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
 
+    ops.def(
+        "npu_dcut_recurrent_gated_delta_rule(Tensor query, "
+        "                                    Tensor key, "
+        "                                    Tensor value, "
+        "                                    Tensor(a!) state, "
+        "                                    *, "
+        "                                    Tensor? beta=None, "
+        "                                    float? scale=None, "
+        "                                    Tensor? query_start_loc=None, "
+        "                                    Tensor? ssm_state_indices=None, "
+        "                                    Tensor? num_accepted_tokens=None, "
+        "                                    Tensor? g=None, "
+        "                                    Tensor? gk=None, "
+        "                                    bool zero_padded_output=False) -> Tensor");
+    ops.impl("npu_dcut_recurrent_gated_delta_rule", torch::kPrivateUse1,
+             &vllm_ascend::npu_dcut_recurrent_gated_delta_rule);
+
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
@@ -2230,6 +2249,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         int run_mode"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
+    ops.def(
+        "npu_dcut_causal_conv1d(Tensor(a!) output, Tensor x, "
+        "                         Tensor weight, Tensor(b!) conv_state, "
+        "                         Tensor? bias=None, "
+        "                         Tensor? query_start_loc=None, "
+        "                         Tensor? cache_indices=None, "
+        "                         Tensor? num_accepted_tokens=None, "
+        "                         int activation_mode=0, "
+        "                         int pad_slot_id=-1) -> Tensor(a!)");
+    ops.impl("npu_dcut_causal_conv1d", torch::kPrivateUse1, &vllm_ascend::npu_dcut_causal_conv1d);
     ops.def(
         "moe_grouped_matmul("
             "Tensor x,"

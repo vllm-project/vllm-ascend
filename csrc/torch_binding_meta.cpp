@@ -585,6 +585,21 @@ at::Tensor npu_causal_conv1d_custom_meta(
     return output;
 }
 
+at::Tensor npu_dcut_causal_conv1d_meta(
+    const at::Tensor& output,
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<at::Tensor>& query_start_loc,
+    const c10::optional<at::Tensor>& cache_indices,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    int64_t activation_mode,
+    int64_t pad_slot_id)
+{
+    return output;
+}
+
 at::Tensor npu_causal_conv1d_310_meta(
     const at::Tensor& x,
     const at::Tensor& weight,
@@ -638,6 +653,24 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     auto options = value.options().dtype(at::ScalarType::BFloat16);
     at::Tensor output = at::empty_symint(value.sym_sizes(), options);
     return output;
+}
+
+at::Tensor npu_dcut_recurrent_gated_delta_rule_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    at::Tensor& state,
+    const c10::optional<at::Tensor>& beta,
+    const c10::optional<double> scale,
+    const c10::optional<at::Tensor>& query_start_loc,
+    const c10::optional<at::Tensor>& ssm_state_indices,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    const c10::optional<at::Tensor>& g,
+    const c10::optional<at::Tensor>& gk,
+    bool zero_padded_output)
+{
+    auto options = value.options().dtype(at::ScalarType::BFloat16);
+    return at::empty_symint(value.sym_sizes(), options);
 }
 
 std::vector<at::Tensor> moe_grouped_matmul_meta(
@@ -1513,6 +1546,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // recurrent_gated_delta_rule meta implementation
     ops.impl("npu_recurrent_gated_delta_rule", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_meta);
+    // D-Cut recurrent_gated_delta_rule meta implementation
+    ops.impl("npu_dcut_recurrent_gated_delta_rule",
+             &vllm_ascend::meta::npu_dcut_recurrent_gated_delta_rule_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
@@ -1561,6 +1597,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
+    // D-Cut causal_conv1d meta implementation
+    ops.impl("npu_dcut_causal_conv1d", &vllm_ascend::meta::npu_dcut_causal_conv1d_meta);
     // moe_grouped_matmul
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
