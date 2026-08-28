@@ -69,6 +69,37 @@ else:
     FlexibleArgumentParser = None
 
 _CUSTOM_OP_REGISTERED = False
+
+
+def _import_fla_npu_before_custom_opp() -> None:
+    """Import fla_npu before bootstrap_custom_op_env sets ASCEND_CUSTOM_OPP_PATH.
+
+    fla_npu's direct runtime prepends its own OPP vendor dirs to
+    ASCEND_CUSTOM_OPP_PATH at import time. If the import happens after the
+    kernel manager has already indexed the custom-op environment, fla
+    operator lookups fail (observed on A5: solve_tri 161001 and
+    gdn_core_fwd 169112 "dynamic shape JSON config cannot be found").
+    Importing it first keeps the search path complete from the start.
+    """
+    import os
+
+    if os.environ.get("VLLM_ASCEND_GDN_BACKEND", "auto").strip().lower() == "native":
+        return
+    try:
+        from vllm_ascend.device.device_config import is_950
+
+        if not is_950():
+            return
+    except Exception:
+        return
+    try:
+        import importlib
+
+        importlib.import_module("fla_npu.ops.ascendc")
+    except ImportError as exc:
+        logger.warning(
+            "fla_npu is not importable; GDN fla paths will fall back to native: %s", exc
+        )
 # Delete after the driver is released; temporarily hard-coded to 4
 MAX_CAPTURE_SIZES_FOR_950 = 4
 
@@ -254,6 +285,7 @@ class NPUPlatform(Platform):
         global _CUSTOM_OP_REGISTERED
         if _CUSTOM_OP_REGISTERED:
             return
+        _import_fla_npu_before_custom_opp()
         bootstrap_custom_op_env()
         _CUSTOM_OP_REGISTERED = True
 
