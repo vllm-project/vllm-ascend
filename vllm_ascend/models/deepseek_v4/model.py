@@ -64,6 +64,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
@@ -951,6 +952,26 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_regex={
+            re.compile(r"rotary_emb\.inv_freq"): None,
+            re.compile(r"^(?!model)"): "model.",
+        },
+        orig_to_new_substr={
+            ".w1.": ".gate_proj.",
+            ".w2.": ".down_proj.",
+            ".w3.": ".up_proj.",
+            "model.head.": "lm_head.",
+            "model.lm_head.": "lm_head.",
+            "embed.": "embed_tokens.",
+            ".attn.": ".self_attn.",
+            ".ffn.": ".mlp.",
+            ".ffn_norm.": ".post_attention_layernorm.",
+            ".attn_norm.": ".input_layernorm.",
+            ".gate.bias": ".gate.e_score_correction_bias",
+        },
+        orig_to_new_suffix={".scale": ".weight_scale"},
+    )
     model_cls = DeepseekV4Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1074,38 +1095,9 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            # TODO:
-            if not name.startswith("model"):
-                name = f"model.{name}"
-
-            if ".w1." in name:
-                name = name.replace(".w1.", ".gate_proj.")
-            if ".w2." in name:
-                name = name.replace(".w2.", ".down_proj.")
-            if ".w3." in name:
-                name = name.replace(".w3.", ".up_proj.")
-
-            if "model.head." in name and "model.lm_head." not in name:
-                name = name.replace("model.head.", "lm_head.")
-            if "model.lm_head." in name:
-                name = name.replace("model.lm_head.", "lm_head.")
-            if "embed." in name and "embed_token." not in name:
-                name = name.replace("embed.", "embed_tokens.")
-            if "attn" in name and "self_attn" not in name:
-                name = name.replace(".attn.", ".self_attn.")
-            if ".ffn." in name:
-                name = name.replace(".ffn.", ".mlp.")
-            if ".ffn_norm." in name:
-                name = name.replace(".ffn_norm.", ".post_attention_layernorm.")
-            if ".attn_norm." in name:
-                name = name.replace(".attn_norm.", ".input_layernorm.")
-            if name.endswith(".scale"):
-                name = name.replace(".scale", ".weight_scale")
-
-            if "rotary_emb.inv_freq" in name:
+            mapped = self.hf_to_vllm_mapper._map_name(name)
+            if mapped is None:
                 continue
-            if ".gate.bias" in name:
-                name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
                 if is_pp_missing_parameter(name, self):
