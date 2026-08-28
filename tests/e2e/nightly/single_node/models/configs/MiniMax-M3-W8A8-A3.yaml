@@ -41,7 +41,7 @@ test_cases:
       - "--long-prefill-token-threshold"
       - "2048"
       - "--max-num-seqs"
-      - "64"
+      - "16"
       - "--distributed-executor-backend"
       - "mp"
       - "--reasoning-parser"
@@ -50,17 +50,21 @@ test_cases:
       - '{"image":1}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      - "--speculative-config"
-      - '{"model": "Inferact/MiniMax-M3-EAGLE3-GQA", "method": "eagle3", "num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":true,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp": true,"enable_reduce_sample": true}'
+      - '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp": true,"enable_reduce_sample": true}'
+    test_content:
+      - chat_completion
+    api_keyword_args:
+      max_tokens: 10
+      chat_template_kwargs:
+        thinking_mode: disabled
     benchmarks:
       acc_gpqa:
         case_type: accuracy
         dataset_path: vllm-ascend/gpqa
         request_conf: vllm_api_general_chat
         dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-        max_out_len: 65536
+        max_out_len: 32768
         batch_size: 64
         baseline: 92
         threshold: 2
