@@ -26,8 +26,10 @@ This guide covers A3 W4A8 text and multimodal serving, TP/DP/EP, Prefix Cache,
 
 | Model | Purpose | Requirements |
 | --- | --- | --- |
-| [Kimi-K3-W4A8](https://www.modelscope.cn/models/sgl-npu/Kimi-K3-W4A8) | Full 93-layer, 896-expert target | About 1.49 TB of weight storage; the reference deployment uses four Atlas 800 A3 nodes with 16 logical NPUs per node (DP4/TP16/EP64) |
-| [Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark) | Optional GQA draft for speculative decoding | Download separately; use a draft compatible with the target checkpoint and TP size |
+| [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Full 93-layer, 896-expert W4A8 target | About 1.49 TB of weight storage; the reference deployment uses four Atlas 800 A3 nodes with 16 logical NPUs per node (DP4/TP16/EP64) |
+| [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark) | Optional GQA draft | Set `num_speculative_tokens` to `7` |
+| [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark) | Optional MLA draft | Set `num_speculative_tokens` to `7` |
+| [Inferact/Kimi-K3-DSpark-Block5](https://huggingface.co/Inferact/Kimi-K3-DSpark-Block5) | Optional MLA draft with five-token blocks | Set `num_speculative_tokens` to `5` |
 
 Download weights, tokenizer, and processor files before starting the service.
 Mount them at identical paths on every node, for example under `/path/to/models`.
@@ -242,16 +244,20 @@ running the request in Section 6. For general startup issues, see the
 
 ### 5.2 Speculative Decoding with DSpark
 
-For the GQA path, a public draft checkpoint is
-[`RadixArk/Kimi-K3-DSpark`](https://huggingface.co/RadixArk/Kimi-K3-DSpark).
-For the MLA path, use a matching Kimi K3 MLA draft checkpoint. Add the same
-speculative configuration to the Node 0 and headless worker commands:
+Choose a GQA or MLA draft from the [model weights](#31-model-weights-and-hardware)
+listed in Section 3.1 and download it to the same path on every node.
+The following configuration uses seven speculative tokens for
+`RadixArk/Kimi-K3-DSpark` or `Inferact/Kimi-K3-DSpark`. For
+`Inferact/Kimi-K3-DSpark-Block5`, select that checkpoint's path and change
+`num_speculative_tokens` to `5`.
+
+Add the same speculative configuration to the Node 0 and headless worker commands:
 
 ```shell
 --speculative-config \
 '{
   "method": "dspark",
-  "model": "<MATCHING_GQA_OR_MLA_DRAFT_PATH>",
+  "model": "<DSPARK_DRAFT_PATH>",
   "num_speculative_tokens": 7,
   "draft_tensor_parallel_size": 16,
   "max_model_len": 4096,
@@ -345,9 +351,10 @@ not a claim of optimal throughput or latency for every workload.
 | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |
 | Full W4A8, mixed prefill/decode | 4 A3 | 64 | 16 | 4 / 64 | 16 | 8192 | 133120 | `FULL_DECODE_ONLY` |
 
-Optional DSpark uses draft TP16, seven speculative tokens, and draft
-`max_model_len=4096`, as shown in Section 5.2. Account for its extra memory
-before enabling it.
+Optional DSpark uses draft TP16 and draft `max_model_len=4096`, as shown in
+Section 5.2. Use seven speculative tokens for the RadixArk GQA draft or the
+Inferact seven-token MLA draft, and five for `Inferact/Kimi-K3-DSpark-Block5`.
+Account for its extra memory before enabling it.
 
 ### 9.2 Tuning Guidelines
 
@@ -370,6 +377,7 @@ the [Public FAQ](../../faqs.md). This section covers K3-specific questions.
 ### Which checkpoint should I use with DSpark?
 
 Use a draft that matches the target architecture, tokenizer, and quantization
-variant. The public GQA draft is linked in Section 3.1; an MLA draft must be
-matched separately. For QuaRot checkpoints, retain the checkpoint's
-quantization metadata and bundled rotation tensors on every node.
+variant. Section 3.1 lists the RadixArk GQA draft and both Inferact MLA drafts,
+together with their `num_speculative_tokens` values. For QuaRot checkpoints,
+retain the checkpoint's quantization metadata and bundled rotation tensors on
+every node.
