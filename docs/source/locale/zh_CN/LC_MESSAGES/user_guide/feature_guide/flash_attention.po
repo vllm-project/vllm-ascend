@@ -71,7 +71,6 @@ msgstr "与默认FIA后端相比，启用FA3可能导致性能下降。这种权
 msgid "FA3 has been tested and verified on the following models:"
 msgstr "FA3已在以下模型上测试验证："
 
-#, fuzzy
 msgid ""
 "Other models have not been tested yet and will be supported in the future if"
 " not supported after being tested."
@@ -188,13 +187,6 @@ msgid "| Feature | GPU FA3 | NPU FA3 |"
 msgstr "| 特性 | GPU FA3 | NPU FA3 |"
 
 msgid ""
-"FA3 currently requires Ascend Atlas A2 and A3 inference NPUs.\n"
-"We will support other NPUs in the future."
-msgstr ""
-"FA3目前需要昇腾Atlas A2和A3推理NPU。\n"
-"我们将在未来支持其他NPU。"
-
-msgid ""
 "To install the `flash_attn_npu` wheel package, refer to: "
 "<https://github.com/MinghuasLab/flash-attention-"
 "npu/blob/main/README.md#installation>."
@@ -218,3 +210,10 @@ msgstr ""
 "批量不变模式与 FA3 无关。如果也需要该模式，请将 `rl_config.enable_batch_invariant` 设置为 "
 "`true`。使用此配置路径时，无需手动设置 `VLLM_BATCH_INVARIANT`、`HCCL_DETERMINISTIC` 或 "
 "`LCCL_DETERMINISTIC`。"
+
+msgid ""
+"FA3 currently requires Ascend Atlas A2 and A3 inference NPUs.\n"
+"We will support other NPUs in the future."
+msgstr ""
+"FA3目前需要昇腾Atlas A2和A3推理NPU。\n"
+"我们将在未来支持其他NPU。"

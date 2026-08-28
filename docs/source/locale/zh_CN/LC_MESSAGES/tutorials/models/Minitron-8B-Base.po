@@ -68,11 +68,6 @@ msgid ""
 "If you do not want to use the docker image, you can also build from source:"
 msgstr "如果您不想使用 Docker 镜像，也可以从源码构建："
 
-msgid ""
-"- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
-
 msgid "## Deployment"
 msgstr "## 部署"
 
@@ -177,3 +172,9 @@ msgstr ""
 "`Minitron-8B-Base`（BF16版本）：需要1个Ascend 910B（配备1 x 64GB "
 "NPU）。[下载模型权重](https://www.modelscope.cn/models/nv-"
 "community/Minitron-8B-Base)"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr ""
+"- 从源码安装 `vllm-ascend`，请参考[安装指南](../../getting_started/installation.md)。"

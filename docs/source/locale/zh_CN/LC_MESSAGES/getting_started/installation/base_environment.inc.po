@@ -1,0 +1,68 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-28 02:09+0000\n"
+"PO-Revision-Date: 2026-08-28 02:09+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid ""
+"This path is intended for advanced users who need to manage the user-space "
+"software stack themselves. You can install on an existing Linux host or "
+"start from a minimal Linux container."
+msgstr "此路径适用于需要自行管理用户空间软件栈的高级用户。您可以在现有的Linux主机上安装，或从最小的Linux容器开始。"
+
+msgid "???+ important \"Verify NNAL separately\""
+msgstr "???+ important \"单独验证NNAL\""
+
+msgid ""
+"The vLLM Ascend runtime requires NNAL (Ascend Neural Network Acceleration "
+"Library). The NNAL package is typically named `Ascend-cann-nnal_...run`."
+msgstr "vLLM Ascend运行时需要NNAL（昇腾神经网络加速库）。NNAL包通常命名为`Ascend-cann-nnal_...run`。"
+
+msgid ""
+"{% filter indent(4, true) %}{% include "
+"\"getting_started/installation/install_vllm_ascend.inc.md\" %}{% endfilter "
+"%}"
+msgstr ""
+"{% filter indent(4, true) %}{% include "
+"\"getting_started/installation/install_vllm_ascend.inc.md\" %}{% endfilter "
+"%}"
+
+msgid "=== \"Base environment\""
+msgstr "=== \"基础环境\""
+
+msgid "<span id=\"installation-base-environment\"></span>"
+msgstr "<span id=\"installation-base-environment\"></span>"
+
+msgid ""
+"#### Install CANN manually {: #installation-base-environment-install-cann }"
+msgstr "#### 手动安装 CANN {: #installation-base-environment-install-cann }"
+
+msgid ""
+"The commands above use the default CANN and NNAL installation paths. If you "
+"install either component in a non-default directory, source the "
+"corresponding `set_env.sh` from the actual installation directory. Refer to "
+"the [CANN installation resources](https://www.hiascend.com/cann/download) to"
+" complete the installation."
+msgstr ""
+"上述命令使用默认的 CANN 和 NNAL 安装路径。如果将任一组件安装到非默认目录，请加载实际安装目录下对应的 `set_env.sh`。请参阅 "
+"[CANN 安装资源](https://www.hiascend.com/cann/download)完成安装。"
+
+msgid ""
+"#### Install vLLM and vLLM Ascend {: #installation-base-environment-install "
+"}"
+msgstr ""
+"#### 安装 vLLM 和 vLLM Ascend {: #installation-base-environment-install }"

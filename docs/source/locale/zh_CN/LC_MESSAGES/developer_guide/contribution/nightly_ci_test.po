@@ -512,9 +512,6 @@ msgstr "| `qwen3-235b-a22b-w8a8` | Qwen3-235B-A22B-W8A8 |"
 msgid "| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |"
 msgstr "| `Qwen3.5-397B-A17B-w8a8-mtp` | Qwen3.5-397B-A17B W8A8 + MTP |"
 
-msgid "| `MiniMax-M2.5-w8a8-QuaRot-A3` | MiniMax-M2.5 W8A8 + QuaRot |"
-msgstr "| `MiniMax-M2.5-w8a8-QuaRot-A3` | MiniMax-M2.5 W8A8 + QuaRot |"
-
 msgid "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |"
 msgstr "| `Qwen3.5-27B-w8a8-A3` | Qwen3.5-27B W8A8 |"
 

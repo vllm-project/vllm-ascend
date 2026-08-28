@@ -95,16 +95,8 @@ msgstr "其他稀疏注意力模型尚未经过验证。"
 msgid "## 1. Install Dependencies"
 msgstr "## 1. 安装依赖"
 
-msgid ""
-"The installation steps are grouped by hardware. Only A3 series is currently\n"
-"supported."
-msgstr "安装步骤按硬件分组。目前仅支持A3系列。"
-
 msgid "### Prefill Build Dependencies"
 msgstr "### Prefill构建依赖"
-
-msgid "=== \"A3 series\""
-msgstr "=== \"A3系列\""
 
 msgid ""
 "Prefill requires MemFabric Hybrid and Memcache Hybrid. Install them in this\n"
@@ -287,3 +279,11 @@ msgstr ""
 "- 稀疏Decode卸载支持DP和TP；不支持CP和PP。\n"
 "- MemFabric是唯一支持的`SfaRemoteD2HConnector`传输后端。\n"
 "- 分层缓冲区复用目前无法与`MooncakeLayerwiseConnector`结合使用，因为按缓冲区传输完成门控尚未实现。计划在后续更新中提供支持。"
+
+msgid ""
+"The installation steps are grouped by hardware. Only A3 series is currently\n"
+"supported."
+msgstr "安装步骤按硬件分组。目前仅支持A3系列。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3系列\""

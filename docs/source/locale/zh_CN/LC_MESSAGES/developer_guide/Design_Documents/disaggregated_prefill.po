@@ -125,14 +125,6 @@ msgid "### 4. Specifications Design"
 msgstr "### 4. 规格设计"
 
 msgid ""
-"This feature is flexible and supports various configurations, including "
-"setups with MLA and GQA models. It is compatible with A2 and A3 hardware "
-"configurations and facilitates scenarios involving equal TP setups and "
-"certain unequal TP setups across multiple P and D nodes."
-msgstr ""
-"该特性灵活且支持多种配置，包括使用MLA和GQA模型的设置。它兼容A2和A3硬件配置，并支持跨多个P节点和D节点的相等TP设置和某些不等TP设置的场景。"
-
-msgid ""
 "- 🟢 Functional: Fully operational, with ongoing optimizations.\n"
 "- 🔵 Experimental: Experimental support, interfaces and functions may change.\n"
 "- 🚧 WIP: Under active development, will be supported soon.\n"
@@ -180,11 +172,6 @@ msgid "## Limitations"
 msgstr "## 限制"
 
 msgid ""
-"- Heterogeneous P and D nodes are not supported, for example, running P "
-"nodes on A2 and D nodes on A3."
-msgstr "- 不支持异构的 P 和 D 节点，例如在 A2 上运行 P 节点、在 A3 上运行 D 节点。"
-
-msgid ""
 "- In non-symmetric TP configurations, only cases where the P nodes have a "
 "higher TP degree than the D nodes and the P TP count is an integer multiple "
 "of the D TP count are supported (i.e., P_tp > D_tp and P_tp % D_tp = 0)."
@@ -217,12 +204,6 @@ msgstr ""
 msgid "| Feature                       |      Status    |"
 msgstr "| 功能特性                       |      状态      |"
 
-msgid "| A2                            | 🟢 Functional  |"
-msgstr "| A2                            | 🟢 功能正常    |"
-
-msgid "| A3                            | 🟢 Functional  |"
-msgstr "| A3                            | 🟢 功能正常    |"
-
 msgid "| equal TP configuration        | 🟢 Functional  |"
 msgstr "| equal TP configuration        | 🟢 功能正常    |"
 
@@ -234,3 +215,22 @@ msgstr "| MLA                           | 🟢 功能正常    |"
 
 msgid "| GQA                           | 🟢 Functional  |"
 msgstr "| GQA                           | 🟢 功能正常    |"
+
+msgid ""
+"This feature is flexible and supports various configurations, including "
+"setups with MLA and GQA models. It is compatible with A2 and A3 hardware "
+"configurations and facilitates scenarios involving equal TP setups and "
+"certain unequal TP setups across multiple P and D nodes."
+msgstr ""
+"该特性灵活且支持多种配置，包括使用MLA和GQA模型的设置。它兼容A2和A3硬件配置，并支持跨多个P节点和D节点的相等TP设置和某些不等TP设置的场景。"
+
+msgid "| A2                            | 🟢 Functional  |"
+msgstr "| A2                            | 🟢 功能正常    |"
+
+msgid "| A3                            | 🟢 Functional  |"
+msgstr "| A3                            | 🟢 功能正常    |"
+
+msgid ""
+"- Heterogeneous P and D nodes are not supported, for example, running P "
+"nodes on A2 and D nodes on A3."
+msgstr "- 不支持异构的 P 和 D 节点，例如在 A2 上运行 P 节点、在 A3 上运行 D 节点。"

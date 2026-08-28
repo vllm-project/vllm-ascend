@@ -67,27 +67,11 @@ msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/roo
 msgid "### 3.2 Verify Multi-node Communication (Optional)"
 msgstr "### 3.2 验证多节点通信（可选）"
 
-msgid ""
-"If you want to deploy a multi-node environment, you need to verify multi-"
-"node communication according to [verify multi-node communication "
-"environment](../../installation.md#verify-multi-node-communication)."
-msgstr ""
-"如需部署多节点环境，需按照[验证多节点通信环境](../../installation.md#verify-multi-node-"
-"communication)中的说明验证多节点通信。"
-
 msgid "## 4 Installation"
 msgstr "## 4 安装"
 
 msgid "### 4.1 Docker Image Installation"
 msgstr "### 4.1 Docker 镜像安装"
-
-msgid ""
-"Select an image based on your machine type and start the docker image on "
-"your node, refer to [using docker](../../installation.md#set-up-using-"
-"docker)."
-msgstr ""
-"根据您的机器类型选择镜像，并在节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-"
-"using-docker)。"
 
 msgid ""
 "After a successful docker run, you can verify the running container service "
@@ -101,11 +85,6 @@ msgid ""
 "If you don't want to use the docker image as above, you can also build all "
 "from source:"
 msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
-
-msgid ""
-"- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
 msgid ""
 "If you want to deploy a multi-node environment, you need to set up the "
@@ -167,9 +146,6 @@ msgstr ""
 "PD（Prefill-"
 "Decode）分离通过在专用节点组上独立运行Prefill和Decode来解决这些问题，每个节点组可独立配置。对于需要同时保证稳定延迟和高吞吐量的并发多用户生产环境，推荐采用此架构。"
 
-msgid "#### 5.2.1 A3 Series PD Separation Deployment"
-msgstr "#### 5.2.1 A3系列PD分离部署"
-
 msgid "Parameter descriptions:"
 msgstr "参数说明："
 
@@ -181,9 +157,6 @@ msgstr ""
 "请参考 [Prefill-"
 "Decode分离（Deepseek）](../features/pd_disaggregation_mooncake_multi_node.md) "
 "部署P-D分离代理。"
-
-msgid "#### 5.2.2 A2 Series PD Separation Deployment"
-msgstr "#### 5.2.2 A2系列PD分离部署"
 
 msgid "Before you start, please:"
 msgstr "开始前，请："
@@ -358,12 +331,6 @@ msgstr "## 10 常见问题"
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动 Docker 镜像。"
 
-msgid "=== \"A2 series\""
-msgstr "=== \"A2 系列\""
-
-msgid "=== \"A3 series\""
-msgstr "=== \"A3 系列\""
-
 msgid "1. Prepare the script `launch_online_dp.py` on each node."
 msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
 
@@ -452,9 +419,6 @@ msgstr ""
 "|长上下文（1M）|1P1D部署|32 (A3)|DeepSeek-V4-Flash-w8a8-mtp|P节点和D节点均使用dp16 "
 "tp1；平衡延迟与吞吐量|"
 
-msgid "=== \"A2 series with dspark\""
-msgstr "=== \"A2系列搭配dspark\""
-
 msgid "tps more than 50+ ,its reach  2X speed of dsv4f with mtp"
 msgstr "tps超过50+，其速度达到dsv4f搭配mtp的2倍"
 
@@ -532,12 +496,6 @@ msgstr ""
 "| SWE Multilingual | v0.25.1rc | accuracy | gen | 68.33 | A3 1P1D DSpark "
 "w8a8 |"
 
-msgid "=== \"A3 series with DSpark\""
-msgstr "=== \"A3系列与DSpark\""
-
-msgid "=== \"A3 series with dspark\""
-msgstr "=== \"A3系列与dspark\""
-
 msgid ""
 "Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
 "more details."
@@ -584,13 +542,6 @@ msgstr ""
 "- `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`：控制混合注意力层前缀缓存检查点的保留间隔（以token为单位）。适用于DeepSeek-V4，并且仅在启用前缀缓存时生效。在KV缓存压力下，它可以提高可重用长前缀的有效前缀缓存命中率。该值必须是 `--block-size` 的非负倍数；对于DeepSeek-V4-Flash，建议使用 `--block-size` 的128倍。当 `--block-size` 为 `32` 时，将其设置为 `4096`；当 `--block-size` 为 `128` 时，将其设置为 `16384`。"
 
 msgid ""
-"Common Issues Tip: If you encounter issues, please refer to the [Public "
-"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
-"troubleshooting."
-msgstr ""
-"常见问题提示：如果您遇到问题，请参阅[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)进行故障排除。"
-
-msgid ""
 "- `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.\n"
 "- `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.\n"
 "- `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.\n"
@@ -610,14 +561,6 @@ msgstr ""
 "- `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`：控制混合注意力层前缀缓存检查点的保留间隔（以token为单位）。适用于DeepSeek-V4，并且仅在启用前缀缓存时生效。在KV缓存压力下，它可以提高可重用长前缀的有效前缀缓存命中率。该值必须是 `--block-size` 的非负倍数；对于DeepSeek-V4-Flash，建议使用 `--block-size` 的128倍。当 `--block-size` 为 `32` 时，将其设置为 `4096`；当 `--block-size` 为 `128` 时，将其设置为 `16384`。"
 
 msgid ""
-"Common Issues Tip: If you encounter issues with PD separation deployment, "
-"please refer to the [Public "
-"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for "
-"troubleshooting."
-msgstr ""
-"常见问题提示：如果您在PD分离部署中遇到问题，请参阅[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)进行故障排除。"
-
-msgid ""
 "Please refer to the [Feature "
 "Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
@@ -625,9 +568,60 @@ msgstr ""
 "请参阅[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)以获取详细的特性描述。"
 
 msgid ""
-"For common environment, installation, and general parameter issues, please "
-"refer to the [Public "
-"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this "
-"chapter only covers model-specific issues."
+"If you want to deploy a multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../../getting_started/installation.md#installation-multi-node-"
+"interconnect)."
 msgstr ""
-"对于常见的环境、安装和通用参数问题，请参阅[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)；本章仅涵盖模型特定问题。"
+"如果您想部署多节点环境，需要按照[验证多节点通信环境](../../getting_started/installation.md#installation-"
+"multi-node-interconnect)来验证多节点通信。"
+
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using "
+"docker](../../getting_started/installation.md#installation-prebuilt-image)."
+msgstr ""
+"根据您的机器类型选择镜像，并在您的节点上启动docker镜像，请参考[使用docker](../../getting_started/installation.md#installation-"
+"prebuilt-image)。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装`vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues, please refer to the [Public "
+"FAQs](../../faqs.md) for troubleshooting."
+msgstr "常见问题提示：如果遇到问题，请参考[公共FAQ](../../faqs.md)进行故障排查。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues with PD separation deployment, "
+"please refer to the [Public FAQs](../../faqs.md) for troubleshooting."
+msgstr "常见问题提示：如果在PD分离部署中遇到问题，请参考[公共FAQ](../../faqs.md)进行故障排查。"
+
+msgid ""
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public FAQs](../../faqs.md); this chapter only covers model-"
+"specific issues."
+msgstr "对于常见的环境、安装和通用参数问题，请参考[公共FAQ](../../faqs.md)；本章仅涵盖模型特定问题。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3 系列\""
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2 系列\""
+
+msgid "=== \"A2 series with dspark\""
+msgstr "=== \"A2系列搭配dspark\""
+
+msgid "=== \"A3 series with DSpark\""
+msgstr "=== \"A3系列与DSpark\""
+
+msgid "#### 5.2.1 A3 Series PD Separation Deployment"
+msgstr "#### 5.2.1 A3系列PD分离部署"
+
+msgid "=== \"A3 series with dspark\""
+msgstr "=== \"A3系列与dspark\""
+
+msgid "#### 5.2.2 A2 Series PD Separation Deployment"
+msgstr "#### 5.2.2 A2系列PD分离部署"

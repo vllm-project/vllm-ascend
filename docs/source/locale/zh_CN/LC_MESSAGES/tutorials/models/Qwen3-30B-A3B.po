@@ -174,11 +174,6 @@ msgid ""
 "If deploying a multi-node environment, set up the environment on each node."
 msgstr "如果部署多节点环境，请在每个节点上设置环境。"
 
-msgid ""
-"For more details, please refer to the [Installation "
-"Guide](../../installation.md)."
-msgstr "更多详情，请参考[安装指南](../../installation.md)。"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -394,11 +389,6 @@ msgstr ""
 msgid "#### Table 2: Detailed Node Configuration"
 msgstr "#### 表2：详细节点配置"
 
-msgid ""
-"> For detailed parameter descriptions, please refer to the deployment "
-"examples in Section 5."
-msgstr "> 详细参数说明请参考第5节的部署示例。"
-
 msgid "**Low Latency Configuration:**"
 msgstr "**低时延配置：**"
 
@@ -512,12 +502,6 @@ msgstr ""
 "| 长上下文       | 单节点（TP4）     | 2 (A3)<br>4 (A2) | W8A8           | "
 "减少并发序列以支持更长的最大模型长度                             |"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3系列\""
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2系列\""
-
 msgid ""
 "!!! tip\n"
 "    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment."
@@ -621,9 +605,35 @@ msgstr ""
 "请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的特性描述。"
 
 msgid ""
+"For more details, please refer to the [Installation "
+"Guide](../../getting_started/installation.md)."
+msgstr "更多详情请参阅[安装指南](../../getting_started/installation.md)。"
+
+msgid ""
 "For common environment, installation, and general parameter issues, please "
-"refer to the [Public "
-"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This "
-"chapter only covers model-specific issues."
+"refer to the [Public FAQs](../../faqs.md). This chapter only covers model-"
+"specific issues."
+msgstr "常见环境、安装及通用参数问题请参阅[公共FAQ](../../faqs.md)。本章仅涵盖模型相关问题。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3系列\""
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2系列\""
+
+msgid ""
+"Please refer to the [vLLM Serve](https://docs.vllm.ai/en/stable/cli/serve/),"
+" [vLLM Features](https://docs.vllm.ai/en/stable/features) and [vLLM Ascend "
+"Feature "
+"Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html)"
+" for key parameter descriptions."
 msgstr ""
-"对于常见的环境、安装和通用参数问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。本章仅涵盖模型特定问题。"
+"有关关键参数的说明，请参阅[vLLM "
+"Serve](https://docs.vllm.ai/en/stable/cli/serve/)、[vLLM功能](https://docs.vllm.ai/en/stable/features)和[vLLM"
+" "
+"Ascend功能矩阵](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html)。"
+
+msgid ""
+"> For detailed parameter descriptions, please refer to the deployment "
+"examples in [Section 5.1](#51-single-node-online-deployment)."
+msgstr "> 有关详细参数说明，请参考[第5.1节](#51-single-node-online-deployment)中的部署示例。"

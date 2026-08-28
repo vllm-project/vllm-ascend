@@ -1,0 +1,191 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-28 02:09+0000\n"
+"PO-Revision-Date: 2026-08-28 02:09+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "First, install the system dependencies and configure the pip mirror."
+msgstr "首先，安装系统依赖并配置 pip 镜像。"
+
+msgid ""
+"Optional: If you are working on an x86 machine or using a TorchNPU "
+"development version, configure pip's `extra-index`:"
+msgstr "可选：如果您在 x86 机器上工作或使用 TorchNPU 开发版本，请配置 pip 的 `extra-index`："
+
+msgid ""
+"WheelNext selects a vLLM Ascend wheel that matches the hardware from the "
+"variant index. First, install and verify `uv`:"
+msgstr "WheelNext 会从变体索引中选择与硬件匹配的 vLLM Ascend wheel。首先，安装并验证 `uv`："
+
+msgid "Check the device build type:"
+msgstr "检查设备构建类型："
+
+msgid ""
+"If `uv pip install` fails because of a corrupted cache or stale package "
+"data, clear the uv cache before running the installation command again:"
+msgstr "如果 `uv pip install` 因缓存损坏或包数据过期而失败，请在重新运行安装命令之前清除 uv 缓存："
+
+msgid "uv cache clean"
+msgstr "uv cache clean"
+
+msgid ""
+"Finally, handle `triton` and `triton-ascend` according to the hardware:"
+msgstr "最后，根据硬件处理 `triton` 和 `triton-ascend`："
+
+msgid "=== \"A2 / A3 / 950DT\""
+msgstr "=== \"A2 / A3 / 950DT\""
+
+msgid "???+ note \"Other vLLM Ascend versions\""
+msgstr "???+ note \"其他 vLLM Ascend 版本\""
+
+msgid ""
+"When installing another version of `vllm-ascend`, check the repository's "
+"`requirements.txt` for the corresponding `triton-ascend` version."
+msgstr ""
+"安装其他版本的 `vllm-ascend` 时，请查看仓库的 `requirements.txt` 以获取对应的 `triton-ascend` 版本。"
+
+msgid "??? tip \"If pip cannot verify the Huawei Cloud mirror certificate\""
+msgstr "??? tip \"如果 pip 无法验证华为云镜像证书\""
+
+msgid ""
+"The Huawei Cloud package index uses HTTPS, so `--trusted-host` is not "
+"normally required. If pip reports an SSL certificate verification or "
+"untrusted-host error for `mirrors.huaweicloud.com`, first update pip and the"
+" operating system CA certificates, or configure the CA bundle required by "
+"your network."
+msgstr ""
+"华为云软件包索引使用 HTTPS，因此通常不需要 `--trusted-host`。如果 pip 针对 "
+"`mirrors.huaweicloud.com` 报告 SSL 证书验证错误或不受信任主机错误，请先更新 pip 和操作系统 CA "
+"证书，或者配置网络所需的 CA 证书包。"
+
+msgid ""
+"As a temporary workaround on a trusted network, retry the vLLM Ascend "
+"installation command with `--trusted-host mirrors.huaweicloud.com`."
+msgstr ""
+"在可信网络中，可采用临时解决方法：在 vLLM Ascend 安装命令中添加 `--trusted-host "
+"mirrors.huaweicloud.com` 后重试。"
+
+msgid ""
+"This option tells pip to trust the host even when HTTPS validation fails, "
+"which weakens protection against man-in-the-middle attacks. Use it only when"
+" you trust the network and cannot fix the certificate configuration."
+msgstr "此选项会让 pip 在 HTTPS 验证失败时仍信任该主机，从而削弱对中间人攻击的防护。仅当你信任当前网络且无法修复证书配置时使用。"
+
+msgid ""
+"Choose one of the following methods to install `vllm` and `vllm-ascend`. "
+"PyTorch and TorchNPU are installed automatically as dependencies during this"
+" step using the compatible versions for the selected release."
+msgstr ""
+"选择以下方法之一安装`vllm`和`vllm-"
+"ascend`。在此步骤中，PyTorch和TorchNPU会作为依赖项，按所选发布版本的兼容版本自动安装。"
+
+msgid ""
+"To ensure that Triton Ascend matches the current vLLM Ascend version, remove"
+" any existing `triton` and `triton-ascend` packages before installing the "
+"corresponding version of `triton-ascend`:"
+msgstr ""
+"为确保使用与当前vLLM Ascend版本匹配的Triton Ascend，请先清理环境中已有的`triton`和`triton-"
+"ascend`，再安装对应版本的`triton-ascend`："
+
+msgid ""
+"This prevents an existing Triton package or another version of Triton Ascend"
+" from being mixed into the current environment."
+msgstr "这样可以避免已有Triton包或其他版本的Triton Ascend与当前环境混用。"
+
+msgid ""
+"For more Triton Ascend installation guidance, see [Triton-Ascend > "
+"FAQ](https://github.com/Ascend/triton-"
+"ascend/blob/main/docs/en/FAQ.md#1-installation-and-environment-"
+"configuration)."
+msgstr ""
+"有关Triton Ascend安装的更多说明，请参阅[Triton-Ascend > "
+"FAQ](https://github.com/Ascend/triton-"
+"ascend/blob/main/docs/en/FAQ.md#1-installation-and-environment-"
+"configuration)。"
+
+msgid "=== \"Atlas 300I DUO / Atlas 200I Pro\""
+msgstr "=== \"Atlas 300I DUO / Atlas 200I Pro\""
+
+msgid ""
+"Atlas 300I DUO and Atlas 200I Pro do not support `triton` or `triton-"
+"ascend`. If either package is already installed in the environment, "
+"uninstall it and do not reinstall `triton-ascend`:"
+msgstr ""
+"Atlas 300I DUO和Atlas 200I Pro不支持`triton`或`triton-"
+"ascend`。如果环境中已安装任一软件包，请将其卸载，并且不要重新安装`triton-ascend`："
+
+msgid "??? note \"Installation method comparison\""
+msgstr "??? note \"安装方式对比\""
+
+msgid "| Method | Package type | Hardware handling | Recommended for |"
+msgstr "| 安装方式 | 包类型 | 硬件适配方式 | 推荐用户 |"
+
+msgid ""
+"    | **pip** | Prebuilt wheel | Installs the standard `vllm-ascend` wheel, "
+"which currently targets A2 | A2 users who want the simplest installation |"
+msgstr ""
+"    | **pip** | 预构建 wheel | 安装标准的 `vllm-ascend` wheel，该 wheel 目前面向 A2 | "
+"希望以最简单方式安装的 A2 用户 |"
+
+msgid ""
+"    | **uv** | Prebuilt wheel | Uses WheelNext wheel variants to select a "
+"compatible build for the detected hardware | Users who want a prebuilt wheel"
+" selected for their hardware |"
+msgstr ""
+"    | **uv** | 预构建 wheel | 使用 WheelNext wheel 变体，根据检测到的硬件选择兼容构建 | "
+"希望为其硬件选择预构建 wheel 的用户 |"
+
+msgid ""
+"    | **Source** | Source code | Builds and installs vLLM Ascend for the "
+"current environment | Development, customization, or environments without a "
+"suitable prebuilt wheel |"
+msgstr ""
+"    | **Source** | 源码 | 为当前环境构建并安装 vLLM Ascend | 开发、自定义或没有合适预构建 wheel 的环境 |"
+
+msgid ""
+"This installation method currently supports only **A2** builds and does not "
+"automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT. For "
+"other hardware, use a prebuilt image, WheelNext, or a source installation."
+msgstr ""
+"该安装方式目前仅支持 **A2** 构建，不会自动支持 A3、Atlas 300I DUO、Atlas 200I Pro 或 "
+"950DT。其他硬件请使用预构建镜像、WheelNext 或源码安装。"
+
+msgid "???+ warning \"A3 source installation\""
+msgstr "???+ warning \"A3 源码安装\""
+
+msgid ""
+"When installing vLLM Ascend from source for A3, run `git submodule update "
+"--init --recursive` manually or make sure that the environment has internet "
+"access so the required submodules can be downloaded automatically."
+msgstr ""
+"在 A3 上从源码安装 vLLM Ascend 时，请手动运行 `git submodule update --init "
+"--recursive`，或确保环境可以访问互联网，以便自动下载所需的子模块。"
+
+msgid "Install vLLM first, then install vLLM Ascend:"
+msgstr "首先安装 vLLM，然后安装 vLLM Ascend："
+
+msgid "??? tip \"Clear the cache if uv installation fails\""
+msgstr "??? tip \"如果 uv 安装失败，请清除缓存\""
+
+msgid "=== \"pip installation\""
+msgstr "=== \"pip 安装\""
+
+msgid "=== \"uv installation\""
+msgstr "=== \"uv 安装\""
+
+msgid "=== \"source installation\""
+msgstr "=== \"源码安装\""

@@ -43,24 +43,13 @@ msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cac
 msgid "You can use our official docker image to run `GLM-4.x` directly."
 msgstr "您可以使用官方提供的Docker镜像直接运行 `GLM-4.x`。"
 
-msgid "=== \"A3 series\""
-msgstr "=== \"A3系列\""
-
 msgid "Start the docker image on each node."
 msgstr "在每个节点上启动Docker镜像。"
-
-msgid "=== \"A2 series\""
-msgstr "=== \"A2系列\""
 
 msgid ""
 "In addition, if you don't want to use the docker image as above, you can "
 "also build all from source:"
 msgstr "此外，如果您不想使用上述Docker镜像，也可以从源码全部构建："
-
-msgid ""
-"- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
 msgid ""
 "If you want to deploy multi-node environment, you need to set up environment"
@@ -333,3 +322,14 @@ msgid ""
 msgstr ""
 "尽管之前的文档不建议在 Atlas 800 A2（64GB × 8）平台上进行多节点部署，但如果需要，仍可为 GLM-4.x "
 "模型实现此配置。要进行双节点设置，请在各个节点上分别执行以下脚本。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3系列\""
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2系列\""
