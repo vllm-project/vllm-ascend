@@ -619,9 +619,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=num_physical_blocks,
             kv_cache_tensors=[
-                KVCacheTensor(
-                    size=kv_cache_spec.page_size_bytes * num_physical_blocks,
-                    shared_by=[layer_name],
+                _make_kv_cache_tensor(
+                    per_layer_size=(kv_cache_spec.page_size_bytes * num_physical_blocks),
+                    layer_names=[layer_name],
+                    page_size=kv_cache_spec.page_size_bytes,
                 )
             ],
             kv_cache_groups=[
