@@ -162,6 +162,10 @@ class InstanceInfo:
     decoder_host: str
     decoder_port: int
     prefiller_cached_tokens: int | None = None
+    # prompt-side fields produced by prefiller (decoder can't, proxy merges them)
+    prompt_logprobs: Any = None
+    prompt_token_ids: Any = None
+    prompt_text: Any = None
 
 
 TAINT_PRIORITY = 1e15
@@ -959,6 +963,10 @@ async def assign_instances(
     if kv_transfer_params:
         req_data["kv_transfer_params"] = kv_transfer_params
     prefiller_cached_tokens = extract_cached_tokens(response_json)
+    # harvest prompt-side fields from prefiller (has h, local prefill fills tensor)
+    _p_pl = response_json.get("prompt_logprobs")
+    _p_pti = response_json.get("prompt_token_ids")
+    _p_pt = response_json.get("prompt_text")
 
     try:
         decoder = await runtime.schedule("pick_decoder", decoder_score)
@@ -978,6 +986,9 @@ async def assign_instances(
         decoder_host=decoder["host"],
         decoder_port=decoder["port"],
         prefiller_cached_tokens=prefiller_cached_tokens,
+        prompt_logprobs=_p_pl,
+        prompt_token_ids=_p_pti,
+        prompt_text=_p_pt,
     )
 
 
@@ -1013,6 +1024,34 @@ async def handle_completions_impl(api: str, request: Request):
         else:
             origin_prompt = ""
         origin_max_tokens = req_data.get("max_tokens", 16)
+
+        # prompt_logprobs must be non-streaming (vllm rejects stream+prompt_logprobs).
+        # Strip it before sending to decoder, then merge prefiller's value back.
+        if req_data.get("prompt_logprobs") is not None and not stream_flag:
+            decode_req = req_data.copy()
+            decode_req.pop("prompt_logprobs", None)
+            decode_req.pop("echo", None)
+            decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
+            headers = auth_headers(instance_info.request_id)
+            try:
+                d_resp = await decoder_client.post(api, json=decode_req, headers=headers)
+                d_resp.raise_for_status()
+                d_json = d_resp.json()
+                choice = (d_json.get("choices") or [{}])[0]
+                if choice.get("stop_reason") == "recomputed":
+                    # rare: decoder requests recompute; merge not supported, skip
+                    logger.warning("prompt_logprobs + recomputed retry: merge skipped for %s", instance_info.request_id)
+                else:
+                    if instance_info.prompt_logprobs is not None:
+                        d_json["prompt_logprobs"] = instance_info.prompt_logprobs
+                    if instance_info.prompt_token_ids is not None:
+                        d_json["prompt_token_ids"] = instance_info.prompt_token_ids
+                    if instance_info.prompt_text is not None:
+                        d_json["prompt_text"] = instance_info.prompt_text
+                return JSONResponse(d_json)
+            finally:
+                await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+                request_released = True
 
         async def generate_stream():
             nonlocal instance_info
