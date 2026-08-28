@@ -78,23 +78,21 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
 
 def tensor_sum(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
     """Route supported Tensor.sum calls through reduce_sum."""
+    if x.device.type != "npu" or x.dtype not in _BATCH_INVARIANT_SUM_DTYPES or kwargs.get("dtype") is not None:
+        return torch_tensor_sum(x, *args, **kwargs)
+
     dim = args[0] if args else kwargs.get("dim", kwargs.get("axis"))
     keepdim = args[1] if len(args) > 1 else kwargs.get("keepdim", kwargs.get("keepdims", False))
-    dtype = kwargs.get("dtype")
     reduce_dim = dim[0] if isinstance(dim, (tuple, list)) and len(dim) == 1 else dim
+    if not isinstance(reduce_dim, int):
+        return torch_tensor_sum(x, *args, **kwargs)
 
     # NOTE: The AscendC op supports only the last dimension. For a 3-D
     # tensor, dim=-1 and dim=2 use reduce_sum; other dimensions stay native.
-    if (
-        x.device.type == "npu"
-        and x.dtype in _BATCH_INVARIANT_SUM_DTYPES
-        and dtype is None
-        and isinstance(reduce_dim, int)
-    ):
-        ndim = x.dim()
-        if ndim > 0 and -ndim <= reduce_dim < ndim and reduce_dim % ndim == ndim - 1:
-            return reduce_sum(x, reduce_dim, keepdim)
-    return torch_tensor_sum(x, *args, **kwargs)
+    ndim = x.dim()
+    if ndim <= 0 or reduce_dim < -ndim or reduce_dim >= ndim or reduce_dim % ndim != ndim - 1:
+        return torch_tensor_sum(x, *args, **kwargs)
+    return reduce_sum(x, reduce_dim, keepdim)
 
 
 def override_envs_for_invariance():

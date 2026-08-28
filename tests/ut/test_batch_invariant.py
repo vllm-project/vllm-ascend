@@ -59,6 +59,8 @@ class TestBatchInvariant:
             result = batch_invariant.tensor_sum(x, dim=dim, keepdim=True)
 
         native_sum.assert_called_once_with(x, dim=dim, keepdim=True)
+        if device_type == "cpu" or dtype == torch.bool:
+            x.dim.assert_not_called()
         assert result is expected
 
     def test_override_envs_for_invariance(self):
