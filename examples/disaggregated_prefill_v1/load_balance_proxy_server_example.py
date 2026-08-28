@@ -1,4 +1,9 @@
-# Adapted from https://github.com/vllm-project/vllm/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py
+# Adapted from https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+#
+# Modified: Authorization header resolution now prefers the ORIGINAL client
+# request's Authorization header. If the original request carries no
+# Authorization header, fall back to constructing one from the
+# OPENAI_API_KEY environment variable (original upstream behavior).
 
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,6 +18,8 @@
 # - Load balances requests to multiple prefiller and decoder servers.
 # - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
 # - Streams responses from backend servers to clients.
+# - Forwards the client's original Authorization header to backends when
+#   present; otherwise falls back to the OPENAI_API_KEY environment variable.
 #
 # Prerequisites:
 # - Python 3.10+
@@ -60,12 +67,7 @@
 # Or for chat completions:
 #
 #   curl -X POST http://localhost:9000/v1/chat/completions \
-#     -H "Content-Type: application/json" \
-#     -d '{
-#           "model": "your-model",
 #           "messages": [{"role": "user", "content": "Hello!"}],
-#           "max_tokens": 16
-#         }'
 #
 # Step 4: Health Check
 # --------------------
@@ -83,20 +85,14 @@
 # For example, add 2 prefiller instances:
 #
 #   curl -X POST http://localhost:9000/instances/add \
-#     -H "Content-Type: application/json" \
-#     -d '{
 #           "type": "prefill",
 #           "instances": ["127.0.0.1:8102", "127.0.0.1:8103"]
-#         }'
 #
 # or remove 1 decoder instance:
 #
 #   curl -X POST http://localhost:9000/instances/remove \
-#     -H "Content-Type: application/json" \
-#     -d '{
 #           "type": "decode",
 #           "instances": "127.0.0.1:8201"
-#         }'
 #
 # This will return a JSON object with the adding or removing info
 # and the current prefiller and decoder instances.
@@ -626,7 +622,9 @@ class NodeListener:
     @staticmethod
     async def check_instance_status(host: str, port: int) -> bool:
         endpoint = "/models"
-        headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+        # Background health probe: no original client request is available here,
+        # so fall back to the OPENAI_API_KEY environment variable.
+        headers = auth_headers(next_req_id())
         try:
             async with httpx.AsyncClient(timeout=5.0, base_url=build_base_url(host, port)) as client:
                 response = await client.get(endpoint, headers=headers)
@@ -808,9 +806,32 @@ def with_cancellation(handler_func):
     return wrapper
 
 
-def auth_headers(request_id: str) -> dict[str, str]:
+def resolve_authorization(request: Request | None = None) -> str | None:
+    """Prefer the Authorization header from the original client request.
+
+    Returns the raw Authorization header value (e.g. "Bearer sk-xxx") if the
+    original request carries one; otherwise returns None so the caller falls
+    back to the OPENAI_API_KEY environment variable.
+    """
+    if request is not None:
+        authorization = request.headers.get("Authorization")
+        if authorization:
+            return authorization
+    return None
+
+
+def auth_headers(request_id: str, authorization: str | None = None) -> dict[str, str]:
+    """Build backend request headers.
+
+    Priority:
+    1. The Authorization header captured from the ORIGINAL client request
+       (passed in via ``authorization``).
+    2. Fallback: constructed from ``os.environ.get('OPENAI_API_KEY')``.
+    """
+    if not authorization:
+        authorization = f"Bearer {os.environ.get('OPENAI_API_KEY')}"
     return {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+        "Authorization": authorization,
         "X-Request-Id": request_id,
     }
 
@@ -841,9 +862,10 @@ async def send_request_to_service(
     request_id: str,
     max_retries: int = 3,
     base_delay: float = 0.2,
+    authorization: str | None = None,
 ):
     req_data = build_prefill_request(req_data)
-    headers = auth_headers(request_id)
+    headers = auth_headers(request_id, authorization)
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
         try:
@@ -868,8 +890,9 @@ async def stream_service_response(
     request_id: str,
     max_retries: int = 3,
     base_delay: float = 0.2,
+    authorization: str | None = None,
 ):
-    headers = auth_headers(request_id)
+    headers = auth_headers(request_id, authorization)
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
         first_chunk_sent = False
@@ -931,6 +954,7 @@ async def assign_instances(
     request_length: int,
     *,
     is_initial_request: bool,
+    authorization: str | None = None,
 ) -> InstanceInfo:
     runtime = get_runtime()
     args = get_global_args()
@@ -949,6 +973,7 @@ async def assign_instances(
             request_id,
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
+            authorization=authorization,
         )
     except Exception:
         await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
@@ -986,22 +1011,28 @@ async def reassign_instances(
     req_data: Any,
     request_length: int,
     previous_instance: InstanceInfo,
+    authorization: str | None = None,
 ) -> InstanceInfo:
     runtime = get_runtime()
     await runtime.schedule("release_prefill_kv", previous_instance.prefiller_key, previous_instance.prefiller_score)
     await runtime.schedule("release_decoder", previous_instance.decoder_key, previous_instance.decoder_score)
-    return await assign_instances(api, req_data, request_length, is_initial_request=False)
+    return await assign_instances(api, req_data, request_length, is_initial_request=False, authorization=authorization)
 
 
 async def handle_completions_impl(api: str, request: Request):
     runtime = get_runtime()
     args = get_global_args()
     request_released = False
+    # Prefer the Authorization header from the original client request;
+    # falls back to OPENAI_API_KEY inside auth_headers() when absent.
+    authorization = resolve_authorization(request)
     try:
         req_data = await request.json()
         req_body = await request.body()
         request_length = len(req_body)
-        instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
+        instance_info = await assign_instances(
+            api, req_data, request_length, is_initial_request=True, authorization=authorization
+        )
         stream_flag = bool(req_data.get("stream", False))
         chat_flag = "messages" in req_data
 
@@ -1043,6 +1074,7 @@ async def handle_completions_impl(api: str, request: Request):
                         request_id=instance_info.request_id,
                         max_retries=args.max_retries,
                         base_delay=args.retry_delay,
+                        authorization=authorization,
                     ):
                         if not released_kv and chunk:
                             await release_prefill_kv_once()
@@ -1098,7 +1130,9 @@ async def handle_completions_impl(api: str, request: Request):
                                 req_data["prompt"] = origin_prompt + generated_token
                             req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
                             tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
+                            instance_info = await reassign_instances(
+                                api, req_data, tmp_request_length, instance_info, authorization=authorization
+                            )
                             released_kv = False
                             break
                         if retry_count > 0 and not stream_flag:
@@ -1206,9 +1240,11 @@ async def handle_chat_completions(request: Request):
     return await handle_completions_impl("/chat/completions", request)
 
 
-async def handle_models_impl():
+async def handle_models_impl(request: Request):
     runtime = get_runtime()
     request_id = next_req_id()
+    # Prefer the Authorization header from the original client request.
+    authorization = resolve_authorization(request)
     await runtime.sync_clients()
     snapshot = runtime.scheduler.get_snapshot()
     candidates = [(ServerRole.PREFILL, s) for s in snapshot["prefill_instances"]] + [
@@ -1222,7 +1258,7 @@ async def handle_models_impl():
         key = server_key(host, port)
         try:
             client = await runtime.get_client(role, key)
-            response = await client.get("/models", headers=auth_headers(request_id), timeout=3.0)
+            response = await client.get("/models", headers=auth_headers(request_id, authorization), timeout=3.0)
             response.raise_for_status()
             return Response(content=response.content, media_type="application/json")
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
@@ -1238,8 +1274,8 @@ async def handle_models_impl():
 
 
 @app.get("/v1/models")
-async def handle_models():
-    return await handle_models_impl()
+async def handle_models(request: Request):
+    return await handle_models_impl(request)
 
 
 @app.post("/reset_prefix_cache")
