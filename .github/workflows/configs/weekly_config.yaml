@@ -243,6 +243,10 @@ a3:
         config_file_path: Minimax_m2.7_in64k_1k_prefix90_tpot50.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 2
+      - name: MiniMax-M2.5-w8a8-QuaRot-step
+        config_file_path: MiniMax-M2.5-w8a8-QuaRot-step.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+        size: 2
       - name: DeepSeek-V4-flash-w8a8-PD-no-prefix
         config_file_path: DeepSeek-V4-flash-w8a8-PD-no-prefix.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
