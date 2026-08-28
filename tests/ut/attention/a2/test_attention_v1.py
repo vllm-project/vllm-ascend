@@ -202,7 +202,7 @@ class TestC8DecodeMetadata(TestBase):
         buffers = [torch.zeros(8, 2, dtype=torch.int32) for _ in names]
         captured = []
         for name, buffer in zip(names, buffers):
-            param = [None] * 23
+            param: list[object] = [None] * 23
             param[3] = buffer
             param[17] = torch.ones(1)
             param[21] = name
