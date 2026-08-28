@@ -214,6 +214,7 @@ nav:
         - tutorials/models/Kimi-K2-Thinking.md
         - tutorials/models/Kimi-K2.5.md
         - tutorials/models/Kimi-K2.6.md
+        - tutorials/models/Kimi-K3.md
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
         - tutorials/models/MiniMax-M3.md
