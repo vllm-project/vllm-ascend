@@ -40,7 +40,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
@@ -225,6 +225,7 @@ def test_ascend_mla_page_size_includes_scale_storage() -> None:
 
 
 def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
+    legacy_layout_kwargs = {"indexes_kv_by_block_stride": True} if vllm_version_is("0.27.1") else {}
     spec = AscendMLAAttentionSpec(
         block_size=512,
         num_kv_heads=1,
@@ -232,11 +233,11 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
         dtype=torch.bfloat16,
         cache_dtype_str="fp8_ds_mla",
         page_size_padded=(512 // 4) * (128 * 2 + 2) + 128,
-        compress_ratio=4,
         model_version="deepseek_v4",
-        indexes_kv_by_block_stride=True,
         scale_dim=1,
         scale_dtype=torch.float16,
+        **_ratio_kwargs(4),
+        **legacy_layout_kwargs,
     )
 
     merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
@@ -244,9 +245,11 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     assert merged.block_size == spec.block_size
     assert merged.real_page_size_bytes == (512 // 4) * (128 * 2 + 2)
     assert merged.page_size_bytes == spec.page_size_padded
-    assert merged.compress_ratio == spec.compress_ratio
+    ratio_field = "compress_ratio" if vllm_version_is("0.27.1") else "tokens_per_state"
+    assert getattr(merged, ratio_field) == getattr(spec, ratio_field)
     assert merged.model_version == spec.model_version
-    assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
+    if vllm_version_is("0.27.1"):
+        assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
     assert merged.scale_dim == spec.scale_dim
     assert merged.scale_dtype == spec.scale_dtype
 
@@ -392,7 +395,7 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
 
     assert num_blocks == expected_num_blocks
     assert len(tensors) == 29
-    assert [len(tensor.shared_by) for tensor in tensors] == [4] * 23 + [1] * 6
+    assert [len(get_kv_cache_tensor_layers(tensor)) for tensor in tensors] == [4] * 23 + [1] * 6
     assert all(tensor.size == page_size * expected_num_blocks for tensor in tensors)
     assert sum(tensor.size for tensor in tensors) == available_memory
 
