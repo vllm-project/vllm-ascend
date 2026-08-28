@@ -364,6 +364,25 @@ class cmake_build_ext(build_ext):
 
         num_jobs = self.compute_num_jobs()
 
+        # AscendC's preprocess/link pipeline can race when one kernel target
+        # is built with parallel Make jobs, producing intermittent ld.lld
+        # "unknown file type" failures. Build this generated-kernel target
+        # once, serially, before the extension's normal parallel build. The
+        # dependency is then up to date when vllm_ascend_C is built below, so
+        # the rest of the extension keeps the configured parallelism.
+        if envs.SOC_VERSION.startswith("ascend950"):
+            subprocess.check_call(
+                [
+                    "cmake",
+                    "--build",
+                    ".",
+                    "--parallel",
+                    "1",
+                    "--target=gmm_situ_quant_kernels",
+                ],
+                cwd=self.build_temp,
+            )
+
         build_args = [
             "--build",
             ".",
