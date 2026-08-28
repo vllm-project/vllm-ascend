@@ -88,6 +88,10 @@ class GDNOperator(StrEnum):
     CHUNK_GATED_DELTA_RULE_FWD_H = "chunk_gated_delta_rule_fwd_h"
     CHUNK_FWD_O = "chunk_fwd_o"
     RECURRENT_GATED_DELTA_RULE = "recurrent_gated_delta_rule"
+    # Single-kernel composition covering the whole chunk prefill chain
+    # (cumsum/kkt/solve_tri/recompute_w_u/fwd_h/fwd_o); native falls back to
+    # the existing six-operator chain as one unit.
+    GDN_CORE_FWD = "gdn_core_fwd"
 
 
 _STAGE1_NATIVE_ONLY = {
@@ -180,6 +184,38 @@ def run_gdn_prefill_pipeline(
     q = l2norm(q)
     k = l2norm(k)
     repeat = num_value_heads // num_key_heads
+
+    fused = operators.get(GDNOperator.GDN_CORE_FWD)
+    if fused is not None:
+        # 单核全链（gdn_core_fwd phase6）：GVA 由 kernel 内部处理（q/k 不
+        # repeat），g 传原始门控值（cumsum 在 kernel 内部完成），beta 在
+        # normalizer 内转 fp32。native 回落时此分支不存在，走下方分立链。
+        initial_state_fused = initial_state.clone()
+        initial_state_fused[~has_initial_state, ...] = 0
+        initial_state_fused = initial_state_fused.transpose(-1, -2).contiguous()
+        cu_seqlens_host = (
+            list(metadata.cu_seqlens_host) if metadata.cu_seqlens_host is not None else None
+        )
+        chunk_indices_host = (
+            list(metadata.chunk_indices_host) if metadata.chunk_indices_host is not None else None
+        )
+        fused_output, fused_final_state = fused(
+            q.transpose(1, 2).contiguous(),
+            k.transpose(1, 2).contiguous(),
+            v.transpose(1, 2).contiguous(),
+            g,
+            beta,
+            initial_state=initial_state_fused,
+            chunk_size=chunk_size,
+            cu_seqlens=cu_seqlens_host,
+            chunk_indices=chunk_indices_host,
+            scale=scale,
+        )
+        return (
+            fused_output.to(output_dtype).transpose(1, 2).contiguous(),
+            fused_final_state.transpose(-1, -2).contiguous(),
+        )
+
     if repeat > 1:
         q = q.repeat_interleave(repeat, dim=2)
         k = k.repeat_interleave(repeat, dim=2)
@@ -327,6 +363,7 @@ _FLA_OPERATOR_PATHS: dict[GDNOperator, tuple[str, str]] = {
         "chunk_gated_delta_rule_fwd_h",
     ),
     GDNOperator.CHUNK_FWD_O: ("fla_npu.ops.ascendc", "chunk_fwd_o"),
+    GDNOperator.GDN_CORE_FWD: ("fla_npu.ops.ascendc", "gdn_core_fwd_phase6"),
 }
 
 
@@ -1240,6 +1277,40 @@ class A5GDNAdapter:
 
             return call
 
+        def fla_gdn_core(raw):
+            def call(
+                q_core,
+                k_core,
+                v_core,
+                gate,
+                beta_value,
+                *,
+                initial_state,
+                chunk_size,
+                cu_seqlens,
+                chunk_indices,
+                scale,
+            ):
+                # gdn_core_fwd phase6: single-kernel full chain. GVA and the
+                # local cumsum happen inside the kernel; beta must be fp32
+                # (OpDef gate dtype). Returns (o, final_state, g_cumsum, A).
+                o, final_state, _, _ = raw(
+                    q_core,
+                    k_core,
+                    v_core,
+                    gate,
+                    beta_value.float(),
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    chunk_size=chunk_size,
+                    cu_seqlens=cu_seqlens,
+                    chunk_indices=chunk_indices,
+                    scale=scale,
+                )
+                return o, final_state
+
+            return call
+
         specs = {
             GDNOperator.L2NORM_FWD: (native_l2norm, "vllm.third_party.fla.l2norm_fwd", None),
             GDNOperator.CHUNK_LOCAL_CUMSUM: (
@@ -1295,6 +1366,30 @@ class A5GDNAdapter:
                 selection,
                 native=native,
                 native_symbol=native_symbol,
+                phase="prefill",
+                stateful=False,
+            )
+
+        # GDN_CORE_FWD 组合单元：fla 侧一次调用替换六步分立链；native 侧
+        # 不加入 selected（管线按 operators.get() 缺省走现有分立链回落）。
+        def native_gdn_core_unused(*args, **kwargs):
+            raise RuntimeError(
+                "gdn_core_fwd native composition must run through the standalone chain"
+            )
+
+        core_selection = self.dispatcher.select(
+            GDNOperator.GDN_CORE_FWD,
+            self.signature,
+            native=native_gdn_core_unused,
+            native_symbol="gdn-core-native-chain",
+            fla_resolver=self._normalized_fla_resolver(GDNOperator.GDN_CORE_FWD, fla_gdn_core),
+        )
+        if core_selection.backend is GDNBackendMode.FLA_NPU:
+            selected[GDNOperator.GDN_CORE_FWD] = self._logged_operator(
+                GDNOperator.GDN_CORE_FWD,
+                core_selection,
+                native=native_gdn_core_unused,
+                native_symbol="gdn-core-native-chain",
                 phase="prefill",
                 stateful=False,
             )
