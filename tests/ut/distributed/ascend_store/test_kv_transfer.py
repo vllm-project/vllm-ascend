@@ -456,6 +456,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
 
     def test_handle_request_puts_missing_keys(self):
         t, store = self._make_thread([1, 0, 1, 0])
+        t.token_database.prepare_values = MagicMock(wraps=t.token_database.prepare_values)
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=64,
@@ -467,8 +468,16 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 1)
-        keys, _, _ = store.put_calls[0]
+        keys, addrs, sizes = store.put_calls[0]
         self.assertEqual(len(keys), 2)
+        self.assertEqual(addrs, [[1001], [1003]])
+        self.assertEqual(sizes, [[16], [16]])
+        t.token_database.prepare_values.assert_called_once_with(
+            [16, 48],
+            [32, 64],
+            [1, 3],
+            kv_cache_group_id=0,
+        )
 
     def test_handle_request_all_exist_no_put(self):
         t, store = self._make_thread([1, 1])
@@ -748,6 +757,54 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         t._handle_request(req)
         keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
+
+    def test_handle_request_batches_values_per_group_in_order(self):
+        store = FakeStore()
+        db = ChunkedTokenDatabase(
+            [KeyMetadata("m", 0, 0, 0, 0), KeyMetadata("m", 0, 0, 0, 0, kv_cache_group_id=1)],
+            [16, 32],
+            None,
+            hash_block_size=16,
+        )
+        db.set_group_buffers(
+            {0: [1000], 1: [2000]},
+            {0: [16], 1: [32]},
+            {0: [16], 1: [32]},
+            group_num_layers={0: 1, 1: 1},
+        )
+        db.prepare_values = MagicMock(wraps=db.prepare_values)
+        t = KVCacheStoreRecvingThread(
+            m_store=store,
+            token_database=db,
+            block_size=[16, 32],
+            tp_rank=0,
+            dcp_size=1,
+            ready_event=threading.Event(),
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+        )
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids_by_group=[[1, 2], [3]],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
+            kv_cache_group_ids=[0, 1],
+        )
+
+        t.request_queue.put(req)
+        t._handle_request(req)
+
+        keys, addrs, sizes = store.get_calls[0]
+        self.assertEqual(len(keys), 3)
+        self.assertEqual(addrs, [[1016], [1032], [2096]])
+        self.assertEqual(sizes, [[16], [16], [32]])
+        self.assertEqual(db.prepare_values.call_count, 2)
+        self.assertEqual(
+            [call.kwargs["kv_cache_group_id"] for call in db.prepare_values.call_args_list],
+            [0, 1],
+        )
 
 
 @unittest.skip("LayerMultiBlockReqMeta API is deprecated, tests need update for LayerTransferTask")

@@ -564,27 +564,6 @@ class KVTransferThread(threading.Thread):
         skip_flags = req_meta.skip_null_blocks_by_group
         return group_id < len(skip_flags) and skip_flags[group_id] if skip_flags else False
 
-    def _prepare_value(
-        self,
-        start: int,
-        end: int,
-        block_ids: list[int],
-        kv_cache_group_id: int = 0,
-        cache_role: str = "kv",
-        block_id: int | None = None,
-    ):
-        try:
-            return self.token_database.prepare_value(
-                start,
-                end,
-                block_ids,
-                kv_cache_group_id=kv_cache_group_id,
-                cache_role=cache_role,
-                block_id=block_id,
-            )
-        except TypeError:
-            return self.token_database.prepare_value(start, end, block_ids)
-
     def _decode_adaptor_prefill_pp(
         self,
         keys: list[str],
@@ -826,8 +805,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 req_id,
                 group_id,
             )
-            addrs = []
-            sizes = []
+            addrs, sizes = self.token_database.prepare_values(
+                starts,
+                ends,
+                key_block_ids,
+                kv_cache_group_id=group_id,
+            )
             stored_events: list[BlockStored] = []
             all_hashes = []
             if self.enable_kv_event:
@@ -846,15 +829,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 keys[:3],
             )
             for index, start in enumerate(starts):
-                addr, size, _ = self._prepare_value(
-                    start,
-                    ends[index],
-                    block_ids,
-                    kv_cache_group_id=group_id,
-                    block_id=key_block_ids[index],
-                )
-                addrs.append(addr)
-                sizes.append(size)
                 if self.enable_kv_event:
                     token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
                     block_size = (
@@ -952,6 +926,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             load_masks = self.token_database.load_mask(req_meta.block_hashes, token_len)
             for group_id in group_ids:
                 block_ids = req_meta.block_ids_by_group[group_id]
+                group_starts: list[int] = []
+                group_ends: list[int] = []
+                group_keys: list[str] = []
+                group_block_ids: list[int] = []
                 group_block_size = self._get_block_size(group_id)
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
 
@@ -968,17 +946,21 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     chunk_filter=chunk_filter,
                 )
                 for start, end, key, _block_hash, block_id in token_iter:
-                    addr, size, block_id = self._prepare_value(
-                        start,
-                        end,
-                        block_ids,
-                        kv_cache_group_id=group_id,
-                        block_id=block_id,
-                    )
-                    key_list.append(key)
-                    addr_list.append(addr)
-                    size_list.append(size)
-                    block_id_list.append(block_id)
+                    group_starts.append(start)
+                    group_ends.append(end)
+                    group_keys.append(key)
+                    group_block_ids.append(block_id)
+
+                group_addrs, group_sizes = self.token_database.prepare_values(
+                    group_starts,
+                    group_ends,
+                    group_block_ids,
+                    kv_cache_group_id=group_id,
+                )
+                key_list.extend(group_keys)
+                addr_list.extend(group_addrs)
+                size_list.extend(group_sizes)
+                block_id_list.extend(group_block_ids)
             if not key_list:
                 self.set_finished_request(req_id)
                 return
