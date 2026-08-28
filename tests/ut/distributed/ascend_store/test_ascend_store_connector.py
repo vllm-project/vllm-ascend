@@ -156,7 +156,7 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
-    def test_init_worker_role(self, mock_worker_cls, mock_lookup_cls):
+    def test_worker_skips_lookup_server_for_scheduler_client_backend(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
@@ -165,6 +165,21 @@ class TestAscendStoreConnector(unittest.TestCase):
             role=KVConnectorRole.WORKER,
             kv_cache_config=None,
         )
+        mock_worker_cls.assert_called_once()
+        mock_lookup_cls.assert_not_called()
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_worker_keeps_lookup_server_for_yuanrong(self, mock_worker_cls, mock_lookup_cls):
+        config = self._make_vllm_config(extra_config={"backend": "yuanrong"})
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+
         mock_worker_cls.assert_called_once()
         mock_lookup_cls.assert_called_once()
 

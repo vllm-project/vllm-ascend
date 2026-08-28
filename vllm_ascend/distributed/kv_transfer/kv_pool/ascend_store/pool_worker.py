@@ -43,6 +43,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     block_hash_to_str,
     get_block_hashes,
     get_cache_family_granularity,
+    get_kv_pool_lookup_tp_size,
     infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
@@ -606,7 +607,12 @@ class KVPoolWorker:
 
     def _infer_group_families(self) -> list[str]:
         kv_cache_groups = self.kv_cache_config.kv_cache_groups if self.kv_cache_config is not None else None
-        return infer_group_cache_families(kv_cache_groups, self.compress_ratios, self.hf_config)
+        return infer_group_cache_families(
+            kv_cache_groups,
+            self.compress_ratios,
+            self.hf_config,
+            use_sparse=self.use_sparse and not self.use_compress and not self.use_hybrid,
+        )
 
     def _infer_group_block_sizes(
         self,
@@ -2211,19 +2217,15 @@ class KVPoolWorker:
             return 0
         return min(hits) if hits else 0
 
-    def _get_group_num_kv_heads(self, group_id: int) -> int:
-        if self.use_mla or self.use_sparse:
-            return 1
-        if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
-            return 1
-        return self.num_kv_head
-
     def get_group_tp_size(self, kv_cache_group_id: int):
-        if self.tp_mismatch:
-            return self.effective_tp_size
-        if self.group_uses_align_state[kv_cache_group_id]:
-            return self.tp_size
-        return min(self.tp_size, self._get_group_num_kv_heads(kv_cache_group_id))
+        return get_kv_pool_lookup_tp_size(
+            self.tp_size,
+            self.num_kv_head,
+            self.use_mla,
+            self.use_sparse,
+            self.group_uses_align_state[kv_cache_group_id],
+            self.effective_tp_size if self.tp_mismatch else None,
+        )
 
     @staticmethod
     def _replace_key_field(key: str, field: str, value: int) -> str:

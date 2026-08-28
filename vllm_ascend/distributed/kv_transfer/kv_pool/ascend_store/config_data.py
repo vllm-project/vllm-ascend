@@ -14,6 +14,8 @@ from vllm.v1.core.sched.output import NewRequestData
 
 from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
 
+SCHEDULER_LOOKUP_BACKENDS = frozenset({"memcache", "mooncake"})
+
 
 @dataclass(frozen=True)
 class TPMismatchInfo:
@@ -67,6 +69,21 @@ def infer_tp_mismatch_info(
         effective_heads_per_rank=effective_heads_per_rank,
         num_sub_keys=num_sub_keys,
     )
+
+
+def get_kv_pool_lookup_tp_size(
+    tp_size: int,
+    num_kv_heads: int,
+    use_mla: bool,
+    use_sparse: bool,
+    use_align_state: bool = False,
+    effective_tp_size: int | None = None,
+) -> int:
+    if effective_tp_size is not None:
+        return effective_tp_size
+    if use_align_state:
+        return tp_size
+    return min(tp_size, 1 if use_mla or use_sparse else num_kv_heads)
 
 
 # Parameters related to the key
@@ -220,14 +237,18 @@ def infer_group_cache_families(
     kv_cache_groups: Sequence[object] | None,
     compress_ratios: Sequence[int] | None,
     hf_config: Any | None = None,
+    use_sparse: bool = False,
 ) -> list[str]:
     if kv_cache_groups is None:
-        return ["default"]
+        return ["mixed" if use_sparse else "default"]
 
     families: list[str] = []
     for group in kv_cache_groups:
+        if use_sparse:
+            families.append("mixed")
+            continue
         spec_ratios = _get_group_spec_ratios(group)
-        if len(spec_ratios) == 1:
+        if len(spec_ratios) == 1 and spec_ratios != {None}:
             families.append(infer_cache_family_from_ratio(next(iter(spec_ratios))))
             continue
         if len(spec_ratios) > 1:
