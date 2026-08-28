@@ -165,8 +165,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             self, desc: BatchExecutionDescriptor
         ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         """Replay a full graph and update its registered tasks."""
-        num_tokens = desc.num_tokens
-        logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
         
         graph = self.graphs[desc]

@@ -2179,7 +2179,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
@@ -3431,7 +3431,7 @@ class NPUModelRunner(GPUModelRunner):
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    input_ids, positions, intermediate_tensors, inputs_embeds
                 )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
