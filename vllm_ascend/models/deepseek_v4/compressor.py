@@ -24,6 +24,7 @@
 # limitations under the License.
 #
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
@@ -88,8 +89,8 @@ class AscendCompressorStateCache(CompressorStateCache):
 class AscendCompressorMetadata:
     """Request metadata for the compressed KV and compressor state caches."""
 
-    cache: typing.Any
-    state: typing.Any
+    cache: Any
+    state: Any
 
 
 class Compressor(nn.Module):
@@ -165,7 +166,7 @@ class Compressor(nn.Module):
                 f"Only support compress_ratio in [4, 128]. Got unsupported compress_ratio: {compress_ratio}"
             )
 
-    def _compute_metadata(self, metadata):
+    def _compute_metadata(self, metadata: Any):
         from vllm_ascend.attention.dsa_v1 import get_or_compute_compressor_metadata
 
         return get_or_compute_compressor_metadata(metadata, self.compress_ratio)
