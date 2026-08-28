@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -18,11 +19,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
-    infer_cache_family_ratio,
     LayerBatchReqMeta,
     LayerBlockRange,
     LayerLoadTask,
-    LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
     SharedBlockData,
@@ -41,16 +40,11 @@ class LayerBatchBuilder:
     def __init__(
         self,
         token_database: ChunkedTokenDatabase,
-        my_key_index: int,
-        num_ranks_per_layer: int,
         page_size_bytes: int,
         num_layers: int,
         group_id: int = 0,
     ) -> None:
-        self.my_key_index = my_key_index
-        self.num_ranks_per_layer = num_ranks_per_layer
         self.page_size_bytes = page_size_bytes
-        self.num_layers = num_layers
         self.group_id = group_id
         self._block_len_np = np.asarray(token_database.group_block_len[group_id], dtype=np.int64)
         self._kv_caches_base_addr_np = np.asarray(
@@ -344,10 +338,7 @@ class KVTransferThread(threading.Thread):
             return self.block_size[kv_cache_group_id]
         return self.block_size
 
-    def add_request(
-        self,
-        request: ReqMeta | LayerBatchReqMeta | LayerMultiBlockReqMeta,
-    ) -> torch.Tensor:
+    def add_request(self, request: Any) -> None:
         self.request_queue.put(request)
 
     def get_and_clear_finished_requests(
@@ -625,16 +616,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
         )
         self.put_step = put_step
         self.kv_role = kv_role
-        self.stored_requests = defaultdict[str, int](int)
         self.group_uses_align_state = group_uses_align_state or []
         self.enable_kv_event = enable_kv_event
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
-
-    def add_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            self.stored_requests[req_id] += 1
 
     def is_stored_request(self, req_id: str) -> bool:
         with self.done_task_lock:
@@ -643,17 +629,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def get_stored_request_count(self, req_id: str) -> int | None:
         with self.done_task_lock:
             return self.stored_requests.get(req_id)
-
-    def get_stored_requests_snapshot(self) -> dict[str, int]:
-        with self.done_task_lock:
-            return dict(self.stored_requests)
-
-    def dec_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
-                return self.stored_requests[req_id]
-            return None
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -715,6 +690,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.request_queue.task_done()
 
     def _handle_stored_request(self, req_meta: ReqMeta):
+        """Store missing KV chunks for one request."""
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
         current_event = req_meta.current_event
@@ -740,8 +716,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
             group_block_size = self._get_block_size(group_id)
-            cache_family = self.token_database.group_cache_families["kv"].get(group_id)
-            raw_group_block_size = group_block_size * infer_cache_family_ratio(cache_family)
 
             group_store_mask = (
                 list(store_masks[group_id]) if store_masks is not None and group_id < len(store_masks) else None
@@ -749,8 +723,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if group_store_mask is not None:
                 skipped_chunks = 0
                 for chunk_id, allowed in enumerate(group_store_mask):
-                    start = chunk_id * raw_group_block_size
-                    if allowed and should_skip(start, start + raw_group_block_size):
+                    start = chunk_id * group_block_size
+                    if allowed and should_skip(start, start + group_block_size):
                         group_store_mask[chunk_id] = False
                         skipped_chunks += 1
                 if skipped_chunks:
@@ -776,14 +750,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 start: int,
                 group_block_size=group_block_size,
                 group_store_mask=group_store_mask,
-                raw_group_block_size=raw_group_block_size,
             ) -> bool:
                 block_idx = start // group_block_size
                 mask_allows = group_store_mask is None or (
                     block_idx < len(group_store_mask) and group_store_mask[block_idx]
                 )
-                chunk_start = block_idx * raw_group_block_size
-                return mask_allows and not should_skip(chunk_start, chunk_start + raw_group_block_size)
+                chunk_start = block_idx * group_block_size
+                return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
             pre_shard = self.dcp_size <= 1 and not align_state_group
             iterator = self.token_database.process_token_key_strings_with_block_ids(
@@ -1100,11 +1073,6 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
 
         return cache
 
-    def add_request(  # type: ignore[override]
-        self, req_meta: list[LayerTransferTask]
-    ) -> torch.Tensor:
-        self.request_queue.put(req_meta)
-
     def _handle_request(  # type: ignore[override]
         self, transfer_tasks: list[LayerTransferTask]
     ):
@@ -1228,11 +1196,6 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         self.layer_save_finished_events = layer_save_finished_events
         self.final_layer_id = num_layers - 1
 
-    def add_request(  # type: ignore[override]
-        self, req_meta: LayerLoadTask
-    ) -> torch.Tensor:
-        self.request_queue.put(req_meta)
-
     def _wait_for_save(self, layer_id: int) -> None:
         while not self.layer_save_finished_events[layer_id].wait(timeout=10):
             logger.info("Layerwise %d save wait timed out, keep waiting before load", layer_id)
@@ -1314,9 +1277,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         tp_rank: int,
         tp_size: int,
         dcp_size: int,
-        put_step: int,
-        my_key_index: int,
-        num_ranks_per_layer: int,
         page_size_bytes: int,
         ready_event: threading.Event,
         num_layers: int,
@@ -1337,9 +1297,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             name="KVCacheStoreLayerSendingThread",
         )
         self.final_layer_id = num_layers - 1
-        self.put_step = put_step
-        self.stored_requests: defaultdict[str, int] = defaultdict(int)
-        self.done_task_lock = threading.Lock()
         self.layer_save_finished_events = layer_save_finished_events
         self.sync_save_events = sync_save_events
         self.max_transfer_blocks = max_transfer_blocks
@@ -1351,21 +1308,10 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         else:
             self.layer_batch_builder = LayerBatchBuilder(
                 token_database,
-                my_key_index,
-                num_ranks_per_layer,
                 page_size_bytes,
                 num_layers,
                 group_id=0,
             )
-
-    def add_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            self.stored_requests[req_id] += 1
-
-    def dec_stored_request(self, req_id: str):
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -1379,11 +1325,6 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         else:
             builder = self.layer_batch_builder
         return builder.build_shared(task, is_save=True)
-
-    def add_request(  # type: ignore[override]
-        self, req_meta: list[LayerTransferTask]
-    ) -> torch.Tensor:
-        self.request_queue.put(req_meta)
 
     def _handle_request(  # type: ignore[override]
         self, transfer_tasks: list[LayerTransferTask]
@@ -1470,8 +1411,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         tp_rank: int,
         tp_size: int,
         dcp_size: int,
-        my_key_index: int,
-        num_ranks_per_layer: int,
         page_size_bytes: int,
         ready_event: threading.Event,
         get_event: threading.Event,
@@ -1483,6 +1422,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
         group_builders: list[LayerBatchBuilder] | None = None,
+        external_slot_release_waiter: Callable[[int], None] | None = None,
+        save_failure_checker: Callable[[], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -1502,14 +1443,14 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         self.h2d_stagger_us = h2d_stagger_us
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+        self.external_slot_release_waiter = external_slot_release_waiter
+        self.save_failure_checker = save_failure_checker
         self.group_builders: list[LayerBatchBuilder] | None = group_builders
         if group_builders is not None:
             self.layer_batch_builder = group_builders[0]
         else:
             self.layer_batch_builder = LayerBatchBuilder(
                 token_database,
-                my_key_index,
-                num_ranks_per_layer,
                 page_size_bytes,
                 num_layers,
                 group_id=0,
@@ -1522,11 +1463,6 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         else:
             builder = self.layer_batch_builder
         return builder.build_shared(task, is_save=False)
-
-    def add_request(  # type: ignore[override]
-        self, req_meta: LayerLoadTask
-    ) -> torch.Tensor:
-        self.request_queue.put(req_meta)
 
     def _get_h2d_stagger_delay_us(self, layer_id: int) -> int:
         if self.h2d_stagger_us <= 0:
@@ -1552,7 +1488,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
         if wait_for_save is not None:
             while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
+                if self.save_failure_checker is not None:
+                    self.save_failure_checker()
                 logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
+            if self.save_failure_checker is not None:
+                self.save_failure_checker()
             # Non-saving TP ranks have no D2H task to synchronize the event.
             # Their CPU save-finished signal only means the event was recorded;
             # wait for the NPU work before reusing the local HBM buffer.
@@ -1561,6 +1501,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             self.layer_save_finished_events[wait_for_save].clear()
 
         if len(transfer_tasks) == 0:
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(layer_id)
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
@@ -1580,6 +1522,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                 task_metas.append((task, req_meta))
 
         if not task_metas:
+            if self.external_slot_release_waiter is not None:
+                self.external_slot_release_waiter(layer_id)
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
@@ -1611,6 +1555,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
         addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
+        if self.external_slot_release_waiter is not None:
+            self.external_slot_release_waiter(layer_id)
         res = self._batch_copy_with_limits(
             gvas_array,
             addr_array,

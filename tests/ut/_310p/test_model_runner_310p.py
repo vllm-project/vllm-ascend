@@ -73,7 +73,6 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
     forward_context = SimpleNamespace(
         cudagraph_runtime_mode=CUDAGraphMode.FULL,
         capturing=False,
-        flash_comm_v1_enabled=False,
     )
 
     with patch(

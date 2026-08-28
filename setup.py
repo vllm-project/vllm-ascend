@@ -507,6 +507,9 @@ setup(
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
+    package_data={
+        "vllm_ascend.observability": ["config/*.yaml"],
+    },
     python_requires=">=3.10",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
@@ -519,6 +522,9 @@ setup(
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
             "ascend_model = vllm_ascend:register_model",
+        ],
+        "ms_service_metric.providers": [
+            "vllm-ascend = vllm_ascend.observability:get_metric_provider",
         ],
     },
 )

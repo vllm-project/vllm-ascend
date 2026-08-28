@@ -22,8 +22,12 @@ import torch
 import vllm
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
+)
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.interfaces import (
@@ -39,7 +43,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import import_from_path
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3SparseForCausalLM
+from vllm_ascend.utils import is_vl_model
 
 
 def _load_vllm_minimax_m3_common_module(module_name: str):
@@ -83,7 +89,21 @@ def _install_fused_allreduce_norm_fallback() -> None:
         norm: GemmaRMSNorm,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if get_tensor_model_parallel_world_size() > 1:
-            hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
+            # The config context may be unset (e.g. profiling/dummy runs);
+            # fall back to the plain all-reduce path in that case.
+            try:
+                sp_enabled = get_current_vllm_config().parallel_config.use_sequence_parallel_moe
+            except AssertionError:
+                sp_enabled = False
+            if sp_enabled and not (_EXTRA_CTX.is_draft_model and is_vl_model()):
+                padding = (-hidden_states.shape[0]) % get_tensor_model_parallel_world_size()
+                if padding:
+                    hidden_states = torch.nn.functional.pad(
+                        hidden_states, (0, 0) * (hidden_states.ndim - 1) + (0, padding)
+                    )
+                hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+            else:
+                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return norm(hidden_states, residual)
 
     cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
@@ -189,10 +209,16 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, Sup
             self.multimodal_config is not None and self.multimodal_config.mm_encoder_tp_mode == "data"
         )
 
-        with self._mark_composite_model(
-            vllm_config,
-            language_targets=MiniMaxM3SparseForCausalLM,
-            tower_targets={"image": MiniMaxVLVisionModel, "video": MiniMaxVLVisionModel},
+        with (
+            self._mark_language_model(
+                vllm_config,
+                targets=MiniMaxM3SparseForCausalLM,
+            ),
+            self._mark_tower_model(
+                vllm_config,
+                {"image", "video"},
+                targets=MiniMaxVLVisionModel,
+            ),
         ):
             self.model = MiniMaxM3VLModel(
                 vllm_config=vllm_config,

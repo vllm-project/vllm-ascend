@@ -5,15 +5,20 @@ import os
 import shlex
 import subprocess
 import sys
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import openai
 import psutil
 import pytest
+import requests
 import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
 from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
+from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import (
+    create_single_node_kv_pool_manager,
+)
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
@@ -44,14 +49,40 @@ async def run_image_test(config: SingleNodeConfig, server: "RemoteOpenAIServer |
 
 
 async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
-    from tools.send_request import send_v1_chat_completions
+    from tools.send_request import resolve_prompt, send_v1_chat_completions
 
-    send_v1_chat_completions(
-        config.prompts[0],
-        model=config.model,
-        server=server,
-        request_args=config.api_keyword_args,
-    )
+    prompts = config.prompts if config.prompts else ["Hello!"]
+    expected = config.expected_response or {}
+
+    max_model_len_str = _extract_server_cmd_value(config.server_cmd, "--max-model-len")
+    max_model_len = int(max_model_len_str) if max_model_len_str else None
+
+    if isinstance(config.api_keyword_args, list):
+        api_args_list = config.api_keyword_args
+        if len(api_args_list) != len(prompts):
+            raise ValueError(f"""
+            api_keyword_args list length ({len(api_args_list)})must match prompts length ({len(prompts)})""")
+    else:
+        api_args_list = [config.api_keyword_args] * len(prompts)
+
+    if isinstance(expected.get("per_prompt"), list):
+        expected_list = expected["per_prompt"]
+    else:
+        expected_list = [expected] * len(prompts)
+
+    for prompt_raw, api_args, exp in zip(prompts, api_args_list, expected_list):
+        prompt, actual_prompt_tokens = resolve_prompt(server, prompt_raw, use_chat=True)
+        if actual_prompt_tokens is not None:
+            exp = dict(exp) if exp else {}
+            exp.setdefault("prompt_tokens", actual_prompt_tokens)
+        send_v1_chat_completions(
+            prompt,
+            model=config.model,
+            server=server,
+            request_args=api_args,
+            expected=exp,
+            max_model_len=max_model_len,
+        )
 
 
 async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
@@ -213,20 +244,45 @@ async def run_check_rank0_process_count(
     )
 
 
-# Extend this dictionary to add new test capabilities
-TEST_HANDLERS = {
+async def run_spec_decode_acceptance_test(
+    config: SingleNodeConfig,
+    server: "RemoteOpenAIServer | DisaggEpdProxy",
+    spec_baseline: tuple[int, list[int]] | None = None,
+) -> None:
+    from tools.spec_decode_metrics import measure_acceptance_rate, validate_acceptance_rate
+
+    spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
+    num_speculative_tokens = int(spec_config.get("num_speculative_tokens", 1))
+
+    acceptance_cfg = config.extra_config.get("acceptance_rate", {})
+    baseline_val = acceptance_cfg.get("baseline")
+    tolerance = acceptance_cfg.get("tolerance", 0.05)
+
+    if baseline_val is None:
+        logger.warning("acceptance_rate.baseline not set in config, skipping validation")
+        baseline_val = 0.0
+
+    if spec_baseline is None:
+        spec_baseline = (0, [0] * num_speculative_tokens)
+
+    _, all_rates = measure_acceptance_rate(server, num_speculative_tokens, spec_baseline)
+    validate_acceptance_rate(all_rates[0], float(baseline_val), float(tolerance))
+
+
+TEST_HANDLERS: dict[str, Callable[..., Awaitable[None]]] = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
     "messages": run_messages_test,
     "check_rank0_process_count": run_check_rank0_process_count,
+    "spec_decode_acceptance": run_spec_decode_acceptance_test,
 }
 
 
 async def _dispatch_tests(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     """Dispatches requested tests defined in yaml."""
     for test_name in config.test_content:
-        if test_name == "benchmark_comparisons":
+        if test_name in ("benchmark_comparisons", "spec_decode_acceptance"):
             continue
 
         handler = TEST_HANDLERS.get(test_name)
@@ -234,6 +290,38 @@ async def _dispatch_tests(config: SingleNodeConfig, server: "RemoteOpenAIServer 
             await handler(config, server)
         else:
             logger.warning("No handler registered for test content type: %s", test_name)
+
+
+async def _run_benchmarks_and_spec_decode(
+    config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy", port: int
+) -> None:
+    """Run benchmarks, with spec decode baseline capture before and acceptance measurement after."""
+    spec_baseline = None
+    if "spec_decode_acceptance" in config.test_content:
+        from tools.spec_decode_metrics import capture_baseline
+
+        spec_config = _parse_json_flag(config.server_cmd, "--speculative-config")
+        num_spec_tokens = int(spec_config.get("num_speculative_tokens", 1))
+
+        chat_url = server.url_for("v1", "chat", "completions")
+
+        def warmup_fn():
+            requests.post(
+                chat_url,
+                json={
+                    "model": config.model,
+                    "messages": [{"role": "user", "content": "Hello!"}],
+                    "max_tokens": 16,
+                },
+                timeout=120,
+            )
+
+        spec_baseline = capture_baseline(server, num_spec_tokens, warmup_fn)
+
+    _run_benchmarks(config, port)
+
+    if "spec_decode_acceptance" in config.test_content:
+        await run_spec_decode_acceptance_test(config, server, spec_baseline)
 
 
 def _extract_server_cmd_value(server_cmd: list[str], flag: str) -> str | None:
@@ -257,12 +345,11 @@ def _extract_hardware(runner: str) -> str:
 _PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
 
 _FEATURE_ENVS: dict[str, str] = {
-    "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
-    "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
-    "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
 }
+
+_FEATURE_CONFIGS: dict[str, str] = {"enable_fused_mc2": "fused_mc2"}
 
 _PERF_METRIC_RENAME: dict[str, str] = {
     "Benchmark Duration": "Benchmark_Duration(BD)",
@@ -275,8 +362,9 @@ _PERF_METRIC_RENAME: dict[str, str] = {
 
 def _extract_dtype(config: SingleNodeConfig) -> str:
     """Determine weight dtype: w8a8 if model name contains 'w8a8' and --quantization ascend is set, else bf16."""
+    server_cmd: list[str] = config.server_cmd
     has_w8a8 = "w8a8" in config.model.lower()
-    has_quant_ascend = _extract_server_cmd_value(config.server_cmd, "--quantization") == "ascend"
+    has_quant_ascend = _extract_server_cmd_value(server_cmd, "--quantization") == "ascend"
     return "w8a8" if (has_w8a8 and has_quant_ascend) else "bf16"
 
 
@@ -304,8 +392,11 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
     features: list[str] = []
 
     # Features from --additional-config JSON
-    additional = _parse_json_flag(cmd_list, "--additional-config")
-    if additional.get("enable_weight_nz_layout"):
+    additional = _parse_json_flag(cmd_list, "--additional-config") or _parse_json_flag(cmd_list, "--additional_config")
+    for config_key, feature_name in _FEATURE_CONFIGS.items():
+        if additional.get(config_key):
+            features.append(feature_name)
+    if additional.get("weight_nz_mode", 0) != 0:
         features.append("weight_nz_layout")
     tc = additional.get("torchair_graph_config") or {}
     if isinstance(tc, dict) and tc.get("enabled"):
@@ -493,22 +584,37 @@ async def test_single_node(config: SingleNodeConfig) -> None:
                 f"{k}=={v}",
             ]
             subprocess.call(command)
+    kv_pool_manager = create_single_node_kv_pool_manager(config.kv_pool, config.name)
     if config.service_mode == "epd":
         with (
-            RemoteEPDServer(vllm_serve_args=config.epd_server_cmds, env_dict=config.envs) as _,
+            kv_pool_manager,
+            RemoteEPDServer(
+                vllm_serve_args=config.epd_server_cmds,
+                env_dict={**config.envs, **kv_pool_manager.server_envs},
+            ) as _,
             DisaggEpdProxy(proxy_args=config.epd_proxy_args, env_dict=config.envs) as proxy,
         ):
             await _dispatch_tests(config, proxy)
-            _run_benchmarks(config, proxy.port)
+            await _run_benchmarks_and_spec_decode(config, proxy, proxy.port)
         return
 
     # Standard OpenAI service mode
-    with RemoteOpenAIServer(
-        model=config.model,
-        vllm_serve_args=config.server_cmd,
-        server_port=config.server_port,
-        env_dict=config.envs,
-        auto_port=False,
-    ) as server:
-        await _dispatch_tests(config, server)
-        _run_benchmarks(config, config.server_port)
+    with (
+        kv_pool_manager,
+        RemoteOpenAIServer(
+            model=config.model,
+            vllm_serve_args=config.server_cmd,
+            server_port=config.server_port,
+            env_dict={**config.envs, **kv_pool_manager.server_envs},
+            auto_port=False,
+        ) as server,
+    ):
+        errors = []
+        try:
+            await _dispatch_tests(config, server)
+        except Exception as e:
+            errors.append(e)
+            logger.error("dispatch_tests failed: %s", e)
+        await _run_benchmarks_and_spec_decode(config, server, config.server_port)
+        if errors:
+            raise errors[0]

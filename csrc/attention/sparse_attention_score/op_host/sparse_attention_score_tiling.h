@@ -12,6 +12,7 @@
 #define SPARSE_ATTENTION_SCORE_TILING_H
 
 #include <cstdint>
+#include <array>
 #include "register/tilingdata_base.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling/tiling_api.h"
@@ -23,10 +24,20 @@ constexpr uint64_t SASA_BASE_TILING = 10000;
 constexpr uint64_t SASA_FP16_D128_TILING = SASA_BASE_TILING + 1;
 constexpr uint64_t SASA_BF16_D128_TILING = SASA_BASE_TILING + 2;
 constexpr uint64_t SASA_FP8_D128_TILING = SASA_BASE_TILING + 3;
+constexpr uint64_t SASA_FP8_D128_BF16_TILING = SASA_BASE_TILING + 4;
+constexpr uint64_t SASA_FP16_D128_ARCH35_FD_TILING = SASA_BASE_TILING + 5;
+constexpr uint64_t SASA_BF16_D128_ARCH35_FD_TILING = SASA_BASE_TILING + 6;
+constexpr uint64_t SASA_FP8_D128_ARCH35_FD_TILING = SASA_BASE_TILING + 7;
+constexpr uint64_t SASA_FP8_D128_BF16_ARCH35_FD_TILING = SASA_BASE_TILING + 8;
+
+constexpr uint32_t SASA_FD_MAX_AIC = 32;
+constexpr uint32_t SASA_FD_MAX_BASE_TASK = 32;
 
 constexpr uint64_t SASA_BASE_ARCH22_TILING = 20000;
 constexpr uint64_t SASA_FP16_D128_ARCH22_TILING = SASA_BASE_ARCH22_TILING + 1;
 constexpr uint64_t SASA_BF16_D128_ARCH22_TILING = SASA_BASE_ARCH22_TILING + 2;
+constexpr uint64_t SASA_FP16_D128_ARCH22_FD_TILING = SASA_BASE_ARCH22_TILING + 3;
+constexpr uint64_t SASA_BF16_D128_ARCH22_FD_TILING = SASA_BASE_ARCH22_TILING + 4;
 
 BEGIN_TILING_DATA_DEF(SparseAttentionScoreTilingData)
 TILING_DATA_FIELD_DEF(uint32_t, batch);
@@ -64,6 +75,21 @@ TILING_DATA_FIELD_DEF(uint32_t, qL1BufNum);
 TILING_DATA_FIELD_DEF(uint32_t, kL1BufNum);
 TILING_DATA_FIELD_DEF(uint32_t, vL1BufNum);
 TILING_DATA_FIELD_DEF(uint32_t, pL1BufNum);
+// FlashDecoding metadata. All workspace offsets are bytes
+// relative to AscendC::GetUserWorkspace(workspace).
+TILING_DATA_FIELD_DEF(uint32_t, fdLseSubStride);
+// FD core-range metadata.
+TILING_DATA_FIELD_DEF(uint32_t, fdCorePerCoreTaskNum);
+TILING_DATA_FIELD_DEF_ARR(uint32_t, SASA_FD_MAX_AIC, fdCoreTaskStart);
+TILING_DATA_FIELD_DEF_ARR(uint32_t, SASA_FD_MAX_AIC, fdCoreTaskEnd);
+// FD combine-range metadata.
+TILING_DATA_FIELD_DEF(uint32_t, fdCombineTaskNum);
+TILING_DATA_FIELD_DEF_ARR(uint32_t, SASA_FD_MAX_BASE_TASK, fdCombineBaseTask);
+TILING_DATA_FIELD_DEF_ARR(uint32_t, SASA_FD_MAX_BASE_TASK, fdPartialStartByBase);
+TILING_DATA_FIELD_DEF_ARR(uint32_t, SASA_FD_MAX_BASE_TASK, fdPartialCountByBase);
+TILING_DATA_FIELD_DEF(uint64_t, fdIdentityOffset);
+TILING_DATA_FIELD_DEF(uint64_t, fdPartialLseOffset);
+TILING_DATA_FIELD_DEF(uint64_t, fdPartialOOffset);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(SparseAttentionScore, SparseAttentionScoreTilingData)
 
@@ -77,6 +103,20 @@ struct SparseAttentionScoreCompileInfo {
     uint64_t l1Size = 0;
     uint64_t sysWorkspaceSize = 0;
     platform_ascendc::SocVersion socVersion;
+};
+
+struct SASAFdCoreRange {
+    uint32_t perCoreTaskNum = 0;
+    std::array<uint32_t, SASA_FD_MAX_AIC> taskStart{};
+    std::array<uint32_t, SASA_FD_MAX_AIC> taskEnd{};
+};
+
+struct SASAFdCombineRange {
+    uint32_t combineTaskNum = 0;
+    uint32_t partialTaskNum = 0;
+    std::array<uint32_t, SASA_FD_MAX_BASE_TASK> baseTask{};
+    std::array<uint32_t, SASA_FD_MAX_BASE_TASK> partialStartByBase{};
+    std::array<uint32_t, SASA_FD_MAX_BASE_TASK> partialCountByBase{};
 };
 
 class SASATiling {
@@ -94,9 +134,11 @@ private:
     ge::graphStatus ParseAttrs(gert::TilingContext *context);
     ge::graphStatus ParseInputTensors(gert::TilingContext *context);
     ge::graphStatus ParseSeqlens(gert::TilingContext *context);
+    ge::graphStatus ParseSelectNumIdx(gert::TilingContext *context);
     ge::graphStatus CalculateTaskSplit(gert::TilingContext *context);
     ge::graphStatus CalculateWorkSpace(gert::TilingContext *context);
     ge::graphStatus FillTilingData(gert::TilingContext *context);
+    ge::graphStatus CheckAttentionOutDtype(gert::TilingContext *sasContext);
     uint64_t GenerateTilingKey();
 
 private:
@@ -115,12 +157,23 @@ private:
 
     const int32_t *qSeqLenList_ = nullptr;
     const int32_t *kvSeqLenList_ = nullptr;
+    const int32_t *selectNumIdxList_ = nullptr;
 
     uint64_t mm1OutSize_ = 0;
     uint64_t smOnlineOutSize_ = 0;
     uint64_t mm2OutSize_ = 0;
     uint64_t updateSize_ = 0;
     uint64_t workSpaceSize_ = 0;
+
+    bool enableFd_ = false;
+    uint32_t fdLseSubStride_ = 0;
+    uint64_t fdIdentityOffset_ = 0;
+    uint64_t fdPartialLseOffset_ = 0;
+    uint64_t fdPartialLseSize_ = 0;
+    uint64_t fdPartialOOffset_ = 0;
+    uint64_t fdPartialOSize_ = 0;
+    SASAFdCoreRange fdCoreRange_{};
+    SASAFdCombineRange fdCombineRange_{};
 
     uint32_t blockDim_ = 20;
     uint32_t aivNum_ = 0;
@@ -131,6 +184,7 @@ private:
     uint32_t socVer_ = 0;
     
     ge::DataType dataType_ = ge::DT_FLOAT16;
+    ge::DataType attentionOutDtype_ = ge::DT_FLOAT16;
 
     SparseAttentionScoreTilingData *tilingData_ = nullptr;
 };

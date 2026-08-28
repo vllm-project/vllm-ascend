@@ -15,6 +15,7 @@
 
 import math
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -32,6 +33,7 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
+        utils.enable_dsa_cp.cache_clear()
         utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
 
     def test_nd_to_nz_2d(self):
@@ -142,6 +144,51 @@ class TestUtils(TestBase):
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
         ):
             self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_sp_uses_upstream_parallel_config(self):
+        sequence_parallel_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=True,
+                enable_expert_parallel=False,
+            )
+        )
+        self.assertTrue(utils.enable_sp(sequence_parallel_config))
+
+        shared_expert_dp_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                enable_expert_parallel=True,
+            )
+        )
+        self.assertFalse(utils.enable_sp(shared_expert_dp_config))
+
+        no_sequence_parallel_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                enable_expert_parallel=False,
+            )
+        )
+        self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
+
+    def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
+        ascend_config = SimpleNamespace(enable_dsa_cp=True)
+
+        with (
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+            mock.patch("vllm_ascend.utils.enable_sp") as mock_enable_sp,
+        ):
+            self.assertTrue(utils.enable_dsa_cp())
+
+        mock_enable_sp.assert_not_called()
+
+    def test_enable_dsa_cp_reads_validated_ascend_config(self):
+        ascend_config = mock.MagicMock(enable_dsa_cp=False)
+
+        with (
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+            mock.patch("vllm_ascend.utils.enable_sp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp())
 
     def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_both(self):
         mock_vllm_config = mock.MagicMock()
@@ -458,3 +505,47 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_check_gdn_layer_supports_kimi_linear_config_property():
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                text_config=KimiLinearConfig(
+                    linear_attn_config={
+                        "kda_layers": [2],
+                        "full_attn_layers": [1],
+                    }
+                )
+            )
+        )
+    )
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_nested_layer_types():
+    hf_config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["linear_attention"]))
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_qwen3_next_config():
+    from transformers import Qwen3NextConfig
+
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3NextConfig()))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_returns_false_without_linear_attention():
+    from transformers import Qwen3Config
+
+    # Dense Qwen3 configs, including Qwen3-8B, expose only full-attention
+    # layer types and must not be classified as hybrid GDN models.
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3Config()))
+
+    assert utils.check_gdn_layer(vllm_config) is False

@@ -457,24 +457,26 @@ Key configuration parameters:
 
 Dynamic Speculative Decoding adapts the number of draft tokens (K) at runtime, instead of always using a fixed `num_speculative_tokens`. This helps keep speculative decoding beneficial as concurrency and draft confidence change. vLLM Ascend currently provides two approaches:
 
-- **Confidence-head based (DSpark)**: adjust the per-request verify length using the DSpark confidence head.
+- **Confidence-based verify length (DSpark / DFlash)**: adjust the per-request verify length from draft confidence. DSpark uses a dedicated confidence head; DFlash is **head-free** and uses `max(softmax(logits))` of the drafted token as a confidence proxy.
 - **Batch-size based (Autoregressive)**: select a shared K from concurrency ranges via `num_speculative_tokens_per_batch_size`.
 
-### Confidence-head based (DSpark)
+### Confidence-based verify length (DSpark / DFlash)
 
 This approach adapts how many drafted tokens are verified per request. It can reduce verify cost when the drafter is less confident about later tokens, while still allowing longer speculation when confidence is high.
 
 > [!NOTE]
-> This is an **exploratory** feature and currently targets **model runner v1** only. The supported dynamic method relies on the DSpark **confidence head**. For other proposers such as DFlash, non-neural-parameter-based dynamic schemes are under exploration. Among DSpark draft models, only the **Qwen** series is supported today; support for models such as GLM and DeepSeek is being added incrementally.
+> This is an **exploratory** feature and currently targets **model runner v1** only. Supported dynamic methods are `"dspark"` (confidence head) and `"dflash"` (head-free). Among DSpark draft models, only the **Qwen** series is supported today; support for models such as GLM and DeepSeek is being added incrementally.
 
 #### How it works
 
-When `dynamic_spec_config.method` is set to `"dspark"`, the DSpark proposer:
+When `dynamic_spec_config.method` is set to `"dspark"` or `"dflash"`, the corresponding proposer:
 
 1. Runs the draft model as usual to produce up to `num_speculative_tokens` draft tokens.
-2. Uses the DSpark confidence head to estimate per-position acceptance likelihood for each request.
+2. Estimates per-position acceptance likelihood for each request:
+   - **DSpark**: sigmoid output of the DSpark confidence head.
+   - **DFlash (head-free)**: `max(softmax(logits))` of the argmax draft token (no extra neural head).
 3. Periodically recomputes a shared per-request verify budget from those confidence scores.
-4. Allocates that budget across requests, so each request keeps only a prefix of draft tokens for verification.
+4. Allocates that budget across requests (each request keeps at least `min_verify_tokens`), so each request verifies only a prefix of draft tokens.
 
 The resulting per-request verify lengths are consumed by the model runner when collecting draft tokens for the target-model verify step.
 
@@ -482,7 +484,7 @@ The resulting per-request verify lengths are consumed by the model runner when c
 
 Enable this approach through `additional_config.dynamic_spec_config`. See [Additional Configuration](../configuration/additional_config.md) for the full parameter reference.
 
-You still need a normal DSpark `speculative_config` (`method: "dspark"`, draft model path, and `num_speculative_tokens`). Dynamic decoding only decides how many of those drafted tokens are verified per request.
+You still need a matching `speculative_config` (`method: "dspark"` or `"dflash"`, draft model path, and `num_speculative_tokens`). Dynamic decoding only decides how many of those drafted tokens are verified per request. Set `dynamic_spec_config.method` to the same method name as in `speculative_config`.
 
 #### Offline inference example
 

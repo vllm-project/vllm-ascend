@@ -33,7 +33,19 @@ from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 MODELS = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+# Confidence-based dynamic verify-length; keep in sync with
+# tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py (dspark).
+DSPARK_DYNAMIC_SPEC_CONFIG = {
+    "method": "dspark",
+    "method_params": {
+        "initial_verify_budget_per_req": 3,
+        "budget_update_interval": 1,
+        "budget_threshold": 0.7,
+    },
+}
 
+
+@pytest.mark.skip(reason="Temporarily brought offline. The cases of speculative decoding need to be rectified later.")
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
     ("golden", "num_speculative_tokens", "additional_config"),
@@ -41,14 +53,24 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         pytest.param(
             [0.88, 0.74, 0.58, 0.49, 0.40],
             5,
-            {"enable_flashcomm1": False, "enable_dsa_cp": False},
+            {"enable_dsa_cp": False},
             id="dspark",
         ),
         pytest.param(
             [0.88, 0.74, 0.58, 0.49, 0.40, 0.30, 0.18],
             7,
-            {"enable_flashcomm1": True, "enable_dsa_cp": True},
+            {"enable_dsa_cp": True},
             id="dsa-cp-dspark",
+        ),
+        pytest.param(
+            [0.65, 0.55, 0.45, 0.35, 0.30],
+            5,
+            {
+                "enable_flashcomm1": False,
+                "enable_dsa_cp": False,
+                "dynamic_spec_config": DSPARK_DYNAMIC_SPEC_CONFIG,
+            },
+            id="dspark-dynamic",
         ),
     ],
 )

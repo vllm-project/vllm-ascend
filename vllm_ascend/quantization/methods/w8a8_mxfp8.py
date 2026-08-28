@@ -28,6 +28,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 
 from .base import (
     AscendLinearScheme,
@@ -60,7 +61,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
-        self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
+        self.group_size = quant_description.get("group_size", 32)
+        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
@@ -89,7 +92,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             original_shape = x.shape
             if x.dim() > 2:
                 x = x.view(-1, x.shape[-1])
-            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                x,
+                dst_type=torch.float8_e4m3fn,
+                scale_alg=self.dynamic_mx_quant_scale_alg,
+            )
             output_dtype = x.dtype
 
         if bias is not None and bias.dtype != torch.float32:
@@ -123,6 +130,12 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         this method stores original shapes and can be called multiple times safely.
         Use restore_weights_for_rl_loading() before weight reload, then call this
         method again after loading.
+
+        Address stability for ACL graph:
+        The transformed buffer is what the ACL graph captures and replays. It is
+        allocated once and cached on the layer; subsequent calls copy the
+        (re)loaded original-shape data in place into the cached buffer so its
+        data_ptr never changes across RL weight reloads.
         """
 
         # Check if already transformed to avoid double transformation
@@ -140,12 +153,23 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         n_dim, k_dim = layer.weight_scale.data.shape
         # Shape should be padded if it cannot be divided by 2
         if layer.weight_scale.data.shape[-1] % 2 != 0:
-            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
-            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
+            reshaped_scale = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
-            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
+            reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        target_scale = reshaped_scale.transpose(0, 1)
+
+        if not hasattr(layer, "_mxfp8_weight_buf"):
+            # First call: allocate the persistent transformed buffers.
+            layer._mxfp8_weight_buf = layer.weight.data.transpose(0, 1).contiguous()
+            layer._mxfp8_scale_buf = target_scale.contiguous()
+        else:
+            # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
+            layer._mxfp8_weight_buf.copy_(layer.weight.data.transpose(0, 1).contiguous())
+            layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
+
+        layer.weight.data = layer._mxfp8_weight_buf
+        layer.weight_scale.data = layer._mxfp8_scale_buf
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -207,7 +231,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
-        self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
+        self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.use_aclgraph = (
             vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE

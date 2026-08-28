@@ -123,7 +123,20 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     },
+    "qwen3_5_text": {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    },
     "qwen3_5_moe": {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
+    "qwen3_5_moe_text": {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -412,6 +425,27 @@ def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
         Dictionary mapping fused module names to their component module names.
         Returns empty dict if model_type is not found.
     """
+    if model_type in ("kimi_k3", "kimi_linear"):
+        # Start from vLLM's model-owned mapping so changes to its packed KDA,
+        # MLA, convolution, or MLP modules remain the source of truth. Add only
+        # the ModelSlim MoE convention and Ascend's mixed-precision KDA split.
+        from vllm.models.kimi_k3.nvidia.model import KimiLinearModel
+
+        mapping = {
+            packed_name: list(shard_names)
+            for packed_name, shard_names in KimiLinearModel.packed_modules_mapping.items()
+        }
+        qkv_shards = [name for name in mapping["in_proj_qkvgfab"] if name in ("q_proj", "k_proj", "v_proj")]
+        gate_shards = ["g_proj", "f_a_proj", "b_proj"]
+        mapping.update(
+            {
+                "experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"],
+                "in_proj_qkvgfab": qkv_shards + gate_shards,
+                "in_proj_qkv": qkv_shards,
+                "in_proj_gfab": gate_shards,
+            }
+        )
+        return mapping
     return packed_modules_model_mapping.get(model_type, {})
 
 
@@ -601,8 +635,9 @@ class AscendModelSlimConfig(QuantizationConfig):
 
         This method is called by vLLM to apply the model-specific weight mapper
         to the quantization configuration. It directly uses the forward mapping
-        (HF -> vLLM) to transform keys in quant_description from HF format to
-        vLLM format.
+        (HF -> vLLM) to transform layer keys in quant_description from HF format
+        to vLLM format. Checkpoint-level metadata under ``optional`` does not
+        name model parameters and must retain its schema.
 
         Args:
             hf_to_vllm_mapper: The WeightsMapper instance provided by vLLM
@@ -615,13 +650,20 @@ class AscendModelSlimConfig(QuantizationConfig):
         self._mapper_applied = True
 
         if self.quant_description:
-            self.quant_description = hf_to_vllm_mapper.apply_dict(self.quant_description)
+            optional_metadata = self.quant_description.get("optional")
+            layer_descriptions = {
+                name: description for name, description in self.quant_description.items() if name != "optional"
+            }
+            self.quant_description = hf_to_vllm_mapper.apply_dict(layer_descriptions)
+            if optional_metadata is not None:
+                self.quant_description["optional"] = optional_metadata
             self._add_kvcache_quant_metadata()
             logger.info("Applied hf_to_vllm_mapper to quant_description keys")
 
     def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Upstream use staticmethod, but we need to use instance attribute"""
         suffix_map = {}
+        regex_map = {}
         if self.enable_c8_quant:
             suffix_map.update(
                 {
@@ -632,27 +674,48 @@ class AscendModelSlimConfig(QuantizationConfig):
                 }
             )
         if self.enable_fa_quant:
-            suffix_map.update(
+            # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
+            # mapping, we use regex mapping.
+            regex_map.update(
                 {
-                    ".fa_q.scale": ".mla_attn.mla_attn.fa_q.scale",
-                    ".fa_k.scale": ".mla_attn.mla_attn.fa_k.scale",
-                    ".fa_v.scale": ".mla_attn.mla_attn.fa_v.scale",
-                    ".fa_q.offset": ".mla_attn.mla_attn.fa_q.offset",
-                    ".fa_k.offset": ".mla_attn.mla_attn.fa_k.offset",
-                    ".fa_v.offset": ".mla_attn.mla_attn.fa_v.offset",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_q\.scale$"): ".mla_attn.mla_attn.fa_q.scale",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_k\.scale$"): ".mla_attn.mla_attn.fa_k.scale",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_v\.scale$"): ".mla_attn.mla_attn.fa_v.scale",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_q\.offset$"): ".mla_attn.mla_attn.fa_q.offset",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_k\.offset$"): ".mla_attn.mla_attn.fa_k.offset",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.fa_v\.offset$"): ".mla_attn.mla_attn.fa_v.offset",
                 }
             )
         if self.enable_indexer_quant:
-            suffix_map.update(
+            regex_map.update(
                 {
-                    ".indexer.q_rot": ".mla_attn.mla_attn.indexer.q_rot",
-                    ".indexer.k_rot": ".mla_attn.mla_attn.indexer.k_rot",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.indexer\.q_rot$"): ".mla_attn.mla_attn.indexer.q_rot",
+                    re.compile(r"(?<!\.mla_attn\.mla_attn)\.indexer\.k_rot$"): ".mla_attn.mla_attn.indexer.k_rot",
                 }
             )
-        if not suffix_map:
+        if not suffix_map and not regex_map:
             return QuantizationConfig.get_cache_scale_mapper()
-        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map)
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=suffix_map, orig_to_new_regex=regex_map)
         return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
+
+    def uses_kimi_k3_mixed_kda_projection(self, prefix: str) -> bool:
+        """Return whether Kimi K3's packed KDA input must be split.
+
+        vLLM 0.27 packs q/k/v and the full-rank KDA gates into one linear
+        layer.  ModelSlim QuaRot checkpoints intentionally keep q/k/v W8A8
+        while storing g/f_a/b in floating point, which cannot be represented
+        by one quantization method.  Only accept that known layout here; other
+        mixed packed layouts retain the normal validation error.
+        """
+        suffix = ".in_proj_qkvgfab"
+        attention_prefix = prefix[: -len(suffix)] if prefix.endswith(suffix) else prefix
+        quant_types = {
+            name: self.quant_description.get(f"{attention_prefix}.{name}.weight")
+            for name in ("q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj")
+        }
+        qkv_types = {quant_types[name] for name in ("q_proj", "k_proj", "v_proj")}
+        gate_types = {quant_types[name] for name in ("g_proj", "f_a_proj", "b_proj")}
+        return len(qkv_types) == 1 and None not in qkv_types and qkv_types != {"FLOAT"} and gate_types == {"FLOAT"}
 
     def _has_quant_weight(self, prefix: str, packed_modules_mapping: Mapping[str, list[str]]) -> bool:
         proj_name = prefix.split(".")[-1]
@@ -724,8 +787,8 @@ class AscendModelSlimConfig(QuantizationConfig):
             # Adapt to bailing_hybrid architecture: update layer names to MoE convention
             prefix = prefix.replace("linear_attn", "attention")
             prefix = prefix.replace("self_attn", "attention")
-        if model_type in packed_modules_model_mapping:
-            self.packed_modules_mapping = packed_modules_model_mapping[model_type]
+        if model_type in packed_modules_model_mapping or model_type in ("kimi_k3", "kimi_linear"):
+            self.packed_modules_mapping = get_packed_modules_mapping(model_type)
         prefix = self.quant_prefix_mapper(model_type, prefix)
 
         if isinstance(layer, LinearBase):
@@ -775,6 +838,11 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def is_layer_skipped_ascend(self, prefix: str, fused_mapping: Mapping[str, list[str]] = MappingProxyType({})):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
+        if self.model_type in ("kimi_k3", "kimi_linear") and self.uses_kimi_k3_mixed_kda_projection(prefix):
+            # The model adapter replaces this temporary packed projection with
+            # separate quantized q/k/v and floating-point gate projections.
+            return True
+
         proj_name = prefix.split(".")[-1]
         if proj_name in fused_mapping:
             shard_prefixes = [

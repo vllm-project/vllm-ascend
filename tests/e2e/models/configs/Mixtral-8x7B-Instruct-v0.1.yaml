@@ -18,7 +18,6 @@ envs:
   HCCL_BUFFSIZE: "200"
   VLLM_ASCEND_ENABLE_MLAPO: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 tasks:
   - name: "ceval-valid"

@@ -662,8 +662,6 @@ class NPUModelRunner310(NPUModelRunner):
                 num_tokens_padded,
             )
 
-        if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
-            hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
     def _check_and_update_cudagraph_mode(

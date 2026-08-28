@@ -7,15 +7,46 @@ import importlib.util
 import inspect
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import vllm
+from torch import nn
+from vllm.model_executor.models.utils import StageMissingLayer
 
+from vllm_ascend.models.minimax_m3 import minimax_m3_vl as m3_vl
 from vllm_ascend.models.minimax_m3.minimax_m3_vl import (
+    MiniMaxM3SparseForConditionalGeneration,
     MiniMaxM3VLDummyInputsBuilder,
     MiniMaxM3VLMultiModalProcessor,
     MiniMaxM3VLProcessingInfo,
     MiniMaxVLVisionModel,
 )
+
+
+class _DummyMiniMaxM3MultimodalConfig:
+    mm_encoder_only = False
+    mm_encoder_tp_mode = "weights"
+
+    def __init__(self, limit_mm_per_prompt: dict[str, int]) -> None:
+        self.limit_mm_per_prompt = limit_mm_per_prompt
+
+    def get_limit_per_prompt(self, modality: str) -> int:
+        return self.limit_mm_per_prompt.get(modality, 999)
+
+
+class _DummyVisionTower(nn.Module):
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+
+
+class _DummyLanguageModel(nn.Module):
+    def __init__(self, **kwargs) -> None:
+        super().__init__()
+        self.lm_head = nn.Identity()
+
+    def make_empty_intermediate_tensors(self, *args, **kwargs):
+        return None
 
 
 class TestMiniMaxM3VitProcessor(unittest.TestCase):
@@ -39,3 +70,32 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
             inspect.getsourcefile(MiniMaxM3VLProcessingInfo),
             inspect.getsourcefile(MiniMaxM3VLMultiModalProcessor),
         )
+
+    def test_shared_vision_tower_pruning_follows_image_video_limits(self) -> None:
+        def make_vllm_config(limit_mm_per_prompt: dict[str, int]):
+            return SimpleNamespace(
+                model_config=SimpleNamespace(
+                    hf_config=SimpleNamespace(vision_config=SimpleNamespace()),
+                    hf_text_config=SimpleNamespace(hidden_size=1),
+                    multimodal_config=_DummyMiniMaxM3MultimodalConfig(limit_mm_per_prompt),
+                ),
+                quant_config=None,
+            )
+
+        test_cases = [
+            ({"image": 1, "video": 1}, _DummyVisionTower),
+            ({"image": 1, "video": 0}, _DummyVisionTower),
+            ({"image": 0, "video": 1}, _DummyVisionTower),
+            ({"image": 0, "video": 0}, StageMissingLayer),
+        ]
+
+        with (
+            patch.object(m3_vl, "MiniMaxVLVisionModel", _DummyVisionTower),
+            patch.object(m3_vl, "MiniMaxM3SparseForCausalLM", _DummyLanguageModel),
+        ):
+            for limit_mm_per_prompt, expected_tower_type in test_cases:
+                with self.subTest(limit_mm_per_prompt=limit_mm_per_prompt):
+                    model = MiniMaxM3SparseForConditionalGeneration(vllm_config=make_vllm_config(limit_mm_per_prompt))
+
+                    self.assertIsInstance(model.model.vision_tower, expected_tower_type)
+                    self.assertIsInstance(model.language_model, _DummyLanguageModel)

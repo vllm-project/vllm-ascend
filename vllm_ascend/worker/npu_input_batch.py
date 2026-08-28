@@ -32,7 +32,6 @@ from vllm.v1.sample.thinking_budget_state import (
 )
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -64,11 +63,8 @@ class NPUInputBatch(InputBatch):
         use_replayssm: bool = False,
         slot_mapping_modes: list | None = None,
     ):
-        # main2main compat: only store the new upstream kwargs when
-        # running against vllm main (post-0.26.0).
-        if not vllm_version_is("0.26.0"):
-            self.use_replayssm = use_replayssm
-            self.slot_mapping_modes = slot_mapping_modes
+        self.use_replayssm = use_replayssm
+        self.slot_mapping_modes = slot_mapping_modes
 
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode

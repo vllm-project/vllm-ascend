@@ -60,7 +60,6 @@ env_common: &env_common
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "256"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common

@@ -1,6 +1,8 @@
 import vllm
 from vllm.lora.request import LoRARequest
 
+from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+
 MODEL_PATH = "Qwen/Qwen3-30B-A3B"
 
 PROMPT_TEMPLATE = """<|im_start|>user
@@ -53,37 +55,37 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3moe_lora_tp(qwen3moe_lora_files):
-    llm = vllm.LLM(
+    with VllmRunner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
-    )
+    ) as vllm_model:
+        generate_and_test(vllm_model.model, qwen3moe_lora_files, lora_id=1)
 
-    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
 
-
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3moe_lora_ep(qwen3moe_lora_files):
-    llm = vllm.LLM(
+    with VllmRunner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
         enable_expert_parallel=True,
-    )
+    ) as vllm_model:
+        generate_and_test(vllm_model.model, qwen3moe_lora_files, lora_id=1)
 
-    generate_and_test(llm, qwen3moe_lora_files, lora_id=1)
 
-
+@wait_until_npu_memory_free()
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3moe_lora_multi_id_ep(qwen3moe_lora_files):
     """Test multiple different LoRA IDs (-1, 1, 2) in a single batch on EP path.
 
@@ -104,19 +106,17 @@ def test_qwen3moe_lora_multi_id_ep(qwen3moe_lora_files):
 
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=64)
 
-    llm = vllm.LLM(
+    with VllmRunner(
         MODEL_PATH,
         max_model_len=1024,
         enable_lora=True,
         max_loras=4,
         enforce_eager=True,
-        trust_remote_code=True,
         enable_chunked_prefill=True,
         tensor_parallel_size=2,
         enable_expert_parallel=True,
-    )
-
-    outputs = llm.generate(prompts, sampling_params, lora_request=lora_requests)
+    ) as vllm_model:
+        outputs = vllm_model.model.generate(prompts, sampling_params, lora_request=lora_requests)
 
     generated_texts: list[str] = []
     for i, output in enumerate(outputs):

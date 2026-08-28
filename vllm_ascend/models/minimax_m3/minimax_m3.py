@@ -28,6 +28,7 @@ from itertools import islice
 from typing import Any
 
 import torch
+import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -85,6 +86,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3Indexer,
     AscendMiniMaxM3IndexerLinear,
@@ -96,6 +98,41 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+
+def _scatter_index_cache(
+    cache: torch.Tensor,
+    updates: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Write MiniMax-M3 index keys into the paged cache."""
+    slots = slot_mapping.reshape(-1)
+    if slots.numel() == 0:
+        return
+
+    updates = updates.reshape(slots.shape[0], cache.shape[-1])
+    if updates.dtype != cache.dtype:
+        updates = updates.to(cache.dtype)
+
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        if cache.ndim != 3:
+            raise ValueError(f"Unexpected MiniMax-M3 index cache ndim on A5: {cache.ndim}")
+        key = updates.reshape(slots.shape[0], 1, cache.shape[-1]).contiguous()
+        key_cache = cache.unsqueeze(2)
+        torch_npu.npu_scatter_pa_cache(
+            key,
+            slots.contiguous(),
+            key_cache=key_cache,
+        )
+        return
+
+    flat_cache = cache.view(-1, cache.shape[-1])
+    torch.ops._C_ascend.npu_scatter_nd_update_v2(
+        flat_cache,
+        slots.view(-1, 1),
+        updates,
+    )
 
 
 class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
@@ -284,13 +321,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         idx_cache = self.indexer.index_cache.kv_cache
         if isinstance(idx_cache, (tuple, list)):
             idx_cache = idx_cache[0]
-        flat = idx_cache.view(-1, self.idx_head_dim)
-        # Scatter ND update ignores indices outside the cache bounds, so graph
-        # padding slots set to -1 do not write into the last cache row.
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(
-            flat,
-            index_meta.slot_mapping[:num_tokens].view(-1, 1),
-            index_key[:num_tokens].to(flat.dtype),
+        _scatter_index_cache(
+            idx_cache,
+            index_key[:num_tokens],
+            index_meta.slot_mapping[:num_tokens],
         )
 
     def _sparse_prepare(
@@ -317,7 +351,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             )
 
         if (
-            main_qkv.device.type != "npu"
+            get_ascend_device_type() == AscendDeviceType.A5
+            or main_qkv.device.type != "npu"
             or main_qkv.dtype != torch.bfloat16
             or positions.ndim != 1
             or not getattr(self.rotary_emb, "is_neox_style", True)
@@ -432,16 +467,43 @@ def _get_rope_parameters(config: PretrainedConfig) -> dict[str, Any] | None:
     return rope_parameters
 
 
+def _is_w8a8_mxfp8_linear(layer: nn.Module) -> bool:
+    quant_method = getattr(layer, "quant_method", None)
+    quant_scheme = getattr(quant_method, "quant_method", quant_method)
+    return quant_scheme is not None and quant_scheme.__class__.__name__ == "AscendW8A8MXFP8DynamicLinearMethod"
+
+
 class MiniMaxM3SwiGLUOAI(nn.Module):
     """MiniMax-M3 SwiGLU-OAI activation for packed gate/up outputs."""
 
-    def __init__(self, alpha: float, beta: float, limit: float):
+    def __init__(
+        self,
+        alpha: float,
+        beta: float,
+        limit: float,
+        use_mx_quant: bool = False,
+    ):
         super().__init__()
         self.alpha = float(alpha)
         self.beta = float(beta)
         self.limit = float(limit)
+        self.use_mx_quant = use_mx_quant
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.use_mx_quant or get_ascend_device_type() == AscendDeviceType.A5:
+            d = x.shape[-1] // 2
+            gate = torch.clamp(x[..., :d], max=self.limit)
+            up = torch.clamp(x[..., d:], min=-self.limit, max=self.limit)
+            activated = gate * torch.sigmoid(self.alpha * gate) * (up + self.beta)
+            if self.use_mx_quant:
+                quantized_x, scale = DeviceOperator.npu_dynamic_quant(
+                    activated,
+                    act_quant_type=torch.float8_e4m3fn,
+                    use_mxfp_quant=True,
+                )
+                assert scale is not None
+                return quantized_x, scale
+            return activated
         return torch.ops.npu.npu_clipped_swiglu(
             x,
             dim=-1,
@@ -483,10 +545,16 @@ class MiniMaxM3MLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act == "swigluoai":
+            use_mx_quant = (
+                get_ascend_device_type() == AscendDeviceType.A5
+                and _is_w8a8_mxfp8_linear(self.gate_up_proj)
+                and _is_w8a8_mxfp8_linear(self.down_proj)
+            )
             self.act_fn = MiniMaxM3SwiGLUOAI(
                 alpha=config.swiglu_alpha,
                 beta=getattr(config, "swiglu_beta", 1.0),
                 limit=config.swiglu_limit,
+                use_mx_quant=use_mx_quant,
             )
         else:
             raise ValueError(f"Unsupported activation: {hidden_act}. Only swigluoai is supported.")

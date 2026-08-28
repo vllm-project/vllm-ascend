@@ -19,7 +19,6 @@ test_cases:
       VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
       TASK_QUEUE_ENABLE: "1"
       VLLM_ASCEND_ENABLE_MLAPO: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
     server_cmd:
@@ -76,5 +75,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 4
         request_rate: 0
-        baseline: 1
+        baseline: 186.35295
         threshold: 0.97

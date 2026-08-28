@@ -1,0 +1,147 @@
+name: Cancel runs on PR close
+# pull_request_target is required so OBS secrets are available for fork PRs.
+# The upload job only checks out the merge commit on the base repository.
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const branch = context.payload.pull_request.head.ref;
+
+            const statuses = ["in_progress", "queued", "waiting", "pending", "requested"];
+            for (const status of statuses) {
+              let page = 1;
+              while (true) {
+                const resp = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner, repo, branch, status, per_page: 100, page
+                });
+
+                const runs = resp.data.workflow_runs;
+                if (!runs.length) break;
+
+                for (const run of runs) {
+                  if (run.id === context.runId) continue; // don't cancel this workflow
+                  try {
+                    await github.rest.actions.cancelWorkflowRun({ owner, repo, run_id: run.id });
+                    core.info(`Cancel requested: ${run.html_url}`);
+                  } catch (e) {
+                    // common reasons: already completed (409) or insufficient permissions (403)
+                    core.warning(`Failed to cancel ${run.html_url}: ${e.message}`);
+                  }
+                }
+
+                if (runs.length < 100) break;
+                page++;
+              }
+            }
+
+  upload-merged-new-tests:
+    name: Upload merged new tests to OBS
+    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }}
+    runs-on: linux-amd64-cpu-8-hk
+    env:
+      OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
+      OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
+    steps:
+      - name: Checkout merge commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+
+      - name: Resolve merged commit
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git checkout "${{ github.event.pull_request.merge_commit_sha }}"
+
+      - name: Collect new or moved tests
+        id: collect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          python3 .github/workflows/scripts/collect_merged_new_tests.py \
+            --diff-base "${BASE_SHA}" \
+            --output merged_new_tests.yaml \
+            --pr-number "${PR_NUMBER}" \
+            --merge-sha "${MERGE_SHA}"
+          if [ -s merged_new_tests.yaml ]; then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+            echo "Collected tests:"
+            cat merged_new_tests.yaml
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "No new or moved tests to upload"
+          fi
+
+      - name: Merge into OBS extra_recommended_tests.yaml
+        id: merge
+        if: ${{ steps.collect.outputs.has_tests == 'true' }}
+        run: |
+          set -euo pipefail
+          OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+          pip install pyyaml --quiet
+          http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
+          if [ "${http_code}" = "200" ] && [ -s extra_recommended_tests.yaml ]; then
+            echo "Downloaded existing extra_recommended_tests.yaml from OBS"
+          elif [ "${http_code}" = "404" ]; then
+            echo "No extra_recommended_tests.yaml on OBS yet; starting a new file"
+            : > extra_recommended_tests.yaml
+          else
+            echo "::error::Failed to download extra_recommended_tests.yaml from OBS (HTTP ${http_code})"
+            exit 1
+          fi
+          python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
+            --extra-yaml extra_recommended_tests.yaml \
+            --incoming-yaml merged_new_tests.yaml \
+            --output-yaml extra_recommended_tests.yaml \
+            | tee merge.out
+          if grep -q "^Appended " merge.out; then
+            echo "has_new_paths=true" >> "$GITHUB_OUTPUT"
+            echo "Merged extra yaml:"
+            cat extra_recommended_tests.yaml
+          else
+            echo "has_new_paths=false" >> "$GITHUB_OUTPUT"
+            echo "No new paths to upload"
+          fi
+
+      - name: Upload extra_recommended_tests.yaml to OBS
+        if: ${{ steps.merge.outputs.has_new_paths == 'true' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
+            echo "::error::OBS credentials are missing"
+            exit 1
+          fi
+          pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os
+          from obs import ObsClient
+
+          obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com',
+          )
+          resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
+          if resp.status >= 300:
+              raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
+          print(f'Uploaded extra_recommended_tests.yaml -> {obs_path}')
+          print('https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/' + obs_path)
+          EOF

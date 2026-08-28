@@ -17,6 +17,7 @@ vllm_ascend.egg-info/
 # Linting
 actionlint
 shellcheck*/
+gitleaks
 
 
 # Python gitignore

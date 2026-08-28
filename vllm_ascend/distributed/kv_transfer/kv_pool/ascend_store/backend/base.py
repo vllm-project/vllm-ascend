@@ -10,7 +10,7 @@ class Backend(ABC):
     store: Any | None = None
 
     @abstractmethod
-    def __init__(self, parallel_config: ParallelConfig):
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
         pass
 
     @classmethod

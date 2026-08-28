@@ -16,7 +16,7 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.fla import chunk, chunk_o, chunk_o_update
+from vllm_ascend.ops.triton.fla import chunk, chunk_o
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -93,49 +93,29 @@ def _patch_missing_cdiv(monkeypatch: pytest.MonkeyPatch, module) -> None:
     )
 
 
-@pytest.mark.parametrize("target", ["chunk_o", "chunk_o_update"])
-def test_chunk_leaf_wrappers_use_prebuilt_chunk_offsets(
+def test_chunk_leaf_wrapper_use_prebuilt_chunk_offsets(
     monkeypatch: pytest.MonkeyPatch,
-    target: str,
 ):
     fake_kernel = _FakeKernel()
     sentinel = torch.tensor([0, 2, 5], dtype=torch.int32)
     cu_seqlens = torch.tensor([0, 4, 7], dtype=torch.int32)
 
-    if target == "chunk_o":
-        _patch_missing_cdiv(monkeypatch, chunk_o)
-        monkeypatch.setattr(chunk_o, "chunk_fwd_kernel_o", fake_kernel)
-        monkeypatch.setattr(
-            chunk_o,
-            "prepare_chunk_offsets",
-            lambda *args, **kwargs: pytest.fail("prepare_chunk_offsets should not be called"),
-        )
-        chunk_o.chunk_fwd_o(
-            q=torch.zeros((2, 4, 1, 8), dtype=torch.float32),
-            k=torch.zeros((2, 4, 1, 8), dtype=torch.float32),
-            v=torch.zeros((2, 4, 1, 16), dtype=torch.float32),
-            h=torch.zeros((4, 1, 8, 16), dtype=torch.float32),
-            g=torch.zeros((2, 4, 1), dtype=torch.float32),
-            cu_seqlens=cu_seqlens,
-            chunk_offsets=sentinel,
-        )
-    else:
-        _patch_missing_cdiv(monkeypatch, chunk_o_update)
-        monkeypatch.setattr(chunk_o_update, "chunk_fwd_kernel_o_update", fake_kernel)
-        monkeypatch.setattr(
-            chunk_o_update,
-            "prepare_chunk_offsets",
-            lambda *args, **kwargs: pytest.fail("prepare_chunk_offsets should not be called"),
-        )
-        chunk_o_update.chunk_fwd_o_update(
-            q=torch.zeros((2, 4, 1, 8), dtype=torch.float32),
-            v=torch.zeros((2, 4, 1, 16), dtype=torch.float32),
-            h=torch.zeros((4, 1, 8, 16), dtype=torch.float32),
-            h_update=torch.zeros((5, 1, 8, 8), dtype=torch.float32),
-            updated_h_state=torch.zeros((1, 8, 16), dtype=torch.float32),
-            cu_seqlens=cu_seqlens,
-            chunk_offsets=sentinel,
-        )
+    _patch_missing_cdiv(monkeypatch, chunk_o)
+    monkeypatch.setattr(chunk_o, "chunk_fwd_kernel_o", fake_kernel)
+    monkeypatch.setattr(
+        chunk_o,
+        "prepare_chunk_offsets",
+        lambda *args, **kwargs: pytest.fail("prepare_chunk_offsets should not be called"),
+    )
+    chunk_o.chunk_fwd_o(
+        q=torch.zeros((2, 4, 1, 8), dtype=torch.float32),
+        k=torch.zeros((2, 4, 1, 8), dtype=torch.float32),
+        v=torch.zeros((2, 4, 1, 16), dtype=torch.float32),
+        h=torch.zeros((4, 1, 8, 16), dtype=torch.float32),
+        g=torch.zeros((2, 4, 1), dtype=torch.float32),
+        cu_seqlens=cu_seqlens,
+        chunk_offsets=sentinel,
+    )
 
     assert fake_kernel.launch_kwargs is not None
     assert fake_kernel.launch_kwargs["chunk_offsets"] is sentinel

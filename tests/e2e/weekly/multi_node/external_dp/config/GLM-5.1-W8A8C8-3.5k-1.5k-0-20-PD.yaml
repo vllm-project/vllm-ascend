@@ -50,7 +50,6 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
@@ -89,7 +88,7 @@ templates:
       - --max-model-len
       - "18432"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "c8_enable_reshape_optim":false}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "c8_enable_reshape_optim":false,"enable_fused_mc2":0}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -153,7 +152,7 @@ templates:
       - --max-model-len
       - "18432"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "c8_enable_reshape_optim":false}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "c8_enable_reshape_optim":false,"enable_fused_mc2":0}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -222,7 +221,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false,"enable_fused_mc2":0}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -288,7 +287,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false,"enable_fused_mc2":0}'
       - --max-num-seqs
       - "32"
       - --gpu-memory-utilization
@@ -330,5 +329,5 @@ benchmarks:
         max_out_len: 1500
         batch_size: 40
         request_rate: 6.87
-        baseline: 1456.52
+        baseline: 1449.1316
         threshold: 0.97

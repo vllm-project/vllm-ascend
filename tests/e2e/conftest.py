@@ -1924,6 +1924,41 @@ def olmoe_lora_files():
     return snapshot_download(repo_id="vllm-ascend/olmoe-instruct-text2sql-spider")
 
 
+@pytest.fixture(scope="session")
+def qwen2vl_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2-vl-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
+def qwen25vl_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen25-vl-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
+def qwen25vl_vision_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2.5-3b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen3vl_vision_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen3-4b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_language_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-language")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_connector_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-tower-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-tower")
+
+
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [
@@ -1938,13 +1973,8 @@ def qwen_prompt(questions: list[str]) -> list[str]:
 
 def hunyuan_prompt(questions: list[str]) -> list[str]:
     image_token = "<｜hy_place▁holder▁no▁102｜>"
-    if vllm_version_is("0.26.0"):
-        # v0.26.0 matches the bare image token and adds the boundaries in its
-        # prompt replacement. Supplying the wrapper would duplicate them.
-        placeholder = image_token
-    else:
-        # vLLM main PR #49691 matches the complete image placeholder.
-        placeholder = f"<｜hy_place▁holder▁no▁100｜>{image_token}<｜hy_place▁holder▁no▁101｜>"
+    # vLLM PR #49691 matches the complete image placeholder.
+    placeholder = f"<｜hy_place▁holder▁no▁100｜>{image_token}<｜hy_place▁holder▁no▁101｜>"
     return [f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>" for question in questions]
 
 
@@ -1962,6 +1992,14 @@ PROMPT_CONFIGS = {
         "model": "vllm-ascend/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
+        **(
+            {
+                "skip": "HunyuanVL is not supported on vLLM >= 0.27.1 "
+                "(upstream vllm-project/vllm#53272 removed native Hunyuan V1/VL)."
+            }
+            if not vllm_version_is("0.27.1")
+            else {}
+        ),
     },
 }
 

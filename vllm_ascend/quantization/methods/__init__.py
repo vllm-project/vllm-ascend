@@ -45,6 +45,7 @@ from .base import (
 
 # Import all scheme classes for external access
 from .fp8 import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DSDynamicLinearMethod
+from .fp8_block import AscendFp8BlockFusedMoEMethod, AscendFp8BlockLinearMethod, resolve_block_scales
 from .kv_c8 import AscendFAQuantAttentionMethod
 
 # Import registry functions
@@ -96,6 +97,7 @@ __all__ = [
     "get_scheme_class",
     # Utility functions
     "is_mx_quant_type",
+    "resolve_block_scales",
     # Scheme classes
     "AscendW8A8LinearMethod",
     "AscendW8A8DynamicLinearMethod",
@@ -115,4 +117,6 @@ __all__ = [
     "AscendW4A4MXFP4FlatQuantDynamicLinearMethod",
     "AscendW8A8MXFP8DSDynamicLinearMethod",
     "AscendW4A8MXFPDSDynamicFusedMoEMethod",
+    "AscendFp8BlockLinearMethod",
+    "AscendFp8BlockFusedMoEMethod",
 ]

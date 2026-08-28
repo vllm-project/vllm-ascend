@@ -1,6 +1,6 @@
 test_name: "weekly test DeepSeek-V3.2-W8A8-EP disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-V3.2-W8A8"
-num_nodes: 2
+num_nodes: 4
 npu_per_node: 16
 env_common: &env_common
   OMP_PROC_BIND: false
@@ -12,17 +12,61 @@ env_common: &env_common
   ASCEND_AGGREGATE_ENABLE: "1"
   ASCEND_TRANSPORT_PRINT: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: 8080
 
+
 disaggregated_prefill:
   enabled: true
-  prefiller_host_index: [0]
-  decoder_host_index: [1]
+  prefiller_host_index: [0, 1]
+  decoder_host_index: [2, 3]
+
 
 deployment:
+  -
+    envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
+          --host 0.0.0.0
+          --port $SERVER_PORT
+          --data-parallel-size 2
+          --data-parallel-start-rank 0
+          --data-parallel-size-local 1
+          --data-parallel-address $LOCAL_IP
+          --data-parallel-rpc-port 13389
+          --tensor-parallel-size 16
+          --enable-expert-parallel
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
+          --seed 1024
+          --quantization ascend
+          --max-num-seqs 16
+          --max-model-len 133000 
+          --max-num-batched-tokens 8192
+          --trust-remote-code
+          --gpu-memory-utilization 0.90
+          --enforce-eager
+          --no-enable-prefix-caching
+          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true,"enable_fused_mc2":1}'
+          --tokenizer-mode deepseek_v32 
+          --reasoning-parser deepseek_v3
+          --kv-transfer-config
+          '{"kv_connector": "MooncakeConnectorV1",
+          "kv_role": "kv_producer",
+          "kv_port": "30000",
+          "kv_connector_extra_config": {
+                    "prefill": {
+                            "dp_size": 2,
+                            "tp_size": 16
+                    },
+                    "decode": {
+                            "dp_size": 8,
+                            "tp_size": 4
+                    }
+              }
+          }'
+
+
   -
     envs:
       <<: *env_common
@@ -30,81 +74,71 @@ deployment:
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
+          --headless
           --port $SERVER_PORT
-          --data-parallel-size 1
-          --data-parallel-start-rank 0
+          --data-parallel-size 2
+          --data-parallel-start-rank 1
           --data-parallel-size-local 1
-          --data-parallel-address $LOCAL_IP
+          --data-parallel-address $MASTER_IP
+          --data-parallel-rpc-port 13389
           --tensor-parallel-size 16
           --enable-expert-parallel
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
           --seed 1024
-          --max-model-len 133000
+          --quantization ascend
+          --max-num-seqs 16
+          --max-model-len 133000 
           --max-num-batched-tokens 8192
           --trust-remote-code
-          --max-num-seqs 16
-          --gpu-memory-utilization 0.95
-          --quantization ascend
+          --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
+          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":false,"enable_fused_mc2":1}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
-          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}' 
           --kv-transfer-config
           '{"kv_connector": "MooncakeConnectorV1",
           "kv_role": "kv_producer",
           "kv_port": "30000",
           "kv_connector_extra_config": {
                     "prefill": {
-                            "dp_size": 1,
+                            "dp_size": 2,
                             "tp_size": 16
                     },
                     "decode": {
                             "dp_size": 8,
-                            "tp_size": 2
+                            "tp_size": 4
                     }
               }
           }'
-
   -
     envs:
       <<: *env_common
-      OMP_PROC_BIND: false
-      OMP_NUM_THREADS: 10
-      HCCL_OP_EXPANSION_MODE: "AIV"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      VLLM_USE_V1: "1"
-      HCCL_BUFFSIZE: "1100"
-      ASCEND_AGGREGATE_ENABLE: "1"
-      ASCEND_TRANSPORT_PRINT: "1"
-      ACL_OP_INIT_MODE: "1"
-      ASCEND_A3_ENABLE: "1"
-      VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-      TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
-      DYNAMIC_EPLB: "true"
+      VLLM_ASCEND_ENABLE_MLAPO: 1
+      TASK_QUEUE_ENABLE: 1
+      HCCL_BUFFSIZE: 1100
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
           --port $SERVER_PORT
           --data-parallel-size 8
-          --data-parallel-size-local 8
+          --data-parallel-size-local 4
           --data-parallel-start-rank 0
           --data-parallel-address $LOCAL_IP
           --data-parallel-rpc-port 13389
-          --tensor-parallel-size 2
+          --tensor-parallel-size 4
           --enable-expert-parallel
-          --seed 1024
-          --max-model-len 133000 
-          --max-num-batched-tokens 100
           --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
-          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}'
-          --additional-config '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
+          --seed 1024
+          --quantization ascend
+          --max-model-len 133000 
+          --max-num-batched-tokens 42
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}' 
           --trust-remote-code
           --max-num-seqs 14
-          --gpu-memory-utilization 0.92
+          --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --quantization ascend
+          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true,"enable_fused_mc2":1}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -113,16 +147,62 @@ deployment:
           "kv_port": "30200",
           "kv_connector_extra_config": {
                       "prefill": {
-                              "dp_size": 1,
+                              "dp_size": 2,
                               "tp_size": 16
                       },
                       "decode": {
                               "dp_size": 8,
-                              "tp_size": 2
+                              "tp_size": 4
                       }
               }
           }'
 
+  -
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_MLAPO: 1
+      TASK_QUEUE_ENABLE: 1
+      HCCL_BUFFSIZE: 1100
+    server_cmd: >
+      vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
+          --host 0.0.0.0
+          --headless
+          --port $SERVER_PORT
+          --data-parallel-size 8
+          --data-parallel-size-local 4
+          --data-parallel-start-rank 4
+          --data-parallel-address $MASTER_IP
+          --data-parallel-rpc-port 13389
+          --tensor-parallel-size 4
+          --enable-expert-parallel
+          --speculative-config '{"num_speculative_tokens": 2, "method":"deepseek_mtp"}'
+          --seed 1024
+          --quantization ascend
+          --max-model-len 133000 
+          --max-num-batched-tokens 42
+          --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}' 
+          --trust-remote-code
+          --max-num-seqs 14
+          --gpu-memory-utilization 0.90
+          --no-enable-prefix-caching
+          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true,"enable_fused_mc2":1}'
+          --tokenizer-mode deepseek_v32
+          --reasoning-parser deepseek_v3
+          --kv-transfer-config 
+          '{"kv_connector": "MooncakeConnectorV1",
+          "kv_role": "kv_consumer",
+          "kv_port": "30200",
+          "kv_connector_extra_config": {
+                      "prefill": {
+                              "dp_size": 2,
+                              "tp_size": 16
+                      },
+                      "decode": {
+                              "dp_size": 8,
+                              "tp_size": 4
+                      }
+              }
+          }'
 
 benchmarks:
   perf_16384_1024_num64:
