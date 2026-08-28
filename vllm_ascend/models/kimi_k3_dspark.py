@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -154,13 +154,14 @@ class AscendK3DSparkModel(UpstreamK3DSparkModel):
         self.quant_config = get_draft_quant_config(vllm_config)
         self.embed_tokens: nn.Module | None = None
 
-        self.context_proj = ReplicatedLinear(
+        self.context_proj = ColumnParallelLinear(
             self.config.target_hidden_size * self.config.num_target_layers,
             self.config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "context_proj"),
+            gather_output=True,
         )
         self.context_norm = RMSNorm(
             self.config.hidden_size,
