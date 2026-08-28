@@ -285,12 +285,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         if isinstance(idx_cache, (tuple, list)):
             idx_cache = idx_cache[0]
         flat = idx_cache.view(-1, self.idx_head_dim)
-        # Scatter ND update ignores indices outside the cache bounds, so graph
-        # padding slots set to -1 do not write into the last cache row.
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(
-            flat,
-            index_meta.slot_mapping[:num_tokens].view(-1, 1),
-            index_key[:num_tokens].to(flat.dtype),
+        # npu_scatter_pa_kv_cache requires a block-based cache [B, S, H, D].
+        # Use a single block of block_size=num_slots so the flat slot maps 1:1
+        # to the cache row, and view key as [T, 1, D] (single head).
+        # NOTE: relies on npu_scatter_pa_kv_cache ignoring out-of-bounds/negative
+        # slots (graph padding slots are -1), matching the previous scatter_nd.
+        num_slots = flat.shape[0]
+        DeviceOperator._npu_scatter_pa_kv_cache_single(
+            flat.view(1, num_slots, 1, self.idx_head_dim),
+            index_key[:num_tokens].view(-1, 1, self.idx_head_dim).to(flat.dtype),
+            index_meta.slot_mapping[:num_tokens],
         )
 
     def _sparse_prepare(

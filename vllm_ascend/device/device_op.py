@@ -707,9 +707,72 @@ class BaseDeviceAdaptor:
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
+    def _pa_normalize_kv(t, cache):
+        """Normalize key/value to [T, H, D], aligned with cache [B, S, H, D].
+
+        scatter_nd_update_v2 accepts any update shape, but npu_scatter_pa_kv_cache
+        requires key/value in [T, H, D] (or 4D). Dynamic-quant outputs are often
+        2D [T, D] and scale tensors [T, D, 1, 1]; reshape them against the cache.
+        """
+        if t.ndim == 4 and t.shape[-1] == 1:
+            t = t.squeeze(-1)
+        if t.ndim != 3 or t.shape[1:] != (cache.shape[2], cache.shape[3]):
+            t = t.reshape(-1, cache.shape[2], cache.shape[3])
+        return t
+
+    @staticmethod
+    def _npu_scatter_pa_kv_cache_single(key_cache, key, slot_mapping):
+        """Single-input (key-only) scatter via npu_scatter_pa_kv_cache.
+
+        Contract (single-in single-out form):
+          key: [T, H, D]; value: []; key_cache: [B, S, H, D]; value_cache: [];
+          slot_mapping: 1D flat [T]; cache_mode: "Norm".
+        2D BLOCK_OFFSET slot_mapping [T, 2] is normalized to 1D flat here using
+        the cache block_size (cache.shape[1]).
+        """
+        key = BaseDeviceAdaptor._pa_normalize_kv(key, key_cache)
+        if slot_mapping.ndim == 2:
+            block_size = key_cache.shape[1]
+            slot_mapping = slot_mapping[..., 0] * block_size + slot_mapping[..., 1]
+        empty = torch.empty((), dtype=key.dtype, device=key.device)
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=key,
+            value=empty,
+            key_cache=key_cache,
+            value_cache=empty,
+            slot_mapping=slot_mapping,
+            cache_mode="Norm",
+        )
+
+    @staticmethod
+    def _npu_scatter_pa_kv_cache_pair(key_cache, value_cache, key, value, slot_mapping):
+        """Key+value paired scatter via npu_scatter_pa_kv_cache.
+
+        Contract (paired form):
+          key: [T, H, D]; value: [T, H, D];
+          key_cache: [B, S, H, D]; value_cache: [B, S, H, D];
+          slot_mapping: 1D flat [T]; cache_mode: "Norm".
+        2D BLOCK_OFFSET slot_mapping [T, 2] is normalized to 1D flat here using
+        the cache block_size (cache.shape[1]).
+        """
+        key = BaseDeviceAdaptor._pa_normalize_kv(key, key_cache)
+        value = BaseDeviceAdaptor._pa_normalize_kv(value, value_cache)
+        if slot_mapping.ndim == 2:
+            block_size = key_cache.shape[1]
+            slot_mapping = slot_mapping[..., 0] * block_size + slot_mapping[..., 1]
+        torch_npu.npu_scatter_pa_kv_cache(
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping,
+            cache_mode="Norm",
+        )
+
+    @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+        """Scatter KV into cache. Non-A5: single-input scatter of pre-quantized tensor."""
+        BaseDeviceAdaptor._npu_scatter_pa_kv_cache_single(cache, x, slot_mapping)
 
     # ===== Indexer Quant + Scatter =====
 
@@ -735,8 +798,9 @@ class BaseDeviceAdaptor:
             kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
             if kv_scale_out.ndim < 4:
                 kv_scale_out = kv_scale_out.unsqueeze(-1)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_out)
+            BaseDeviceAdaptor._npu_scatter_pa_kv_cache_pair(
+                indexer_k_cache, indexer_scale_cache, kv_out, kv_scale_out, slot_mapping
+            )
 
         return q, q_scale, kv_out, kv_scale_out
 
@@ -749,7 +813,7 @@ class BaseDeviceAdaptor:
             return None, None
         kv_out, kv_scale = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
         kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
+        BaseDeviceAdaptor._npu_scatter_pa_kv_cache_single(indexer_k_cache, kv_out, slot_mapping)
         return kv_out, kv_scale
 
     @staticmethod
@@ -759,7 +823,7 @@ class BaseDeviceAdaptor:
         kv_scale = kv_scale.to(torch.float16)
         if kv_scale.ndim < 4:
             kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale)
+        BaseDeviceAdaptor._npu_scatter_pa_kv_cache_single(indexer_scale_cache, kv_scale, slot_mapping)
 
     @staticmethod
     def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
@@ -772,8 +836,9 @@ class BaseDeviceAdaptor:
         dummy_shape = (1, 1, 1, kv_dummy.shape[-1])
         indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
         indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_dummy)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_dummy)
+        BaseDeviceAdaptor._npu_scatter_pa_kv_cache_pair(
+            indexer_k_cache, indexer_scale_cache, kv_dummy, kv_scale_dummy, slot_mapping
+        )
 
     # ===== Lightning Indexer Dtype Prep =====
 
