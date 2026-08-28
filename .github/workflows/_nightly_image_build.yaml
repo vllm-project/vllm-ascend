@@ -120,10 +120,10 @@ jobs:
             TAG_PREFIX="daily"
             BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend"
           else
-            SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend"
-            SWR_TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp"
+            SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend"
+            SWR_TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend-temp"
             TAG_PREFIX="nightly-ci"
-            BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend"
+            BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend"
           fi
 
           CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
@@ -228,7 +228,7 @@ jobs:
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
-          RELEASE_SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend"
+          RELEASE_SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend"
           RELEASE_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
           # Release copy uses a stable tag without arch info (single-arch arm64 image)
           RELEASE_IMAGE="${RELEASE_SWR_REGISTRY}:${RELEASE_TAG}"
