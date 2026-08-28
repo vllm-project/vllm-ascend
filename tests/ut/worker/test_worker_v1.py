@@ -495,6 +495,32 @@ class TestNPUWorker(TestBase):
             worker.wake_up(tags=["kv_cache"])
             mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
 
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_without_post_kv_cache_hook(
+        self, mock_get_config, mock_allocator_class
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_get_config.return_value = SimpleNamespace(
+            weight_nz_mode=0,
+            rl_config=SimpleNamespace(
+                enabled=False,
+                sleep_mode_extra_cleanup=False,
+            ),
+        )
+        mock_allocator = MagicMock()
+        mock_allocator_class.get_instance.return_value = mock_allocator
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.model_runner = SimpleNamespace(model=MagicMock())
+        worker._sleep_saved_buffers = {}
+
+        worker.wake_up(tags=["kv_cache"])
+
+        mock_allocator.wake_up.assert_called_once_with(tags=["kv_cache"])
+
     @staticmethod
     def _make_unquantized_moe_model():
         model = torch.nn.Module()
