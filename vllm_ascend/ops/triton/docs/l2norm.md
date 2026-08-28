@@ -57,7 +57,7 @@ Source: `vllm_ascend/ops/triton/fla/l2norm.py` (host wrapper: `l2norm_fwd`).
 > [!NOTE]
 > Single-operator accuracy test cases are placed under `tests/e2e/nightly/single_node/ops/singlecard_ops/triton`.
 
-`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_l2norm.py` compares the kernel against `torch.nn.functional.normalize(x, dim=-1, p=2)` over `(B, T, H, D)` shapes `(1, 63, 1, 60)`, `(2, 500, 4, 64)`, `(2, 1000, 2, 100)` and `(3, 1024, 4, 128)`, covering a row count that is not a multiple of `MBLOCK` as well as a non-power-of-two feature dimension. Precision tolerance follows the dtype of this reduction-type operator: `rtol=3e-4, atol=1e-3` for fp32, `rtol=3e-3, atol=5e-3` for fp16 and `rtol=1e-2, atol=5e-2` for bf16.
+`tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_l2norm.py` compares the kernel against `torch.nn.functional.normalize(x, dim=-1, p=2)` over `(B, T, H, D)` shapes `(1, 63, 1, 60)`, `(2, 500, 4, 64)`, `(2, 1000, 2, 100)` and `(3, 1024, 4, 128)`, covering a row count that is not a multiple of `MBLOCK` as well as a non-power-of-two feature dimension. All current cases use fp32 with `rtol=3e-4, atol=1e-3`; fp16 and bf16 are listed as supported input dtypes above but are not covered by this test file yet.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_l2norm.py

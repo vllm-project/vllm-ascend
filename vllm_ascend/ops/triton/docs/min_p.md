@@ -45,7 +45,7 @@ Source: `vllm_ascend/worker/v2/sample/min_p.py` (host wrapper: `apply_min_p`).
 
 - `logits` must be 2-D `[num_tokens, vocab_size]` and fp32 (the sampler always produces fp32 logits); rows are addressed through `logits_stride`, so only the last dimension has to be contiguous.
 - The update is in place: `apply_min_p` returns `None` and the caller's `logits` tensor is overwritten. Rows with `min_p == 0.0` are not written at all, which is safe only because the input and output pointers are the same tensor — passing two different tensors would leave those rows uninitialized in the output.
-- `expanded_idx_mapping` has one entry per token row, with values in `[0, min_p.shape[0])`; out-of-range values would read past the `min_p` buffer.
+- `expanded_idx_mapping` has one entry per token row, with values in `[0, min_p.shape[0])`; out-of-range values would read past the `min_p` buffer. Both `expanded_idx_mapping` and `min_p` must be contiguous one-dimensional tensors because the kernel indexes them as `ptr + index` and receives no stride for either input.
 - `min_p` values must lie in `[0.0, 1.0]`. `0.0` means "disabled"; a value of exactly `1.0` keeps only the row maximum. Negative values are invalid (`log(min_p)` would be `NaN`).
 - The row maximum and the threshold are computed in fp32 regardless of the tile size, so results do not depend on `BLOCK_SIZE`.
 - `BLOCK_SIZE` is capped at `8192` so that one `[BLOCK_SIZE]` fp32 tile (32KB) stays within UB even for very large vocabularies (e.g. `151936` for Qwen-class models); the two-pass loop then handles the rest of the row.
