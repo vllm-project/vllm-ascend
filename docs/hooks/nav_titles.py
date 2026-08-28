@@ -46,9 +46,9 @@ TITLES = {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",
     },
-    "developer_guide/Design_Documents/eplb_swift_balancer.md": {
-        "en": "EPLB Swift Balancer",
-        "zh": "EPLB 快速均衡器",
+    "developer_guide/Design_Documents/model_runner_v1_eplb.md": {
+        "en": "Model Runner V1 EPLB Architecture",
+        "zh": "Model Runner V1 EPLB 架构",
     },
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
@@ -123,6 +123,7 @@ TITLES = {
     "tutorials/models/Kimi-K2-Thinking.md": {"en": "Kimi-K2-Thinking", "zh": "Kimi-K2-Thinking"},
     "tutorials/models/Kimi-K2.5.md": {"en": "Kimi-K2.5", "zh": "Kimi-K2.5"},
     "tutorials/models/Kimi-K2.6.md": {"en": "Kimi-K2.6", "zh": "Kimi-K2.6"},
+    "tutorials/models/Kimi-K3.md": {"en": "Kimi-K3", "zh": "Kimi-K3"},
     "tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md": {
         "en": "LLaVA-OneVision-Qwen2-0.5B-OV",
         "zh": "LLaVA-OneVision-Qwen2-0.5B-OV",

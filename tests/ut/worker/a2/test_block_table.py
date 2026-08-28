@@ -14,6 +14,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -21,6 +22,11 @@ import torch
 
 # import vllm.utils.cpu_triton_utils as cpu_tl
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from tests.ut.base import TestBase
 
@@ -97,6 +103,57 @@ class TestBlockTableComputeSlotMapping(TestBase):
 
         self.assertEqual(block_table.slot_mapping.cpu.numel(), 128)
         self.assertEqual(block_table.slot_mapping.cpu[: req_indices.size].numel(), 110)
+
+    def test_mamba_table_preserves_speculative_capacity_with_dcp(self):
+        from vllm_ascend.worker.block_table import BlockTable
+
+        mamba_spec = MambaSpec(
+            block_size=384,
+            shapes=((4, 8),),
+            dtypes=(torch.float32,),
+            page_size_padded=128,
+            mamba_cache_mode="align",
+            num_speculative_blocks=7,
+        )
+        layer_specs = {f"mamba.{i}": mamba_spec for i in range(3)}
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+        self.assertIsNotNone(uniform_spec)
+        # ceil(133120 / 384) + 7 speculative state slots, on every DCP rank.
+        expected_width = 354
+        for spec in (mamba_spec, uniform_spec):
+            for dcp_size in (1, 4):
+                with self.subTest(spec=type(spec).__name__, dcp_size=dcp_size):
+                    config = SimpleNamespace(
+                        cache_config=SimpleNamespace(mamba_cache_mode="align"),
+                        parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_size),
+                    )
+                    width = spec.max_num_blocks_per_req(config, 133120)
+                    self.assertEqual(width, expected_width)
+                    group = KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=spec)
+                    with patch(
+                        "vllm_ascend.worker.block_table.get_dcp_group",
+                        return_value=SimpleNamespace(world_size=dcp_size, rank_in_group=0),
+                    ):
+                        table = BlockTable(
+                            block_size=spec.block_size,
+                            max_num_reqs=self.max_num_reqs,
+                            max_num_blocks_per_req=width,
+                            max_num_batched_tokens=self.max_num_batched_tokens,
+                            pin_memory=self.pin_memory,
+                            device=self.device,
+                            kernel_sizes=[0],
+                            num_speculative_tokens=7,
+                            kv_cache_group=group,
+                        )
+
+                    self.assertTrue(table.is_mamba_group)
+                    self.assertEqual(table.block_table.cpu.shape[1], expected_width)
+                    self.assertEqual(table.max_num_blocks_per_req, expected_width)
+                    # Exercise the last speculative slot, not just the formula.
+                    block_ids = list(range(expected_width))
+                    table.add_row(block_ids[:-2], 0)
+                    table.append_row(block_ids[-2:], 0)
+                    np.testing.assert_array_equal(table.block_table.np[0], block_ids)
 
     def setup_block_table_data(self, block_table, num_reqs=2):
         """Helper method to populate block table with test data"""

@@ -97,6 +97,8 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
         "--port",
         str(port),
         "--trust-remote-code",
+        "--additional-config",
+        '{"weight_nz_mode": 0}',
     ]
     # VLLM_SERVER_DEV_MODE registers the dev endpoints; insecure serialization
     # lets the server unpickle the IPC handles sent over HTTP. Pin the server to
@@ -105,7 +107,6 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
         "VLLM_SERVER_DEV_MODE": "1",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
         "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
-        "VLLM_ASCEND_ENABLE_NZ": "0",
     }
 
     with RemoteOpenAIServer(

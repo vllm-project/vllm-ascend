@@ -44,7 +44,11 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.nnodes_within_dp = 1
         mock_vllm_config.use_v2_model_runner = False
         mock_vllm_config.parallel_config.enable_eplb = False
-        mock_vllm_config.parallel_config.eplb_config = MagicMock(use_async=False, communicator=None)
+        mock_vllm_config.parallel_config.enable_elastic_ep = False
+        mock_vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator=None,
+        )
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
         mock_vllm_config.scheduler_config.max_num_seqs = None
@@ -68,7 +72,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
-        mock_ascend_config.enable_mc2_hierarchy_comm = False
+        mock_ascend_config.mc2_comm_alg = ""
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
@@ -131,24 +135,103 @@ class TestNPUPlatform(TestBase):
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
-        self.assertEqual(
-            vllm_config.parallel_config.eplb_config.communicator,
-            "torch_nccl",
-        )
+        self.assertIsNone(vllm_config.parallel_config.eplb_config.communicator)
 
-    def test_validate_eplb_config_replaces_upstream_gloo_default(self):
+    def test_validate_eplb_config_warns_and_forces_async_mode(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
-        vllm_config.parallel_config.eplb_config.communicator = "torch_gloo"
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=False,
+            communicator="torch_gloo",
+        )
+
+        with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
+            _validate_eplb_config(vllm_config)
+
+        self.assertTrue(vllm_config.parallel_config.eplb_config.use_async)
+        self.assertEqual(vllm_config.parallel_config.eplb_config.communicator, "torch_gloo")
+        warning.assert_called_once()
+
+    def test_validate_eplb_config_rejects_nccl_before_sync_normalization(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=False,
+            communicator="torch_nccl",
+        )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            self.assertRaisesRegex(ValueError, "torch_gloo"),
+        ):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_async_keeps_gloo_auto_select(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.enable_elastic_ep = False
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator=None,
+        )
 
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
-        self.assertEqual(
+        self.assertIsNone(
             vllm_config.parallel_config.eplb_config.communicator,
-            "torch_nccl",
         )
+
+    def test_validate_eplb_config_async_rejects_elastic_ep(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.enable_elastic_ep = True
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator=None,
+        )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            self.assertRaisesRegex(ValueError, "elastic EP"),
+        ):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_async_rejects_nccl_communicator(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.enable_elastic_ep = False
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator="torch_nccl",
+        )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            self.assertRaisesRegex(ValueError, "torch_gloo"),
+        ):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_async_rejects_nixl_communicator(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.enable_elastic_ep = False
+        vllm_config.parallel_config.eplb_config = MagicMock(
+            use_async=True,
+            communicator="nixl",
+        )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            self.assertRaisesRegex(ValueError, "got 'nixl'"),
+        ):
+            _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_allows_load_collection_phase_with_dbo_and_spec_decode(
         self,
@@ -602,6 +685,24 @@ class TestNPUPlatform(TestBase):
         self.assertFalse(kwargs["in_profile_run"])
         self.assertEqual(kwargs["padded_num_tokens"], 8)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
+        self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
+
+    def test_set_additional_forward_context_v1_includes_dynamic_mx_scale_alg(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.use_v2_model_runner = False
+
+        with patch(
+            "vllm_ascend.quantization.utils.get_dynamic_mx_quant_scale_alg",
+            return_value=1,
+        ):
+            kwargs = self.platform.set_additional_forward_context(
+                attn_metadata=None,
+                vllm_config=vllm_config,
+                dp_metadata=None,
+                num_tokens=5,
+            )
+
+        self.assertEqual(kwargs, {"dynamic_mx_quant_scale_alg": 1})
 
     def test_set_additional_forward_context_reads_v2_profile_override(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

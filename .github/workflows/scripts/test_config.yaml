@@ -238,14 +238,21 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/eplb
-    - vllm_ascend/distributed/eplb_communicator.py
-    - vllm_ascend/distributed/eplb_state.py
+    - vllm_ascend/distributed/eplb
     - vllm_ascend/ops/fused_moe/eplb.py
-    - vllm_ascend/ops/fused_moe/router.py
+    - vllm_ascend/ops/fused_moe/routed_experts.py
+    - vllm_ascend/ops/triton/eplb.py
     - vllm_ascend/patch/platform/patch_eplb.py
+    - vllm_ascend/patch/platform/patch_fused_moe.py
     - vllm_ascend/worker/v2/eplb.py
   tests:
     - tests/ut/eplb
+    - tests/ut/distributed/eplb
+    - tests/ut/ops/test_eplb.py
+    - tests/ut/ops/a2/test_eplb.py
+    - tests/ut/patch/platform/test_patch_eplb.py
+    - tests/ut/patch/platform/test_patch_fused_moe.py
+    - tests/ut/worker/v2/test_eplb_load_collection_phase.py
     - tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
@@ -308,6 +315,7 @@
     - tests/ut/models/test_deepseek_v4_compressor.py
     - tests/ut/models/test_deepseek_v4_indexer.py
     - tests/ut/models/test_deepseek_v4_moe.py
+    - tests/ut/models/test_kimi_k3_adapter.py
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
 
 - name: models_minimax_m3
@@ -320,6 +328,30 @@
     - tests/ut/models/minimax_m3
     - tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py
     - tests/e2e/pull_request/eight_card/test_minimax_m3.py
+
+- name: models_kimi_k3
+  optional: true
+  source_file_dependencies:
+    - vllm_ascend/models/kimi_k3.py
+    - vllm_ascend/models/kimi_k3_dspark.py
+    - vllm_ascend/models/kimi_k3_mtp.py
+    - vllm_ascend/models/qwen3_dspark.py
+    - vllm_ascend/worker/model_runner_v1.py
+    - vllm_ascend/worker/worker.py
+    - vllm_ascend/attention/mla_v1.py
+    - vllm_ascend/core/kv_cache_interface.py
+    - vllm_ascend/ops/kimi_kda.py
+    - vllm_ascend/ops/fused_moe
+    - vllm_ascend/ops/triton/kimi_k3
+    - vllm_ascend/spec_decode/dspark_proposer.py
+    - vllm_ascend/spec_decode/llm_base_proposer.py
+    - vllm_ascend/quantization/modelslim_config.py
+    - vllm_ascend/patch/platform/patch_kv_cache_utils.py
+    - vllm_ascend/patch/platform/patch_kv_cache_coordinator.py
+    - vllm_ascend/patch/platform/patch_speculative_config.py
+    - vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py
+  tests:
+    - tests/e2e/pull_request/sixteen_card/test_kimi_k3.py
 
 # Ops
 - name: ops_basic
@@ -391,6 +423,7 @@
   source_file_dependencies:
     - vllm_ascend/ops/gdn.py
     - vllm_ascend/ops/gdn_attn_builder.py
+    - vllm_ascend/ops/kimi_kda.py
     - vllm_ascend/ops/triton/gdn_chunk_meta.py
   tests:
     - tests/ut/ops
@@ -856,6 +889,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 560
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 420
   tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 260
+  tests/e2e/pull_request/two_card/model_runner_v2/test_mamba_hybrid.py: 220
   tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 370
   tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 570
   tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 470
@@ -876,7 +910,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1280
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/eight_card/test_glm5_2.py: 1360
-  tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 930
+  tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 1360
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 340
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380
@@ -892,6 +926,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_32b_bf16_ll_performance.py: 1200
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
+  tests/e2e/pull_request/sixteen_card/test_kimi_k3.py: 360
   tests/ut/attention/a2/test_attention_cp.py: 30
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
@@ -910,9 +945,11 @@ estimated_times:
   tests/ut/kv_offload/a2/test_remote_decode_lifecycle.py: 60
   tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
+  tests/ut/ops/a2/test_eplb.py: 30
   tests/ut/ops/a2/test_gdn_layerwise_kv.py: 70
   tests/ut/ops/a2/test_token_dispatcher.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50
+  tests/ut/ops/a3_2/test_kimi_kda_fused_norm_gate.py: 60
   tests/ut/ops/a3_2/test_select_experts.py: 20
   tests/ut/quantization/methods/a2/test_w4a16.py: 30
   tests/ut/quantization/methods/a2/test_w4a4_flatquant.py: 40
@@ -971,6 +1008,8 @@ runner_mapping:
     310p: 310p-4
   tests/e2e/pull_request/eight_card:
     default: a3-8
+  tests/e2e/pull_request/sixteen_card:
+    default: a3-16
   tests/ut/.+/a3_2:
     default: a3-2
   tests/ut/.+/a2:
@@ -1003,6 +1042,9 @@ partition:
     count: 2
   a3-8:
     runner_label: linux-aarch64-a3-8-
+    count: 1
+  a3-16:
+    runner_label: linux-aarch64-a3-16
     count: 1
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk

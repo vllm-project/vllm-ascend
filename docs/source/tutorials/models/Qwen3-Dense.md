@@ -238,7 +238,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --served-model-name qwen3 \
         --trust-remote-code \
         --quantization ascend \
-        --distributed-executor-backend mp \
+        --distributed-executor-backend "mp" \
         --tensor-parallel-size 4 \
         --max-model-len 5500 \
         --max-num-batched-tokens 40960 \
@@ -338,7 +338,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 !!! note
 
-    - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+    - [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — Additional parameter details for vLLM serve commands.
     - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 
 **Service Verification:**
@@ -493,6 +493,8 @@ After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Features](https://docs.vllm.ai/en/stable/features), [vLLM Ascend Additional Configuration](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html), [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) and [vLLM Ascend Feature Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide) for detailed key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -515,7 +517,7 @@ After several minutes, you will get the performance evaluation result.
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
 
-For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment)
+>For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 <u>High Throughput Configuration:</u>
 
@@ -527,7 +529,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend "mp" \
     --tensor-parallel-size 4 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
@@ -576,7 +578,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend "mp" \
     --tensor-parallel-size 8 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
