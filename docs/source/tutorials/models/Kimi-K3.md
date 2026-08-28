@@ -2,14 +2,14 @@
 
 ## 1 Introduction
 
-Kimi K3 is a multimodal mixture-of-experts model that combines Kimi Delta
+Kimi-K3 is a multimodal mixture-of-experts model that combines Kimi Delta
 Attention (KDA), gated Multi-head Latent Attention (MLA), attention residuals,
 SiTU activations, and latent MoE layers.
 
 This tutorial covers model preparation, installation, online serving, and
 accuracy and performance evaluation for the full W4A8 checkpoint on Atlas A3.
 This tutorial is based on **vLLM-Ascend main with vLLM 0.27.1**. Use a
-main-branch build with Kimi K3 support and its matching vLLM revision.
+main-branch build with Kimi-K3 support and its matching vLLM revision.
 
 ## 2 Supported Features
 
@@ -24,12 +24,12 @@ This guide covers A3 W4A8 text and multimodal serving, TP/DP/EP, Prefix Cache,
 
 ### 3.1 Model Weights and Hardware
 
-| Model | Purpose | Requirements |
-| --- | --- | --- |
-| [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Full 93-layer, 896-expert W4A8 target | About 1.49 TB of weight storage; the reference deployment uses four Atlas 800 A3 nodes with 16 logical NPUs per node (DP4/TP16/EP64) |
-| [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark) | Optional GQA draft | Set `num_speculative_tokens` to `7` |
-| [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark) | Optional MLA draft | Set `num_speculative_tokens` to `7` |
-| [Inferact/Kimi-K3-DSpark-Block5](https://huggingface.co/Inferact/Kimi-K3-DSpark-Block5) | Optional MLA draft with five-token blocks | Set `num_speculative_tokens` to `5` |
+| Model | Download | Purpose | Requirements |
+| --- | --- | --- | --- |
+| Eco-Tech/Kimi-K3-w4a8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K3-w4a8) | Full 93-layer, 896-expert W4A8 target | About 1.49 TB of weight storage; the reference deployment uses four Atlas 800 A3 nodes with 16 logical NPUs per node (DP4/TP16/EP64) |
+| RadixArk/Kimi-K3-DSpark | [ModelScope](https://www.modelscope.cn/models/RadixArk/Kimi-K3-DSpark) / [Hugging Face](https://huggingface.co/RadixArk/Kimi-K3-DSpark) | Optional GQA draft | Set `num_speculative_tokens` to `7` |
+| Inferact/Kimi-K3-DSpark | [ModelScope](https://www.modelscope.cn/models/Inferact/Kimi-K3-DSpark) / [Hugging Face](https://huggingface.co/Inferact/Kimi-K3-DSpark) | Optional MLA draft | Set `num_speculative_tokens` to `7` |
+| Inferact/Kimi-K3-DSpark-Block5 | [ModelScope](https://www.modelscope.cn/models/Inferact/Kimi-K3-DSpark-Block5) / [Hugging Face](https://huggingface.co/Inferact/Kimi-K3-DSpark-Block5) | Optional MLA draft with five-token blocks | Set `num_speculative_tokens` to `5` |
 
 Download weights, tokenizer, and processor files before starting the service.
 Mount them at identical paths on every node, for example under `/path/to/models`.
@@ -46,13 +46,16 @@ All nodes must use the same model revision and compatible software stack.
 
 ## 4 Installation
 
+The Kimi-K3 installation and deployment instructions in this tutorial apply
+only to the Atlas A3 series.
+
 ### 4.1 Docker Image Installation
 
 Follow the [installation requirements](../../installation.md#requirements) for
 the host driver and firmware. Start the A3 container below on every node.
 
 The example uses the main-branch nightly image for the vLLM 0.27-based stack.
-Check that the image includes Kimi K3 support and the matching vLLM version.
+Check that the image includes Kimi-K3 support and the matching vLLM version.
 Pin its digest for reproducible deployments.
 To build an image from the selected source revision, follow Section 4.2.
 
@@ -233,7 +236,7 @@ Key parameter descriptions:
   budget. Check capacity with the actual checkpoint before increasing sequence
   length, concurrency, or adding a draft.
 - `--tokenizer-mode kimi_k3`, `--reasoning-parser kimi_k3`, and
-  `--tool-call-parser kimi_k3` select the K3 request/response format.
+  `--tool-call-parser kimi_k3` select the Kimi-K3 request/response format.
   `--enable-auto-tool-choice` enables automatic tool selection.
 - `FULL_DECODE_ONLY` captures decode execution; `--enable-prefix-caching`
   enables reuse of cached prefixes.
@@ -330,9 +333,49 @@ comparing results across backends.
 
 ## 8 Performance Evaluation
 
-Use [AISBench performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
-or the [vLLM benchmark tools](https://docs.vllm.ai/en/latest/benchmarking/)
-from a load generator in the serving network.
+### Using AISBench
+
+Refer to [AISBench performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)
+for configuration and execution instructions.
+
+### Using vLLM Benchmark
+
+After the service in Section 5.1 is ready, run the following from a load generator
+in the serving network with the same vLLM version and tokenizer files. Set
+`NODE0_IP` and `TOKENIZER_PATH` to the service address and local tokenizer path.
+
+```shell
+export NODE0_IP="<NODE0_IP>"
+export TOKENIZER_PATH="<KIMI_K3_TOKENIZER_PATH>"
+
+vllm bench serve \
+  --backend openai-chat \
+  --base-url "http://$NODE0_IP:8000" \
+  --endpoint /v1/chat/completions \
+  --model kimi-k3 \
+  --tokenizer "$TOKENIZER_PATH" \
+  --tokenizer-mode kimi_k3 \
+  --dataset-name random \
+  --random-input-len 1024 \
+  --random-output-len 128 \
+  --random-range-ratio 0.0 \
+  --num-prompts 100 \
+  --max-concurrency 4 \
+  --request-rate inf \
+  --ignore-eos \
+  --save-result \
+  --result-dir ./benchmark-results
+```
+
+This example measures 100 requests with at most four in flight, using random
+1024-token inputs and 128-token outputs. The chat format can add input tokens;
+`--ignore-eos` prevents early EOS from shortening the requested output length.
+`--request-rate inf` sends requests as soon as concurrency slots are available.
+Check that all 100 measured requests succeed and review throughput, TTFT, and
+TPOT in the console and saved JSON results. Adjust lengths and concurrency for
+the intended workload; this example is not a peak-performance configuration.
+See the [vLLM benchmark tools](https://docs.vllm.ai/en/latest/benchmarking/)
+for additional options.
 
 Record the checkpoint revision, topology, graph mode, Prefix Cache setting,
 input/output lengths, concurrency, completed requests, and error count together
@@ -372,7 +415,7 @@ general tuning methods.
 ## 10 FAQ
 
 For common environment, installation, and general parameter issues, refer to
-the [Public FAQ](../../faqs.md). This section covers K3-specific questions.
+the [Public FAQ](../../faqs.md). This section covers Kimi-K3-specific questions.
 
 ### Which checkpoint should I use with DSpark?
 
