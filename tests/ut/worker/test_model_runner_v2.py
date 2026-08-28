@@ -1,3 +1,5 @@
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -97,3 +99,40 @@ def test_full_decode_only_keeps_graph_descriptor_request_count():
 
     assert num_reqs_padded == 4
     np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))
+
+
+def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
+    source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    padding_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "num_tokens_after_padding" for target in node.targets)
+    ]
+    partition_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "maybe_partition_pcp_batch"
+    ]
+
+    # prepare_inputs has one implementation for v0.27.1 and one for newer
+    # vLLM snapshots. Both must retain the real global PCP batch when it is
+    # larger than the graph descriptor, then forward that descriptor as the
+    # rank-local padded extent. Upstream vLLM #53515 introduced both parts.
+    assert len(padding_assignments) == 2
+    for assignment in padding_assignments:
+        assert ast.unparse(assignment.value) == "max(num_tokens, batch_desc.num_tokens)"
+
+    assert len(partition_calls) == 2
+    for call in partition_calls:
+        padded_num_tokens = next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "padded_num_tokens"),
+            None,
+        )
+        assert isinstance(padded_num_tokens, ast.Attribute)
+        assert padded_num_tokens.attr == "num_tokens"
+        assert isinstance(padded_num_tokens.value, ast.Name)
+        assert padded_num_tokens.value.id == "batch_desc"
