@@ -45,6 +45,18 @@ class TestBatchInvariant:
         mock_reduce.assert_called_once_with(x, -1, True)
         assert result is expected
 
+    def test_reduce_sum_uses_native_sum_for_cpu_tensor(self):
+        x = MagicMock(spec=torch.Tensor)
+        x.device.type = "cpu"
+        expected = MagicMock(spec=torch.Tensor)
+
+        with patch("vllm_ascend.batch_invariant.torch_sum", return_value=expected) as native_sum:
+            result = batch_invariant.reduce_sum(x, dim=-1, keepdim=True)
+
+        native_sum.assert_called_once_with(x, dim=-1, keepdim=True)
+        x.dim.assert_not_called()
+        assert result is expected
+
     @pytest.mark.parametrize("dim", [0, (0, 2), [0, 2], None])
     def test_reduce_sum_uses_native_sum_for_unsupported_dimensions(self, dim):
         x = MagicMock(spec=torch.Tensor)

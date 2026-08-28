@@ -94,6 +94,10 @@ def reduce_sum(
             native_kwargs["out"] = out
         return torch_sum(x, **native_kwargs)
 
+    # npu_reduce_sum_batch_invariant does not support CPU tensors.
+    if x.device.type != "npu":
+        return native_sum()
+
     ndim = x.dim()
     if dim is None and ndim == 1:
         reduce_dim = -1
@@ -108,7 +112,7 @@ def reduce_sum(
     # tensor, dim=-1 and dim=2 are supported; dim=0 and dim=1 use torch.sum.
     is_last_dim = reduce_dim is not None and ndim > 0 and -ndim <= reduce_dim < ndim and reduce_dim % ndim == ndim - 1
     target_dtype = dtype or x.dtype
-    if x.device.type != "npu" or target_dtype not in _BATCH_INVARIANT_SUM_DTYPES or not is_last_dim:
+    if target_dtype not in _BATCH_INVARIANT_SUM_DTYPES or not is_last_dim:
         return native_sum()
 
     result = x.to(dtype=dtype) if dtype is not None and x.dtype != dtype else x
