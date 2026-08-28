@@ -44,6 +44,7 @@ import regex as re
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.distributed import (
     split_tensor_along_last_dim,
@@ -57,14 +58,18 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import (
+    get_ccu_sched_group,
     get_mlp_tp_group,
     get_otp_group,
 )
 from vllm_ascend.utils import (
+    AscendDeviceType,
     enable_dsa_cp,
     enable_sp,
     enable_sp_by_pass,
+    get_ascend_device_type,
     is_vl_model,
+    matmul_reduce_scatter_enable,
     mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
@@ -359,13 +364,28 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         if pad_size > 0 and not dsa_cp_attn_out:
             x = F.pad(x, (0, 0, 0, pad_size))
 
+        # Gate the fused matmul+reduce_scatter to prefill-sized inputs: the fused
+        # collective cannot allocate its comm resource inside decode cudagraph
+        # capture. matmul_and_reduce is a custom op and therefore opaque to
+        # torch.compile, so this runtime shape gate is not baked into the graph.
+        mmrs_fusion = mmrs_fusion and input_parallel.shape[0] > 1000
+
         world_size = self.layer.tp_size
-        hcom_name = get_tp_group().device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
+        # The fused quant ReduceScatter runs on the AICPU comm engine, whose
+        # channel is only provisioned for the ccu_sched group.
+        a5_rs_fusion = (
+            mmrs_fusion and get_ascend_device_type() == AscendDeviceType.A5 and matmul_reduce_scatter_enable()
+        )
+        comm_group = get_ccu_sched_group() if a5_rs_fusion else get_tp_group()
+        hcom_name = comm_group.device_group._get_backend(torch.device("npu")).get_hccl_comm_name(self.layer.tp_rank)
 
         from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
         from vllm_ascend.quantization.method_adapters import AscendLinearMethod
-        from vllm_ascend.quantization.methods import AscendW8A8LinearMethod
+        from vllm_ascend.quantization.methods import (
+            AscendW8A8LinearMethod,
+            AscendW8A8MXFP8DynamicLinearMethod,
+        )
 
         # For unquant
         if mmrs_fusion and isinstance(self.layer.quant_method, UnquantizedLinearMethod):
@@ -409,6 +429,40 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                 output_dtype=output_dtype,
             )
             output = torch.add(output, torch.mul(quant_bias, deq_scale).to(self.layer.params_dtype))
+        # For mxfp8 (W8A8_MXFP8) quant -- A5 only, fused quant reduce_scatter.
+        elif (
+            a5_rs_fusion
+            and isinstance(self.layer.quant_method, AscendLinearMethod)
+            and isinstance(self.layer.quant_method.quant_method, AscendW8A8MXFP8DynamicLinearMethod)
+        ):
+            from vllm_ascend.device.mxfp_compat import FLOAT8_E8M0FNU_DTYPE
+
+            group_size = self.layer.quant_method.quant_method.group_size
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+            # This operator wants a transposed VIEW of the weight together with the
+            # scale in its original order -- the opposite of npu_quant_matmul, which
+            # takes a contiguous (K,N) weight and a transposed scale. Feeding it the
+            # quant_matmul layout passes every shape check but computes a ~48% wrong
+            # result, which only shows up as logits drift and degenerate repetition
+            # over long greedy generation. The scale must be contiguous or
+            # CheckMxScaleDim rejects it.
+            output = DeviceOperator.npu_quant_mm_reduce_scatter(
+                quantized_x,
+                self.layer.weight.t().contiguous().t(),
+                hcom_name,
+                world_size,
+                reduce_op="sum",
+                bias=None,
+                x1_scale=pertoken_scale,
+                x2_scale=self.layer.weight_scale.transpose(0, 1).contiguous(),
+                group_sizes=[1, 1, group_size],
+                x1_scale_dtype=int(FLOAT8_E8M0FNU_DTYPE),
+                x2_scale_dtype=int(FLOAT8_E8M0FNU_DTYPE),
+                comm_turn=0,
+                y_dtype=torch.bfloat16,
+            )
+            if bias_ is not None:
+                output.add_(bias_.to(output.dtype))
         else:
             output_parallel = self.layer.quant_method.apply(self.layer, x, bias=bias_)
             output = tensor_model_parallel_reduce_scatter(output_parallel, 0)

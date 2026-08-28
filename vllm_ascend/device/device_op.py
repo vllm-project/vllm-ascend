@@ -190,6 +190,53 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
+    def npu_quant_mm_reduce_scatter(
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        hcom: str,
+        world_size: int,
+        *,
+        reduce_op: str = "sum",
+        bias: torch.Tensor | None = None,
+        x1_scale: torch.Tensor | None = None,
+        x2_scale: torch.Tensor | None = None,
+        group_sizes: list[int] | None = None,
+        x1_scale_dtype: int | None = None,
+        x2_scale_dtype: int | None = None,
+        comm_turn: int = 0,
+        y_dtype: torch.dtype | None = None,
+        comm_mode: str = "ai_cpu",
+    ):
+        """Fused quantized Matmul + ReduceScatter.
+
+        comm_mode must be ccu or ai_cpu on A5 (None is rejected with EZ0024), and
+        ``hcom`` has to come from the ccu_sched group so the AICPU channel is
+        provisioned. Returns the output only; the operator's second result is the
+        gathered intermediate, which no caller needs.
+        """
+        expansion_mode = os.environ.get("HCCL_OP_EXPANSION_MODE")
+        if expansion_mode == "CCU_SCHED":
+            comm_mode = "ccu"
+
+        output, _ = torch_npu.npu_quant_mm_reduce_scatter(
+            x1,
+            x2,
+            hcom,
+            world_size,
+            reduce_op=reduce_op,
+            bias=bias,
+            x1_scale=x1_scale,
+            x2_scale=x2_scale,
+            group_sizes=group_sizes,
+            x1_scale_dtype=x1_scale_dtype,
+            x2_scale_dtype=x2_scale_dtype,
+            comm_turn=comm_turn,
+            y_dtype=y_dtype,
+            comm_mode=comm_mode,
+        )
+        return output
+
+    @staticmethod
     def npu_dynamic_quant(
         hidden_states: torch.Tensor,
         dynamic_scale: torch.Tensor | None = None,
