@@ -72,6 +72,28 @@ def test_qsa_store_cache_rows_updates_non_contiguous_layout() -> None:
     torch.testing.assert_close(storage[1, :, 0], rows[1])
 
 
+def test_qsa_store_cache_rows_uses_only_aligned_prefix() -> None:
+    cache = torch.zeros((1, 4, 1, 2))
+    rows = torch.tensor([[[1.0, 2.0]], [[3.0, 4.0]], [[5.0, 6.0]]])
+    qsa_store_cache_rows(cache, torch.tensor([2]), rows)
+    torch.testing.assert_close(cache[0, 2], rows[0])
+    assert torch.count_nonzero(cache).item() == 2
+
+    cache.zero_()
+    qsa_store_cache_rows(cache, torch.tensor([1, 2, 3]), rows[:1])
+    torch.testing.assert_close(cache[0, 1], rows[0])
+    assert torch.count_nonzero(cache).item() == 2
+
+
+def test_qsa_store_cache_rows_invalid_slots_do_not_change_slot_zero() -> None:
+    cache = torch.zeros((1, 4, 1, 2))
+    cache[0, 0] = torch.tensor([[9.0, 10.0]])
+    rows = torch.tensor([[[1.0, 2.0]], [[3.0, 4.0]], [[5.0, 6.0]]])
+    qsa_store_cache_rows(cache, torch.tensor([-1, 0, 99]), rows)
+    torch.testing.assert_close(cache[0, 0], rows[1])
+    assert torch.count_nonzero(cache).item() == 2
+
+
 def test_qsa_compresses_current_group() -> None:
     raw_keys = torch.arange(8, dtype=torch.float32).reshape(4, 1, 2)
     positions = torch.arange(4).reshape(4, 1, 1).expand(-1, 1, 3)

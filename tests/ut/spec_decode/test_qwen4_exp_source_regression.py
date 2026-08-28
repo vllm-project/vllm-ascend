@@ -16,6 +16,7 @@ EAGLE = ROOT / "vllm_ascend" / "spec_decode" / "eagle_proposer.py"
 LOCAL_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "qwen4_exp.py"
 BASE_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "llm_base_proposer.py"
 MODEL_RUNNER = ROOT / "vllm_ascend" / "worker" / "model_runner_v1.py"
+OPS = ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "ops.py"
 
 
 def _class(path: Path, name: str) -> ast.ClassDef:
@@ -125,3 +126,43 @@ def test_spec_proposer_normalizes_multiple_of_block_size() -> None:
     )
     assert "isinstance(kernel_block_size, MultipleOf)" in source
     assert "kernel_block_size.base" in source
+
+
+def test_qsa_indexer_uses_portable_torch_chain() -> None:
+    source = ast.unparse(_method(QSA, "AscendQSAIndexer", "forward"))
+    project = source.index("self.project_qk")
+    update = source.index("self._update_and_compress")
+    select = source.index("self._select")
+    assert project < update < select
+
+
+def test_qsa_graph_path_has_no_host_sync_or_debug_probes() -> None:
+    metadata = ast.unparse(_method(QSA, "AscendQSAIndexer", "_metadata"))
+    assert "torch.equal" not in metadata
+    qsa_source = QSA.read_text()
+    for diagnostic in (
+        "QSA_CAPTURE_",
+        "sys.getrefcount",
+        "data_ptr()",
+        "logging.getLogger",
+    ):
+        assert diagnostic not in qsa_source
+
+
+def test_qsa_cache_write_keeps_static_update_width() -> None:
+    source = ast.unparse(
+        next(
+            node
+            for node in ast.parse(OPS.read_text()).body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "qsa_store_cache_rows"
+        )
+    )
+    assert "masked_select" not in source
+    assert "index_put_" in source
+    assert "accumulate=True" in source
+
+
+def test_qsa_ascend_backend_uses_merged_cache_layout() -> None:
+    source = MODEL_RUNNER.read_text()
+    assert '"QWEN4_EXP_QSA_ASCEND"' in source
