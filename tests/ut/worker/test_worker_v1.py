@@ -497,9 +497,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_without_post_kv_cache_hook(
-        self, mock_get_config, mock_allocator_class
-    ):
+    def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class):
         from vllm_ascend.worker.worker import NPUWorker
 
         mock_get_config.return_value = SimpleNamespace(

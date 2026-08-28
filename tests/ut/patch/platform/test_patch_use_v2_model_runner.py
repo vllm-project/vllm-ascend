@@ -21,10 +21,6 @@ def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
         ],
     )
 
-    unsupported = (
-        patch_use_v2_model_runner._patched_get_v1_model_runner_unsupported_features(
-            object()
-        )
-    )
+    unsupported = patch_use_v2_model_runner._patched_get_v1_model_runner_unsupported_features(object())
 
     assert unsupported == ["prefill context parallel", "diffusion models"]
