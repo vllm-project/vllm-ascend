@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.nn.parameter import Parameter
-from vllm.distributed import divide
+from vllm.distributed import divide, get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -72,19 +72,19 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 
         elif lmhead_tp_enable() and "head" in prefix:
             self.comm_group = get_lmhead_tp_group()
-            self.tp_size = self.comm_group.world_size
-            self.tp_rank = self.comm_group.rank_in_group
+            self.tp_size = get_tensor_model_parallel_world_size()
+            self.tp_rank = get_tensor_model_parallel_rank()
 
         elif embedding_tp_enable() and "embed_tokens" in prefix:
             self.comm_group = get_embed_tp_group()
             self.forward_type = "embed_tp"
-            self.tp_size = self.comm_group.world_size
-            self.tp_rank = self.comm_group.rank_in_group
+            self.tp_size = get_tensor_model_parallel_world_size()
+            self.tp_rank = get_tensor_model_parallel_rank()
 
         else:
             self.comm_group = get_tp_group()
-            self.tp_size = self.comm_group.world_size
-            self.tp_rank = self.comm_group.rank_in_group
+            self.tp_size = get_tensor_model_parallel_world_size()
+            self.tp_rank = get_tensor_model_parallel_rank()
 
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
