@@ -9,6 +9,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_mock_vllm_config,
     create_moe_layer,
 )
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.quantization.methods.w8a8_dynamic import (
     AscendW8A8DynamicFusedMoEMethod,
     AscendW8A8DynamicLinearMethod,
@@ -161,6 +162,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, hidden_size, dtype=torch.float32)
         mock_extra_ctx.moe_comm_method = mock_comm
+        mock_extra_ctx.moe_comm_type = MoECommType.MC2
         self.quant_method.in_dtype = torch.bfloat16
 
         self.quant_method.apply(
@@ -184,6 +186,42 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertEqual(fused_experts_input.topk_weights.dtype, torch.float32)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
+
+        mock_comm.reset_mock()
+        mock_select_experts.return_value = (topk_weights.to(torch.bfloat16), topk_ids)
+        self.quant_method.apply(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=2,
+            renormalize=True,
+            num_experts=self.num_experts,
+            activation="gelu",
+            apply_router_weight_on_input=True,
+            mc2_mask=mc2_mask,
+            pertoken_scale=pertoken_scale,
+        )
+        fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_experts_input.topk_weights.dtype, torch.float32)
+
+        mock_comm.reset_mock()
+        mock_select_experts.return_value = (topk_weights, topk_ids)
+        mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        self.quant_method.apply(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=2,
+            renormalize=True,
+            num_experts=self.num_experts,
+            activation="gelu",
+            apply_router_weight_on_input=True,
+            mc2_mask=mc2_mask,
+            pertoken_scale=pertoken_scale,
+        )
+        fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertEqual(fused_experts_input.topk_weights.dtype, torch.bfloat16)
+        self.assertIsNot(fused_experts_input.topk_weights, topk_weights)
 
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")

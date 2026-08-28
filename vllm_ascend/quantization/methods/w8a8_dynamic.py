@@ -293,6 +293,16 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         assert topk_weights is not None
 
+        # MC2 combine consumes FP32 expert scales. Keep the common FP32 router
+        # output in FP32 to avoid a FP32 -> BF16 -> FP32 round trip, while also
+        # normalizing native-selector fallback outputs to the required dtype.
+        if _EXTRA_CTX.moe_comm_type in (MoECommType.MC2, MoECommType.FUSED_MC2):
+            topk_weights = topk_weights.to(torch.float32)
+        else:
+            # Other dispatchers still rely on model-dtype routing weights,
+            # especially under ACLGraph, so retain their dtype contract.
+            topk_weights = topk_weights.to(self.in_dtype)
+
         act_name = getattr(activation, "value", activation)
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         fused_scale_flag = (
