@@ -644,6 +644,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
                 prefill_has_initial_state = has_initial_state
+            # Normalize once per step rather than once per GDN layer. Slicing above
+            # can leave these non-contiguous, and gating_gather_clear_l2norm_qk needs
+            # them int32/bool and contiguous; doing it here saves ~35 aten dispatches
+            # per step (2 tensors x ~3 calls x 30 layers, all no-ops after the first).
+            if prefill_state_indices is not None:
+                if prefill_state_indices.dtype != torch.int32:
+                    prefill_state_indices = prefill_state_indices.to(torch.int32)
+                prefill_state_indices = prefill_state_indices.reshape(-1).contiguous()
+            if prefill_has_initial_state is not None:
+                if prefill_has_initial_state.dtype != torch.bool:
+                    prefill_has_initial_state = prefill_has_initial_state.to(torch.bool)
+                prefill_has_initial_state = prefill_has_initial_state.reshape(-1).contiguous()
         else:
             has_initial_state = None
 
