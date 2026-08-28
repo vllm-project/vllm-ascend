@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -68,6 +69,31 @@ if TYPE_CHECKING:
 
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
+
+# Physical-page-order invariance for the sparse attention kernel.
+#
+# npu_sparse_flash_attention consumes the top-k indices as a set, but it walks
+# them in the given order, so its accumulation order - and with it the bf16
+# rounding - depends on the physical KV block layout whenever the indices are
+# not monotonic. The lightning indexer returns them sorted by score, so two
+# requests with identical content but different block placement produce
+# different bits. Sorting the valid indices ascending (-1 padding kept at the
+# tail, as the kernel requires) makes the walk order a pure function of the
+# logical positions.
+_TOPK_PAD_SENTINEL_F = 1.0e9
+
+
+def canonicalize_topk_indices(topk_indices: torch.Tensor) -> torch.Tensor:
+    if not envs_ascend.VLLM_ASCEND_SFA_SORT_TOPK:
+        return topk_indices
+    # NOTE: the int32 sort runs on AICPU on A2 (~30 ms for [1043, 2048]); the
+    # float32 sort is an AI Core kernel (~0.2 ms). Positions are below 2^24 and
+    # are therefore exact in float32.
+    keyed = topk_indices.to(torch.float32)
+    keyed = torch.where(keyed < 0, torch.full_like(keyed, _TOPK_PAD_SENTINEL_F), keyed)
+    sorted_keys = torch.sort(keyed, dim=-1).values
+    sorted_keys = torch.where(sorted_keys >= _TOPK_PAD_SENTINEL_F, torch.full_like(sorted_keys, -1.0), sorted_keys)
+    return sorted_keys.to(topk_indices.dtype)
 
 
 class PreprocessType(enum.Enum):
@@ -1650,6 +1676,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
             )
+            # Make the kernel walk order independent of the physical block
+            # layout. Applied before the cache is updated so that the layers
+            # reusing the cached top-k see the same order.
+            topk_indices = canonicalize_topk_indices(topk_indices)
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
 

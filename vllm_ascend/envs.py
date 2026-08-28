@@ -80,6 +80,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether the sparse attention top-k indices are sorted into ascending
+    # order before they are used and cached. npu_sparse_flash_attention walks
+    # the indices in the given order, so without this the accumulation order -
+    # and the rounding that follows from it - depends on the physical KV block
+    # layout of the request. Set to 0 to restore the raw indexer order.
+    "VLLM_ASCEND_SFA_SORT_TOPK": lambda: bool(int(os.getenv("VLLM_ASCEND_SFA_SORT_TOPK", "1"))),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
