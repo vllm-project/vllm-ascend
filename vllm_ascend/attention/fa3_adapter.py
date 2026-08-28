@@ -172,14 +172,25 @@ def fa3_forward(
         v_fa = value.view(num_blocks, bs, num_kv_heads, head_size)
 
         # Strip the padding dummy segment (KV len 0, query spanning all
-        # padding tokens); see strip_padding_dummy.
+        # padding tokens); see strip_padding_dummy.  When a scheduler_metadata
+        # is supplied by the caller (shape-cached), pass ITS cu_seqlens_q /
+        # cache_seqlens buffers to the kernel so the fingerprint check passes
+        # and no per-call tensors are allocated.
         from vllm_ascend.attention.fa3_adapter import strip_padding_dummy
 
         real_cu, real_kv, max_seqlen_q = strip_padding_dummy(
             actual_seq_lengths_q, seq_lens_list,
         )
-        cache_seqlens = torch.tensor(real_kv, dtype=torch.int32, device=device)
-        cu_seqlens_q = torch.tensor(real_cu, dtype=torch.int32, device=device)
+        if scheduler_metadata is not None:
+            # buffers already refreshed by the caller to this batch's values
+            cu_seqlens_q = getattr(scheduler_metadata, "_fa_cu_buf", None)
+            cache_seqlens = getattr(scheduler_metadata, "_fa_cs_buf", None)
+        else:
+            cu_seqlens_q = None
+            cache_seqlens = None
+        if cu_seqlens_q is None or cache_seqlens is None:
+            cache_seqlens = torch.tensor(real_kv, dtype=torch.int32, device=device)
+            cu_seqlens_q = torch.tensor(real_cu, dtype=torch.int32, device=device)
 
         out = fa3_kvcache(
             query,

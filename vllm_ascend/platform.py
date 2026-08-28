@@ -543,6 +543,32 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = cudagraph_mode
 
+        # FA3 (flash-attention-npu) integration: plain FULL captures ONE
+        # mixed CANN graph family serving both prefill and decode replays;
+        # FA3 graphs cannot coexist with CANN graph replays in the same
+        # process (kernel-level corruption, empirically established), and
+        # the FA3 kernel bakes the uniform cu layout into its captured
+        # tiling so decode needs its own uniform graph family.  Downgrade
+        # plain FULL to FULL_AND_PIECEWISE: decode batches replay uniform
+        # FULL graphs (FA3 kernel inside, captured by the attention layer
+        # when VLLM_ASCEND_FA3_DECODE_GRAPH=1) while prefill/mixed batches
+        # use PIECEWISE CANN graphs with eager FA3 attention between the
+        # pieces.  This is the sanctioned exception per design doc 09;
+        # every other cudagraph mode keeps its native behavior.
+        import os as _os
+        if (
+            compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            and _os.environ.get("VLLM_ASCEND_FA3_DECODE_GRAPH") == "1"
+        ):
+            logger.info(
+                "FA3: downgrading cudagraph_mode FULL -> FULL_AND_PIECEWISE "
+                "(decode FA3 uniform graphs + prefill PIECEWISE graphs with "
+                "eager FA3 attention)."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            if compilation_config.mode != CompilationMode.VLLM_COMPILE:
+                compilation_config.mode = CompilationMode.VLLM_COMPILE
+
         # get custom compile backend for graph fusion
         compilation_config.oot_compiler = cls.get_compile_backend()
 

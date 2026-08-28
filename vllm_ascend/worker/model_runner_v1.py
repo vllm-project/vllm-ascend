@@ -3058,7 +3058,21 @@ class NPUModelRunner(GPUModelRunner):
             if force_eager:
                 return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
 
-            return self.cudagraph_dispatcher.dispatch(
+            if (
+                not uniform_decode
+                and os.environ.get("VLLM_ASCEND_FA3_DECODE_GRAPH") == "1"
+                and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            ):
+                # FA3-uniform-only key set (see the init-time replacement):
+                # mixed/prefill batches run EAGER CANN — returning NONE here
+                # (instead of letting the stock dispatcher fall through its
+                # "NONE not in allowed_modes" assert) also makes the DP-sync
+                # minimum NONE so idle dummy ranks agree on eager for this
+                # step.
+                return (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
+
+
+            mode, desc = self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3066,6 +3080,7 @@ class NPUModelRunner(GPUModelRunner):
                 invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
                 num_active_loras=num_active_loras,
             )
+            return mode, desc
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded, use_cascade_attn or has_encoder_output)
         num_tokens_padded = batch_descriptor.num_tokens
