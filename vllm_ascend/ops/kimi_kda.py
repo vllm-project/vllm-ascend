@@ -137,7 +137,7 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
             raise ValueError("KDA fused f_proj requires an output-sharded parameter")
         shard_offset = sum(self.output_sizes[:_F_PROJ_SHARD_ID]) // self.tp_size
         shard_size = self.output_sizes[_F_PROJ_SHARD_ID] // self.tp_size
-        param_shard = self.weight.data.narrow(output_dim, shard_offset, shard_size)
+        param_shard = self.weight.narrow(output_dim, shard_offset, shard_size)
         fused_weight = torch.matmul(
             self.f_b_weight.float(),
             self.f_a_weight.float(),
@@ -173,11 +173,14 @@ def _zero_padded_recurrent_output(
 
 
 def _prepare_beta(
-    raw_beta: torch.Tensor,
+    beta: torch.Tensor,
     num_actual_tokens: int,
+    *,
+    is_preprocessed: bool = False,
 ) -> torch.Tensor:
-    """Convert vLLM 0.27's packed raw beta to the AscendC contract."""
-    return raw_beta[:, :num_actual_tokens].float().sigmoid()
+    """Slice beta and apply sigmoid unless the auxiliary stream already did."""
+    beta = beta[:, :num_actual_tokens]
+    return beta if is_preprocessed else beta.float().sigmoid()
 
 
 class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
@@ -273,6 +276,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 g2=g2,
                 beta=beta,
                 core_attn_out=core_attn_out,
+                beta_is_preprocessed=True,
             )
             core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
             return self.o_proj(core_attn_out)[0]
@@ -290,18 +294,24 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         hidden_states.record_stream(bfg_stream)
         with npu_stream_switch(bfg_stream):
             bfg_stream.wait_event(hidden_states_ready)
-            raw_bfg = self._project_bfg(hidden_states)
+            fused_bfg = self._project_bfg(hidden_states)
             bfg_projection_ready = bfg_stream.record_event()
 
         quantized_qkv = self._quantize_fused_qkv(hidden_states)
         quant_ready = main_stream.record_event()
 
+        # Stage 1 join: DynamicQuant on main overlaps the BFG GEMM on the
+        # auxiliary stream, but the two Cube matmuls remain serialized.
         main_stream.wait_event(bfg_projection_ready)
         mixed_qkv = self._matmul_fused_qkv(quantized_qkv)
 
         with npu_stream_switch(bfg_stream):
+            # Stage 2: after both first-stage branches complete, overlap the
+            # QKV Cube matmul with beta's FP32 conversion and sigmoid vector
+            # work. Split and reshape the F/output gates here as well so all
+            # BFG output handling occurs after the QKV matmul is enqueued.
             bfg_stream.wait_event(quant_ready)
-            beta, g1, g2 = self._postprocess_bfg(*raw_bfg)
+            beta, g1, g2 = self._postprocess_bfg(fused_bfg)
             bfg_ready = bfg_stream.record_event()
 
         for tensor in (beta, g1, g2):
@@ -314,17 +324,18 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     def _project_bfg(
         self,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        fused_bfg = self.fused_bfg_proj(hidden_states)[0]
-        return fused_bfg.split(self._fused_bfg_output_sizes, dim=-1)
+    ) -> torch.Tensor:
+        return self.fused_bfg_proj(hidden_states)[0]
 
     def _postprocess_bfg(
         self,
-        beta: torch.Tensor,
-        raw_gate: torch.Tensor,
-        output_gate: torch.Tensor,
+        fused_bfg: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        beta = beta.unsqueeze(0)
+        beta, raw_gate, output_gate = fused_bfg.split(
+            self._fused_bfg_output_sizes,
+            dim=-1,
+        )
+        beta = beta.float().sigmoid().unsqueeze(0)
         raw_gate = rearrange(raw_gate, "n (h d) -> 1 n h d", d=self.head_dim)
         output_gate = rearrange(output_gate, "n (h d) -> n h d", d=self.head_dim)
         return beta, raw_gate, output_gate
@@ -516,6 +527,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         g2: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        *,
+        beta_is_preprocessed: bool = False,
     ) -> None:
         """Dispatch speculative, prefill, and decode tokens through KDA kernels."""
         forward_context = get_forward_context()
@@ -532,7 +545,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         g2 = g2[:num_actual_tokens]
-        beta = _prepare_beta(beta, num_actual_tokens)
+        beta = _prepare_beta(
+            beta,
+            num_actual_tokens,
+            is_preprocessed=beta_is_preprocessed,
+        )
 
         conv_state, recurrent_state = self.kv_cache
         conv_weights_t = self.get_parameter(_PACKED_CONV_WEIGHT_NAME)
