@@ -514,7 +514,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 enable_enpu=self.enable_enpu,
             )
     def set_update_stream(self, update_stream):
-        self.__runnable.set_update_stream(update_stream)
+        self._runnable.set_update_stream(update_stream)
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
@@ -701,8 +701,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         for per_layer_metadata in multi_steps_attn_metadata:
             metadata = next(iter(per_layer_metadata.values()))
             update_params.append({
-                "actual_seq_lengths": metadata.query_start_loc,
-                "actual_seq_lengths_kv": metadata.seq_lens,
+                "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                "actual_seq_lengths_kv": metadata.seq_lens_list,
         })
 
         with set_ascend_forward_context(
@@ -726,7 +726,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 forward_context.moe_layer_index = 0
 
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._runnable.set_update_params(update_params)
+                self._runnable.set_draft_update_attn_metadata(update_params)
 
             self._runnable(
                 num_input_tokens=num_tokens,
@@ -1023,8 +1023,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         for per_layer_metadata in multi_steps_attn_metadata:
             metadata = next(iter(per_layer_metadata.values()))
             update_params.append({
-                "actual_seq_lengths": metadata.query_start_loc,
-                "actual_seq_lengths_kv": metadata.seq_lens,
+                "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                "actual_seq_lengths_kv": metadata.seq_lens_list,
         })
 
         with set_ascend_forward_context(
@@ -1065,7 +1065,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_token_ids = run_draft()
             else:
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL: 
-                    self._runnable.set_update_params(update_params)
+                    self._runnable.set_draft_update_attn_metadata(update_params)
                 draft_token_ids = run_draft()
                 # self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids

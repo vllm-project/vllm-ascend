@@ -121,14 +121,14 @@ class ACLGraphWrapper:
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
         self.update_stream = update_stream
-        self.fia_params: list[dict[str, Any]] = []
+        self.draft_update_attn_metadata: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
 
     def set_update_stream(self, update_stream):
         self.update_stream = update_stream
 
-    def set_update_params(self, fia_params: list[dict[str, Any]]):
-        self.fia_params = fia_params
+    def set_draft_update_attn_metadata(self, update_params: list[dict[str, Any]]):
+        self.draft_update_attn_metadata = update_params
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -275,7 +275,7 @@ class ACLGraphWrapper:
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
         if _EXTRA_CTX.is_draft_model:
             resolved_tasks = entry.aclgraph.resolve_tasks(
-                SharedSource(self.fia_params)
+                SharedSource(self.draft_update_attn_metadata)
             )
         else:
             resolved_tasks = entry.aclgraph.resolve_tasks(
