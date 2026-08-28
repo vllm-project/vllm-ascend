@@ -118,9 +118,11 @@ jobs:
           - chip: a2
             runner: linux-aarch64-a2-1
             image_tag: 9.1.0-910b-ubuntu22.04-py3.12
-            # Dual-die package: dies 0-1, 2-3, ... must be used as whole
-            # pairs — run_tests.py enforces pair-aligned device assignment.
-            pair_aligned: 'true'
+            # A2 cards are single-die — pair alignment does not apply (it
+            # is the A3 dual-die package's constraint); enforcing it here
+            # crashes run_tests.py's device assignment with
+            # "visible devices must form complete dual-die pairs".
+            pair_aligned: ''
           - chip: 310p
             runner: linux-aarch64-310p-1
             image_tag: 9.1.0-310p-ubuntu22.04-py3.12
