@@ -61,6 +61,24 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
+def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Expose identical Mamba specs to upstream MRV2 sizing and state handling."""
+    groups = []
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            inner_specs = list(spec.kv_cache_specs.values())
+            if (
+                inner_specs
+                and isinstance(inner_specs[0], MambaSpec)
+                and all(inner == inner_specs[0] for inner in inner_specs)
+            ):
+                group = replace(group, kv_cache_spec=inner_specs[0])
+        groups.append(group)
+    # Preserve per-layer attention layouts and the caller's worker config.
+    return replace(kv_cache_config, kv_cache_groups=groups)
+
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
