@@ -77,11 +77,14 @@ def _dispatch_lora_expand(
 
 @dataclass(frozen=True)
 class DSASGMVMetadata:
-    """Segment-local routing metadata consumed by the DSA SGMV kernels."""
+    """Segment-local routing metadata consumed by the DSA LoRA kernels."""
 
     seq_start_locs: torch.Tensor
     seq_lengths: torch.Tensor
     lora_indices: torch.Tensor
+    token_lora_indices: torch.Tensor
+    use_gmm_shrink: torch.Tensor
+    no_lora_dispatch: torch.Tensor
     batches: int
     max_seq_length: int
     token_nums: int
@@ -211,6 +214,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             pin_memory=PIN_MEMORY,
         )
         self._dsa_sgmv_metadata_cpu_array = self._dsa_sgmv_metadata_cpu.numpy()
+        # These CPU scalars are live inputs to the opaque shrink dispatcher.
+        # Keep one stable pair per decode/prefill segment so graph replay can
+        # change its BGMV/GMM choice without rebuilding layer-local metadata.
+        self._dsa_use_gmm_shrink_cpu = torch.zeros(2, dtype=torch.bool)
+        self._dsa_no_lora_cpu = torch.ones(2, dtype=torch.bool)
         self._dsa_max_batches = max_batches
         self._dsa_sgmv_metadata: tuple[DSASGMVMetadata | None, DSASGMVMetadata | None] = (None, None)
         self._dsa_actual_tokens = 0
@@ -316,6 +324,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             seq_start_locs=device_metadata[0],
             seq_lengths=device_metadata[1],
             lora_indices=device_metadata[2],
+            token_lora_indices=torch.narrow(
+                self._token_lora_indices,
+                0,
+                token_offset,
+                host_metadata.token_nums,
+            ),
+            use_gmm_shrink=self._dsa_use_gmm_shrink_cpu[segment_index],
+            no_lora_dispatch=self._dsa_no_lora_cpu[segment_index],
             batches=host_metadata.batches,
             max_seq_length=host_metadata.max_seq_length,
             token_nums=host_metadata.token_nums,
@@ -352,9 +368,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._validate_sgmv_batches(prefill_host_metadata, self._dsa_max_batches, "DSA prefill")
         self._write_sgmv_metadata(self._dsa_sgmv_metadata_cpu_array[0], decode_host_metadata)
         self._write_sgmv_metadata(self._dsa_sgmv_metadata_cpu_array[1], prefill_host_metadata)
+        self._dsa_use_gmm_shrink_cpu[0].fill_(decode_host_metadata.token_nums > GMM_TOKEN_THRESHOLD)
+        self._dsa_use_gmm_shrink_cpu[1].fill_(prefill_host_metadata.token_nums > GMM_TOKEN_THRESHOLD)
+        self._dsa_no_lora_cpu[0].fill_(decode_host_metadata.no_lora)
+        self._dsa_no_lora_cpu[1].fill_(prefill_host_metadata.no_lora)
 
         # ACLGraph requires fixed tensor shapes. Transfer both segments in one
-        # H2D copy; zero-length trailing groups are ignored by SGMV.
+        # H2D copy; zero-length trailing groups are ignored by the shrink
+        # dispatcher and the SGMV expand kernel.
         self._dsa_sgmv_metadata_buffer.copy_(
             self._dsa_sgmv_metadata_cpu,
             non_blocking=True,
@@ -613,14 +634,17 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         if sgmv_metadata is not None:
             if sgmv_metadata.no_lora:
                 return
-            for output, lora_a in zip(y_views, lora_a_stacked):
-                self.sgmv_shrink(
-                    x,
-                    lora_a[:, 0].contiguous(),
-                    output,
-                    *sgmv_metadata.op_args,
-                    scale,
-                )
+            _dispatch_lora_shrink(
+                y_views,
+                x,
+                list(lora_a_stacked),
+                sgmv_metadata.lora_indices,
+                sgmv_metadata.seq_lengths,
+                sgmv_metadata.token_lora_indices,
+                scale,
+                sgmv_metadata.use_gmm_shrink,
+                sgmv_metadata.no_lora_dispatch,
+            )
             return
 
         _, seq_lengths, lora_indices, _, _, _ = self.prefill_metadata
