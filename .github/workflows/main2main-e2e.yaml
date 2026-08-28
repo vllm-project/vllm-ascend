@@ -123,6 +123,13 @@ jobs:
             # crashes run_tests.py's device assignment with
             # "visible devices must form complete dual-die pairs".
             pair_aligned: ''
+          - chip: a3
+            runner: linux-aarch64-a3-800i-2-cn12-001
+            image_tag: ${{ inputs.image_tag_a3 }}
+            # 800i-2 exposes two independently usable NPUs; single-card
+            # cases get one device each, so die-pair alignment (an
+            # 800i-16 device-plugin property) does not apply here.
+            pair_aligned: ''
           - chip: 310p
             runner: linux-aarch64-310p-1
             image_tag: 9.1.0-310p-ubuntu22.04-py3.12
