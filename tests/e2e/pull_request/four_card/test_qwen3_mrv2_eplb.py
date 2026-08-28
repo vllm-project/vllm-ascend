@@ -134,6 +134,7 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
     os.environ,
     {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_LOGGING_LEVEL": "INFO",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
