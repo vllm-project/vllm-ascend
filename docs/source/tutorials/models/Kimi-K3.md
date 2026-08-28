@@ -151,6 +151,31 @@ Lower `--max-model-len` and `--max-num-batched-tokens` for a short smoke test.
 The larger values above require a capacity check with the exact checkpoint and
 runner memory configuration.
 
+### Model Runner V2
+
+Enable MRV2 before starting the single-node deployment:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+```
+
+For generation without a draft model, omit `--speculative-config` from the
+launch command. The bounded functional configuration uses
+`--max-model-len 4096`, `--max-num-seqs 4`, `--max-num-batched-tokens 512`,
+and `--mamba-cache-mode align`.
+Use `--enforce-eager` for eager execution, or
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` for ACL Graph.
+The model, parallelism, and KV cache layout settings remain unchanged.
+
+The validated MRV2 scope is bounded single-node text generation without a
+draft model, including prefix caching, chunked prefill, and ACL Graph.
+This does not establish full-checkpoint accuracy, long-context capacity,
+multi-node, or P/D support.
+
+DSpark under MRV2 is experimental and has a known warm-prefix token-consistency
+issue. Use MRV1 (`VLLM_USE_V2_MODEL_RUNNER=0`) for DSpark workloads that require
+prefix-cache consistency.
+
 ## 6 Four-Node Full-Checkpoint Deployment
 
 The full checkpoint uses four Atlas 800 A3 nodes in a DP4/TP16/EP64 mixed

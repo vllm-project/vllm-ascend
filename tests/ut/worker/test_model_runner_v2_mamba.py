@@ -1,8 +1,10 @@
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -10,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -18,7 +21,9 @@ from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
+    normalize_mamba_kv_cache_config,
 )
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
@@ -67,6 +72,86 @@ def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+    assert AscendMambaHybridModelState._get_mamba_group_info is MambaHybridModelState._get_mamba_group_info
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_mamba_worker_groups_reserve_speculative_block_table_entries(wrapped, prefix_caching):
+    spec = MambaSpec(
+        block_size=384,
+        shapes=((10, 6), (2, 2)),
+        dtypes=(torch.float16, torch.float32),
+        num_speculative_blocks=7,
+        mamba_cache_mode="align",
+    )
+    attention_specs = {
+        name: FullAttentionSpec(block_size=384, num_kv_heads=1, head_size=head_size, dtype=torch.float16)
+        for name, head_size in (("target", 8), ("draft", 16))
+    }
+    attention_spec = UniformTypeKVCacheSpecs.from_specs(attention_specs)
+    assert attention_spec is not None
+    groups = [KVCacheGroupSpec(layer_names=list(attention_specs), kv_cache_spec=attention_spec)]
+    for group_id in range(2):
+        layer_names = [f"mamba.{group_id}.{layer_id}" for layer_id in range(2)]
+        group_spec = UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(layer_names, spec)) if wrapped else spec
+        assert group_spec is not None
+        groups.append(KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=group_spec))
+    config = KVCacheConfig(num_blocks=3, kv_cache_tensors=[], kv_cache_groups=groups)
+    runner = object.__new__(NPUModelRunner)
+    runner.max_model_len = 4096
+    runner.is_encoder_decoder = False
+    runner.dcp_size = 1
+    runner.dcp_rank = 0
+    runner.cp_interleave = 1
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = 512
+    runner.device = torch.device("cpu")
+    runner.cache_config = SimpleNamespace(enable_prefix_caching=prefix_caching)
+    runner.vllm_config = SimpleNamespace()
+    runner.model_state = MagicMock()
+    runner.model_state.get_additional_cg_support.return_value = []
+
+    class BlockTablesReached(Exception):
+        pass
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.graph_manager_wrapper", return_value=nullcontext()),
+        patch("vllm.v1.worker.gpu.model_runner.init_attn_backend", return_value=([], MagicMock(), [128, 384, 384])),
+        patch("vllm.v1.worker.gpu.model_runner.BlockTables", side_effect=BlockTablesReached) as block_tables,
+        pytest.raises(BlockTablesReached),
+    ):
+        runner.initialize_kv_cache(config)
+
+    # Exercise upstream sizing, not a reimplementation of its arithmetic.
+    expected_mamba_width = (11 if prefix_caching else 1) + spec.num_speculative_blocks
+    assert block_tables.call_args.kwargs["max_num_blocks_per_group"] == [11, expected_mamba_width, expected_mamba_width]
+    worker_groups = runner.kv_cache_config.kv_cache_groups
+    assert worker_groups[0].kv_cache_spec == attention_spec
+    assert worker_groups[1].kv_cache_spec == worker_groups[2].kv_cache_spec == spec
+    # No mutation of the config shared with the scheduler/other workers.
+    assert isinstance(config.kv_cache_groups[1].kv_cache_spec, UniformTypeKVCacheSpecs) == wrapped
+    state = object.__new__(AscendMambaHybridModelState)
+    state._mamba_spec = None
+    state._mamba_group_ids = []
+    assert state._get_mamba_group_info(runner.kv_cache_config) == ([1, 2], spec)
+    assert state._get_mamba_group_info(runner.kv_cache_config) == ([1, 2], spec)
+
+
+def test_mamba_normalization_preserves_distinct_per_layer_state_layouts():
+    specs = {
+        "first": _mamba_spec(),
+        "second": MambaSpec(block_size=16, shapes=((4, 3), (2, 2)), dtypes=(torch.float16, torch.float32)),
+    }
+    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group_spec is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=list(specs), kv_cache_spec=group_spec)],
+    )
+    normalized = normalize_mamba_kv_cache_config(config)
+    assert normalized.kv_cache_groups[0].kv_cache_spec is group_spec
 
 
 def test_prepare_inputs_propagates_padded_request_count():

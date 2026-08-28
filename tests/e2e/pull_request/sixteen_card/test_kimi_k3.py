@@ -304,8 +304,8 @@ def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-def k3_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+def k3_runtime(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", getattr(request, "param", "0"))
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
     monkeypatch.setenv("HCCL_BUFFSIZE", "512")
@@ -374,6 +374,7 @@ def _generate(llm, prompts: list[dict]):
     return outputs
 
 
+@pytest.mark.parametrize("k3_runtime", ["0", "1"], indirect=True, ids=["mrv1", "mrv2"])
 def test_k3_mla_block5_tp16(k3_models: dict[str, str]) -> None:
     args = _engine_args(k3_models, "mla_block5")
     with VllmRunner(k3_models["target"], **args) as runner:
@@ -397,6 +398,29 @@ def test_k3_mla_block5_tp16(k3_models: dict[str, str]) -> None:
         drafts = [m for m in llm.get_metrics() if m.name == "vllm:spec_decode_num_drafts"]
         assert drafts and all(isinstance(m, Counter) for m in drafts)
         assert sum(m.value for m in drafts) > 0, "Requests bypassed speculative decoding"
+
+
+@pytest.mark.parametrize("k3_runtime", ["1"], indirect=True, ids=["mrv2"])
+@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "aclgraph"])
+def test_k3_mrv2_without_draft(k3_models: dict[str, str], enforce_eager: bool) -> None:
+    args = _engine_args(k3_models, "mla_block5")
+    del args["speculative_config"]
+    args["enforce_eager"] = enforce_eager
+    args["compilation_config"] = {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4]}
+    with VllmRunner(k3_models["target"], **args) as runner:
+        llm = runner.model
+        _generate(llm, [_prompt(length, salt=i * 137) for i, length in enumerate((127, 128, 129, 769))])
+        prefix = _prompt(1153, salt=421)
+        assert llm.reset_prefix_cache()
+        cold = _generate(llm, [prefix])[0]
+        warm = _generate(llm, [prefix])[0]
+        assert cold.num_cached_tokens == 0
+        assert warm.num_cached_tokens > 0
+        assert cold.outputs[0].token_ids == warm.outputs[0].token_ids
+        assert llm.reset_prefix_cache()
+        reset = _generate(llm, [prefix])[0]
+        assert reset.num_cached_tokens == 0
+        assert cold.outputs[0].token_ids == reset.outputs[0].token_ids
 
 
 def _serve_args(args: dict) -> list[str]:
