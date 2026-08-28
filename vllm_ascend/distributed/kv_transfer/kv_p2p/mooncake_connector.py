@@ -2433,7 +2433,7 @@ class MooncakeConnectorWorker:
     def _recover_aligned_kv_tensor_base(
         shared_tensors: list[torch.Tensor],
         tensor_size: int,
-    ) -> int:
+    ) -> int | None:
         """Recover the aligned raw buffer base behind hybrid cache views."""
         candidates: set[int] = set()
         for tensor in shared_tensors:
@@ -2446,16 +2446,17 @@ class MooncakeConnectorWorker:
             if aligned_base <= tensor.data_ptr() and aligned_base + tensor_size <= storage_end:
                 candidates.add(aligned_base)
 
-        if len(candidates) != 1:
+        if len(candidates) > 1:
             raise RuntimeError(
                 "Unable to recover one aligned KV tensor base from hybrid cache views: "
                 f"candidates={sorted(candidates)}, tensor_size={tensor_size}."
             )
-        return candidates.pop()
+        return candidates.pop() if candidates else None
 
     def _get_registered_kv_tensor_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
         ptrs: list[int] = []
         lengths: list[int] = []
+        private_layer_tensors: list[torch.Tensor] = []
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_tensors: list[torch.Tensor] = []
@@ -2473,10 +2474,57 @@ class MooncakeConnectorWorker:
                 shared_tensors,
                 kv_cache_tensor.size,
             )
+            if base_addr is None:
+                storage_keys = {tensor_storage_key(tensor) for tensor in shared_tensors}
+                if len(storage_keys) == 1:
+                    raise RuntimeError(
+                        "Unable to recover one aligned KV tensor base from hybrid cache views: "
+                        f"candidates=[], tensor_size={kv_cache_tensor.size}."
+                    )
+
+                # vLLM #51718 describes all layers in one KVCacheTensor backed
+                # by a shared allocation. Ascend's hybrid KV-transfer layout
+                # can instead materialize one aligned allocation per layer.
+                # No individual storage then spans the descriptor's total
+                # size, so register the real layer storage ranges below.
+                private_layer_tensors.extend(shared_tensors)
+                continue
             if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
                 raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
             ptrs.append(base_addr)
             lengths.append(kv_cache_tensor.size)
+
+        if private_layer_tensors:
+            regions_by_storage: OrderedDict[int, tuple[int, int]] = OrderedDict()
+            for tensor in private_layer_tensors:
+                if tensor.numel() == 0:
+                    continue
+                storage = tensor.untyped_storage()
+                storage_base = tensor_storage_key(tensor)
+                aligned_base = (
+                    (storage_base + KV_CACHE_BUFFER_ALIGNMENT - 1)
+                    // KV_CACHE_BUFFER_ALIGNMENT
+                    * KV_CACHE_BUFFER_ALIGNMENT
+                )
+                tensor_span = tensor.element_size() + sum(
+                    (size - 1) * stride * tensor.element_size() for size, stride in zip(tensor.shape, tensor.stride())
+                )
+                tensor_end = tensor.data_ptr() + tensor_span
+                storage_end = storage_base + storage.nbytes()
+                if not (aligned_base <= tensor.data_ptr() and tensor_end <= storage_end):
+                    raise RuntimeError(
+                        "Unable to recover an aligned private KV layer storage: "
+                        f"data_ptr={tensor.data_ptr()}, tensor_end={tensor_end}, "
+                        f"storage=[{storage_base}, {storage_end})."
+                    )
+                previous = regions_by_storage.get(storage_base)
+                regions_by_storage[storage_base] = (
+                    aligned_base,
+                    max(previous[1] if previous is not None else aligned_base, tensor_end),
+                )
+
+            ptrs.extend(base for base, _ in regions_by_storage.values())
+            lengths.extend(end - base for base, end in regions_by_storage.values())
 
         return ptrs, lengths
 
