@@ -798,6 +798,67 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
 
 
+class TestQwen4ExpPleInputs(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.model_config = SimpleNamespace(
+            hf_text_config=SimpleNamespace(
+                ple_layer_ids=[0],
+                ngram_size=3,
+                eos_token_id=999,
+            )
+        )
+        runner.max_num_reqs = 2
+        runner.device = torch.device("cpu")
+        runner._qwen4_exp_ngram_context_buffer = None
+        runner.input_ids = SimpleNamespace(gpu=torch.tensor([5], dtype=torch.int32))
+        runner.query_start_loc = SimpleNamespace(
+            gpu=torch.tensor([0, 1], dtype=torch.int32)
+        )
+        runner.input_batch = SimpleNamespace(
+            num_computed_tokens_cpu=np.array([3], dtype=np.int32),
+            token_ids_cpu=np.array([[7, 8, 9, 0]], dtype=np.int32),
+        )
+        return runner
+
+    def test_ngram_context_keeps_address_and_refreshes_values(self):
+        runner = self._build_runner()
+        dummy_kwargs = {}
+        runner._maybe_add_qwen4_exp_ple_inputs(
+            dummy_kwargs,
+            num_tokens=1,
+            num_reqs=1,
+            num_reqs_padded=1,
+            is_dummy=True,
+        )
+        dummy_context = dummy_kwargs["ngram_context"]
+        stable_ptr = dummy_context.data_ptr()
+        self.assertEqual(dummy_context.tolist(), [[999, 999]])
+
+        real_kwargs = {}
+        runner._maybe_add_qwen4_exp_ple_inputs(
+            real_kwargs,
+            num_tokens=1,
+            num_reqs=1,
+            num_reqs_padded=1,
+        )
+        real_context = real_kwargs["ngram_context"]
+        self.assertEqual(real_context.data_ptr(), stable_ptr)
+        self.assertEqual(real_context.tolist(), [[8, 9]])
+
+        external = torch.tensor([[33, 44]], dtype=torch.int32)
+        external_kwargs = {"ngram_context": external}
+        runner._maybe_add_qwen4_exp_ple_inputs(
+            external_kwargs,
+            num_tokens=1,
+            num_reqs=1,
+            num_reqs_padded=1,
+        )
+        copied_context = external_kwargs["ngram_context"]
+        self.assertEqual(copied_context.data_ptr(), stable_ptr)
+        self.assertEqual(copied_context.tolist(), [[33, 44]])
+
+
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)

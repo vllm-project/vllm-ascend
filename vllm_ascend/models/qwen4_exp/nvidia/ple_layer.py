@@ -659,7 +659,7 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         return MambaStateShapeCalculator.short_conv_state_shape(
             tp_world_size=1,
             intermediate_size=self.hc_hidden_size,
-            conv_kernel=self.conv_state_len + 1,
+            conv_kernel=self.conv_state_len + self.num_spec_tokens + 1,
         )
 
     def _apply_norm(
@@ -673,6 +673,76 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         inputs_t = inputs.transpose(0, 1).unsqueeze(0)
         output = self.conv1d(inputs_t)[..., : inputs_t.size(-1)]
         return F.silu(output).squeeze(0).transpose(0, 1)
+
+    @staticmethod
+    def _gather_conv_state_rows(
+        conv_state: torch.Tensor, state_indices: torch.Tensor
+    ) -> torch.Tensor:
+        """Select request rows before transposing the large short-conv cache."""
+        storage_layout = conv_state.transpose(-1, -2)
+        if storage_layout.is_contiguous():
+            selected = storage_layout.index_select(0, state_indices)
+            return selected.transpose(-1, -2)
+        return conv_state.index_select(0, state_indices)
+
+    @staticmethod
+    def _scatter_conv_state_rows(
+        conv_state: torch.Tensor,
+        state_indices: torch.Tensor,
+        selected_state: torch.Tensor,
+    ) -> None:
+        """Write request rows through the contiguous short-conv cache layout."""
+        storage_layout = conv_state.transpose(-1, -2)
+        if storage_layout.is_contiguous():
+            storage_layout.index_copy_(
+                0, state_indices, selected_state.transpose(-1, -2)
+            )
+            return
+        conv_state.index_copy_(0, state_indices, selected_state)
+
+    @staticmethod
+    def _short_conv_cross_correlation(
+        history: torch.Tensor,
+        conv_weights: torch.Tensor,
+        dilation: int,
+    ) -> torch.Tensor:
+        """Depthwise 1-D cross-correlation without Conv2D or unfold views.
+
+        ``Tensor.unfold`` represents its windows with overlapping as-strided
+        metadata. That metadata can be captured with temporary graph-pool
+        addresses on Ascend and then fault on the first graph replay. The
+        kernel is tiny, so explicitly accumulate its fixed-offset slices.
+        """
+        kernel_size = conv_weights.size(-1)
+        history_len = history.size(-1)
+        effective_kernel_size = dilation * (kernel_size - 1) + 1
+        output_len = history_len - effective_kernel_size + 1
+        if output_len == 1:
+            # Ordinary decode has exactly one output position. Materialize
+            # the dilated kernel samples so graph replay never observes the
+            # stepped slice's dynamic stride metadata.
+            dilated_history = history[..., 0:history_len:dilation].contiguous()
+            return (
+                dilated_history.float()
+                * conv_weights.float().view(1, history.size(1), kernel_size)
+            ).sum(dim=-1, keepdim=True).to(history.dtype)
+
+        # Prefill/speculative paths can have multiple output positions. Each
+        # slice is a normal contiguous-range view; stack immediately owns a
+        # dense copy and no view stride survives into the multiply kernel.
+        windows = torch.stack(
+            [
+                history[
+                    ..., kernel_idx * dilation : kernel_idx * dilation + output_len
+                ]
+                for kernel_idx in range(kernel_size)
+            ],
+            dim=-1,
+        ).contiguous()
+        return (
+            windows.float()
+            * conv_weights.float().view(1, history.size(1), 1, kernel_size)
+        ).sum(dim=-1).to(history.dtype)
 
     def _short_conv_dilated_decode_batched(
         self,
@@ -706,7 +776,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             ].to(device=conv_state.device, dtype=torch.bool)
             has_initial_state = has_initial_state & valid_state
 
-        cached_state = conv_state.index_select(0, state_indices)
+        state_capacity = self.conv_state_len + self.num_spec_tokens
+        cached_state_full = self._gather_conv_state_rows(conv_state, state_indices)
+        cached_state = cached_state_full[..., -state_capacity:]
         state = cached_state[..., : self.conv_state_len].to(x_d.dtype)
         if self.conv_state_len > 0:
             initial_state = torch.where(
@@ -718,11 +790,12 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         else:
             history = x_d.unsqueeze(-1)
 
-        conv_output = F.conv1d(
-            history,
-            conv_weights.unsqueeze(1).contiguous(),
-            groups=history.size(1),
-            dilation=self.short_conv_dilation,
+        # ``F.conv1d`` lowers this tiny depthwise convolution to the legacy
+        # ACLop Conv2D path on Ascend, which cannot be captured by an NPU
+        # graph. Express the same cross-correlation with tensor operations so
+        # the ordinary decode path remains graph-capturable.
+        conv_output = self._short_conv_cross_correlation(
+            history, conv_weights, self.short_conv_dilation
         ).squeeze(-1)
         output = F.silu(conv_output)
         output = output * valid_state.view(-1, 1).to(output.dtype)
@@ -738,7 +811,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 existing_base_state,
             )
             cached_state[..., : self.conv_state_len] = safe_next_state
-            conv_state.index_copy_(0, state_indices, cached_state)
+            self._scatter_conv_state_rows(
+                conv_state, state_indices, cached_state_full
+            )
 
         return output
 
@@ -819,9 +894,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                     dtype=x_p.dtype,
                 )
             else:
-                state = conv_state.index_select(0, state_indices)[
-                    ..., : self.conv_state_len
-                ].to(x_p.dtype)
+                state_capacity = self.conv_state_len + self.num_spec_tokens
+                state = self._gather_conv_state_rows(conv_state, state_indices)[
+                    ..., -state_capacity:
+                ][..., : self.conv_state_len].to(x_p.dtype)
             use_initial_mask = (valid_state & has_initial).view(num_prefills, 1, 1)
             initial_state = torch.where(
                 use_initial_mask,
@@ -832,11 +908,12 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         else:
             history = packed_tokens
 
-        conv_output = F.conv1d(
-            history,
-            conv_weights.unsqueeze(1).contiguous(),
-            groups=history.size(1),
-            dilation=self.short_conv_dilation,
+        # ``F.conv1d`` lowers this tiny depthwise convolution to the legacy
+        # ACLop Conv2D path on Ascend, which cannot be captured by an NPU
+        # graph. Express the same cross-correlation with tensor operations so
+        # the speculative decode path remains graph-capturable.
+        conv_output = self._short_conv_cross_correlation(
+            history, conv_weights, self.short_conv_dilation
         )
         conv_output = F.silu(conv_output).transpose(1, 2).contiguous()
 
@@ -862,7 +939,11 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
             # Write back without a host synchronization. Valid, non-empty rows
             # receive their new state; padding and zero-length rows keep the
             # current cache value.
-            existing_state = conv_state.index_select(0, state_indices)
+            state_capacity = self.conv_state_len + self.num_spec_tokens
+            existing_state_full = self._gather_conv_state_rows(
+                conv_state, state_indices
+            )
+            existing_state = existing_state_full[..., -state_capacity:]
             existing_base_state = existing_state[..., : self.conv_state_len]
             update_mask = valid_state & (lengths.to(device=conv_state.device) > 0)
             safe_next_state = torch.where(
@@ -871,7 +952,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 existing_base_state,
             )
             existing_state[..., : self.conv_state_len] = safe_next_state
-            conv_state.index_copy_(0, state_indices, existing_state)
+            self._scatter_conv_state_rows(
+                conv_state, state_indices, existing_state_full
+            )
         return output
 
     def _short_conv_dilated_spec_batched(
@@ -939,7 +1022,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         packed = packed.transpose(1, 2).contiguous()
 
         if self.conv_state_len > 0:
-            cached_state = conv_state.index_select(0, state_indices)
+            state_capacity = self.conv_state_len + self.num_spec_tokens
+            cached_state_full = self._gather_conv_state_rows(conv_state, state_indices)
+            cached_state = cached_state_full[..., -state_capacity:]
             rollback_offsets = num_accepted_tokens.to(
                 device=conv_state.device, dtype=torch.int64
             ).sub(1)
@@ -967,11 +1052,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         else:
             history = packed
 
-        conv_output = F.conv1d(
-            history,
-            conv_weights.unsqueeze(1).contiguous(),
-            groups=history.size(1),
-            dilation=self.short_conv_dilation,
+        # Avoid the legacy ACLop Conv2D lowering of depthwise ``F.conv1d``;
+        # ACLop operators cannot run while the MTP decode graph is captured.
+        conv_output = self._short_conv_cross_correlation(
+            history, conv_weights, self.short_conv_dilation
         )
         conv_output = F.silu(conv_output).transpose(1, 2).contiguous()
 
@@ -1006,7 +1090,9 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 existing_state,
             )
             cached_state[..., :state_capacity] = next_state
-            conv_state.index_copy_(0, state_indices, cached_state)
+            self._scatter_conv_state_rows(
+                conv_state, state_indices, cached_state_full
+            )
 
         return output
 
@@ -1161,7 +1247,10 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                     f"dilated convolution: got {conv_state.size(-1)}, "
                     f"expect at least {state_capacity}."
                 )
-            conv_state = conv_state[..., -state_capacity:]
+            # Keep the full cache contiguous here. Slicing the last state
+            # columns before index_select creates a strided view whose Ascend
+            # kernel materializes the entire cache. Gather the request rows
+            # first, then slice the much smaller gathered tensor instead.
         return self._short_conv_dilated_dispatch(
             inputs,
             layer_attn_metadata,

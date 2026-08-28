@@ -687,7 +687,10 @@ class Qwen4ExpForCausalLM(
         hf_config = vllm_config.model_config.hf_text_config
         conv_kernel_size = hf_config.ple_conv_kernel_size
         short_conv_dilation = hf_config.ngram_size
-        conv_state_len = (conv_kernel_size - 1) * short_conv_dilation
+        conv_state_len = (
+            (conv_kernel_size - 1) * short_conv_dilation
+            + vllm_config.num_speculative_tokens
+        )
         hc_count = hf_config.hc_count
         hc_hidden_size = hf_config.hidden_size * hc_count
         return MambaStateShapeCalculator.short_conv_state_shape(
