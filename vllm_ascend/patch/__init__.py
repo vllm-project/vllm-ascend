@@ -739,7 +739,9 @@
 #       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
 #    How:
 #       1. patch to remove assert
-#       2. path to only collect copy metadata in preprocess_mamba(and do actual copy after kv transfer load).
+#       2. patch to collect per-layer copy metadata in preprocess_mamba. With
+#          layerwise KV transfer, copy each layer's state only after that
+#          layer finishes loading; otherwise keep the original batched copy.
 #    Future Plan:
 #       Remove this patch when:
 #       vLLM itself supports kv transfer for mamba

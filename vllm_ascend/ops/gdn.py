@@ -189,7 +189,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
-        wait_for_kv_layer_from_connector(self.prefix)
         num_tokens = hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
@@ -237,7 +236,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        record_attention_compute_start()
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
             b,
@@ -278,6 +276,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata is None:
             # V1 profile run
             return
+
+        # Layerwise KV pool hooks must stay inside the custom op body: the
+        # forward() caller region is traced by Dynamo in fullgraph mode, and
+        # these side effects (thread locks, connector waits) would break the
+        # graph. Waiting here still orders the deferred mamba state copy and
+        # the layer load before conv/attention kernels touch mamba state.
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
 
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]

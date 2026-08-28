@@ -146,3 +146,65 @@ def test_load_only_step_does_not_hide_remote_state_copy_on_next_forward():
     assert collect.call_args.args[4:7] == (63, 64, 0)
     stage.assert_called_once_with(copy_bufs)
     assert mamba_state_idx["req"] == 64
+
+
+def test_layerwise_mamba_copy_is_grouped_by_layer():
+    """Per-layer scheduling: prepare stages all layers once; each layer's
+    do_mamba_copy_block_for_layer consumes only its own slice; finish validates
+    all layers executed."""
+    from vllm_ascend.patch.worker import patch_mamba_utils as pm
+
+    bufs = SimpleNamespace(
+        src_ptrs=CpuGpuBuffer(8, dtype=torch.int64, device=torch.device("cpu"), pin_memory=False),
+        dst_ptrs=CpuGpuBuffer(8, dtype=torch.int64, device=torch.device("cpu"), pin_memory=False),
+        sizes=CpuGpuBuffer(8, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False),
+        offset=0,
+        _layer_copy_metadata={
+            "layers.0.linear_attn": ([11, 12], [21, 22], [31, 32]),
+            "layers.1.linear_attn": ([13, 14], [23, 24], [33, 34]),
+        },
+        _layer_copy_slices={},
+        _layer_copy_staged=False,
+        _layer_tensor_copy_pairs={},
+        _tensor_copy_pairs=[],
+    )
+
+    copy_calls = []
+    orig = pm._batch_memcpy_triton
+    pm._batch_memcpy_triton = lambda s, d, z: copy_calls.append((list(s), list(d), list(z)))
+    try:
+        pm.prepare_mamba_copy_by_layer(bufs)
+        assert bufs._layer_copy_staged is True
+        assert bufs.src_ptrs.np[:4].tolist() == [11, 12, 13, 14]
+
+        pm.do_mamba_copy_block_for_layer(bufs, "layers.0.linear_attn")
+        pm.do_mamba_copy_block_for_layer(bufs, "layers.1.linear_attn")
+
+        assert copy_calls == [
+            ([11, 12], [21, 22], [31, 32]),
+            ([13, 14], [23, 24], [33, 34]),
+        ]
+
+        pm.finish_mamba_copy_by_layer(bufs)
+        assert bufs.offset == 0
+    finally:
+        pm._batch_memcpy_triton = orig
+
+    # finish must raise if a layer was never executed
+    bufs2 = SimpleNamespace(
+        src_ptrs=CpuGpuBuffer(8, dtype=torch.int64, device=torch.device("cpu"), pin_memory=False),
+        dst_ptrs=CpuGpuBuffer(8, dtype=torch.int64, device=torch.device("cpu"), pin_memory=False),
+        sizes=CpuGpuBuffer(8, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False),
+        offset=0,
+        _layer_copy_metadata={"layers.2.linear_attn": ([15], [25], [35])},
+        _layer_copy_slices={},
+        _layer_copy_staged=False,
+        _layer_tensor_copy_pairs={},
+        _tensor_copy_pairs=[],
+    )
+    try:
+        pm.finish_mamba_copy_by_layer(bufs2)
+        raised = False
+    except RuntimeError:
+        raised = True
+    assert raised, "finish must raise when a loaded layer never executed its copy"

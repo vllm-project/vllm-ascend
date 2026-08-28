@@ -99,6 +99,7 @@ _vllm_mock_modules = [
     "vllm.v1.outputs",
     "vllm.v1.request",
     "vllm.v1.serial_utils",
+    "vllm.v1.worker",
 ]
 if _MOCK_VLLM_DEPS:
     for _mod_name in _vllm_mock_modules:
