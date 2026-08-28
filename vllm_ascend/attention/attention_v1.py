@@ -74,6 +74,54 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+def _expand_c8_decode_metadata(
+    block_tables: torch.Tensor,
+    seq_lens: list[int],
+    actual_seq_qlen: list[int],
+    num_requests: int,
+    *,
+    causal: bool = True,
+    num_actual_tokens: int | None = None,
+    expand_tables: bool = True,
+) -> tuple[torch.Tensor, list[int]]:
+    """Map flattened BNSD queries to paged rows and their visible KV lengths.
+
+    The C8 path uses S=1, including when a request verifies multiple tokens.
+    Repeating its final KV length would let earlier queries see future tokens.
+    Lengths are already host metadata; do not read device tensors here.
+    """
+    if not 0 < num_requests <= min(len(seq_lens), len(actual_seq_qlen), block_tables.shape[0]):
+        raise ValueError("C8 decode requires matching request metadata and block-table rows")
+    query_lens = []
+    expanded_seq_lens = []
+    previous_q_end = 0
+    for request_idx in range(num_requests):
+        q_end = int(actual_seq_qlen[request_idx])
+        query_len = q_end - previous_q_end
+        kv_len = int(seq_lens[request_idx])
+        is_padding = num_actual_tokens is not None and previous_q_end >= num_actual_tokens
+        if query_len <= 0 or (not is_padding and (kv_len <= 0 or (causal and kv_len < query_len))):
+            raise ValueError(f"Invalid C8 decode lengths: query={query_len}, kv={kv_len}")
+        query_lens.append(query_len)
+        if is_padding:
+            # The builder uses a null block row for the dummy padding request.
+            # Its output is discarded; avoid negative lengths for Q > KV = 1.
+            expanded_seq_lens.extend([1] * query_len)
+        elif causal:
+            expanded_seq_lens.extend(range(kv_len - query_len + 1, kv_len + 1))
+        else:
+            expanded_seq_lens.extend([kv_len] * query_len)
+        previous_q_end = q_end
+    tables = block_tables[:num_requests]
+    if not expand_tables or all(length == 1 for length in query_lens):
+        return tables, expanded_seq_lens
+    if len(set(query_lens)) == 1:
+        tables = tables.repeat_interleave(query_lens[0], dim=0)
+    else:
+        tables = torch.cat([tables[i : i + 1].expand(length, -1) for i, length in enumerate(query_lens)], dim=0)
+    return tables, expanded_seq_lens
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -853,8 +901,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_v_aq_scale,
                         c8_v_aq_offset,
                         layer_name,
+                        c8_block_table_is_persistent,
                     ) = param
 
+                    captured_block_tables = block_tables
                     if _EXTRA_CTX.is_draft_model:
                         draft_step, key = draft_attn_key_steps[attn_count]
                         metadata = attn_metadata[draft_step][key]
@@ -866,8 +916,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             sparse_mode = 0
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
-                        seq_lens = attn_metadata[metadata_key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
+                        metadata = attn_metadata[metadata_key]
+                        seq_lens = metadata.seq_lens_list
+                        actual_seq_lengths_q = metadata.actual_seq_lengths_q
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -879,6 +930,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         if not sliding_window:
                             block_tables = attn_metadata[metadata_key].block_tables
                     layer_count += 1
+
+                    if c8_k_aq_scale is not None:
+                        block_tables, seq_lens = _expand_c8_decode_metadata(
+                            metadata.block_tables,
+                            seq_lens,
+                            actual_seq_lengths_q,
+                            len(actual_seq_lengths_q),
+                            causal=metadata.causal,
+                            num_actual_tokens=metadata.num_actual_tokens,
+                        )
+                        if len(seq_lens) != num_tokens:
+                            raise ValueError("C8 replay query count must match the captured graph size")
+                        if c8_block_table_is_persistent:
+                            # graph_task_update keeps the input address, not ownership
+                            # of a temporary repeat_interleave/cat result. Each captured
+                            # layer/size owns a buffer initialized before graph capture.
+                            captured_block_tables.copy_(block_tables)
+                            block_tables = captured_block_tables
+                        elif num_tokens > len(actual_seq_lengths_q):
+                            raise ValueError("C8 multi-query replay requires a persistent captured block table")
+                        actual_seq_lengths_q = [1] * num_tokens
 
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
@@ -948,6 +1020,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
 
         extra_args = {}
+        c8_block_table_is_persistent = False
         if self.enable_c8_quant and layer is not None:
             extra_args = {
                 "key_antiquant_scale": layer._c8_k_aq_scale_nz_bnsd,
@@ -968,6 +1041,26 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output = output.unsqueeze(2)
             attn_mask = None
             sparse_mode = 0
+            _, actual_seq_lengths_kv = _expand_c8_decode_metadata(
+                block_table,
+                attn_metadata.seq_lens_list,
+                actual_seq_lengths_q,
+                len(actual_seq_lengths_q),
+                causal=attn_metadata.causal,
+                num_actual_tokens=attn_metadata.num_actual_tokens,
+                expand_tables=False,
+            )
+            owned_tables = getattr(self, "_c8_graph_block_tables", {})
+            if num_tokens in owned_tables:
+                # Do not capture a copy/expansion from the dummy metadata: it
+                # would overwrite the real table installed before every replay.
+                # Mixed FULL capture can have one query per dummy request even
+                # when replay later verifies multiple queries for one request.
+                block_table = owned_tables[num_tokens]
+                c8_block_table_is_persistent = True
+            elif num_tokens > len(actual_seq_lengths_q):
+                raise ValueError("C8 multi-query FULL capture requires preallocated block tables")
+            actual_seq_lengths_q = [1] * num_tokens
         use_max_workspace = self._use_max_workspace_for_fia_graph
         workspace = graph_params.workspaces.get(num_tokens)
         should_update_workspace_cache = False
@@ -1060,8 +1153,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )  # type: ignore
         else:
             attn_params = attn_params + (None, None, None, None)  # type: ignore
-        layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
-        attn_params = attn_params + (layer_name,)  # type: ignore
+        layer_name = (
+            self._graph_metadata_layer_name(layer)
+            if self._use_layer_aware_fia_graph_replay or (self.enable_c8_quant and layer is not None)
+            else None
+        )
+        attn_params = attn_params + (layer_name, c8_block_table_is_persistent)  # type: ignore
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
@@ -1799,6 +1896,18 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
     so that C8 attention layers automatically use this forward path.
     """
 
+    def prepare_graph_block_tables(self, block_table: torch.Tensor, capture_sizes: list[int]) -> None:
+        """Keep expanded PA input storage alive, without recording a graph write."""
+        if not capture_sizes:
+            self._c8_graph_block_tables = {}
+            return
+        # Capture sizes replay serially. Share storage across sizes, but never
+        # across layers: different captured FIA ops can need different tables.
+        buffer = torch.zeros(
+            (max(capture_sizes), block_table.shape[1]), dtype=block_table.dtype, device=block_table.device
+        )
+        self._c8_graph_block_tables = {size: buffer[:size] for size in capture_sizes}
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -2011,7 +2120,15 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """C8 decode via FIA V1 BNSD with native paged INT8 KV + perchannel antiquant."""
         num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
         assert block_size % 32 == 0, f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
-        batch_size = len(attn_metadata.seq_lens_list)
+        block_tables, seq_lens = _expand_c8_decode_metadata(
+            attn_metadata.block_tables,
+            attn_metadata.seq_lens_list,
+            attn_metadata.actual_seq_lengths_q,
+            len(attn_metadata.actual_seq_lengths_q),
+            causal=attn_metadata.causal,
+            num_actual_tokens=attn_metadata.num_actual_tokens,
+        )
+        batch_size = len(seq_lens)
 
         key = self._nz_5d_view(self.key_cache, block_size)
         value = self._nz_5d_view(self.value_cache, block_size)
@@ -2022,8 +2139,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             value,
             key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
             value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
-            block_table=attn_metadata.block_tables,
-            actual_seq_lengths_kv=attn_metadata.seq_lens_list,
+            block_table=block_tables,
+            actual_seq_lengths=[1] * batch_size,
+            actual_seq_lengths_kv=seq_lens,
             num_heads=self.num_heads,
             num_key_value_heads=self.num_kv_heads,
             input_layout="BNSD",
@@ -2063,6 +2181,14 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             )
             kv_k = self._nz_5d_view(self.key_cache, block_size)
             kv_v = self._nz_5d_view(self.value_cache, block_size)
+            block_tables, seq_lens = _expand_c8_decode_metadata(
+                attn_metadata.block_tables,
+                attn_metadata.seq_lens_list,
+                actual_seq_qlen,
+                num_decodes,
+                causal=attn_metadata.causal,
+                num_actual_tokens=attn_metadata.num_actual_tokens,
+            )
 
             attn_out, _ = torch_npu.npu_fused_infer_attention_score(
                 query[:num_decode_tokens].unsqueeze(2),
@@ -2070,8 +2196,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 kv_v,
                 key_antiquant_scale=layer._c8_k_aq_scale_nz_bnsd,
                 value_antiquant_scale=layer._c8_v_aq_scale_nz_bnsd,
-                block_table=attn_metadata.block_tables[:num_decodes],
-                actual_seq_lengths_kv=attn_metadata.seq_lens_list[:num_decodes],
+                block_table=block_tables,
+                actual_seq_lengths=[1] * num_decode_tokens,
+                actual_seq_lengths_kv=seq_lens,
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="BNSD",

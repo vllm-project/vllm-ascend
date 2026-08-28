@@ -14,6 +14,8 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionPCPMetadataBuilder,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
+    AscendMetadata,
+    _expand_c8_decode_metadata,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -27,6 +29,213 @@ from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import AscendDeviceType
 
 LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
+
+
+class TestC8DecodeMetadata(TestBase):
+    @staticmethod
+    def _metadata(query_ends, kv_lens, tables, **kwargs):
+        return AscendMetadata(
+            actual_seq_lengths_q=query_ends,
+            seq_lens_list=kv_lens,
+            block_tables=tables,
+            num_actual_tokens=query_ends[-1],
+            num_decode_tokens=query_ends[-1],
+            num_decodes=len(query_ends),
+            **kwargs,
+        )
+
+    @staticmethod
+    def _impl():
+        impl = AscendC8AttentionBackendImpl.__new__(AscendC8AttentionBackendImpl)
+        impl.num_heads = 4
+        impl.num_kv_heads = 2
+        impl.head_size = 128
+        impl.scale = 128**-0.5
+        impl.key_cache = torch.zeros(4, 128, 2, 128, dtype=torch.int8)
+        impl.value_cache = torch.zeros_like(impl.key_cache)
+        impl.enable_c8_quant = True
+        impl.sliding_window = None
+        impl.kv_sharing_target_layer_name = None
+        impl._use_layer_aware_fia_graph_replay = False
+        impl._use_max_workspace_for_fia_graph = False
+        return impl
+
+    @staticmethod
+    def _layer(name="model.layers.0.self_attn.attn"):
+        return SimpleNamespace(
+            layer_name=name,
+            _c8_k_aq_scale_nz_bnsd=torch.ones(1, 2, 1, 128),
+            _c8_v_aq_scale_nz_bnsd=torch.ones(1, 2, 1, 128),
+        )
+
+    def test_verification_queries_only_see_their_causal_prefix(self):
+        tables = torch.tensor([[7, 11, 13]], dtype=torch.int32)
+        expanded, lengths = _expand_c8_decode_metadata(tables, [1008], [8], 1)
+        self.assertEqual(lengths, list(range(1001, 1009)))
+        torch.testing.assert_close(expanded, tables.repeat(8, 1))
+
+    def test_variable_query_lengths_do_not_repeat_the_final_kv_length(self):
+        tables = torch.tensor([[7, 8], [11, 12]], dtype=torch.int32)
+        expanded, lengths = _expand_c8_decode_metadata(tables, [100, 200], [1, 4], 2)
+        self.assertEqual(lengths, [100, 198, 199, 200])
+        torch.testing.assert_close(expanded, tables[[0, 1, 1, 1]])
+
+    def test_single_token_decode_keeps_the_original_storage(self):
+        tables = torch.tensor([[7, 8], [11, 12]], dtype=torch.int32)
+        expanded, lengths = _expand_c8_decode_metadata(tables, [100, 200], [1, 2], 2)
+        self.assertEqual(expanded.data_ptr(), tables.data_ptr())
+        self.assertEqual(lengths, [100, 200])
+
+    def test_noncausal_queries_keep_the_full_kv_length(self):
+        tables = torch.tensor([[7, 8]], dtype=torch.int32)
+        expanded, lengths = _expand_c8_decode_metadata(tables, [2], [3], 1, causal=False)
+        self.assertEqual(lengths, [2, 2, 2])
+        torch.testing.assert_close(expanded, tables.repeat(3, 1))
+
+    def test_padding_request_does_not_produce_negative_kv_lengths(self):
+        tables = torch.tensor([[7, 8], [0, 0]], dtype=torch.int32)
+        expanded, lengths = _expand_c8_decode_metadata(tables, [100, 1], [3, 8], 2, num_actual_tokens=3)
+        self.assertEqual(lengths, [98, 99, 100, 1, 1, 1, 1, 1])
+        torch.testing.assert_close(expanded[3:], torch.zeros(5, 2, dtype=torch.int32))
+
+    def test_capture_can_compute_lengths_without_expanding_a_device_table(self):
+        tables = torch.tensor([[7, 8]], dtype=torch.int32)
+        expanded, lengths = _expand_c8_decode_metadata(tables, [100], [3], 1, expand_tables=False)
+        self.assertEqual(expanded.data_ptr(), tables.data_ptr())
+        self.assertEqual(expanded.shape, tables.shape)
+        self.assertEqual(lengths, [98, 99, 100])
+
+    def test_invalid_metadata_is_rejected(self):
+        tables = torch.tensor([[7, 8]], dtype=torch.int32)
+        for kv_lens, query_ends, num_requests in (([2], [8], 1), ([8], [0], 1), ([], [], 0), ([8], [1], 2)):
+            with (
+                self.subTest(kv_lens=kv_lens, query_ends=query_ends, num_requests=num_requests),
+                self.assertRaises(ValueError),
+            ):
+                _expand_c8_decode_metadata(tables, kv_lens, query_ends, num_requests)
+
+    def test_graph_buffers_are_owned_per_layer_with_bounded_capture_storage(self):
+        first, second = self._impl(), self._impl()
+        table = torch.zeros(2, 3, dtype=torch.int32)
+        first.prepare_graph_block_tables(table, [4, 8])
+        second.prepare_graph_block_tables(table, [4, 8])
+        self.assertEqual(first._c8_graph_block_tables[4].shape, (4, 3))
+        self.assertEqual(first._c8_graph_block_tables[8].shape, (8, 3))
+        self.assertEqual(first._c8_graph_block_tables[4].data_ptr(), first._c8_graph_block_tables[8].data_ptr())
+        self.assertNotEqual(first._c8_graph_block_tables[8].data_ptr(), second._c8_graph_block_tables[8].data_ptr())
+        self.assertEqual(first._c8_graph_block_tables[4].untyped_storage().nbytes(), 8 * 3 * 4)
+        first._c8_graph_block_tables[8].fill_(9)
+        self.assertEqual(torch.count_nonzero(second._c8_graph_block_tables[8]), 0)
+
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_eager_decode_passes_one_block_row_and_length_per_query(self, mock_fia):
+        impl = self._impl()
+        tables = torch.tensor([[1, 2], [3, 0]], dtype=torch.int32)
+        metadata = self._metadata([1, 4], [100, 200], tables)
+        query = torch.zeros(4, 4, 128)
+        output = torch.empty_like(query)
+        mock_fia.return_value = (torch.zeros(4, 4, 1, 128), None)
+        impl._forward_c8_decode(query, metadata, output, self._layer())
+        args = mock_fia.call_args
+        self.assertEqual(args.args[0].shape, (4, 4, 1, 128))
+        self.assertEqual(args.kwargs["actual_seq_lengths"], [1] * 4)
+        self.assertEqual(args.kwargs["actual_seq_lengths_kv"], [100, 198, 199, 200])
+        torch.testing.assert_close(args.kwargs["block_table"], tables[[0, 1, 1, 1]])
+
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_chunked_prefill_only_expands_the_decode_part(self, mock_fia):
+        impl = self._impl()
+        tables = torch.tensor([[1, 2], [3, 0]], dtype=torch.int32)
+        metadata = self._metadata([3, 5], [100, 2], tables, num_prefills=1)
+        metadata.num_decodes = 1
+        metadata.num_decode_tokens = 3
+        query = torch.zeros(5, 4, 128)
+        mock_fia.side_effect = [(torch.zeros(3, 4, 1, 128), None), (torch.zeros(2, 4, 128), None)]
+        impl._forward_c8_chunked_prefill(query, query, query, metadata, torch.empty_like(query), self._layer())
+        decode, prefill = mock_fia.call_args_list
+        self.assertEqual(decode.kwargs["actual_seq_lengths_kv"], [98, 99, 100])
+        torch.testing.assert_close(decode.kwargs["block_table"], tables[:1].repeat(3, 1))
+        self.assertEqual(prefill.kwargs["input_layout"], "TND")
+        self.assertEqual(prefill.kwargs["actual_seq_lengths"], [2])
+        self.assertEqual(prefill.kwargs["actual_seq_lengths_kv"], [2])
+
+    @patch("torch.npu.graph_task_group_end")
+    @patch("torch.npu.graph_task_group_begin")
+    @patch("torch.npu.ExternalEvent")
+    @patch("torch_npu.npu.current_stream")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.weak_ref_tensors", side_effect=lambda tensor: tensor)
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX", is_draft_model=False)
+    def test_capture_uses_owned_buffer_without_copying_dummy_metadata(self, _ctx, get_params, _weak, fia, *_mocks):
+        impl = self._impl()
+        tables = torch.tensor([[1, 2]], dtype=torch.int32)
+        impl.prepare_graph_block_tables(tables, [8])
+        owned = impl._c8_graph_block_tables[8]
+        owned.fill_(17)
+        metadata = self._metadata([8], [1008], tables)
+        params = SimpleNamespace(events={8: []}, handles={8: []}, attn_params={8: []}, workspaces={8: torch.empty(1)})
+        get_params.return_value = params
+        impl._get_fia_params = lambda *args: (impl.key_cache, impl.value_cache, 128, tables, [1008])
+        query = torch.zeros(8, 4, 128)
+        with patch.object(torch.Tensor, "repeat_interleave", side_effect=AssertionError("captured dummy expansion")):
+            impl.full_graph_fia(query, query, query, metadata, torch.empty_like(query), self._layer())
+        args = fia.out.call_args.kwargs
+        self.assertEqual(args["block_table"].data_ptr(), owned.data_ptr())
+        self.assertTrue(torch.all(owned == 17))
+        self.assertEqual(args["actual_seq_lengths"], [1] * 8)
+        self.assertEqual(args["actual_seq_lengths_kv"], list(range(1001, 1009)))
+        self.assertEqual(params.attn_params[8][-1][-2], "model.layers.0.self_attn.attn")
+        self.assertTrue(params.attn_params[8][-1][-1])
+
+    @patch("torch.npu.stream")
+    @patch("torch.npu.graph_task_update_begin")
+    @patch("torch.npu.graph_task_update_end")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX", sinks=False, is_draft_model=False)
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_replay_uses_layer_names_and_persistent_addresses(self, _aware, _pa, _ctx, get_params, fia, *_mocks):
+        names = ["model.layers.0.self_attn.attn", "model.layers.4.self_attn.attn"]
+        buffers = [torch.zeros(8, 2, dtype=torch.int32) for _ in names]
+        captured = []
+        for name, buffer in zip(names, buffers):
+            param = [None] * 23
+            param[3] = buffer
+            param[17] = torch.ones(1)
+            param[21] = name
+            param[22] = True
+            captured.append(tuple(param))
+        get_params.return_value = SimpleNamespace(
+            events={8: [MagicMock(), MagicMock()]},
+            handles={8: [MagicMock(), MagicMock()]},
+            attn_params={8: captured},
+            workspaces={8: torch.empty(1)},
+        )
+        for iteration in range(3):
+            tables = [
+                torch.tensor([[iteration + 1, 5]], dtype=torch.int32),
+                torch.tensor([[9, iteration + 10]], dtype=torch.int32),
+            ]
+            metadata = {
+                names[1]: self._metadata([8], [2008 + iteration], tables[1]),
+                names[0]: self._metadata([8], [1008 + iteration], tables[0]),
+            }
+            fia.reset_mock()
+            AscendAttentionBackendImpl.update_graph_params(
+                MagicMock(), SimpleNamespace(attn_metadata=metadata), 8, MagicMock()
+            )
+            self.assertEqual(fia.out.call_count, 2)
+            for i, call in enumerate(fia.out.call_args_list):
+                args = call.kwargs
+                self.assertEqual(args["block_table"].data_ptr(), buffers[i].data_ptr())
+                self.assertNotEqual(args["block_table"].data_ptr(), tables[i].data_ptr())
+                torch.testing.assert_close(buffers[i], tables[i].repeat(8, 1))
+                end = (1008, 2008)[i] + iteration
+                self.assertEqual(args["actual_seq_lengths_kv"], list(range(end - 7, end + 1)))
+                self.assertEqual(args["actual_seq_lengths"], [1] * 8)
 
 
 class TestAttentionGraphHelpers(TestBase):
@@ -805,7 +1014,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_EXTRA_CTX.sinks = False
         mock_EXTRA_CTX.is_draft_model = False
 
-        param: list[MagicMock | None] = [MagicMock()] * 22
+        param: list[MagicMock | None | bool] = [MagicMock()] * 23
+        param[22] = False
         param[16] = None  # sliding_window
         param[17] = None  # c8_k_aq_scale
         param[21] = None  # layer_name

@@ -19,11 +19,51 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend.attention.attention_v1 import AscendC8AttentionBackendImpl
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestC8GraphBlockTables(unittest.TestCase):
+    def test_buffers_use_their_own_cache_group_and_only_c8_layers(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        layers = {
+            name: SimpleNamespace(
+                impl=AscendC8AttentionBackendImpl.__new__(AscendC8AttentionBackendImpl),
+                kv_cache_torch_dtype=dtype,
+                _k_cache_scale=torch.ones(1),
+            )
+            for name, dtype in (("target.a", torch.int8), ("target.b", torch.int8), ("draft", torch.bfloat16))
+        }
+        runner.compilation_config = SimpleNamespace(
+            static_forward_context=layers, cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+        )
+        runner.cudagraph_batch_sizes = [4, 8]
+        runner.speculative_config = object()
+        runner.max_num_reqs = 8
+        tables = [torch.zeros(8, 3, dtype=torch.int32), torch.zeros(8, 5, dtype=torch.int32)]
+        runner.input_batch = SimpleNamespace(
+            block_table=[SimpleNamespace(get_device_tensor=MagicMock(return_value=table)) for table in tables]
+        )
+        config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=["target.a", "draft"]),
+                SimpleNamespace(layer_names=["target.b"]),
+            ]
+        )
+        runner._prepare_c8_graph_block_tables(config)
+        self.assertEqual(layers["target.a"].impl._c8_graph_block_tables[8].shape, (8, 3))
+        self.assertEqual(layers["target.b"].impl._c8_graph_block_tables[8].shape, (8, 5))
+        self.assertFalse(hasattr(layers["draft"].impl, "_c8_graph_block_tables"))
+        runner.speculative_config = None
+        runner._prepare_c8_graph_block_tables(config)
+        self.assertEqual(layers["target.a"].impl._c8_graph_block_tables, {})
+        runner.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+        runner._prepare_c8_graph_block_tables(config)
+        self.assertEqual(set(layers["target.a"].impl._c8_graph_block_tables), {4, 8})
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):

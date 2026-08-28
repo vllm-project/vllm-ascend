@@ -113,7 +113,11 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackend,
+    AscendAttentionState,
+    AscendC8AttentionBackendImpl,
+)
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -3740,6 +3744,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.sparse_kv_offload_config,
             )
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self._prepare_c8_graph_block_tables(kv_cache_config)
         # TODO: refactor the logic of attention
         if (
             self.speculative_config
@@ -3780,6 +3786,31 @@ class NPUModelRunner(GPUModelRunner):
 
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def _prepare_c8_graph_block_tables(self, kv_cache_config: KVCacheConfig) -> None:
+        """Initialize per-layer C8 input buffers before any ACL graph is recorded."""
+        # Ordinary one-token decode already has a persistent row per query.
+        # Mixed FULL graphs can change their per-request query lengths between
+        # capture and replay, even without a speculative configuration.
+        capture_sizes = [
+            size
+            for size in self.cudagraph_batch_sizes
+            if size > 1
+            and (
+                self.speculative_config is not None
+                or self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+                or size > self.max_num_reqs
+            )
+        ]
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            for layer_name in group.layer_names:
+                layer = self.compilation_config.static_forward_context[layer_name]
+                if (
+                    isinstance(getattr(layer, "impl", None), AscendC8AttentionBackendImpl)
+                    and getattr(layer, "kv_cache_torch_dtype", None) == torch.int8
+                ):
+                    block_table = self.input_batch.block_table[group_id].get_device_tensor()
+                    layer.impl.prepare_graph_block_tables(block_table, capture_sizes)
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:
         data_ptr = tensor.data_ptr()
