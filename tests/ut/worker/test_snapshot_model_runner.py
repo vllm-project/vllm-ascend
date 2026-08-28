@@ -29,9 +29,6 @@ class _BackendSpecificReloadTarget:
     def restore_snapshot_derived_state(self, act_dtype: torch.dtype) -> None:
         self.reloaded = True
 
-    def get_snapshot_derived_tensors(self) -> dict[str, torch.Tensor]:
-        return {"backend_specific_weight": torch.zeros(1)}
-
 
 class _ImplHolder(torch.nn.Module):
     def __init__(self, impl: object) -> None:
@@ -133,15 +130,12 @@ def test_reset_resume_runtime_tensor_states_clears_shared_state():
     assert torch.all(shared_topk == -1)
 
 
-def test_reload_derived_weights_uses_backend_specific_sanity_tensors():
+def test_reload_derived_weights_uses_backend_specific_hook():
     target = _BackendSpecificReloadTarget()
 
-    with patch("vllm_ascend.snapshot.tensor_state.logger") as logger:
-        restore_derived_tensor_state(_ImplHolder(target), torch.bfloat16, "model")
+    restore_derived_tensor_state(_ImplHolder(target), torch.bfloat16, "model")
 
     assert target.reloaded
-    logger.error.assert_called_once()
-    assert "backend_specific_weight" in str(logger.error.call_args)
 
 
 def test_reload_derived_weights_propagates_failure():

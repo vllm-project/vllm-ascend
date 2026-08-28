@@ -47,7 +47,6 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla, get_identity_cos_and_sin_mla
-from vllm_ascend.quantization.methods.kv_c8 import process_fa_quant_tensor_state
 from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -1210,8 +1209,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 self._process_weights_for_fused_mlapo(act_dtype)
         elif self.fa_quant_layer:
-            layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
-            process_fa_quant_tensor_state(layer, self.kv_lora_rank)
             self._process_weights_for_fused_fa_quant()
         else:
             # if mlapo, W_UK_T can't trans nz
@@ -1236,45 +1233,22 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.W_UV = W_UV.transpose(0, 1).contiguous()
         self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
 
+        if self.fa_quant_layer:
+            layer = self.vllm_config.compilation_config.static_forward_context[self.layer_name]
+            layer.quant_method.process_weights_after_loading(layer)
+
         if self.enable_mlapo:
             if get_ascend_device_type() == AscendDeviceType.A5:
                 self._process_weights_for_fused_mlapo_a5(act_dtype)
             elif self._should_persist_mlapo_derived():
                 self._rebind_persistent_mlapo_buffers()
-                self._derive_mlapo_rebuildable(act_dtype)
+                self._prepare_mlapo_auxiliary_inputs(act_dtype)
             else:
                 self._process_weights_for_fused_mlapo(act_dtype)
         elif self.fa_quant_layer:
             self._process_weights_for_fused_fa_quant()
         else:
             self.W_UK_T = maybe_trans_nz(self.W_UK_T)
-
-    def get_snapshot_derived_tensors(self) -> dict[str, torch.Tensor]:
-        attrs = (
-            # Common MLA absorbed weights.
-            "W_UV",
-            "W_UK_T",
-            # A2/A3 MLAPO and FA-quant weights/scales.
-            "wd_qkv",
-            "deq_scale_qkv",
-            "wu_q",
-            "qb_deq_scl",
-            "wd_q",
-            "wd_kv",
-            "dequant_scale_w_uq_qr",
-            "dequant_scale_w_dq",
-            "dequant_scale_w_dkv_kr",
-            "ctkv_scale",
-            "q_nope_scale",
-            # A5 MLAPO weights/scales.
-            "weight_dq",
-            "weight_uq_qr",
-            "weight_uq_qr_scale",
-            "weight_dkv_kr",
-            "weight_dq_scale",
-            "weight_dkv_kr_scale",
-        )
-        return {attr: tensor for attr in attrs if isinstance((tensor := getattr(self, attr, None)), torch.Tensor)}
 
     def _process_weights_for_fused_fa_quant(self):
         if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1326,7 +1300,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             host = getattr(self, host_name)
             setattr(self, attr_name, host._buffers[buf_name])
 
-    def _derive_mlapo_rebuildable(self, act_dtype: torch.dtype) -> None:
+    def _prepare_mlapo_auxiliary_inputs(self, act_dtype: torch.dtype) -> None:
+        """Prepare normalization and quantization inputs for the MLAPO operator."""
         device = self.q_proj.input_scale.device
         self.gamma1 = self.q_a_layernorm.weight.data  # type: ignore[union-attr]
         self.beta1 = torch.zeros_like(self.gamma1) if (_bias := self.q_a_layernorm.bias) is None else _bias.data  # type: ignore[union-attr]
@@ -1400,7 +1375,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             for _, attr_name, _ in self._MLAPO_PERSISTED_BUFFERS:
                 setattr(self, attr_name, derived[attr_name])
 
-        self._derive_mlapo_rebuildable(act_dtype)
+        self._prepare_mlapo_auxiliary_inputs(act_dtype)
 
         if self._should_release_mlapo_sources():
             self.fused_qkv_a_proj.weight = None  # type: ignore[union-attr]

@@ -389,3 +389,26 @@ def test_reload_cos_and_sin_after_restore_rebinds_persistent_buffers():
     assert rope_mod._cos_cache is model.rope.cos_cached
     assert rope_mod._sin_cache is model.rope.sin_cached
     assert rope_mod._cos_sin_cache is model.rope.cos_sin_cache
+
+
+@pytest.mark.parametrize(("snapshot_config", "persistent"), [(None, False), (object(), True)])
+def test_deepseek_rope_cache_persistence_follows_snapshot_config(patch_init_side_effects, snapshot_config, persistent):
+    from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding
+
+    patch_init_side_effects.return_value.snapshot_config = snapshot_config
+    rope = AscendDeepseekScalingRotaryEmbedding.__new__(AscendDeepseekScalingRotaryEmbedding)
+    torch.nn.Module.__init__(rope)
+    rope.rotary_dim = 8
+    rope.base = BASE
+    rope.scaling_factor = 1.0
+    rope.beta_fast = 32
+    rope.beta_slow = 1
+    rope.max_position_embeddings = 8
+    rope.mscale = 1.0
+
+    with patch("vllm_ascend.ops.rotary_embedding._record_cos_and_sin_cache"):
+        rope._set_cos_sin_cache(8, torch.device("cpu"), torch.float32)
+
+    assert "inv_freq" in rope._non_persistent_buffers_set
+    for name in ("cos_sin_cache", "cos_cached", "sin_cached"):
+        assert (name not in rope._non_persistent_buffers_set) is persistent

@@ -59,27 +59,13 @@ def reset_model_runtime_tensor_state(models: Iterable[nn.Module | None]) -> int:
 
 def restore_derived_tensor_state(model: nn.Module, act_dtype: torch.dtype, label: str) -> None:
     restored = 0
-    min_norm = float("inf")
-    min_norm_where = ""
-    zero_norm_tensors: list[str] = []
 
-    for name, owner in _iter_derived_state_owners(model):
+    for _, owner in _iter_derived_state_owners(model):
         restore = getattr(owner, "restore_snapshot_derived_state", None)
         if not callable(restore):
             continue
         restore(act_dtype)
         restored += 1
-
-        get_sanity_tensors = getattr(owner, "get_snapshot_derived_tensors", None)
-        if not callable(get_sanity_tensors):
-            continue
-        for tensor_name, tensor in get_sanity_tensors().items():
-            norm = float(tensor.detach().float().norm().item())
-            if norm < min_norm:
-                min_norm = norm
-                min_norm_where = f"{name}.{tensor_name}"
-            if norm == 0.0:
-                zero_norm_tensors.append(f"{name}.{tensor_name}")
 
     logger.info(
         "[restore model] [%s] reloaded non-persistent derived weights for %d modules",
@@ -92,20 +78,6 @@ def restore_derived_tensor_state(model: nn.Module, act_dtype: torch.dtype, label
             "attention decode may still use stale derived weights",
             label,
         )
-    if restored and min_norm != float("inf"):
-        if zero_norm_tensors:
-            logger.error(
-                "[restore model] REGRESSION: %d derived weight tensors are still "
-                "zero after restore, attention decode will be broken. preview=%s",
-                len(zero_norm_tensors),
-                zero_norm_tensors[:8],
-            )
-        else:
-            logger.info(
-                "[restore model] derived-weight sanity ok: min_norm=%.6f at %s",
-                min_norm,
-                min_norm_where,
-            )
 
 
 def restore_global_tensor_state(

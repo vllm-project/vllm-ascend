@@ -823,7 +823,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                 raise RuntimeError(f"SFA layer {self.layer_name}: missing persistent MLAPO buffer {buf_name}")
             setattr(self, attr_name, host._buffers[buf_name])
 
-    def _derive_mlapo_rebuildable(self, act_dtype: torch.dtype) -> None:
+    def _prepare_mlapo_auxiliary_inputs(self, act_dtype: torch.dtype) -> None:
+        """Prepare normalization and quantization inputs for the MLAPO operator."""
         # Keep the cold-start device selection identical to the baseline. On
         # resume the source weight may have been released, so use input_scale.
         weight = self.q_proj.weight
@@ -859,38 +860,13 @@ class AscendSFAImpl(MLAAttentionImpl):
                     self._process_weights_for_fused_mlapo_a5_float(act_dtype)
             elif self._should_persist_mlapo_derived():
                 self._rebind_persistent_mlapo_buffers()
-                self._derive_mlapo_rebuildable(act_dtype)
+                self._prepare_mlapo_auxiliary_inputs(act_dtype)
             else:
                 self._process_weights_for_fused_mlapo(act_dtype)
             return
 
         # Non-mlapo path may have NZ-transformed W_UK_T; buffer already holds the
         # post-transform value from cold start, so nothing else to rebuild here.
-
-    def get_snapshot_derived_tensors(self) -> dict[str, torch.Tensor]:
-        attrs = (
-            # Absorbed weights restored from persistent buffers.
-            "W_UV",
-            "W_UK_T",
-            # A2/A3 MLAPO weights/scales.
-            "wd_qkv",
-            "deq_scale_qkv",
-            "wu_q",
-            "qb_deq_scl",
-            "ctkv_scale",
-            "q_nope_scale",
-            # A5 MLAPO/prolog weights/scales.
-            "weight_dq",
-            "weight_uq_qr",
-            "weight_uq_qr_scale",
-            "weight_dkv_kr",
-            "weight_dq_scale",
-            "weight_dkv_kr_scale",
-            "dequant_scale_w_uq_qr",
-            "dequant_scale_w_dq",
-            "dequant_scale_w_dkv_kr",
-        )
-        return {attr: tensor for attr in attrs if isinstance((tensor := getattr(self, attr, None)), torch.Tensor)}
 
     @classmethod
     def reload_hadamard_after_restore(cls, device) -> bool:
@@ -1073,7 +1049,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             for _, attr_name, _ in self._MLAPO_PERSISTED_BUFFERS:
                 setattr(self, attr_name, derived[attr_name])
 
-        self._derive_mlapo_rebuildable(act_dtype)
+        self._prepare_mlapo_auxiliary_inputs(act_dtype)
 
         if self._should_release_mlapo_sources():
             self.fused_qkv_a_proj.weight = None
