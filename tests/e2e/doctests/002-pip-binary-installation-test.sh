@@ -65,14 +65,11 @@ function install_binary_test() {
     PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version)
     _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
 
-    # Setup extra-index-url for PyPI variant, Ascend packages, and PyTorch
-    # CPU wheels. Ascend and PyTorch indexes are routed through the
-    # in-cluster cache service to avoid slow external downloads and wheel
-    # corruption on unreliable connections.
+    # Setup extra-index-url for public PyPI mirror, Ascend packages, and PyTorch CPU wheels.
     local pip_extra_index_urls=(
         "https://mirrors.huaweicloud.com/repository/pypi/variant"
         "http://${CACHE_HOST}/ascend/repos/pypi"
-        "http://${CACHE_HOST}/whl/cpu"
+        "https://download.pytorch.org/whl/cpu/"
     )
     local IFS=" "
     pip config set global.extra-index-url "${pip_extra_index_urls[*]}"
