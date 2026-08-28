@@ -267,8 +267,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
-                w1_offset=layer.w13_weight_offset if hasattr(layer, "w13_weight_offset") else None,
-                w2_offset=layer.w2_weight_offset if hasattr(layer, "w2_weight_offset") else None,
                 is_per_channel_weight=True,
             )
         )

@@ -383,7 +383,6 @@ def quant_apply_mlp(
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[unquantized_hidden_states],
             weight=[w1],
-            scale=[w1_scale],
             antiquant_scale=[w1_scale],
             antiquant_offset=[w1_offset],
             split_item=2,
