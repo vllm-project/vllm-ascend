@@ -45,6 +45,16 @@
   padding: 0.5rem 0.75rem;
 }
 
+/* Outline for content tabs, matching the upstream vLLM documentation. */
+.md-typeset .tabbed-set {
+  border: 0.075rem solid var(--md-default-fg-color);
+  border-radius: 0.2rem;
+}
+
+.md-typeset .tabbed-content {
+  padding: 0 0.6em;
+}
+
 /* GitHub button styling */
 .github-button {
   margin: 0 4px;

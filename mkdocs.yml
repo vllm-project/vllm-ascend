@@ -78,6 +78,7 @@ plugins:
         - "_build/*"
         - "*.zh.md"
         - "_templates/*"
+        - "**/*.inc.md"
         - "release.template.md"
         - "zh/*"
         # Internal helpers that should never be served as static files.
@@ -147,6 +148,7 @@ extra_css:
 
 extra_javascript:
   - javascripts/mathjax.js
+  - javascripts/tabbed-toc.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 extra:
@@ -156,15 +158,39 @@ extra:
   # floating "report issue" button in docs/overrides/main.html).
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
-  # Version substitutions used by macros plugin
+  # ================== Released documentation stack ===========================
+  # These values are used by Quickstart, Installation, release image/tag examples,
+  # and the pip installation doctest. Update this group only after a vLLM Ascend
+  # release and its complete compatible stack have been published and verified;
+  # do not update it for main development. Git and container tags include the
+  # leading "v" and are used across tutorials.
   vllm_version: v0.23.0
   vllm_ascend_version: v0.23.0
-  pip_vllm_ascend_version: 0.23.0
-  pip_vllm_version: 0.23.0
+  # Stable documentation target used by the developer-preview banner.
+  stable_vllm_ascend_version: v0.23.0
+  # PyPI versions omit the leading "v" and are used by installation commands/tests.
+  release_vllm_ascend_version: 0.23.0
+  release_vllm_version: 0.23.0
+  # The supported Python range and the Python version inside release images differ.
+  release_python_version: ">= 3.10, < 3.13"
+  release_image_python_version: "3.12"
+  release_cann_version: "9.1.0"
+  release_pytorch_version: "2.10.0"
+  release_torch_npu_version: "2.10.0.post4"
+  release_nnal_version: "9.1.0"
+  release_triton_ascend_version: "3.2.2"
+  # ================== Current main development stack ==========================
+  # The compatibility policy and CPU-only build instructions use these values.
+  # Update this group when repository requirements or the verified main build
+  # image changes; release documentation must not use it. cann_image_tag is also
+  # used by contributor and optimization test instructions.
   cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
-  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post4"
+  main_pytorch_version: "2.10.0"
+  main_torch_npu_version: "2.10.0.post4"
+  main_torchvision_version: "0.25.0"
+  main_torchaudio_version: "2.10.0"
   main_triton_ascend_version: "3.2.2"
   social:
     - icon: fontawesome/brands/github
@@ -178,9 +204,9 @@ extra:
 nav:
   - index.md
   - Getting Started:
-    - getting_started.md
-    - quick_start.md
-    - installation.md
+    - getting_started/overview.md
+    - getting_started/quick_start.md
+    - getting_started/installation.md
     - Model Tutorials:
         - tutorials/models/index.md
         - tutorials/models/Qwen3-Dense.md
