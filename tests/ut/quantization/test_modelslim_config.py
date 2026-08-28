@@ -678,7 +678,7 @@ class TestQuantPrefixMapper(TestBase):
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.hf_config.model_type = "kimi_linear"
         with patch(
-            "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+            "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
             return_value=mock_vllm_config,
         ):
             method = config.get_quant_method(layer, fused_prefix)
