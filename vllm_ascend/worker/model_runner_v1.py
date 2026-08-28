@@ -815,74 +815,7 @@ class NPUModelRunner(GPUModelRunner):
                     req_state.prev_num_draft_len = 0
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
-        kv_cache_block_copies = getattr(
-            scheduler_output,
-            "kv_cache_block_copies",
-            None,
-        )
-        if kv_cache_block_copies:
-            scheduler_output.kv_cache_block_copies = None
-        try:
-            deferred_state_corrections_fn = super()._update_states(scheduler_output)
-        finally:
-            if kv_cache_block_copies:
-                scheduler_output.kv_cache_block_copies = kv_cache_block_copies
-        if kv_cache_block_copies:
-            self._copy_kv_cache_blocks_for_partial_hits(kv_cache_block_copies)
-        return deferred_state_corrections_fn
-
-    def _copy_kv_cache_blocks_for_partial_hits(self, kv_cache_block_copies) -> None:
-        block_copy_pairs = [
-            (
-                (block_copy.src_block_id, block_copy.dst_block_id)
-                if hasattr(block_copy, "src_block_id")
-                else tuple(block_copy)
-            )
-            for block_copy in kv_cache_block_copies
-        ]
-        cache_tensor_views = []
-        seen_tensor_views = set()
-        block_copy_scales = getattr(
-            self,
-            "_kv_cache_block_copy_scales",
-            {},
-        )
-        for kv_cache in self.kv_caches:
-            block_copy_scale = block_copy_scales.get(id(kv_cache), 1)
-            tensors = (
-                kv_cache
-                if isinstance(kv_cache, (list, tuple))
-                else (kv_cache,)
-            )
-            for tensor in tensors:
-                view_key = (
-                    tensor.data_ptr(),
-                    tuple(tensor.shape),
-                    tuple(tensor.stride()),
-                )
-                if view_key in seen_tensor_views:
-                    continue
-                seen_tensor_views.add(view_key)
-                cache_tensor_views.append((tensor, block_copy_scale))
-
-        for tensor, block_copy_scale in cache_tensor_views:
-            source_blocks = [
-                tensor.narrow(
-                    0,
-                    src_block_id * block_copy_scale,
-                    block_copy_scale,
-                ).clone()
-                for src_block_id, _ in block_copy_pairs
-            ]
-            for source_block, (_, dst_block_id) in zip(
-                source_blocks,
-                block_copy_pairs,
-            ):
-                tensor.narrow(
-                    0,
-                    dst_block_id * block_copy_scale,
-                    block_copy_scale,
-                ).copy_(source_block)
+        return super()._update_states(scheduler_output)
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
@@ -3881,36 +3814,6 @@ class NPUModelRunner(GPUModelRunner):
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
-
-        layer_kv_cache_specs = self._get_layer_kv_cache_specs(kv_cache_config)
-        self._kv_cache_block_copy_scales = {}
-        for group_id, kv_cache_group in enumerate(
-            kv_cache_config.kv_cache_groups
-        ):
-            kernel_block_sizes = self.kernel_block_sizes[group_id]
-            kernel_block_size = (
-                kernel_block_sizes[0]
-                if isinstance(kernel_block_sizes, list)
-                else kernel_block_sizes
-            )
-            for layer_name in kv_cache_group.layer_names:
-                kv_cache = kv_caches.get(layer_name)
-                if kv_cache is None:
-                    continue
-                kv_cache_spec = layer_kv_cache_specs[layer_name]
-                block_copy_scale = 1
-                if (
-                    isinstance(kv_cache_spec, AttentionSpec)
-                    and kernel_block_size > 0
-                ):
-                    assert kv_cache_spec.block_size % kernel_block_size == 0
-                    block_copy_scale = (
-                        kv_cache_spec.block_size // kernel_block_size
-                    )
-                cache_id = id(kv_cache)
-                previous_scale = self._kv_cache_block_copy_scales.get(cache_id)
-                assert previous_scale in (None, block_copy_scale)
-                self._kv_cache_block_copy_scales[cache_id] = block_copy_scale
 
         if self.model_config.hf_text_config.model_type == "deepseek_v4":
             from vllm_ascend.utils import extract_dsv4_layer_index

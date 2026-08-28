@@ -23,6 +23,7 @@ from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
 def _mamba_spec() -> MambaSpec:
@@ -67,6 +68,27 @@ def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+
+
+def test_partial_hit_copy_uses_logical_blocks_for_attention_and_mamba():
+    runner = object.__new__(NPUModelRunner)
+    runner.kv_cache_config = SimpleNamespace(num_blocks=3)
+    attention_cache = torch.arange(18, dtype=torch.float32).view(6, 3)
+    conv_state = torch.arange(12, dtype=torch.float32).view(3, 4)
+    recurrent_state = torch.arange(6, dtype=torch.float32).view(3, 2)
+    runner.kv_caches = [attention_cache, [conv_state, recurrent_state]]
+    expected_attention = attention_cache.clone()
+    expected_conv = conv_state.clone()
+    expected_recurrent = recurrent_state.clone()
+
+    runner._copy_kv_cache_blocks_for_partial_hits([(0, 1), (1, 2)])
+
+    torch.testing.assert_close(attention_cache[2:4], expected_attention[0:2])
+    torch.testing.assert_close(attention_cache[4:6], expected_attention[2:4])
+    torch.testing.assert_close(conv_state[1], expected_conv[0])
+    torch.testing.assert_close(conv_state[2], expected_conv[1])
+    torch.testing.assert_close(recurrent_state[1], expected_recurrent[0])
+    torch.testing.assert_close(recurrent_state[2], expected_recurrent[1])
 
 
 def test_prepare_inputs_propagates_padded_request_count():
