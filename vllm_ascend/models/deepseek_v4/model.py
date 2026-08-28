@@ -1096,8 +1096,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            mapped = self.hf_to_vllm_mapper._map_name(name)
-            if mapped is None:
+            name = self.hf_to_vllm_mapper._map_name(name)
+            if name is None:
                 continue
 
             if "sink" in name:
