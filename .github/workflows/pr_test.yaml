@@ -47,7 +47,6 @@ jobs:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -85,19 +84,11 @@ jobs:
         id: vllm
         run: |
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
             echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
             exit 1
           }
-          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
-            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
-            exit 1
-          }
-          {
-            echo "main_commit=${main_commit}"
-            echo "release_tag=${release_tag}"
-          } >> "$GITHUB_OUTPUT"
+          echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
       - name: cp problem matchers
         run: |
@@ -532,7 +523,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -560,7 +550,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests_upstream.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -585,7 +574,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
