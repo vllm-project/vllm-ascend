@@ -190,13 +190,20 @@ class AscendPCPManager(PCPManager):
             num_draft_tokens_per_req=local_draft_counts,
         )
 
-    def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
+    def partition_batch(
+        self,
+        input_batch: AscendInputBatch,
+        padded_num_tokens: int | None = None,
+    ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
         else:
-            local_batch = super().partition_batch(global_batch)
+            local_batch = super().partition_batch(
+                global_batch,
+                padded_num_tokens=padded_num_tokens,
+            )
             assert isinstance(local_batch, AscendInputBatch)
 
         # PCP builds the local layout from actual tokens, but a FULL decode
