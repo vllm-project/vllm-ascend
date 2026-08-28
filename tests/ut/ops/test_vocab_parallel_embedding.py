@@ -75,9 +75,9 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         mock_group.rank_in_group = 0
         with (
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=mock_group),
-            patch("vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0),
             patch(
-                "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_world_size",
+                "vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_world_size",
                 return_value=2,
             ),
             patch("vllm.model_executor.layers.vocab_parallel_embedding.pad_vocab_size", side_effect=lambda x, y: x + y),
@@ -254,8 +254,8 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         input_ = torch.tensor([1, 2, 3])
 
         with patch(
-            "torch.ops.vllm.maybe_pad_and_reduce",
-            side_effect=lambda x: x,
+            "torch.ops.vllm.all_reduce",
+            side_effect=lambda x, _: x,
         ) as mock_reduce:
             output = layer.forward(input_)
 
@@ -296,6 +296,8 @@ class TestAscendLogitsProcessor(unittest.TestCase):
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_world_size", return_value=2),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.dist.all_to_all_single",
                 self.mock_all_to_all_single,
