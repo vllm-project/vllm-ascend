@@ -20,22 +20,100 @@ Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.p
 """
 
 import os
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, cast
 from unittest.mock import patch
 
-from tests.e2e.conftest import wait_until_npu_memory_free
-from tests.e2e.pull_request.four_card.context_parallel import test_accuracy as common
+from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+
+MAX_NUM_SEQS = 4
+
+FULL_DECODE_GRAPH = {
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "cudagraph_capture_sizes": [MAX_NUM_SEQS],
+}
+
+COMMON_PROMPTS = [
+    "The capital of France is",
+    "Hello, my name is Tom, I am",
+    "The president of United States is",
+]
+
+DSV3_2_DCP_GOLDENS = (
+    [
+        "The capital of France isoint054 Rund959arki",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States isoint054 Rund959arki",
+    ],
+    [
+        "The capital of France isorrionicALLY casmith",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States is平行于我 charm与技术oi",
+    ],
+    [
+        "The capital of France isorrionic Tudefeault",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike挂",
+        "The president of United States is平行于我 charm与技术oi",
+    ],
+)
 
 MODEL = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
 
-FULL_FEATURE_MODEL_CASES = common.AccuracyCase(
+
+@dataclass(frozen=True)
+class AccuracyCase:
+    name: str
+    model: str
+    prompts: Sequence[str]
+    expected_outputs: Sequence[str] | Sequence[Sequence[str]]
+    max_tokens: int
+    runner_kwargs: dict[str, Any]
+
+
+def match_outputs_with_goldens(outputs: list[tuple[list[int], str]], goldens: Sequence[str]) -> None:
+    """Helper function to compare output with golden output, ignoring whitespace differences."""
+    outputs_str: Sequence[str] = [output[1] for output in outputs]
+    assert len(outputs_str) == len(goldens)
+    for index, (output, golden) in enumerate(zip(outputs_str, goldens)):
+        assert isinstance(output, str) and isinstance(golden, str), "Both output and golden must be strings"
+        assert output and golden, "Output and golden should not be empty"
+        assert output.strip() == golden.strip()
+
+
+def _run_accuracy_case(case: AccuracyCase) -> None:
+    runner_cls = DPVllmRunner if case.runner_kwargs.get("data_parallel_size", 1) > 1 else VllmRunner
+    with runner_cls(case.model, **case.runner_kwargs) as runner:
+        outputs = runner.generate_greedy(list(case.prompts), case.max_tokens)
+
+    if isinstance(case.expected_outputs[0], str):
+        expected_outputs = cast(Sequence[str], case.expected_outputs)
+        match_outputs_with_goldens(outputs, expected_outputs)
+    else:
+        # If multiple expected output sets are provided, the output is considered correct if it matches any of the sets.
+        multi_expected_outputs = cast(Sequence[Sequence[str]], case.expected_outputs)
+        tries = []
+        for expected in multi_expected_outputs:
+            try:
+                match_outputs_with_goldens(outputs, expected)
+            except AssertionError as exc:
+                tries.append(f"Output did not match expected set:\n{exc}")
+            else:
+                break
+        if len(tries) == len(multi_expected_outputs):
+            failure_details = "\n\n".join(tries)
+            raise AssertionError(f"Output did not match any of the expected output sets:\n{failure_details}")
+
+
+FULL_FEATURE_MODEL_CASES = AccuracyCase(
     name="dsv3_2_sfa_dcp_replicated_indexer_mrv2_tp2_dcp2",
     model=MODEL,
-    prompts=common.COMMON_PROMPTS,
-    expected_outputs=common.DSV3_2_DCP_GOLDENS,
+    prompts=COMMON_PROMPTS,
+    expected_outputs=DSV3_2_DCP_GOLDENS,
     max_tokens=5,
     runner_kwargs={
         "max_model_len": 1024,
-        "max_num_seqs": common.MAX_NUM_SEQS,
+        "max_num_seqs": MAX_NUM_SEQS,
         "max_num_batched_tokens": 1024,
         "tensor_parallel_size": 2,
         "decode_context_parallel_size": 2,
@@ -43,7 +121,7 @@ FULL_FEATURE_MODEL_CASES = common.AccuracyCase(
         "gpu_memory_utilization": 0.4,
         "block_size": 128,
         "quantization": "ascend",
-        "compilation_config": common.FULL_DECODE_GRAPH,
+        "compilation_config": FULL_DECODE_GRAPH,
         "additional_config": {
             "enable_dsa_cp": False,
             "enable_sparse_li_c8": False,
@@ -67,4 +145,4 @@ FULL_FEATURE_MODEL_CASES = common.AccuracyCase(
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dsv3_2_sfa_dcp_tp2_dcp2_model_runner_v2_accuracy() -> None:
     """Guard MRV2 accuracy."""
-    common._run_accuracy_case(FULL_FEATURE_MODEL_CASES)
+    _run_accuracy_case(FULL_FEATURE_MODEL_CASES)
