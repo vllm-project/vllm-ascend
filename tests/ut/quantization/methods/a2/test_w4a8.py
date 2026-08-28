@@ -337,6 +337,33 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(packed.shape, torch.Size([1, 1, 1]))
         torch.testing.assert_close(packed.view(torch.int8), weight)
 
+    def test_snapshot_persists_mega_moe_tensor_lists(self):
+        layer = self.build_layer(is_new_quant_version=True)
+
+        with (
+            patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz", side_effect=identity),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.get_current_vllm_config",
+                return_value=Mock(snapshot_config=object()),
+            ),
+        ):
+            self.quant_method._maybe_build_cann_mega_moe_lists(layer)
+
+        state = layer.state_dict()
+        names = (
+            "cann_mega_moe_w13_weight_list",
+            "cann_mega_moe_w2_weight_list",
+            "cann_mega_moe_w13_weight_scale_list",
+            "cann_mega_moe_w2_weight_scale_list",
+            "cann_mega_moe_w13_scale_bias_list",
+            "cann_mega_moe_w2_scale_bias_list",
+        )
+        for name in names:
+            self.assertEqual(
+                sum(key.startswith(f"_snapshot_{name}_") for key in state),
+                self.experts,
+            )
+
     def test_get_weight_compressed_tensors(self):
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
         result = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)

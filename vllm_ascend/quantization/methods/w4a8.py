@@ -30,6 +30,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.snapshot.tensor_state import persist_tensor_lists
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
@@ -767,6 +768,18 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             )
         layer.cann_mega_moe_w13_scale_bias_list = [t.reshape(-1) for t in layer.w13_scale_bias.data.unbind(dim=0)]
         layer.cann_mega_moe_w2_scale_bias_list = [t.reshape(-1) for t in layer.w2_scale_bias.data.unbind(dim=0)]
+        if get_current_vllm_config().snapshot_config is not None:
+            persist_tensor_lists(
+                layer,
+                (
+                    "cann_mega_moe_w13_weight_list",
+                    "cann_mega_moe_w2_weight_list",
+                    "cann_mega_moe_w13_weight_scale_list",
+                    "cann_mega_moe_w2_weight_scale_list",
+                    "cann_mega_moe_w13_scale_bias_list",
+                    "cann_mega_moe_w2_scale_bias_list",
+                ),
+            )
         del layer.w13_weight
         del layer.w2_weight
         del layer.w13_weight_scale

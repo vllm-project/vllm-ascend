@@ -367,3 +367,25 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         check_parent_init_signature_has_not_changed(
             YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
         )
+
+
+def test_reload_cos_and_sin_after_restore_rebinds_persistent_buffers():
+    from vllm_ascend.ops import rotary_embedding as rope_mod
+
+    class ModelWithRope(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rope = torch.nn.Module()
+            self.rope.register_buffer("cos_cached", torch.randn(8, 4), persistent=True)
+            self.rope.register_buffer("sin_cached", torch.randn(8, 4), persistent=True)
+            self.rope.register_buffer("cos_sin_cache", torch.randn(8, 4), persistent=True)
+
+    model = ModelWithRope()
+    rope_mod._cos_cache = torch.zeros_like(model.rope.cos_cached)
+    rope_mod._sin_cache = torch.zeros_like(model.rope.sin_cached)
+    rope_mod._cos_sin_cache = torch.zeros_like(model.rope.cos_sin_cache)
+
+    assert rope_mod.reload_cos_and_sin_after_restore(model)
+    assert rope_mod._cos_cache is model.rope.cos_cached
+    assert rope_mod._sin_cache is model.rope.sin_cached
+    assert rope_mod._cos_sin_cache is model.rope.cos_sin_cache

@@ -425,7 +425,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         (
             self.global_expert_map,
-            self._expert_map,
+            expert_map,
             self.log2phy,
             self.global_redundant_expert_num,
         ) = init_eplb_config(
@@ -436,6 +436,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             n_shared_experts,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
+        self.register_buffer("_expert_map", expert_map)
 
         moe_config.global_redundant_expert_num = self.global_redundant_expert_num
         local_num_experts = moe_config.num_local_experts

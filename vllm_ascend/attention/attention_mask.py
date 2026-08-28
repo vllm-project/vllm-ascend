@@ -39,6 +39,12 @@ class AttentionMaskBuilder:
         self.mla_mask = None
         self.chunked_prefill_attn_mask = None
 
+    def reset_snapshot_runtime_state(self) -> None:
+        self.attn_mask_cache = None
+        self._seq_len_cached = 0
+        self.mla_mask = None
+        self.chunked_prefill_attn_mask = None
+
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
         if self.attn_mask_cache is None or max_seq_len > self._seq_len_cached:
             self.attn_mask_cache = _generate_attn_mask(max_seq_len, dtype)

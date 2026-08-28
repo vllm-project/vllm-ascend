@@ -194,30 +194,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         hf_config = self.model_config.hf_config
 
         if AscendDSACPMetadataBuilder.hadamard is None:
-            if hf_config.model_type == "deepseek_v4":
-                indexer_head_dim = hf_config.index_head_dim
-                try:
-                    from scipy.linalg import hadamard  # type: ignore[import-untyped]
-                except ImportError as e:
-                    raise ImportError(
-                        "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
-                    ) from e
-                log_dim = math.ceil(math.log2(indexer_head_dim))
-                dim_padded = 2**log_dim
-                if self.vllm_config.model_config.enable_sleep_mode:
-                    # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
-                    # sleep/wake does not treat it as KV cache.
-                    from vllm_ascend.device_allocator.camem import CaMemAllocator
-
-                    allocator = CaMemAllocator.get_instance()
-                    with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
-                        AscendDSACPMetadataBuilder.hadamard = torch.tensor(
-                            hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                        ).to(torch.bfloat16)
-                else:
-                    AscendDSACPMetadataBuilder.hadamard = torch.tensor(
-                        hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
-                    ).to(torch.bfloat16)
+            self.build_hadamard(hf_config, self.device, self.vllm_config.model_config.enable_sleep_mode)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.req_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.req_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
@@ -262,6 +239,84 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Note(qcs): we use two dimension slot_mapping for kvcache with shape
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
+
+    def reset_snapshot_runtime_state(self) -> None:
+        """Clear reusable DSA-CP request metadata after restore."""
+        self.num_decodes = 0
+        self.num_prefills = 0
+        self.num_decode_tokens = 0
+        self.num_prefill_tokens = 0
+        self.num_actual_tokens = None
+        self.block_table = None
+        self.seq_lens = None
+        self.seq_lens_cpu = None
+
+        for tensor in (
+            self.start_pos_prefill,
+            self.req_sas_metadata,
+            self.req_qli_metadata,
+            self.cu_seqlens_ori_kv,
+            self.cu_seqlens_cmp_kv,
+            self.seqused_q,
+            self._zero_i32,
+            self.local_query_start_loc,
+            self.local_seq_lens,
+            self.slot_mapping,
+        ):
+            if tensor is not None:
+                tensor.zero_()
+
+        for attr_name in (
+            "spec_slot_mapping",
+            "spec_local_query_start_loc",
+            "spec_local_seq_lens",
+        ):
+            tensors = getattr(self, attr_name, None)
+            if tensors is not None:
+                for tensor in tensors:
+                    tensor.zero_()
+
+        common_ratio_to_sas_metadata = getattr(self, "common_ratio_to_sas_metadata", None)
+        if common_ratio_to_sas_metadata is not None:
+            common_ratio_to_sas_metadata.clear()
+
+    @classmethod
+    def build_hadamard(cls, hf_config, device, enable_sleep_mode: bool = False) -> bool:
+        """Build the class-level DSA indexer ``hadamard`` rotation matrix. See
+        ``AscendDSAMetadataBuilder.build_hadamard`` for the snapshot rationale:
+        it is a non-persistent class-level device tensor that is zeroed by
+        suspend/resume and must be rebuilt on restore."""
+        if getattr(hf_config, "model_type", None) != "deepseek_v4":
+            return False
+        try:
+            from scipy.linalg import hadamard  # type: ignore[import-untyped]
+        except ImportError as e:
+            raise ImportError(
+                "DeepSeek-V4 indexer attention requires SciPy for Hadamard transform. Please install scipy."
+            ) from e
+        indexer_head_dim = hf_config.index_head_dim
+        log_dim = math.ceil(math.log2(indexer_head_dim))
+        dim_padded = 2**log_dim
+        if enable_sleep_mode:
+            # Sleep mode allocates KV inside CaMemAllocator; tag Hadamard so
+            # sleep/wake does not treat it as KV cache.
+            from vllm_ascend.device_allocator.camem import CaMemAllocator
+
+            allocator = CaMemAllocator.get_instance()
+            with allocator.use_allocation_tag(CaMemAllocator.sleep_persistent_tag):
+                cls.hadamard = torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=device).to(
+                    torch.bfloat16
+                )
+        else:
+            cls.hadamard = torch.tensor(hadamard(dim_padded, dtype=float), dtype=torch.float, device=device).to(
+                torch.bfloat16
+            )
+        return True
+
+    @classmethod
+    def reload_hadamard_after_restore(cls, hf_config, device) -> bool:
+        """Rebuild the class-level Hadamard tensor after restore."""
+        return cls.build_hadamard(hf_config, device)
 
     @classmethod
     def get_cudagraph_support(
@@ -1175,6 +1230,17 @@ class AscendDSACPImpl(DSAAttentionImpl):
             metadata.num_compressed_tokens,
             metadata.num_reqs_actual,
         )
+
+    def _refresh_tp_group_runtime(self, force: bool = False) -> None:
+        tp_group = get_tp_group()
+        if not force and tp_group is self.tp_group:
+            return
+        self.tp_group = tp_group
+        self.tp_size = tp_group.world_size
+        self.tp_rank = tp_group.rank_in_group
+
+    def reset_snapshot_runtime_state(self) -> None:
+        self._refresh_tp_group_runtime(force=True)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.attn_sink.numel() != self.num_heads:

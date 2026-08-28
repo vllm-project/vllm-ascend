@@ -21,15 +21,20 @@ from typing import Any, cast
 
 import torch
 import vllm
-from torch.distributed import Backend
+from torch.distributed import Backend, ProcessGroup
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
+from vllm_ascend.snapshot.distributed import is_snapshot_hccl_teardown_enabled
 from vllm_ascend.utils import create_hccl_pg_options
 
 _HCCL_PG_REGISTRY = HcclPgRegistry()
 logger = logging.getLogger(__name__)
+
+
+def _abort_hccl_process_group(process_group: ProcessGroup) -> None:
+    process_group._get_backend(torch.device("npu")).abort_hccl_comm("reinit")
 
 
 def _normalize_backend(backend: str | Backend) -> str:
@@ -212,6 +217,10 @@ class GroupCoordinatorPatch(GroupCoordinator):
     def destroy(self):
         if getattr(self, "mq_broadcaster", None) is not None:
             self.mq_broadcaster = None
+
+        device_group = getattr(self, "device_group", None)
+        if device_group is not None and self.backend == "hccl" and is_snapshot_hccl_teardown_enabled():
+            _abort_hccl_process_group(device_group)
 
         self._release_hccl_resources()
 

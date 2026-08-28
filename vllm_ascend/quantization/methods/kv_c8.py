@@ -27,6 +27,17 @@ def _fa_quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
         param.data.copy_(loaded_weight)
 
 
+def process_fa_quant_tensor_state(layer: torch.nn.Module, kv_lora_rank: int) -> None:
+    fa_k_scale = torch.squeeze(layer.fa_k.scale).unsqueeze(0)
+    layer.fak_descale_float = torch.nn.Parameter(fa_k_scale.to(torch.float), requires_grad=False)
+    layer.fak_descale = torch.nn.Parameter(fa_k_scale, requires_grad=False)
+    reciprocal_scale = fa_k_scale.to(torch.float) if get_ascend_device_type() == AscendDeviceType.A5 else fa_k_scale
+    layer.fak_descale_reciprocal = 1.0 / reciprocal_scale
+    fa_k_offset = torch.squeeze(layer.fa_k.offset).unsqueeze(0)
+    layer.fak_offset = torch.nn.Parameter(fa_k_offset.to(layer.fak_descale.dtype), requires_grad=False)
+    layer.quant_kscale = 1.0 / fa_k_scale.repeat(kv_lora_rank).view(1, kv_lora_rank).to(torch.float)
+
+
 @register_scheme("FAKQuant", "attention")
 class AscendFAQuantAttentionMethod:
     def __init__(self):
@@ -57,19 +68,7 @@ class AscendFAQuantAttentionMethod:
             weight_param.weight_loader = _fa_quant_weight_loader
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        fa_k_scale = torch.squeeze(layer.fa_k.scale).unsqueeze(0)
-        layer.fak_descale_float = torch.nn.Parameter(fa_k_scale.to(torch.float), requires_grad=False)
-        layer.fak_descale = torch.nn.Parameter(fa_k_scale, requires_grad=False)
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            layer.fak_descale_reciprocal = 1.0 / torch.nn.Parameter(fa_k_scale.to(torch.float), requires_grad=False)
-        else:
-            layer.fak_descale_reciprocal = 1.0 / torch.nn.Parameter(fa_k_scale, requires_grad=False)
-        fa_k_offset = torch.squeeze(layer.fa_k.offset).unsqueeze(0)
-        layer.fak_offset = torch.nn.Parameter(fa_k_offset.to(layer.fak_descale.dtype), requires_grad=False)
-
-        repeated_quant_kscale = fa_k_scale.repeat(self.kv_lora_rank)
-        layer.quant_kscale = repeated_quant_kscale.view(1, self.kv_lora_rank)
-        layer.quant_kscale = 1.0 / torch.nn.Parameter(layer.quant_kscale.to(torch.float), requires_grad=False)
+        process_fa_quant_tensor_state(layer, self.kv_lora_rank)
 
 
 @register_scheme("INT8_DYNAMIC", "attention")

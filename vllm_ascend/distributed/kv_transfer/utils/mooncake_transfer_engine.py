@@ -1,5 +1,9 @@
 import threading
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class GlobalTE:
     def __init__(self):
@@ -38,6 +42,27 @@ class GlobalTE:
                 if ret_value != 0:
                     raise RuntimeError("Mooncake memory registration failed.")
             self.is_register_buffer = True
+
+    def reset(self):
+        """Drop cached TE. Caller must unregister_memory on old engine BEFORE this."""
+        with self.transfer_engine_lock:
+            old_engine = self.transfer_engine
+            self.transfer_engine = None
+        with self.register_buffer_lock:
+            self.is_register_buffer = False
+
+        if old_engine is None:
+            return
+
+        # TransferEngine 没有可用的 close/finalize；必须把最后一个 Python 引用清掉，
+        # 并立刻触发析构，不能留给 GC 延后执行。
+        try:
+            del old_engine
+            import gc
+
+            gc.collect()
+        except Exception as e:
+            logger.warning("[snapshot] destroy old TransferEngine failed: %s", e)
 
 
 global_te = GlobalTE()

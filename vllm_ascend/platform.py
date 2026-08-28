@@ -46,6 +46,7 @@ from vllm_ascend.utils import (
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
     get_ascend_device_type,
+    is_restore as is_ascend_restore,
     is_moe_model,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -145,6 +146,9 @@ class NPUPlatform(Platform):
 
     def is_sleep_mode_available(self) -> bool:
         return True
+
+    def is_restore(self) -> bool:
+        return is_ascend_restore()
 
     def is_cumem_allocator_available(self) -> bool:
         # vLLM main gates sleep mode on the platform reporting a

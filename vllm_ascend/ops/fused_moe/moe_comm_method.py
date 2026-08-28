@@ -301,6 +301,9 @@ class FusedMC2CommImpl(MoECommMethod):
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
+    def reset_snapshot_runtime_state(self) -> None:
+        self._mega_moe_symm_buffer = None
+
     def _init_mega_moe_symm_buffer(
         self,
         fused_experts_input: MoEFusedExpertsInput,
