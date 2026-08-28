@@ -42,7 +42,9 @@ class AscendMambaManager(MambaManager):
             block_pool=block_pool,
             kv_cache_spec=kv_cache_spec,
             alignment_tokens=alignment_tokens,
-            dcp_world_size=dcp_world_size,
+            # Mamba recurrent state is replicated rather than sharded across
+            # DCP ranks, so its prefix-cache lookup remains single-rank.
+            dcp_world_size=1,
             pcp_world_size=pcp_world_size,
             drop_eagle_block=drop_eagle_block,
         )
