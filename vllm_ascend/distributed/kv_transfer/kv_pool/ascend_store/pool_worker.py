@@ -2138,8 +2138,7 @@ class KVPoolWorker:
                 done_sending = set()
             else:
                 assert isinstance(send_thread, KVCacheStoreSendingThread)
-                pending_req_ids = send_thread.get_pending_request_ids()
-                done_sending = meta.delayed_free_req_ids - pending_req_ids
+                done_sending = send_thread.get_newly_finished_requests(meta.delayed_free_req_ids)
         else:
             done_sending = set()
 

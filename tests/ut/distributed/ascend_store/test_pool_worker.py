@@ -809,14 +809,14 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker = self._make_worker(kv_role="kv_producer")
 
         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
-        send_thread.get_pending_request_ids.return_value = {"r2"}
+        send_thread.get_newly_finished_requests.return_value = {"r1"}
         worker.kv_send_thread = send_thread
 
         meta = AscendConnectorMetadata(set(), set(), delayed_free_req_ids={"r1", "r2"})
         done_s, done_r = worker.get_finished({"r1", "r2"}, meta)
         self.assertEqual(done_s, {"r1"})
         self.assertEqual(done_r, set())
-        send_thread.get_pending_request_ids.assert_called_once()
+        send_thread.get_newly_finished_requests.assert_called_once_with({"r1", "r2"})
 
     def test_get_finished_consumer(self):
         worker = self._make_worker(kv_role="kv_consumer")

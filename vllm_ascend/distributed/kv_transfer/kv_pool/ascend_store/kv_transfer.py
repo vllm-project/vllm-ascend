@@ -720,6 +720,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         with self.done_task_lock:
             return set(self.stored_requests)
 
+    def get_newly_finished_requests(self, req_ids: set[str]) -> set[str]:
+        with self.done_task_lock:
+            # Keep reports sticky until the scheduler drops the request.
+            self.finished_requests.intersection_update(req_ids)
+            newly_finished = req_ids.difference(self.stored_requests.keys(), self.finished_requests)
+            self.finished_requests.update(newly_finished)
+            return newly_finished
+
     def dec_stored_request(self, req_id: str):
         with self.done_task_lock:
             count = self.stored_requests.get(req_id)

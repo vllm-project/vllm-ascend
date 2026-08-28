@@ -538,18 +538,22 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.delete_finished_stored_request("r1")
         self.assertNotIn("r1", t.stored_requests)
 
-    def test_pending_request_removed_after_all_saves_complete(self):
+    def test_terminal_request_reported_once_after_all_saves_complete(self):
         t, _ = self._make_thread()
         req = MagicMock(req_id="r1", event_id=None)
 
         t.add_stored_request("r1")
         t.add_stored_request("r1")
-        t._complete_request(req)
-        self.assertEqual(t.get_pending_request_ids(), {"r1"})
+        self.assertEqual(t.get_newly_finished_requests({"r1"}), set())
 
         t._complete_request(req)
-        self.assertEqual(t.get_pending_request_ids(), set())
-        self.assertEqual(t.get_and_clear_finished_requests(), set())
+        self.assertEqual(t.get_newly_finished_requests({"r1"}), set())
+
+        t._complete_request(req)
+        self.assertEqual(t.get_newly_finished_requests({"r1"}), {"r1"})
+        self.assertEqual(t.get_newly_finished_requests({"r1"}), set())
+        t.get_newly_finished_requests(set())
+        self.assertEqual(t.finished_requests, set())
 
     def test_dec_nonexistent_request(self):
         t, _ = self._make_thread()
