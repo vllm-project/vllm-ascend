@@ -81,8 +81,8 @@ def tensor_sum(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
     if x.device.type != "npu" or x.dtype not in _BATCH_INVARIANT_SUM_DTYPES or kwargs.get("dtype") is not None:
         return torch_tensor_sum(x, *args, **kwargs)
 
-    dim = args[0] if args else kwargs.get("dim", kwargs.get("axis"))
-    keepdim = args[1] if len(args) > 1 else kwargs.get("keepdim", kwargs.get("keepdims", False))
+    dim = args[0] if args else kwargs.get("dim")
+    keepdim = args[1] if len(args) > 1 else kwargs.get("keepdim", False)
     reduce_dim = dim[0] if isinstance(dim, (tuple, list)) and len(dim) == 1 else dim
     if not isinstance(reduce_dim, int):
         return torch_tensor_sum(x, *args, **kwargs)
