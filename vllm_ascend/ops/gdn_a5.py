@@ -92,7 +92,6 @@ class GDNOperator(StrEnum):
 
 _STAGE1_NATIVE_ONLY = {
     GDNOperator.L2NORM_FWD,
-    GDNOperator.RECURRENT_GATED_DELTA_RULE,
 }
 _STAGE1_REPLACEMENTS = tuple(operator for operator in GDNOperator if operator not in _STAGE1_NATIVE_ONLY)
 
@@ -347,10 +346,15 @@ def resolve_fla_operator(operator: GDNOperator) -> tuple[Callable[..., Any], str
 
 
 def _resolve_fla_recurrent_operator() -> tuple[Callable[..., Any], str]:
-    raise AttributeError(
-        "flash-linear-attention-npu does not expose recurrent_gated_delta_rule; "
-        "use the vllm-ascend native operator"
-    )
+    # fla_npu >= PR #363 exposes the stable recurrent entry point; the
+    # ctypes signature (query, key, value, state, *, beta, scale,
+    # actual_seq_lengths, ssm_state_indices, num_accepted_tokens, g, gk)
+    # matches run_gdn_decode_pipeline's call contract exactly.
+    module_name = "fla_npu.ops.ascendc"
+    attribute = "recurrent_gated_delta_rule"
+    module = importlib.import_module(module_name)
+    resolved = getattr(module, attribute)
+    return resolved, f"{module_name}.{attribute}"
 
 
 class A5GDNOperatorDispatcher:
@@ -945,7 +949,7 @@ class A5GDNAdapter:
             native=l2norm_fwd,
             native_symbol="vllm.third_party.fla.l2norm_fwd",
         )
-        recurrent_selection = self.dispatcher.select_native_only(
+        recurrent_selection = self.dispatcher.select(
             GDNOperator.RECURRENT_GATED_DELTA_RULE,
             self.signature,
             native=torch.ops._C_ascend.npu_recurrent_gated_delta_rule,

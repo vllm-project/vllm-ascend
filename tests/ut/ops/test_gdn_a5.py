@@ -94,7 +94,6 @@ def test_parse_gdn_backend_config_rejects_invalid_global_mode(mode):
         "causal_conv1d=invalid",
         "causal_conv1d=auto",
         "l2norm_fwd=fla_npu",
-        "recurrent_gated_delta_rule=fla_npu",
         "causal_conv1d=native,causal_conv1d=fla_npu",
         "causal_conv1d",
         "=native",
