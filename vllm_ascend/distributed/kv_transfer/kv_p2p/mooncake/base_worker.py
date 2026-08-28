@@ -24,6 +24,7 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadata,
@@ -195,7 +196,16 @@ class MooncakeBaseConnectorWorker:
                 configured_layer_names.add(layer_name)
                 layer_names.append(layer_name)
                 spec_index = self.layer_name_to_spec_index[layer_name]
-                layer_block_sizes.append(self.kv_cache_specs[spec_index].block_size)
+                spec = self.kv_cache_specs[spec_index]
+                layer_block_size = spec.block_size
+                if isinstance(spec, AscendSFAIndexerCacheSpec):
+                    # The cache manager treats one SFA indexer block as a DCP
+                    # virtual block, while every worker physically stores all
+                    # replicated indexer blocks. Publish the virtual token span
+                    # so dividing it by the tensor block scale recovers the
+                    # physical kernel block size.
+                    layer_block_size *= spec.sfa_dcp_replicated_indexer_size
+                layer_block_sizes.append(layer_block_size)
                 group_indices.append(self.layer_name_to_group_index[layer_name])
                 kv_caches_base_addr.append(base_addrs)
                 block_strides_per_layer.append(block_strides)
