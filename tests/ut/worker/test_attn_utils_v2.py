@@ -40,9 +40,7 @@ from vllm_ascend.worker.v2.model_states.default import AscendModelState
     ("replicated_indexer", "expected_size"),
     [(False, 1), (True, 4)],
 )
-def test_sfa_indexer_cache_spec_uses_dcp_replication(
-    monkeypatch, replicated_indexer, expected_size
-):
+def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_indexer, expected_size):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
     torch.nn.Module.__init__(indexer_module)
@@ -437,11 +435,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
                 common_metadata.is_prefilling,
                 torch.tensor([True, True, False, False]),
             )
-        expected_dcp_local_seq_lens = (
-            dcp_local_seq_lens[:2]
-            if caller == "default"
-            else dcp_local_seq_lens
-        )
+        expected_dcp_local_seq_lens = dcp_local_seq_lens[:2] if caller == "default" else dcp_local_seq_lens
         torch.testing.assert_close(common_metadata.dcp_local_seq_lens, expected_dcp_local_seq_lens)
     cache_name = "common_ratio_to_sas_metadata"
     assert calls[0][cache_name] is calls[1][cache_name]
