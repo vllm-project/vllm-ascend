@@ -52,8 +52,12 @@ def _patch_pool_scheduler_importlib():
 def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config = MagicMock()
     config.kv_transfer_config.kv_role = kv_role
-    config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
+    config.kv_transfer_config.kv_connector_extra_config = {
+        "backend": "yuanrong",
+        **(extra_config or {}),
+    }
     config.kv_transfer_config.get_from_extra_config.return_value = True
+    config.additional_config = {}
     config.parallel_config.data_parallel_rank = 0
     config.parallel_config.prefill_context_parallel_size = 1
     config.parallel_config.decode_context_parallel_size = 1
@@ -127,6 +131,41 @@ class TestKVPoolScheduler(unittest.TestCase):
                 scheduler = KVPoolScheduler(self._make_config(role, block_size=block_size), use_layerwise=False)
                 request = MagicMock(prompt_token_ids=list(range(token_count)))
                 self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_scheduler_client_lookup_for_mooncake_and_memcache(self, mock_client_cls):
+        for backend_name in ("mooncake", "memcache"):
+            with self.subTest(backend=backend_name):
+                scheduler = KVPoolScheduler(
+                    self._make_config(extra_config={"backend": backend_name}),
+                    use_layerwise=False,
+                )
+                scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 0]
+                request = MagicMock(
+                    prompt_token_ids=list(range(64)),
+                    num_tokens=64,
+                    request_id=f"r-{backend_name}",
+                    block_hashes=[bytes([index]) * 32 for index in range(4)],
+                )
+
+                self.assertEqual(scheduler.get_num_new_matched_tokens(request, 16), (32, False))
+                scheduler.store_scheduler.batch_is_exist.assert_called_once()
+                mock_client_cls.assert_not_called()
+
+    def test_scheduler_client_full_hbm_hit_skips_store_lookup(self):
+        scheduler = KVPoolScheduler(
+            self._make_config(extra_config={"backend": "mooncake"}),
+            use_layerwise=False,
+        )
+        request = MagicMock(
+            prompt_token_ids=list(range(64)),
+            num_tokens=64,
+            request_id="r1",
+            block_hashes=[bytes([index]) * 32 for index in range(4)],
+        )
+
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 64), (0, False))
+        scheduler.store_scheduler.batch_is_exist.assert_not_called()
 
     def test_mooncake_layerwise_hit_requires_every_saving_rank(self):
         config = self._make_config(extra_config={"backend": "mooncake", "use_layerwise": True})
@@ -723,7 +762,7 @@ class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
         cases = [
             ({}, False, 1),
             ({"num_layers": 4}, True, 4),
-            ({"tp_size": 2, "put_step": 1}, False, 2),
+            ({"tp_size": 2, "num_kv_head": 2, "put_step": 1}, False, 2),
         ]
         for attributes, include_layers, expected_count in cases:
             with self.subTest(attributes=attributes, include_layers=include_layers):
@@ -733,6 +772,18 @@ class TestKVPoolSchedulerStoreQueryKeys(unittest.TestCase):
                 result = scheduler._generate_store_query_keys([b"\xaa\xbb"], include_layers=include_layers)
                 self.assertEqual(len(result), 1)
                 self.assertEqual(len(result[0]), expected_count)
+
+    def test_lookup_prefixes_cover_all_parallel_ranks(self):
+        scheduler = self._make_scheduler()
+        scheduler.dcp_size = 2
+        scheduler.tp_size = 4
+        scheduler.pp_size = 2
+        scheduler.num_kv_head = 4
+
+        prefixes = scheduler._get_lookup_key_prefixes(0)
+
+        self.assertEqual(len(prefixes), 16)
+        self.assertIn("@dcp:1@head_or_tp_rank:3@pp_rank:1@", prefixes[-1])
 
 
 class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
@@ -758,6 +809,66 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
                 request.block_hashes = [b"\xaa"] * hash_count
                 result = scheduler._get_store_lookup_hit_tokens(request, 64, computed_tokens)
                 self.assertEqual(result, expected)
+
+    def test_align_state_uses_latest_aligned_hit(self):
+        scheduler = self._make_scheduler()
+        scheduler.group_uses_align_state = [True]
+        scheduler.cache_transfer_granularity = 32
+        scheduler.store_scheduler.batch_is_exist.return_value = [0, 1, 0, 1]
+        request = MagicMock(request_id="r1", block_hashes=[b"\xaa"] * 4)
+
+        result = scheduler._get_store_lookup_hit_tokens(request, 64, 0)
+
+        self.assertEqual(result, 64)
+
+
+class TestKVPoolSchedulerCoordinatedLookup(unittest.TestCase):
+    def _make_scheduler(self):
+        scheduler = KVPoolScheduler.__new__(KVPoolScheduler)
+        scheduler.cache_coordinator = MagicMock()
+        scheduler.cache_coordinator.group_effective_block_sizes = [16, 32]
+        scheduler.kv_cache_group_families = ["c1", "c1"]
+        scheduler.dcp_size = 1
+        scheduler.tp_size = 1
+        scheduler.pp_size = 1
+        scheduler.pp_rank = 0
+        scheduler.num_kv_head = 1
+        scheduler.use_mla = False
+        scheduler.use_sparse = False
+        scheduler.use_kvpp = False
+        scheduler.group_uses_align_state = [False, False]
+        scheduler.tp_mismatch = False
+        scheduler.effective_tp_size = 1
+        scheduler.model_name = "model"
+        scheduler.store_scheduler = MagicMock()
+        scheduler.store_scheduler.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
+        return scheduler
+
+    def test_queries_each_group_and_delegates_hit_resolution(self):
+        scheduler = self._make_scheduler()
+        request = MagicMock(
+            request_id="r1",
+            block_hashes=[bytes([index]) * 32 for index in range(4)],
+        )
+
+        def find_hits(block_hashes, token_len, query_group_hits, **_kwargs):
+            self.assertEqual(token_len, 64)
+            query_group_hits(0, block_hashes, None)
+            query_group_hits(1, block_hashes[::2], None)
+            return 64
+
+        scheduler.cache_coordinator.find_reachable_hit_tokens.side_effect = find_hits
+
+        hit_tokens = scheduler._get_coordinated_lookup_hit_tokens(request, 64, 16)
+
+        self.assertEqual(hit_tokens, 64)
+        self.assertEqual(scheduler.store_scheduler.batch_is_exist.call_count, 2)
+        group0_keys = scheduler.store_scheduler.batch_is_exist.call_args_list[0].args[0]
+        group1_keys = scheduler.store_scheduler.batch_is_exist.call_args_list[1].args[0]
+        self.assertEqual(len(group0_keys), 3)
+        self.assertEqual(len(group1_keys), 2)
+        self.assertTrue(all("@group:0@" in key for key in group0_keys))
+        self.assertTrue(all("@group:1@" in key for key in group1_keys))
 
 
 class TestKVPoolSchedulerFloorGranularity(unittest.TestCase):

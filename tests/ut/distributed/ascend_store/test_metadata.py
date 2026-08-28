@@ -18,6 +18,7 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -33,14 +34,42 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_kv_pool_lookup_tp_size,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
+    infer_group_cache_families,
     masked_block_runs,
     uses_hybrid_kv_cache,
 )
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):
+    def test_lookup_tp_size_matches_worker_key_sharding(self):
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, False, False), 4)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, True, False), 1)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, False, True), 1)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, True, False, use_align_state=True), 8)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, False, False, effective_tp_size=16), 16)
+        self.assertEqual(get_kv_pool_lookup_tp_size(8, 4, True, False, use_kvpp=True), 8)
+
+    def test_sparse_group_uses_mixed_cache_family(self):
+        group = SimpleNamespace(
+            kv_cache_spec=SimpleNamespace(compress_ratio=None),
+            layer_names=[],
+        )
+        self.assertEqual(infer_group_cache_families([group], None, use_sparse=True), ["mixed"])
+
+    def test_missing_spec_ratio_falls_back_to_model_ratio(self):
+        group = SimpleNamespace(
+            kv_cache_spec=SimpleNamespace(compress_ratio=None),
+            layer_names=["model.layers.0.self_attn"],
+        )
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata._get_layer_compress_ratio",
+            return_value=4,
+        ):
+            self.assertEqual(infer_group_cache_families([group], [4]), ["c4"])
+
     def test_uses_hybrid_kv_cache(self):
         groups = [
             SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16)),
