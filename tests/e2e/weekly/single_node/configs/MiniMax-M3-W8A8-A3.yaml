@@ -3,7 +3,7 @@
 # ==========================================
 
 test_cases:
-  - name: "MiniMax-M3-W8A8-A3"
+  - name: "MiniMax-M3-W8A8"
     model: "Eco-Tech/MiniMax-M3-w8a8-0626"
     envs:
       VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "30000"
