@@ -425,10 +425,11 @@ def test_stateful_handoff_preserves_decode_graph(
         tensor_parallel_size=8,
         use_sequence_parallel_moe=True,
     )
+    cudagraph_capture_sizes = [8, 16, 24, 32]
     runner.compilation_config = SimpleNamespace(
         pass_config=SimpleNamespace(enable_sp=True),
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
-        cudagraph_capture_sizes=[8, 16, 24, 32],
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
         max_cudagraph_capture_size=32,
         compile_sizes=[],
     )
@@ -447,6 +448,9 @@ def test_stateful_handoff_preserves_decode_graph(
         num_prompt_tokens=np.array(prompts),
         lora_id_to_lora_request={},
     )
+    runner.ascend_config = SimpleNamespace(
+        get_mc2_comm_alg=lambda: "", finegrained_tp_config=SimpleNamespace(max_finegrained_tp_size=1)
+    )
     runner.cudagraph_dispatcher = CudagraphDispatcher(runner.vllm_config)
     runner.cudagraph_dispatcher.initialize_cudagraph_keys(
         CUDAGraphMode.FULL_DECODE_ONLY, runner.uniform_decode_query_len
@@ -461,8 +465,9 @@ def test_stateful_handoff_preserves_decode_graph(
     monkeypatch.setattr(f"{module}.should_skip_allreduce_across_dp_group", lambda *args: False)
     monkeypatch.setattr(f"{module}.get_dp_group", lambda: SimpleNamespace(cpu_group=None))
     monkeypatch.setattr(f"{module}.dist.all_reduce", all_reduce)
+    num_tokens = sum(scheduled)
     mode, descriptor, _, tokens_across_dp, _ = runner._determine_batch_execution_and_padding(
-        num_tokens=sum(scheduled),
+        num_tokens=num_tokens,
         num_reqs=len(scheduled),
         num_scheduled_tokens_np=np.array(scheduled, dtype=np.int32),
         max_num_scheduled_tokens=max(scheduled),
@@ -472,5 +477,12 @@ def test_stateful_handoff_preserves_decode_graph(
     assert mode == expected_mode
     assert descriptor.uniform == (expected_mode == CUDAGraphMode.FULL)
     if dp_size > 1:
-        assert descriptor.num_tokens == 32
-        torch.testing.assert_close(tokens_across_dp, torch.full((dp_size,), 32, dtype=torch.int32))
+        padded_num_tokens = num_tokens
+        for capture_size in cudagraph_capture_sizes:
+            if num_tokens <= capture_size:
+                padded_num_tokens = capture_size
+                break
+        assert descriptor.num_tokens == padded_num_tokens
+        expected_tokens_across_dp = torch.full((dp_size,), 32, dtype=torch.int32)
+        expected_tokens_across_dp[0] = padded_num_tokens
+        torch.testing.assert_close(tokens_across_dp, expected_tokens_across_dp)

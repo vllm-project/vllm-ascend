@@ -948,10 +948,13 @@ class FinegrainedTPConfig:
             "mlp_tensor_parallel_size",
             "olora_tensor_parallel_size",
         )
+        self.max_finegrained_tp_size = 1
         for field_name in size_fields:
             value = getattr(self, field_name)
             if value < 0:
                 raise ValueError(f"finegrained_tp_config.{field_name} must be non-negative, got {value}")
+            self.max_finegrained_tp_size = max(self.max_finegrained_tp_size, value)
+
         return self
 
     def _validate_preconditions(self, vllm_config: Any):
