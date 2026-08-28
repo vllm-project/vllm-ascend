@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import importlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -23,6 +25,7 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -39,6 +42,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.utils import (
@@ -72,6 +76,112 @@ else:
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+
+# ---------------------------------------------------------------------------
+# FIA v2 sink integration (fia_v2_sink_ops, phase A: eager + graph routing).
+# Copied from the DSpark omni-sink integration with the §2.1 renames applied:
+# omni_custom_ops -> fia_v2_sink_ops and the two op names below. Both switches
+# default to 0 (registered in vllm_ascend/envs.py); the graph-mode switch
+# guards an UNVERIFIED aclgraph path (see F1 note at the capture branch).
+# Following the DSpark integration's delegation principle: the framework only
+# routes and checks op registration; input validity (head topology, head dim,
+# dtype, layout) is validated by the sink operators themselves.
+# ---------------------------------------------------------------------------
+_FIA_V2_SINK_META_CACHE_ATTR = "_ascend_fia_v2_sink_meta_cache"
+_FIA_V2_SINK_REQUIRED_OPS = (
+    "_npu_fused_infer_attention_score_v2_sink_metadata",
+    "npu_fused_infer_attention_score_v2_sink",
+)
+_FIA_V2_SINK_ENABLED = bool(envs.VLLM_ASCEND_ENABLE_FIA_V2_SINK)
+_FIA_V2_SINK_GRAPH_ENABLED = bool(envs.VLLM_ASCEND_ENABLE_FIA_V2_SINK_GRAPH)
+_fia_v2_sink_ops_registered = False
+
+
+def _ensure_fia_v2_sink_ops_registered() -> None:
+    """Load fia_v2_sink_ops and fail early when its sink ops are unavailable."""
+    global _fia_v2_sink_ops_registered
+    if _fia_v2_sink_ops_registered:
+        return
+
+    try:
+        importlib.import_module("fia_v2_sink_ops")
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "VLLM_ASCEND_ENABLE_FIA_V2_SINK=1 requires the fia_v2_sink_ops "
+            "wheel. Install it and set ASCEND_CUSTOM_OPP_PATH to both custom "
+            "OPP entries of the delivery kit."
+        ) from exc
+
+    missing_ops = [name for name in _FIA_V2_SINK_REQUIRED_OPS if not hasattr(torch.ops.custom, name)]
+    if missing_ops:
+        raise RuntimeError(
+            "fia_v2_sink_ops was imported but the required FIA v2 sink operators "
+            f"were not registered: {', '.join(missing_ops)}. Check that "
+            "ASCEND_CUSTOM_OPP_PATH points at both delivered OPP entries."
+        )
+    _fia_v2_sink_ops_registered = True
+
+
+def _get_or_compute_fia_v2_sink_inputs(
+    cache_key: tuple[int | bool | None, ...],
+    compute: Callable[[], tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute device seq tensors and metadata once per forward/signature.
+
+    During aclgraph capture the first layer records the conversion, metadata and
+    sink dependency. Later layers reuse the same tensors. Graph replay therefore
+    reruns one metadata op per signature while keeping all captured addresses
+    stable. Eager forwards get a fresh context-local cache on every step.
+    """
+    forward_context = get_forward_context()
+    cache = getattr(forward_context, _FIA_V2_SINK_META_CACHE_ATTR, None)
+    if cache is None:
+        cache = {}
+        setattr(forward_context, _FIA_V2_SINK_META_CACHE_ATTR, cache)
+    if cache_key not in cache:
+        cache[cache_key] = compute()
+    return cache[cache_key]
+
+
+def _build_fia_v2_sink_seq_tensors(
+    num_tokens: int,
+    num_reqs: int,
+    seq_lens: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build legal device-side TND lengths without host synchronization.
+
+    Main-model query blocks are not uniform (mixed prefill), so cumulative Q
+    lengths come from the device-side query_start_loc tensor whenever it is
+    available; the uniform-block arange derivation below is kept verbatim from
+    the DSpark integration as fallback for producers without that tensor.
+    KV lengths map to int64 on the same device; padded dummy requests keep a
+    strictly positive length because FIA sink rejects non-positive values.
+    """
+    if (
+        query_start_loc is not None
+        and query_start_loc.device.type == "npu"
+        and query_start_loc.numel() == num_reqs + 1
+    ):
+        actual_seq_qlen = query_start_loc[1 : num_reqs + 1].to(torch.int64)
+    else:
+        # DSpark原文路径：均匀块直接 arange×每req token 数得累积和。
+        if num_reqs <= 0 or num_tokens % num_reqs != 0:
+            raise RuntimeError(
+                "FIA v2 sink requires a non-empty uniform query batch when no "
+                "device-side query_start_loc is available: "
+                f"num_tokens={num_tokens}, num_reqs={num_reqs}"
+            )
+        device = query_start_loc.device if query_start_loc is not None else seq_lens.device
+        actual_seq_qlen = torch.arange(1, num_reqs + 1, dtype=torch.int64, device=device) * (
+            num_tokens // num_reqs
+        )
+    # Eager metadata may keep seq_lens host-resident while query_start_loc is
+    # on device; the [B]-element H2D stays asynchronous and sync-free.
+    if seq_lens.device != actual_seq_qlen.device:
+        seq_lens = seq_lens.to(device=actual_seq_qlen.device, non_blocking=True)
+    actual_seq_kvlen = seq_lens[:num_reqs].to(torch.int64).clamp_min(1)
+    return actual_seq_qlen, actual_seq_kvlen
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -538,6 +648,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
         self._layer_name: str | None = None
+        # FIA v2 sink (phase A): fail fast at engine start when a switch is
+        # explicitly enabled but the wheel/OPP package is half-deployed, so it
+        # cannot silently fall back or route nowhere mid-serving.
+        self._fia_v2_sink_requested = _FIA_V2_SINK_ENABLED or _FIA_V2_SINK_GRAPH_ENABLED
+        if self._fia_v2_sink_requested:
+            _ensure_fia_v2_sink_ops_registered()
+        # Static per-layer facts are resolved once here instead of per step,
+        # so the hot path reads a single routing conclusion. Only facts the
+        # sink operators cannot see live in this gate: head topology, head
+        # dim, dtype and layout are passed to the ops as inputs and validated
+        # by the ops themselves (delegation principle of the DSpark
+        # integration), so the framework must not duplicate their capability
+        # tables.
+        self._fia_v2_sink_layer_ok = self._fia_v2_sink_requested and (
+            self.sliding_window is None
+            and self.sinks is None
+            and self.attn_type != AttentionType.ENCODER_DECODER
+            and not self.enable_c8_quant
+        )
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -1344,6 +1473,158 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
+    def _use_fia_v2_sink(self, attn_metadata: AscendMetadata) -> bool:
+        """Whether this layer/batch may be dispatched to the FIA v2 sink ops.
+
+        Static layer facts were resolved once in __init__
+        (_fia_v2_sink_layer_ok); input validity beyond those (head topology,
+        head dim, dtype, layout) is delegated to the sink operators, which
+        receive them as inputs. Routing keeps only conditions the operators
+        cannot judge: the batch must be paged (PrefillNoCache runs on inline
+        KV) and the seq/block_table tensors must cover the query batch —
+        any mismatch falls back to the official path because the AICPU
+        metadata op fails with a process-level crash on illegal inputs
+        (plans/10 §5.5-L2), not with a catchable error.
+        """
+        if not self._fia_v2_sink_layer_ok or attn_metadata is None:
+            return False
+        num_reqs = len(attn_metadata.actual_seq_lengths_q)
+        return (
+            attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
+            and num_reqs > 0
+            and attn_metadata.seq_lens is not None
+            and attn_metadata.query_start_loc is not None
+            and attn_metadata.seq_lens.shape[0] >= num_reqs
+            and attn_metadata.query_start_loc.numel() >= num_reqs + 1
+            and attn_metadata.block_tables.shape[0] >= num_reqs
+        )
+
+    def _forward_fia_v2_sink(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+        kv_cache=None,
+    ) -> torch.Tensor:
+        """Main-model attention via the two-stage FIA v2 sink operators.
+
+        Copied from the DSpark integration (_forward_fia_sink) with three
+        deltas per docs/13 §2: (1) op names / wheel swapped to fia_v2_sink_ops;
+        (2) return_softmax_lse=True keeps the (out, lse) tuple contract of the
+        delivered schema (omni returned it unconditionally); (3) sparse_mode /
+        atten_mask are forwarded instead of hardcoded non-causal DSpark
+        semantics, because this path serves causal main models — sliding-window
+        (sparse_mode=4) layers never reach here (guarded in _use_fia_v2_sink).
+        Both seq tensors stay on device: the metadata stage reads them on AICPU
+        and no seq_lens.tolist()/item() host sync happens in this forward.
+        """
+        if self.key_cache is None and kv_cache is not None:
+            if (
+                isinstance(kv_cache, torch.Tensor)
+                and kv_cache.dim() > 0
+                and kv_cache.shape[0] == 2
+                or isinstance(kv_cache, (list, tuple))
+                and len(kv_cache) >= 2
+            ):
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+        if self.key_cache is None:
+            raise RuntimeError("key_cache is None in _forward_fia_v2_sink")
+
+        num_block, block_size, _, _ = self.key_cache.shape
+        key = self.key_cache.view(num_block, block_size, -1)
+        value = self.value_cache.view(num_block, block_size, -1)
+        block_table = attn_metadata.block_tables
+
+        num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        query = query[:num_tokens]
+
+        num_reqs = len(attn_metadata.actual_seq_lengths_q)
+        if block_table.shape[0] < num_reqs:
+            raise RuntimeError(
+                "FIA v2 sink block table has fewer rows than requests: "
+                f"rows={block_table.shape[0]}, num_reqs={num_reqs}"
+            )
+        block_table = block_table[:num_reqs]
+
+        sparse_mode = 3 if attn_metadata.causal else 0
+        atten_mask = attn_metadata.attn_mask if sparse_mode == 3 else None
+
+        cache_key = (
+            attn_metadata.query_start_loc.data_ptr(),
+            attn_metadata.seq_lens.data_ptr(),
+            num_tokens,
+            num_reqs,
+            sparse_mode,
+            atten_mask is not None,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_size,
+            block_size,
+        )
+
+        def compute_sink_inputs() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            actual_seq_qlen, actual_seq_kvlen = _build_fia_v2_sink_seq_tensors(
+                num_tokens,
+                num_reqs,
+                attn_metadata.seq_lens,
+                attn_metadata.query_start_loc,
+            )
+            # Explicit aic/aiv counts: the schema defaults (24/48) do not match
+            # this SoC, and get_stream_limit is the omni/vllm convention the
+            # delivered wheel was validated with.
+            stream_limit = torch.npu.get_stream_limit(torch.npu.current_stream())
+            meta_data = torch.ops.custom._npu_fused_infer_attention_score_v2_sink_metadata(
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_size,
+                self.head_size,
+                actual_seq_lengths=actual_seq_qlen,
+                actual_seq_lengths_kv=actual_seq_kvlen,
+                batch_size=num_reqs,
+                sparse_mode=sparse_mode,
+                pre_tokens=SWA_INT_MAX,
+                next_tokens=SWA_INT_MAX,
+                input_layout="TND",
+                input_layout_kv="BnBsH",
+                sink_num=0,
+                block_size=block_size,
+                aic_core_num=stream_limit["cube_core_num"],
+                aiv_core_num=stream_limit["vector_core_num"],
+            )
+            return actual_seq_qlen, actual_seq_kvlen, meta_data
+
+        actual_seq_qlen, actual_seq_kvlen, meta_data = _get_or_compute_fia_v2_sink_inputs(
+            cache_key,
+            compute_sink_inputs,
+        )
+
+        attn_output, _ = torch.ops.custom.npu_fused_infer_attention_score_v2_sink(
+            query,
+            key,
+            value,
+            query_rope=None,
+            key_rope=None,
+            atten_mask=atten_mask,
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_kvlen,
+            block_table=block_table,
+            meta_data=meta_data,
+            num_query_heads=self.num_heads,
+            num_key_value_heads=self.num_kv_heads,
+            softmax_scale=self.scale,
+            input_layout="TND",
+            sparse_mode=sparse_mode,
+            block_size=block_size,
+            pre_tokens=SWA_INT_MAX,
+            next_tokens=SWA_INT_MAX,
+            return_softmax_lse=True,
+        )
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output[:num_tokens]
+        return output
+
     def forward_fused_infer_attention(
         self,
         query: torch.Tensor,
@@ -1357,6 +1638,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
+            if _FIA_V2_SINK_GRAPH_ENABLED and self._use_fia_v2_sink(attn_metadata):
+                # ⚠️ F1 未证路径（docs/13 §0，运行验证前一律视为未证）：
+                # 私有仓模板 docstring 声称 aclgraph capture 后 replay 会重执行
+                # metadata op；但 9.1/9.2 双环境的决定性探针实测相反——含
+                # DNN_VM_AICPU 自定义节点的图重放不刷新 AICPU 输出，metadata
+                # 内容固化在捕获时刻，主算子随图烘焙捕获时的分核计划。本分支
+                # 照抄模板 inline 捕获结构，因此继承同一风险。阶段B 开启前必须
+                # 先独立跑通 tests/aclgraph_decisive_replay_probe.py 并留证；
+                # 默认由子开关 VLLM_ASCEND_ENABLE_FIA_V2_SINK_GRAPH 关闭。
+                return self._forward_fia_v2_sink(query, key, value, attn_metadata, output, kv_cache)
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1365,6 +1656,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
+        elif _FIA_V2_SINK_ENABLED and self._use_fia_v2_sink(attn_metadata):
+            # Eager dispatch（主开关 VLLM_ASCEND_ENABLE_FIA_V2_SINK）：
+            # seq 张量全程驻留 device，AICPU metadata 每步按真值分核，
+            # 动态 batch 形态合法，eager 路径不受 F1 影响。
+            return self._forward_fia_v2_sink(query, key, value, attn_metadata, output, kv_cache)
         passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
