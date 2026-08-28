@@ -27,6 +27,10 @@ def copy_and_expand_dflash_dspark_ref(
     num_query_per_req,
     num_speculative_tokens,
     sample_from_anchor,
+    total_cp_world_size=1,
+    current_cp_rank=0,
+    cp_kv_cache_interleave_size=1,
+    pad_id=-1,
 ):
     """Pure-PyTorch reference of the serial kernel logic (golden)."""
     batch_size = next_token_ids.shape[0]
@@ -67,9 +71,15 @@ def copy_and_expand_dflash_dspark_ref(
             out_query_positions[query_out_idx] = query_pos
 
             query_cache_pos = effective_seq_len + q_idx
-            block_num_q = query_cache_pos // KV_BLOCK_SIZE
+            virtual_block = KV_BLOCK_SIZE * total_cp_world_size
+            virtual_offset = query_cache_pos % virtual_block
+            owner = (virtual_offset // cp_kv_cache_interleave_size) % total_cp_world_size
+            local_offset = (
+                virtual_offset // (total_cp_world_size * cp_kv_cache_interleave_size)
+            ) * cp_kv_cache_interleave_size + virtual_offset % cp_kv_cache_interleave_size
+            block_num_q = query_cache_pos // virtual_block + local_offset // KV_BLOCK_SIZE
             block_id_q = block_table[req_idx, block_num_q].to(torch.int64).item()
-            slot_q = block_id_q * KV_BLOCK_SIZE + (query_cache_pos % KV_BLOCK_SIZE)
+            slot_q = block_id_q * KV_BLOCK_SIZE + local_offset % KV_BLOCK_SIZE if owner == current_cp_rank else pad_id
             out_query_slot_mapping[query_out_idx] = slot_q
 
             if q_idx == 0:
@@ -94,22 +104,39 @@ def copy_and_expand_dflash_dspark_ref(
     }
 
 
-# (batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected)
+# (batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected,
+#  total_cp_world_size, current_cp_rank, cp_kv_cache_interleave_size)
 CONFIGS = [
-    (1, [4], 3, False, False),
-    (64, [4] * 64, 3, False, False),
-    (256, [4] * 256, 3, False, False),
-    (1, [2048], 3, False, False),
-    (4, [1024] * 4, 3, False, False),
-    (8, [512] * 8, 3, False, False),
-    (64, [4] * 64, 3, True, False),
-    (64, [4] * 64, 3, False, True),
-    (8, [512] * 8, 3, True, True),
+    (1, [4], 3, False, False, 1, 0, 1),
+    (64, [4] * 64, 3, False, False, 1, 0, 1),
+    (256, [4] * 256, 3, False, False, 1, 0, 1),
+    (1, [2048], 3, False, False, 1, 0, 1),
+    (4, [1024] * 4, 3, False, False, 1, 0, 1),
+    (8, [512] * 8, 3, False, False, 1, 0, 1),
+    (64, [4] * 64, 3, True, False, 1, 0, 1),
+    (64, [4] * 64, 3, False, True, 1, 0, 1),
+    (8, [512] * 8, 3, True, True, 1, 0, 1),
+    (4, [32] * 4, 3, True, False, 8, 0, 1),
+    (4, [32] * 4, 3, True, False, 8, 3, 1),
+    (4, [32] * 4, 3, True, False, 8, 7, 1),
 ]
 
 
-@pytest.mark.parametrize("batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected", CONFIGS)
-def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected):
+@pytest.mark.parametrize(
+    "batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected,"
+    "total_cp_world_size,current_cp_rank,cp_kv_cache_interleave_size",
+    CONFIGS,
+)
+def test_copy_and_expand_dflash_dspark(
+    batch_size,
+    ctx_lens,
+    num_spec,
+    sample_from_anchor,
+    has_num_rejected,
+    total_cp_world_size,
+    current_cp_rank,
+    cp_kv_cache_interleave_size,
+):
     init_device_properties_triton()
     device = "npu"
     torch.manual_seed(0)
@@ -162,6 +189,9 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
         num_query_per_req,
         num_spec,
         sample_from_anchor,
+        total_cp_world_size,
+        current_cp_rank,
+        cp_kv_cache_interleave_size,
     )
 
     # Run Triton kernel
@@ -197,6 +227,10 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
         batch_size=batch_size,
         HAS_NUM_REJECTED=has_num_rejected,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
+        total_cp_world_size=total_cp_world_size,
+        current_cp_rank=current_cp_rank,
+        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        PAD_ID=-1,
         TILE_SIZE=_COPY_EXPAND_TILE_SIZE,
     )
 
