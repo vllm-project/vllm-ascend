@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerTransferTask,
     ReqMeta,
     SharedBlockData,
+    block_hash_to_str,
     get_block_hashes,
 )
 # isort: on
@@ -718,7 +719,37 @@ class KVCacheStoreSendingThread(KVTransferThread):
         def should_skip(start: int, end: int) -> bool:
             return skip_end > skip_start and start >= skip_start and end <= skip_end
 
-        for group_id in req_meta.kv_cache_group_ids or [0]:
+        group_ids = req_meta.kv_cache_group_ids or [0]
+        key_block_hashes = req_meta.block_hashes
+        # Serialize once only when a fine-grained group is guaranteed to visit
+        # every valid hash. Filtered or incremental saves keep lazy conversion.
+        if (
+            len(group_ids) > 1
+            and req_meta.save_start_token == 0
+            and store_masks is None
+            and skip_end <= skip_start
+            and self.put_step <= 1
+            and key_block_hashes
+            and not isinstance(key_block_hashes[0], str)
+        ):
+            hash_block_size = self.token_database.hash_block_size
+            valid_hash_count = min(len(key_block_hashes), (token_len + hash_block_size - 1) // hash_block_size)
+            covers_all_hashes = any(
+                self._get_block_size(group_id)
+                * infer_cache_family_ratio(self.token_database.group_cache_families["kv"].get(group_id))
+                == hash_block_size
+                and not self._skip_null_blocks(req_meta, group_id)
+                and group_id < len(req_meta.block_ids_by_group)
+                and len(req_meta.block_ids_by_group[group_id]) >= valid_hash_count
+                for group_id in group_ids
+            )
+            if covers_all_hashes:
+                key_block_hashes = list(key_block_hashes)
+                key_block_hashes[:valid_hash_count] = [
+                    block_hash_to_str(block_hash) for block_hash in key_block_hashes[:valid_hash_count]
+                ]
+
+        for group_id in group_ids:
             group_block_size = self._get_block_size(group_id)
             cache_family = self.token_database.group_cache_families["kv"].get(group_id)
             raw_group_block_size = group_block_size * infer_cache_family_ratio(cache_family)
@@ -768,7 +799,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             pre_shard = self.dcp_size <= 1 and not align_state_group
             iterator = self.token_database.process_token_key_strings_with_block_ids(
                 token_len,
-                req_meta.block_hashes,
+                key_block_hashes,
                 block_ids,
                 mask_num=req_meta.save_start_token,
                 kv_cache_group_id=group_id,
@@ -788,15 +819,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if not keys:
                 continue
             exists_states = self.lookup(keys)
-            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
-            if not missing_indices:
-                continue
-            starts = [starts[index] for index in missing_indices]
-            ends = [ends[index] for index in missing_indices]
-            keys = [keys[index] for index in missing_indices]
-            if self.enable_kv_event:
-                block_hashes = [block_hashes[index] for index in missing_indices]
-            key_block_ids = [key_block_ids[index] for index in missing_indices]
+            if any(exists_states):
+                missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
+                if not missing_indices:
+                    continue
+                starts = [starts[index] for index in missing_indices]
+                ends = [ends[index] for index in missing_indices]
+                keys = [keys[index] for index in missing_indices]
+                if self.enable_kv_event:
+                    block_hashes = [block_hashes[index] for index in missing_indices]
+                key_block_ids = [key_block_ids[index] for index in missing_indices]
 
             logger.debug(
                 "Storing KV cache for %d out of %d blocks for request %s in group %d",

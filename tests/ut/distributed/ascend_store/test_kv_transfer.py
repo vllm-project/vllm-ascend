@@ -74,6 +74,16 @@ class FakeTokenDatabase(ChunkedTokenDatabase):
         self.set_group_buffers({0: [1000]}, {0: [block_size]}, {0: [1]}, group_num_layers={0: 1})
 
 
+class CountingBlockHash:
+    def __init__(self, value: int):
+        self.value = value
+        self.hex_calls = 0
+
+    def hex(self):
+        self.hex_calls += 1
+        return f"{self.value:064x}"
+
+
 class MaskedFakeTokenDatabase(FakeTokenDatabase):
     def __init__(self, block_size=16, masks=([True],)):
         super().__init__(block_size)
@@ -492,6 +502,61 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         t._handle_request(req)
         self.assertEqual(len(store.put_calls), 0)
+
+    def test_handle_request_reuses_serialized_hashes_across_cache_families(self):
+        metadata = [KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=group_id) for group_id in range(3)]
+        db = ChunkedTokenDatabase(metadata, [16, 16, 16], None, hash_block_size=16)
+        db.set_group_buffers(
+            {0: [1000], 1: [2000], 2: [3000]},
+            {0: [16], 1: [16], 2: [16]},
+            {0: [16], 1: [16], 2: [16]},
+            group_cache_families={0: "c1", 1: "c4", 2: "c128"},
+            group_num_layers={0: 1, 1: 1, 2: 1},
+        )
+        store = FakeStore()
+        thread = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=[16, 16, 16],
+            tp_rank=0,
+            tp_size=4,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False, False, False],
+        )
+        block_hashes = [CountingBlockHash(index) for index in range(128)]
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=128 * 16,
+            block_ids_by_group=[list(range(128)), list(range(32)), [0]],
+            block_hashes=block_hashes,  # type: ignore[arg-type]
+            kv_cache_group_ids=[0, 1, 2],
+        )
+        thread.add_stored_request(req.req_id)
+        thread.request_queue.put(req)
+
+        thread._handle_request(req)
+
+        self.assertEqual(len(store.put_calls), 3)
+        self.assertTrue(all(block_hash.hex_calls == 1 for block_hash in block_hashes))
+
+        late_hashes = [CountingBlockHash(index) for index in range(128)]
+        late_req = ReqMeta(
+            req_id="r2",
+            token_len_chunk=128 * 16,
+            save_start_token=120 * 16,
+            block_ids_by_group=[list(range(128)), list(range(32)), [0]],
+            block_hashes=late_hashes,  # type: ignore[arg-type]
+            kv_cache_group_ids=[0, 1, 2],
+        )
+        thread.add_stored_request(late_req.req_id)
+        thread.request_queue.put(late_req)
+
+        thread._handle_request(late_req)
+
+        self.assertTrue(all(block_hash.hex_calls == 0 for block_hash in late_hashes[:120]))
 
     def test_handle_request_starts_at_unsaved_watermark(self):
         t, store = self._make_thread([0, 0])
