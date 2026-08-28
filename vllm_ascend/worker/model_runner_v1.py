@@ -3923,6 +3923,16 @@ class NPUModelRunner(GPUModelRunner):
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
+        # Initialize Mamba SSU backend once KV cache groups are known.
+        # Upstream GPU model runner does this during init; Jamba models need it
+        # before graph capture but non-Mamba models no-op safely.
+        from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+            initialize_mamba_ssu_backend,
+        )
+        initialize_mamba_ssu_backend(
+            self.vllm_config.mamba_config,
+            kv_cache_config,
+        )
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # K3's packed layout keeps Mamba specs inside UniformType groups, so the
         # old first-spec scan over attn_groups cannot recognize them.
@@ -5174,17 +5184,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
-        # Initialize Mamba SSU backend before cudagraph capture.
-        # Required for models with Mamba layers (e.g., Jamba).
-        # The upstream GPU model runner does this internally, but
-        # vllm-ascend replaces the runner so we must do it here.
-        from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-            initialize_mamba_ssu_backend,
-        )
-        initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config,
-            self.kv_cache_config,
-        )
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)
