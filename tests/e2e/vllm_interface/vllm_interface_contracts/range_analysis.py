@@ -2887,6 +2887,40 @@ def _vllm_pr_payload(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _vllm_pr_compatibility_impact(item: dict[str, Any]) -> str:
+    relation = item["relation"]
+    contract_kind = item.get("contract_kind", "")
+    old = item["upstream"]["old"]
+    new = item["upstream"]["new"]
+    removed = not new.get("file") or new.get("symbol_kind") == "missing"
+
+    if relation == "direct_import":
+        subject = "module" if old.get("symbol_kind") == "module" else "symbol"
+        if removed:
+            return f"This PR removes a vLLM {subject} imported by vllm-ascend."
+        if old.get("file") != new.get("file"):
+            return f"This PR changes the location of a vLLM {subject} imported by vllm-ascend."
+        return f"This PR changes a vLLM {subject} imported by vllm-ascend."
+
+    if relation == "direct_call":
+        if removed:
+            return "This PR removes a vLLM API called by vllm-ascend."
+        if contract_kind == "call_target_presence":
+            return "This PR makes a vLLM call target unavailable to vllm-ascend."
+        if contract_kind == "return_usage":
+            return "This PR changes the return contract of a vLLM API whose result is used by vllm-ascend."
+        return "This PR changes the call contract of a vLLM API called by vllm-ascend."
+
+    if relation == "override":
+        if removed:
+            return "This PR removes a vLLM API overridden by vllm-ascend."
+        if contract_kind == "replacement_return":
+            return "This PR changes the return contract expected from a vllm-ascend override."
+        return "This PR changes the contract of a vLLM API overridden by vllm-ascend."
+
+    return "This PR changes a vLLM API used by vllm-ascend."
+
+
 def _vllm_pr_finding_lines(
     item: dict[str, Any],
     index: int,
@@ -2932,8 +2966,7 @@ def _vllm_pr_finding_lines(
         *path_lines,
         *call_lines,
         *reason_lines,
-        f"- Change: {item['change']}",
-        f"- Suggested action: {item['suggestion']}",
+        f"- Compatibility impact: {_vllm_pr_compatibility_impact(item)}",
         "",
     ]
 
@@ -2951,11 +2984,6 @@ def _vllm_pr_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- This PR: `{meta['vllm_old_sha']}` -> `{meta['vllm_new_sha']}`",
         f"- vllm-ascend revision: `{meta['vllm_ascend_sha']}`",
-        "- Checked vllm-ascend usage: imports from vLLM, overrides of vLLM APIs, and calls to vLLM",
-        "- Monkey patches, inheritance-only findings, generator reviews, "
-        "and historical incompatibilities are intentionally excluded.",
-        "- If this PR adds a new contract difference on top of an older incompatibility, "
-        "the report keeps it for manual review.",
         f"- Breaks introduced by this PR: {summary['introduced_breaks']}",
         f"- Distinct vLLM API changes causing breaks: {summary['root_causes']}",
         f"- Items for review: {summary['review_findings']}",

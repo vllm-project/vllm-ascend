@@ -81,7 +81,9 @@ introduced break fails this test while a valid report with no introduced break p
 The vLLM PR CI entry renders the same Markdown content previously written to `vllm-interface-pr-summary.md` and sends
 it directly to standard output. It does not create JSON, CSV, Markdown, or
 metadata report files, upload Buildkite artifacts, or create a separate Buildkite annotation. The selected revisions
-and phase timings appear before the summary in separate collapsible log sections. The vLLM Ascend NPU job is
+and phase timings appear before the summary in separate collapsible log sections. Each finding identifies the vLLM API,
+the affected vllm-ascend source location, and the proven compatibility impact without prescribing a fix in either
+repository. The vLLM Ascend NPU job is
 currently soft-fail, so this integration provides early awareness rather than a required merge gate. The analysis
 itself is CPU-only, but its first vLLM PR run must also confirm that the combined image-build, analysis, and sampler
 duration fits the existing job timeout.
