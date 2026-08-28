@@ -73,6 +73,7 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
 class DSparkMarkovHead(nn.Module):
     def __init__(self, config: PretrainedConfig, prefix: str) -> None:
         super().__init__()
+
         # Markov decoding runs serially for every draft position. Keep both
         # low-rank weights replicated so each step remains communication-free.
         self.markov_w1 = nn.Embedding(config.vocab_size, config.dspark_markov_rank)
@@ -82,6 +83,7 @@ class DSparkMarkovHead(nn.Module):
             bias=False,
             return_bias=False,
             prefix=f"{prefix}.markov_w2",
+            disable_tp=True,
         )
 
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
