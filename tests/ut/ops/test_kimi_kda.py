@@ -135,6 +135,24 @@ def test_prepare_beta_slices_and_applies_sigmoid_in_fp32():
     assert torch.all((beta >= 0.0) & (beta <= 1.0))
 
 
+def test_prepare_beta_does_not_repeat_auxiliary_sigmoid():
+    raw_beta = torch.tensor(
+        [[[-20.0], [0.0], [20.0], [100.0]]],
+        dtype=torch.bfloat16,
+    )
+    preprocessed_beta = raw_beta.float().sigmoid()
+
+    beta = _prepare_beta(
+        preprocessed_beta,
+        num_actual_tokens=3,
+        is_preprocessed=True,
+    )
+
+    assert beta.dtype == torch.float32
+    assert beta.shape == (1, 3, 1)
+    torch.testing.assert_close(beta, preprocessed_beta[:, :3])
+
+
 @pytest.mark.parametrize("f_b_is_local", [False, True])
 def test_fused_bfg_linear_composes_f_and_packs_bfg(f_b_is_local: bool):
     with (
@@ -211,36 +229,75 @@ def test_fused_bfg_projection_preserves_staged_outputs():
     attention.head_dim = 3
     attention._fused_bfg_output_sizes = (2, 6, 6)
     hidden_states = torch.randn(4, 5)
-    fused_output = torch.arange(56, dtype=torch.float32).reshape(4, 14)
+    fused_output = torch.arange(56, dtype=torch.float32).reshape(4, 14).to(torch.bfloat16)
     attention.fused_bfg_proj = _RecordingLinear(fused_output)
 
-    beta, raw_gate, output_gate = attention._project_bfg(hidden_states)
-    torch.testing.assert_close(beta, fused_output[:, :2])
-    torch.testing.assert_close(raw_gate, fused_output[:, 2:8])
-    torch.testing.assert_close(output_gate, fused_output[:, 8:])
+    projected_bfg = attention._project_bfg(hidden_states)
+    assert projected_bfg is fused_output
 
-    beta, raw_gate, output_gate = attention._postprocess_bfg(beta, raw_gate, output_gate)
-    torch.testing.assert_close(beta, fused_output[:, :2].unsqueeze(0))
+    beta, raw_gate, output_gate = attention._postprocess_bfg(projected_bfg)
+    assert beta.dtype == torch.float32
+    torch.testing.assert_close(beta, fused_output[:, :2].float().sigmoid().unsqueeze(0))
     torch.testing.assert_close(raw_gate, fused_output[:, 2:8].reshape(4, 2, 3).unsqueeze(0))
     torch.testing.assert_close(output_gate, fused_output[:, 8:].reshape(4, 2, 3))
 
 
-def test_overlapped_qkv_bfg_joins_auxiliary_tail_for_graph_capture():
+def test_mixed_forward_marks_auxiliary_beta_as_preprocessed():
+    attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
+    nn.Module.__init__(attention)
+    attention.uses_mixed_projection = True
+    attention.local_num_heads = 2
+    attention.head_dim = 3
+    hidden_states = torch.randn(4, 6)
+    positions = torch.arange(4)
+    mixed_qkv = torch.randn(4, 18)
+    beta = torch.rand(1, 4, 2, dtype=torch.float32)
+    raw_gate = torch.randn(1, 4, 2, 3)
+    output_gate = torch.randn(4, 2, 3)
+    projected = torch.randn(4, 6)
+    attention._run_overlapped_qkv_bfg = MagicMock(return_value=(mixed_qkv, beta, raw_gate, output_gate))
+    attention._forward = MagicMock()
+    attention.o_proj = _RecordingLinear(projected)
+
+    actual = attention.forward(hidden_states, positions)
+
+    assert actual is projected
+    assert attention._forward.call_args.kwargs["beta"] is beta
+    assert attention._forward.call_args.kwargs["beta_is_preprocessed"] is True
+
+
+def test_overlapped_qkv_bfg_keeps_two_stage_vector_cube_overlap():
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     nn.Module.__init__(attention)
     trace: list[str] = []
     main_stream = _RecordingStream("main", ["hidden_ready", "quant_ready"], trace)
     bfg_stream = _RecordingStream("bfg", ["bfg_projection_ready", "bfg_ready"], trace)
     hidden_states = _RecordingTensor("hidden", trace)
-    raw_bfg = tuple(_RecordingTensor(name, trace) for name in ("beta_raw", "raw_gate_raw", "gate_raw"))
+    fused_bfg = _RecordingTensor("fused_bfg", trace)
     processed_bfg = tuple(_RecordingTensor(name, trace) for name in ("beta", "raw_gate", "output_gate"))
     quantized_qkv = object()
     qkv = object()
 
-    attention._project_bfg = MagicMock(side_effect=lambda _: (trace.append("project_bfg"), raw_bfg)[1])
-    attention._quantize_fused_qkv = MagicMock(side_effect=lambda _: (trace.append("dynamic_quant"), quantized_qkv)[1])
-    attention._matmul_fused_qkv = MagicMock(side_effect=lambda _: (trace.append("qkv_matmul"), qkv)[1])
-    attention._postprocess_bfg = MagicMock(side_effect=lambda *_: (trace.append("postprocess_bfg"), processed_bfg)[1])
+    def record_project_bfg(_hidden_states: object) -> _RecordingTensor:
+        trace.append("project_bfg")
+        return fused_bfg
+
+    def record_dynamic_quant(_hidden_states: object) -> object:
+        trace.append("dynamic_quant")
+        return quantized_qkv
+
+    def record_qkv_matmul(_qkv_input: object) -> object:
+        trace.append("qkv_matmul")
+        return qkv
+
+    def record_postprocess_bfg(*_args: object) -> tuple[_RecordingTensor, ...]:
+        trace.append("postprocess_bfg")
+        return processed_bfg
+
+    attention._project_bfg = MagicMock(side_effect=record_project_bfg)
+    attention._quantize_fused_qkv = MagicMock(side_effect=record_dynamic_quant)
+    attention._matmul_fused_qkv = MagicMock(side_effect=record_qkv_matmul)
+    attention._postprocess_bfg = MagicMock(side_effect=record_postprocess_bfg)
 
     with (
         patch("vllm_ascend.ops.kimi_kda.torch.npu.current_stream", return_value=main_stream),
