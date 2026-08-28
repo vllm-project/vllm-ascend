@@ -30,7 +30,12 @@ import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
-from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    get_dcp_group,
+    get_pcp_group,
+    init_distributed_environment,
+)
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -39,7 +44,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, get_world_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
@@ -646,6 +651,17 @@ class NPUWorker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         self.log_memory_stats()
+        logger.info(
+            "execute_model trace: world_rank=%d pp_rank=%d tp_rank=%d pcp_rank=%d dcp_rank=%d "
+            "scheduled_tokens=%s total=%d",
+            get_world_group().rank_in_group,
+            get_pp_group().rank_in_group,
+            get_tp_group().rank_in_group,
+            get_pcp_group().rank_in_group,
+            get_dcp_group().rank_in_group,
+            scheduler_output.num_scheduled_tokens,
+            scheduler_output.total_num_scheduled_tokens,
+        )
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
