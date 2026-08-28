@@ -14,34 +14,36 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# One round of the main2main external E2E on the three NPU runners
-# (A2/A3/310P).  Merged prep + exec into a single workflow:
+# Resident E2E runners for the main2main external E2E (A2/A3/310P chips).
 #
-# - round=prep (dispatched by the flow at start): only the prepare-<chip>
-#   jobs run.  They build the persistent environment (vllm +
+# The main2main flow runs on a CPU runner; E2E tests run on the NPU
+# runners.  ARC gives every job a fresh pod with an empty workspace, so a
+# per-round exec job could never see a prepare job's environment — this
+# workflow therefore runs ONE resident job per chip for the whole main
+# run:
+#
+# - the main workflow dispatches this workflow once at start (its
+#   "Pre-start E2E runner envs" step) and waits until each prepare-<chip>
+#   job passes the NPU availability check;
+# - the prepare-<chip> job builds the persistent environment ONCE (vllm +
 #   vllm-ascend editable install + csrc cache restore/compile + deps)
-#   under $GITHUB_WORKSPACE and write the .ready freshness marker, so the
-#   first E2E round does not wait for setup.  Re-dispatching with
-#   unchanged inputs is an idempotent no-op (marker match skips the build).
-# - round=N (exec): prepare-<chip> re-runs as a fast no-op (marker match),
-#   then the e2e-<chip> jobs (needs: prepare) check out the signal branch
-#   (accumulated patch + test_groups.json), filter groups by chip, and run
-#   the selected tests with main2main_flow's run_tests.py local mode
-#   (--test-cases 'path@N' card overrides, --skip-setup — the signal
-#   branch + editable install are already in place).  run_tests.py uses
-#   the same classification pipeline as local runs, so fix-mode output
-#   stays byte-identical.
-# - Artifacts: main2main-e2e-round-<N>-<chip> with round-<N>-result.json +
-#   per-test logs/summaries + expected_tests.json; the flow re-parses
-#   them with parse_exec_artifacts (e2e_dispatch.py).
-name: main2main E2E
+#   under $GITHUB_WORKSPACE, then enters a resident command loop: it polls
+#   the signal branch, and every new commit there (pushed by the flow,
+#   carrying the accumulated patch + test_groups.json + command.json with
+#   the round number) is served IN PLACE — checkout, optional csrc
+#   rebuild, run_tests.py with the chip's tests, results pushed to the
+#   per-chip results branch.  No cache re-fetch, no reinstall, no new job
+#   per round.
+# - the flow waits for each round's results on the results branches
+#   (main2main-e2e round layout under round-<N>/) and pushes the next
+#   round's command when it needs one;
+# - the loop exits only when the main run completes (incl. cancelled) or
+#   the hold budget is exhausted — the runners are ours until the main
+#   run ends.
 
 # run-name identifies the main run (Main2Main-E2E-<main_run_id>): the
-# prepared env belongs to one main run (one fixed vllm commit), and every
-# prep/exec round of that run shares the name.  The runs API does not
-# expose workflow_dispatch inputs, so the hold guards match exec rounds of
-# this main run by this exact name; the vllm commit hash is deliberately
-# NOT in the run title (it changes every main2main run).
+# prepared env belongs to one main run (one fixed vllm commit).  The main
+# workflow's pre-start step matches this name to find its prep run.
 run-name: Main2Main-E2E-${{ inputs.main_run_id || '-' }}
 
 on:
@@ -56,26 +58,16 @@ on:
         required: false
         default: 'main'
         description: 'The vllm-ascend base ref (for csrc diff + env marker).'
-      round:
-        type: string
-        required: false
-        default: '1'
-        description: "'prep' pre-starts the runner envs (prepare jobs only); a number runs that E2E round."
       signal_branch:
         type: string
         required: false
         default: 'main2main_e2e'
-        description: 'Fork branch carrying the accumulated patch + test_groups.json.'
+        description: 'Fork branch carrying the accumulated patch + test_groups.json + command.json.'
       signal_repo:
         type: string
         required: false
         default: ''
         description: 'Fork repo carrying the signal branch (the adapted code); empty = this repo.'
-      timeout_minutes:
-        type: number
-        required: false
-        default: 480
-        description: 'Job timeout in minutes for the e2e jobs.'
       image_tag_a3:
         type: string
         required: false
@@ -85,22 +77,22 @@ on:
         type: string
         required: false
         default: 'main'
-        description: 'main2main_flow ref providing run_tests.py (installed in the e2e job).'
+        description: 'main2main_flow ref providing run_tests.py (installed before serving rounds).'
       main_run_id:
         type: string
         required: false
         default: ''
-        description: 'run id of the dispatching main run; identifies the three prepare jobs and the hold guard.'
+        description: 'run id of the dispatching main run; identifies the prepare jobs and the resident loop.'
       main_run_repo:
         type: string
         required: false
         default: ''
-        description: 'repo of the dispatching main run (for the hold guard stop probe; empty = this repo).'
+        description: 'repo of the dispatching main run (for the completion probe; empty = this repo).'
       hold_minutes:
         type: number
         required: false
         default: 1440
-        description: 'Max minutes the prep run holds the three runners (guard until main run ends).'
+        description: 'Max minutes the resident jobs live (guard until the main run ends).'
 
 defaults:
   run:
@@ -113,11 +105,11 @@ permissions:
 jobs:
   prepare:
     # The main_run_id suffix is the unique per-main-run identifier the
-    # pre-start step matches on when waiting for all three runners.
+    # pre-start step matches on when waiting for all NPU runners.
     name: prepare-${{ matrix.chip }}-${{ inputs.main_run_id }}
-    # round=prep runs the hold guard (prepare ends only on exec dispatch /
-    # main-run stop / timeout), so the timeout follows hold_minutes then.
-    timeout-minutes: ${{ inputs.round == 'prep' && fromJSON(inputs.hold_minutes) || 180 }}
+    # The job is resident for the whole main run (env build + command
+    # loop), so the timeout is the hold budget.
+    timeout-minutes: ${{ fromJSON(inputs.hold_minutes) }}
     strategy:
       fail-fast: false
       matrix:
@@ -125,11 +117,13 @@ jobs:
           - chip: a2
             runner: linux-aarch64-a2-1
             image_tag: 9.1.0-910b-ubuntu22.04-py3.12
-            max_jobs: '184'
+            # Dual-die package: dies 0-1, 2-3, ... must be used as whole
+            # pairs — run_tests.py enforces pair-aligned device assignment.
+            pair_aligned: 'true'
           - chip: 310p
             runner: linux-aarch64-310p-1
             image_tag: 9.1.0-310p-ubuntu22.04-py3.12
-            max_jobs: '92'
+            pair_aligned: ''
     runs-on: ${{ matrix.runner }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
@@ -158,6 +152,7 @@ jobs:
           if [ -f "$marker" ] \
             && grep -qx "vllm=${{ inputs.vllm }}" "$marker" \
             && grep -qx "base_ref=${{ inputs.base_ref }}" "$marker" \
+            && grep -q "^base_sha=" "$marker" \
             && grep -qx "image_tag=${{ matrix.image_tag }}" "$marker" \
             && [ -x "$GITHUB_WORKSPACE/.venv/bin/activate" ] \
             && [ -d "$GITHUB_WORKSPACE/vllm-empty/.git" ] \
@@ -178,7 +173,7 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/vllm-empty" \
                  "$GITHUB_WORKSPACE/.venv" \
                  "$GITHUB_WORKSPACE/.ready" \
-                 "$GITHUB_WORKSPACE"/main2main-e2e-round-*
+                 "$GITHUB_WORKSPACE"/main2main-e2e-results
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
           pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
           pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
@@ -275,7 +270,7 @@ jobs:
             vllm_ascend/include
           key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
           # Same tolerance as PR CI: a miss compiles on the NPU runner once,
-          # after which the artifacts persist in the workspace.
+          # after which the artifacts persist in the cache.
           fail-on-cache-miss: false
 
       - name: Install Mooncake wheel
@@ -324,9 +319,9 @@ jobs:
 
       - name: Save vllm-ascend csrc cache
         # Same as vllm-ascend CI's cache pipeline: restore -> (miss) build
-        # -> save, so the next run with the same csrc state hits instead of
-        # recompiling on the NPU runner.  Save only what we compiled here
-        # (a restored cache must not be re-uploaded).
+        # -> save, so the next pod with the same csrc state hits instead of
+        # recompiling.  Save only what we compiled here (a restored cache
+        # must not be re-uploaded).
         if: ${{ steps.env-check.outputs.fresh != 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
         uses: runs-on/cache/save@v5
         with:
@@ -363,9 +358,14 @@ jobs:
       - name: Write freshness marker
         if: steps.env-check.outputs.fresh != 'true'
         run: |
+          # base_sha freezes the commit the env was built on: the resident
+          # loop diffs each round's signal commit against THIS sha to decide
+          # on a kernel rebuild — never against the moving branch tip.
+          base_sha=$(git rev-parse HEAD)
           cat > "$GITHUB_WORKSPACE/.ready" <<EOF
           vllm=${{ inputs.vllm }}
           base_ref=${{ inputs.base_ref }}
+          base_sha=${base_sha}
           image_tag=${{ matrix.image_tag }}
           ready=true
           EOF
@@ -381,370 +381,327 @@ jobs:
             ls -la "$GITHUB_WORKSPACE/.ready"
           fi
 
-      # Prep-round guard: keep this runner occupied (pod not reclaimed by
-      # ARC) until the main run dispatches its E2E exec round, the main run
-      # itself ends, or the hold budget is exhausted.  The env built above
-      # is otherwise lost — the machine gets released and the exec round
-      # must re-queue for NPU resources.  Releases on:
-      #   a) an exec run dispatched by our main run (run-name segment match)
-      #   b) the main run reaching completed (incl. cancelled) — fallback
-      #      when the main run is manually cancelled and never dispatches
-      #   c) inputs.hold_minutes elapsed
-      - name: Hold runner (prep guard)
-        if: ${{ inputs.round == 'prep' }}
+      # Resident command loop: the main2main flow force-pushes the signal
+      # branch once per E2E round (accumulated patch + test_groups.json +
+      # command.json = {"round": N, "main_run_id": ...}); this job picks
+      # every new commit up IN PLACE — same pod, same env, no cache
+      # re-fetch, no reinstall, no new job — runs the chip's tests, and
+      # pushes the round results to the per-chip results branch, where the
+      # flow finds them.  Exits (releasing the runner) only when the main
+      # run completes or the hold budget is exhausted.
+      - name: Serve E2E rounds (command loop)
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          CHIP: ${{ matrix.chip }}
+          RUNNER_LABEL: ${{ matrix.runner }}
+          PAIR_ALIGNED: ${{ matrix.pair_aligned }}
+          SIGNAL_BRANCH: ${{ inputs.signal_branch }}
+          SIGNAL_REPO: ${{ inputs.signal_repo || github.repository }}
+          FLOW_REF: ${{ inputs.flow_ref }}
+          MAIN_RUN_ID: ${{ inputs.main_run_id }}
+          MAIN_RUN_REPO: ${{ inputs.main_run_repo }}
+          VLLM_COMMIT: ${{ inputs.vllm }}
+          HOLD_MINUTES: ${{ inputs.hold_minutes }}
         run: |
           python3 - <<'PY'
-          import json, os, sys, time, urllib.request
+          import json, os, re, shutil, subprocess, sys, tempfile, time
+          import urllib.request
+
+          ws = os.environ["GITHUB_WORKSPACE"]
+          chip = os.environ["CHIP"]
+          runner = os.environ["RUNNER_LABEL"]
+          pair_aligned = os.environ.get("PAIR_ALIGNED") == "true"
+          repo = os.environ["GITHUB_REPOSITORY"]
+          signal_branch = os.environ["SIGNAL_BRANCH"]
+          flow_ref = os.environ["FLOW_REF"]
+          main_run_id = os.environ["MAIN_RUN_ID"]
+          main_run_repo = os.environ["MAIN_RUN_REPO"] or repo
+          hold_minutes = int(os.environ["HOLD_MINUTES"])
+          token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+          git_url = ("https://x-access-token:" + token + "@github.com/"
+                     + os.environ["SIGNAL_REPO"])
+          results_branch = signal_branch + "_results_" + chip
+          results_dir = os.path.join(ws, "main2main-e2e-results")
+          run_tests_py = os.path.join(ws, "main2main_flow",
+                                      "main2main_flow", "scripts", "utils",
+                                      "run_tests.py")
+
+          def log(msg):
+              print(f"[serve {chip}] {time.strftime('%H:%M:%S')} {msg}",
+                    flush=True)
+
+          def git(*args, cwd=ws, check=True):
+              r = subprocess.run(["git", *args], cwd=cwd,
+                                 capture_output=True, text=True)
+              if check and r.returncode != 0:
+                  raise RuntimeError("git " + " ".join(args[:4]) + ": "
+                                     + r.stderr.strip()[-400:])
+              return r
 
           def gh_get(url):
-              token = os.environ.get("GH_TOKEN") or \
-                  os.environ.get("GITHUB_TOKEN", "")
               req = urllib.request.Request(url, headers={
                   "Authorization": "Bearer " + token,
                   "Accept": "application/vnd.github+json",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              })
+                  "X-GitHub-Api-Version": "2022-11-28"})
               with urllib.request.urlopen(req, timeout=30) as resp:
                   return json.load(resp)
 
-          repo = os.environ["GITHUB_REPOSITORY"]
-          self_id = int(os.environ["GITHUB_RUN_ID"])
-          main_run_id = "${{ inputs.main_run_id }}"
-          main_run_repo = "${{ inputs.main_run_repo }}" or repo
-          deadline = time.time() + int("${{ inputs.hold_minutes }}") * 60
-          warn_404 = False
+          def remote_sha(ref):
+              out = git("ls-remote", git_url, ref, check=False).stdout.split()
+              return out[0] if out else ""
+
+          # Sync main2main_flow (run_tests.py source) once before serving.
+          flow_dir = os.path.join(ws, "main2main_flow")
+          if not os.path.isdir(os.path.join(flow_dir, ".git")):
+              git("clone", "--branch", flow_ref,
+                  "https://github.com/vllm-ascend/main2main_flow.git",
+                  flow_dir)
+          else:
+              git("-C", flow_dir, "fetch", "origin", flow_ref)
+              git("-C", flow_dir, "checkout", "--detach", "FETCH_HEAD")
+          subprocess.run(
+              ["bash", "-c",
+               'source "' + ws + '/.venv/bin/activate" && '
+               'pip install -e "' + flow_dir + '"'], check=True)
+
+          def write_empty_result(round_no):
+              out = {"can_commit": True, "ci_result": "passed",
+                     "suite_results": {},
+                     "rounds": [{"round": round_no, "tests": [],
+                                 "cards_used": 0, "total_cards": 0,
+                                 "elapsed_s": 0.0}], "elapsed_s": 0.0}
+              json.dump(out, open(os.path.join(
+                  results_dir, "0", "tests",
+                  "round-" + str(round_no) + "-result.json"), "w"), indent=2)
+
+          def serve_round(round_no):
+              shutil.rmtree(results_dir, ignore_errors=True)
+              tests_dir = os.path.join(results_dir, "0", "tests")
+              os.makedirs(tests_dir)
+              groups = json.load(open(os.path.join(ws, "test_groups.json")))
+              mine = [g for g in groups if g.get("npu_type") == chip]
+              expected, cases = [], []
+              for g in mine:
+                  cards = int(g.get("num_npus", 1))
+                  for t in g.get("tests", "").split():
+                      expected.append({"test": t, "cards_required": cards})
+                      cases.append(t + "@" + str(cards))
+              json.dump(expected, open(os.path.join(
+                  tests_dir, "expected_tests.json"), "w"), indent=2)
+              open(os.path.join(results_dir, "test_cases.txt"), "w").write(
+                  "\n".join(cases))
+              log("round " + str(round_no) + ": "
+                  + str(len(cases)) + " test(s) selected")
+              if not cases:
+                  write_empty_result(round_no)
+                  return
+              # Kernels: rebuild only when the signal commit changed csrc
+              # inputs vs the base_sha frozen in the .ready marker (the
+              # commit the env was actually built on — never the moving
+              # branch tip).  A failed rebuild must NOT fall through to the
+              # tests: they would run against the previous round's kernels
+              # and pass on stale code.
+              base_sha = ""
+              try:
+                  for line in open(os.path.join(ws, ".ready")):
+                      if line.startswith("base_sha="):
+                          base_sha = line.split("=", 1)[1].strip()
+                          break
+              except OSError:
+                  pass
+              if base_sha:
+                  changed = git("diff", "--name-only", base_sha, "HEAD",
+                                "--", "csrc", "setup.py", "CMakeLists.txt",
+                                "cmake").stdout.strip()
+              else:
+                  changed = "csrc"  # unknown build base - rebuild defensively
+              if changed:
+                  m = re.search(r"(\d+)$", runner)
+                  max_jobs = (int(m.group(1)) if m else 1) * 23
+                  log("csrc inputs changed - rebuilding kernels (MAX_JOBS="
+                      + str(max_jobs) + ")")
+                  build = subprocess.run(["bash", "-c",
+                      'set -uo pipefail\n'
+                      'source "' + ws + '/.venv/bin/activate"\n'
+                      '. /usr/local/Ascend/ascend-toolkit/set_env.sh\n'
+                      'export MAX_JOBS=' + str(max_jobs) + '\n'
+                      'cd "' + ws + '"\n'
+                      'uv pip install -e . --no-build-isolation\n'])
+                  if build.returncode != 0:
+                      log("kernel rebuild FAILED (" + str(build.returncode)
+                          + ") - reporting a failed round without tests")
+                      suite = {}
+                      for item in expected:
+                          suite[item["test"]] = {
+                              "cards_required": item["cards_required"],
+                              "run_suite_exit_code": 1,
+                              "ci_result": "failed",
+                              "summary_error": "kernel rebuild failed "
+                                               "before tests ran",
+                              "code_bugs_count": 0,
+                              "env_flakes_count": 0,
+                              "failed_test_files_count": 0,
+                              "failed_test_cases_count": 1,
+                              "not_run": True}
+                      json.dump({"can_commit": False,
+                                 "ci_result": "failed",
+                                 "suite_results": suite, "rounds": [],
+                                 "elapsed_s": 0.0},
+                                open(os.path.join(
+                                    tests_dir, "round-" + str(round_no)
+                                    + "-result.json"), "w"), indent=2)
+                      return
+              else:
+                  log("csrc unchanged - reusing built kernels")
+              script = (
+                  'set -uo pipefail\n'
+                  'source "' + ws + '/.venv/bin/activate"\n'
+                  '. /usr/local/Ascend/ascend-toolkit/set_env.sh\n'
+                  'export VLLM_WORKER_MULTIPROC_METHOD=spawn\n'
+                  'cd "' + ws + '"\n')
+              quoted_cases = " ".join('"' + c + '"' for c in cases)
+              script += (
+                  'python3 "' + run_tests_py + '" '
+                  '--vllm-path "' + ws + '/vllm-empty" '
+                  '--vllm-commit "' + os.environ["VLLM_COMMIT"] + '" '
+                  '--ascend-path "' + ws + '" '
+                  '--ascend-commit "' + git("rev-parse", "HEAD").stdout.strip()
+                  + '" '
+                  '--step-id 0 '
+                  '--round ' + str(round_no) + ' '
+                  '--skip-setup '
+                  '--log-dir "' + results_dir + '" '
+                  + ("--pair-aligned-devices " if pair_aligned else "")
+                  + '--test-cases ' + quoted_cases + '\n')
+              r = subprocess.run(["bash", "-c", script])
+              log("round " + str(round_no)
+                  + ": tests exited " + str(r.returncode))
+
+          def push_results(round_no, cmd_sha):
+              wt = tempfile.mkdtemp(prefix="m2m-results-")
+              try:
+                  git("worktree", "add", "-f", "--detach", wt, "HEAD")
+                  dst = os.path.join(wt, "round-" + str(round_no))
+                  shutil.copytree(os.path.join(results_dir, "0", "tests"),
+                                  dst)
+                  # Identity: lets the flow reject results left over from an
+                  # earlier same-numbered round (previous step / chained run).
+                  json.dump({"round": round_no, "main_run_id": main_run_id,
+                             "command_sha": cmd_sha},
+                            open(os.path.join(dst, "round-meta.json"), "w"),
+                            indent=2)
+                  git("add", "-A", "round-" + str(round_no), cwd=wt)
+                  git("-c", "user.name=main2main-bot",
+                      "-c", "user.email=main2main-bot@users.noreply.github.com",
+                      "commit", "-m",
+                      "main2main e2e round " + str(round_no)
+                      + " results (" + chip + ")", cwd=wt)
+                  git("push", "--force", git_url,
+                      "HEAD:refs/heads/" + results_branch, cwd=wt)
+                  log("round " + str(round_no) + ": results pushed to "
+                      + results_branch)
+              finally:
+                  git("worktree", "remove", "--force", wt, check=False)
+
+          deadline = time.time() + hold_minutes * 60
+          seen = ""
+          served = set()
+          checkout_fails = 0
+          last_beat = time.time()
+          log("resident loop up (signal=" + signal_branch
+              + ", results=" + results_branch
+              + ", hold=" + str(hold_minutes) + "min)")
           while time.time() < deadline:
               if main_run_id:
-                  # a) the next exec round of this main run.  Run ids are
-                  # globally monotonic, so id > self_id rejects runs created
-                  # before this one; the name Main2Main-E2E-<main_run_id>
-                  # is shared by every round of this main run (created_at
-                  # is second-truncated and unsafe for same-second runs).
+                  # Stop when the main run reaches a terminal state
+                  # (incl. cancelled) — the runners are ours only while it
+                  # lives.
                   try:
-                      runs = gh_get(
-                          f"https://api.github.com/repos/{repo}/actions/runs"
-                          "?event=workflow_dispatch&branch=main&per_page=50") \
-                          .get("workflow_runs", [])
-                      want_name = f"Main2Main-E2E-{main_run_id}"
-                      for r in runs:
-                          if (r.get("name") or "") == want_name \
-                                  and int(r["id"]) > self_id:
-                              print(f"[hold] exec run {r['id']} dispatched "
-                                    f"by main run {main_run_id} — releasing "
-                                    "runner")
-                              sys.exit(0)
-                  except Exception as exc:
-                      print(f"[hold] exec probe failed: {exc}",
-                            file=sys.stderr)
-                  # b) main run reached a terminal state (stop fallback).
-                  try:
-                      r = gh_get(f"https://api.github.com/repos/"
-                                 f"{main_run_repo}/actions/runs/"
-                                 f"{main_run_id}")
+                      r = gh_get("https://api.github.com/repos/"
+                                 + main_run_repo + "/actions/runs/"
+                                 + main_run_id)
                       if r.get("status") == "completed":
-                          print(f"[hold] main run {main_run_id} completed "
-                                f"({r.get('conclusion')}) — releasing "
-                                "runner")
-                          sys.exit(0)
+                          log("main run " + main_run_id + " completed ("
+                              + str(r.get("conclusion"))
+                              + ") - releasing runner")
+                          break
                   except Exception as exc:
-                      if "404" in str(exc):
-                          if not warn_404:
-                              print("[hold] cannot read main run "
-                                    f"{main_run_id} (cross-repo 404?) — "
-                                    "relying on exec probe + timeout",
-                                    file=sys.stderr)
-                              warn_404 = True
-                      else:
-                          print(f"[hold] main-run probe failed: {exc}",
-                                file=sys.stderr)
-              time.sleep(30)
-          print(f"[hold] hold budget "
-                f"{int('${{ inputs.hold_minutes }}') * 60}s exhausted — "
-                "releasing runner")
-          sys.exit(0)
-          PY
-
-  e2e:
-    name: e2e-${{ matrix.chip }}
-    if: ${{ inputs.round != 'prep' }}
-    needs: prepare
-    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - chip: a2
-            runner: linux-aarch64-a2-1
-            image_tag: 9.1.0-910b-ubuntu22.04-py3.12
-            max_jobs: '184'
-            # Dual-die package: dies 0-1, 2-3, ... must be used as whole
-            # pairs — run_tests.py enforces pair-aligned device assignment.
-            pair_aligned: 'true'
-          - chip: 310p
-            runner: linux-aarch64-310p-1
-            image_tag: 9.1.0-310p-ubuntu22.04-py3.12
-            max_jobs: '92'
-    runs-on: ${{ matrix.runner }}
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
-      env:
-        VLLM_LOGGING_LEVEL: ERROR
-        VLLM_USE_MODELSCOPE: True
-        HF_HUB_OFFLINE: 1
-        MAX_JOBS: 4
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
-        UV_HTTP_TIMEOUT: 120
-        UV_NO_CACHE: 1
-        UV_SYSTEM_PYTHON: 1
-    steps:
-      - name: Check NPU availability
-        run: |
-          npu-smi info
-
-      - name: Verify prepared env
-        run: |
-          marker="$GITHUB_WORKSPACE/.ready"
-          if [ -f "$marker" ] \
-            && grep -qx "vllm=${{ inputs.vllm }}" "$marker" \
-            && grep -qx "base_ref=${{ inputs.base_ref }}" "$marker" \
-            && grep -qx "image_tag=${{ matrix.image_tag }}" "$marker" \
-            && [ -x "$GITHUB_WORKSPACE/.venv/bin/activate" ] \
-            && [ -d "$GITHUB_WORKSPACE/vllm-empty/.git" ]; then
-            echo "Prepared env verified at $GITHUB_WORKSPACE"
-          else
-            echo "::error::prepared env missing or stale for vllm=${{ inputs.vllm }} / base_ref=${{ inputs.base_ref }} / image_tag=${{ matrix.image_tag }}. The prepare job should have built it — marker mismatch, or the runner workspace was reset."
-            exit 1
-          fi
-
-      - name: Checkout signal branch
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          # The signal branch (adapted code) lives on the PR fork
-          # (signal_repo) — GITHUB_TOKEN is scoped to this repo, so use
-          # the PAT (GH_TOKEN) for the cross-repo fetch.  Always fetch
-          # with an explicit token URL (the prep checkout's stored
-          # credential is dead).
-          SIGNAL_REPO="${{ inputs.signal_repo || github.repository }}"
-          TOKEN="${GH_TOKEN:-${GITHUB_TOKEN}}"
-          git fetch --force --no-tags \
-            "https://x-access-token:${TOKEN}@github.com/${SIGNAL_REPO}" \
-            "${{ inputs.signal_branch }}"
-          git checkout --force --detach FETCH_HEAD
-          git submodule sync --recursive
-          git submodule update --init --recursive
-          echo "--- signal HEAD ---"
-          git log -1 --oneline
-          ls -la test_groups.json
-
-      - name: Rebuild kernels if csrc inputs changed
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          # Refresh the local base_ref ref (prep-time origin/main may predate
-          # the accumulated patch; diff against the base the patch built on).
-          # The signal branch comes from signal_repo, so refresh base there too.
-          SIGNAL_REPO="${{ inputs.signal_repo || github.repository }}"
-          TOKEN="${GH_TOKEN:-${GITHUB_TOKEN}}"
-          git fetch --force --no-tags \
-            "https://x-access-token:${TOKEN}@github.com/${SIGNAL_REPO}" \
-            "${{ inputs.base_ref }}"
-          BASE_SHA=$(git rev-parse FETCH_HEAD)
-          CHANGED=$(git diff --name-only "$BASE_SHA" HEAD -- csrc setup.py CMakeLists.txt cmake)
-          if [ -n "$CHANGED" ]; then
-            echo "csrc inputs changed vs ${{ inputs.base_ref }} ($BASE_SHA):"
-            echo "$CHANGED"
-            echo "Rebuilding kernels (one-time per csrc change)"
-            source "$GITHUB_WORKSPACE/.venv/bin/activate"
-            # CI formula: MAX_JOBS = cards x 23 (see prepare job).
-            CARDS=$(echo "${{ matrix.runner }}" | grep -oE '[0-9]+$')
-            export MAX_JOBS=$((CARDS * 23))
-            uv pip install -e . --no-build-isolation
-          else
-            echo "csrc unchanged - reusing built kernels"
-          fi
-
-      - name: Sync main2main_flow (run_tests.py source)
-        run: |
-          set -euxo pipefail
-          source "$GITHUB_WORKSPACE/.venv/bin/activate"
-          FLOW_DIR="$GITHUB_WORKSPACE/main2main_flow"
-          if [ ! -d "$FLOW_DIR/.git" ]; then
-            git clone --branch "${{ inputs.flow_ref }}" \
-              https://github.com/vllm-ascend/main2main_flow.git "$FLOW_DIR"
-          else
-            git -C "$FLOW_DIR" fetch origin "${{ inputs.flow_ref }}"
-            git -C "$FLOW_DIR" checkout --detach FETCH_HEAD
-          fi
-          pip install -e "$FLOW_DIR"
-
-      - name: Prepare results dir and filter test groups
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-          RESULTS_DIR="$GITHUB_WORKSPACE/main2main-e2e-results"
-          rm -rf "$RESULTS_DIR"
-          mkdir -p "$RESULTS_DIR/0/tests"
-          echo "RESULTS_DIR=$RESULTS_DIR" >> "$GITHUB_ENV"
-          python3 - "${{ matrix.chip }}" "$RESULTS_DIR" <<'PY'
-          import json, os, sys
-          chip, results_dir = sys.argv[1], sys.argv[2]
-          groups = json.load(open(os.path.join(os.environ["GITHUB_WORKSPACE"], "test_groups.json")))
-          mine = [g for g in groups if g.get("npu_type") == chip]
-          tests_dir = os.path.join(results_dir, "0", "tests")
-          expected = []
-          cases = []
-          for g in mine:
-              cards = int(g.get("num_npus", 1))
-              for t in g.get("tests", "").split():
-                  expected.append({"test": t, "cards_required": cards})
-                  cases.append(f"{t}@{cards}")
-          json.dump(expected, open(f"{tests_dir}/expected_tests.json", "w"), indent=2)
-          open(os.path.join(results_dir, "test_cases.txt"), "w").write("\n".join(cases))
-          print(f"chip={chip} groups={len(mine)} tests={len(cases)}")
-          PY
-
-      - name: Run E2E tests
-        run: |
-          set -uo pipefail
-          cd "$GITHUB_WORKSPACE"
-          source "$GITHUB_WORKSPACE/.venv/bin/activate"
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          export VLLM_WORKER_MULTIPROC_METHOD=spawn
-          SIGNAL_SHA=$(git rev-parse HEAD)
-          CASES=()
-          while IFS= read -r t; do
-          [ -n "$t" ] && CASES+=("$t")
-          done < "$RESULTS_DIR/test_cases.txt"
-          if [ ${#CASES[@]} -eq 0 ]; then
-          echo "no test groups for this chip - writing empty result"
-          python3 - "${{ inputs.round }}" "$RESULTS_DIR" <<'PY'
-          import json, os, sys
-          round_slug, results_dir = sys.argv[1], sys.argv[2]
-          out = {"can_commit": True, "ci_result": "passed", "suite_results": {},
-                 "rounds": [{"round": int(round_slug), "tests": [], "cards_used": 0,
-                             "total_cards": 0, "elapsed_s": 0.0}], "elapsed_s": 0.0}
-          json.dump(out, open(f"{results_dir}/0/tests/"
-                              f"round-{round_slug}-result.json", "w"), indent=2)
-          PY
-          exit 0
-          fi
-          EXTRA_ARGS=()
-          if [ "${{ matrix.pair_aligned }}" = "true" ]; then
-            EXTRA_ARGS+=(--pair-aligned-devices)
-            echo "Dual-die A3: enforcing pair-aligned device assignment"
-          fi
-          python3 "$GITHUB_WORKSPACE/main2main_flow/main2main_flow/scripts/utils/run_tests.py" \
-            --vllm-path "$GITHUB_WORKSPACE/vllm-empty" \
-            --vllm-commit "${{ inputs.vllm }}" \
-            --ascend-path "$GITHUB_WORKSPACE" \
-            --ascend-commit "${SIGNAL_SHA}" \
-            --step-id 0 \
-            --round "${{ inputs.round }}" \
-            --skip-setup \
-            --log-dir "$RESULTS_DIR" \
-            "${EXTRA_ARGS[@]}" \
-            --test-cases "${CASES[@]}"
-
-      - name: Upload E2E results
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: main2main-e2e-round-${{ inputs.round }}-${{ matrix.chip }}
-          path: ${{ github.workspace }}/main2main-e2e-results/0/tests/*
-          if-no-files-found: ignore
-          retention-days: 14
-
-      # Exec-round guard: keep the runner occupied between rounds.  The
-      # process is multi-step — the main run chains round 1, 2, ... — so
-      # the machines must stay held beyond this round, not just until the
-      # first exec dispatch (the prep guard hands off here).  Releases on:
-      #   a) the NEXT exec run dispatched by our main run (run-name match)
-      #   b) the main run reaching completed (incl. cancelled) — fallback
-      #   c) inputs.hold_minutes elapsed
-      # The main flow waits for this round's results (uploaded above) via
-      # the jobs API instead of the run completing, so the chain never
-      # deadlocks: it parses the results, then dispatches the next round,
-      # which releases this guard.
-      - name: Hold runner (exec guard)
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          python3 - <<'PY'
-          import json, os, sys, time, urllib.request
-
-          def gh_get(url):
-              token = os.environ.get("GH_TOKEN") or \
-                  os.environ.get("GITHUB_TOKEN", "")
-              req = urllib.request.Request(url, headers={
-                  "Authorization": "Bearer " + token,
-                  "Accept": "application/vnd.github+json",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              })
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  return json.load(resp)
-
-          repo = os.environ["GITHUB_REPOSITORY"]
-          self_id = int(os.environ["GITHUB_RUN_ID"])
-          main_run_id = "${{ inputs.main_run_id }}"
-          main_run_repo = "${{ inputs.main_run_repo }}" or repo
-          deadline = time.time() + int("${{ inputs.hold_minutes }}") * 60
-          warn_404 = False
-          while time.time() < deadline:
-              if main_run_id:
-                  # a) the next exec round of this main run (run-name
-                  # Main2Main-E2E-<main_run_id>, id > self_id).
+                      log("main-run probe failed: " + str(exc))
+              sha = remote_sha(signal_branch)
+              if sha and sha != seen:
+                  # Nothing below may raise out of the loop: an unhandled
+                  # exception would kill the resident while the main run
+                  # still lives.
+                  cmd = {}
+                  ok = True
                   try:
-                      runs = gh_get(
-                          f"https://api.github.com/repos/{repo}/actions/runs"
-                          "?event=workflow_dispatch&branch=main&per_page=50") \
-                          .get("workflow_runs", [])
-                      want_name = f"Main2Main-E2E-{main_run_id}"
-                      for r in runs:
-                          if (r.get("name") or "") == want_name \
-                                  and int(r["id"]) > self_id:
-                              print(f"[hold] next exec run {r['id']} "
-                                    f"dispatched by main run {main_run_id} — "
-                                    "releasing runner for the next round")
-                              sys.exit(0)
+                      git("fetch", "--force", "--no-tags", git_url,
+                          signal_branch)
+                      raw = git("show", "FETCH_HEAD:command.json",
+                                check=False).stdout
+                      cmd = json.loads(raw) if raw.strip() else {}
                   except Exception as exc:
-                      print(f"[hold] exec probe failed: {exc}",
-                            file=sys.stderr)
-                  # b) main run reached a terminal state (stop fallback).
-                  try:
-                      r = gh_get(f"https://api.github.com/repos/"
-                                 f"{main_run_repo}/actions/runs/"
-                                 f"{main_run_id}")
-                      if r.get("status") == "completed":
-                          print(f"[hold] main run {main_run_id} completed "
-                                f"({r.get('conclusion')}) — releasing "
-                                "runner")
-                          sys.exit(0)
-                  except Exception as exc:
-                      if "404" in str(exc):
-                          if not warn_404:
-                              print("[hold] cannot read main run "
-                                    f"{main_run_id} (cross-repo 404?) — "
-                                    "relying on exec probe + timeout",
-                                    file=sys.stderr)
-                              warn_404 = True
+                      ok = False
+                      log("command fetch failed (will retry): " + str(exc))
+                  if ok and cmd.get("main_run_id") != main_run_id:
+                      log("signal commit " + sha[:12]
+                          + " is not for this main run - ignored")
+                      seen = sha
+                  elif ok:
+                      try:
+                          round_no = int(cmd.get("round", -1))
+                      except (TypeError, ValueError):
+                          round_no = -1
+                      if round_no < 0 or round_no in served:
+                          log("round " + str(round_no)
+                              + ": nothing to serve - skip")
+                          seen = sha
                       else:
-                          print(f"[hold] main-run probe failed: {exc}",
-                                file=sys.stderr)
-              time.sleep(30)
-          print(f"[hold] hold budget "
-                f"{int('${{ inputs.hold_minutes }}') * 60}s exhausted — "
-                "releasing runner")
+                          log("round " + str(round_no)
+                              + ": command received (" + sha[:12] + ")")
+                          try:
+                              # Check the signal snapshot out in place (same
+                              # pod/env — only the tracked files move).
+                              git("checkout", "--force", "--detach",
+                                  "FETCH_HEAD")
+                              git("submodule", "sync", "--recursive")
+                              git("submodule", "update", "--init",
+                                  "--recursive")
+                              log("signal HEAD: "
+                                  + git("log", "-1",
+                                        "--oneline").stdout.strip())
+                          except Exception as exc:
+                              # Transient network/checkout failure: retry
+                              # the same sha on the next poll; give up after
+                              # 3 consecutive failures (the flow times the
+                              # round out and pushes a new command).
+                              checkout_fails += 1
+                              log("round " + str(round_no)
+                                  + " checkout FAILED (attempt "
+                                  + str(checkout_fails) + "/3): "
+                                  + str(exc))
+                              if checkout_fails >= 3:
+                                  served.add(round_no)
+                                  seen = sha
+                                  checkout_fails = 0
+                          else:
+                              served.add(round_no)
+                              seen = sha
+                              checkout_fails = 0
+                              try:
+                                  serve_round(round_no)
+                              except Exception as exc:
+                                  log("round " + str(round_no)
+                                      + " FAILED: " + str(exc))
+                              try:
+                                  push_results(round_no, sha)
+                              except Exception as exc:
+                                  log("round " + str(round_no)
+                                      + " results push FAILED: " + str(exc))
+              if time.time() - last_beat > 600:
+                  last_beat = time.time()
+                  log("heartbeat (holding the runner)")
+              time.sleep(20)
+          log("hold budget exhausted - releasing runner")
           sys.exit(0)
           PY

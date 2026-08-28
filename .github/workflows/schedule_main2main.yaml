@@ -166,21 +166,26 @@ jobs:
       HEAD_FORK: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
-      # External E2E on the A2/A3/310P runners (select_tests.py ready-all
-      # selection, identical to PR CI).  Every step with source changes
-      # dispatches main2main-e2e.yaml against MAIN2MAIN_E2E_REPO —
-      # round=prep only builds the runner envs, exec rounds (round=N) run
-      # the tests; MAIN2MAIN_E2E_PREP_RUN_ID is filled by the "Pre-start
+      # External E2E on the A2/A3/310P resident runners (select_tests.py
+      # ready-all selection, identical to PR CI).  This workflow dispatches
+      # main2main-e2e.yaml ONCE (below); the runners build their env and
+      # then serve every E2E round in place from the flow's signal-branch
+      # commands.  MAIN2MAIN_E2E_PREP_RUN_ID is filled by the "Pre-start
       # E2E runner envs" step so the flow reuses that run.
       MAIN2MAIN_E2E_REPO: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_E2E_BRANCH: main2main_e2e
+      # Must mirror main2main-e2e.yaml's resident matrix (a3 temporarily
+      # removed) — groups for chips outside it are dropped flow-side,
+      # otherwise every round waits its full timeout for a chip that never
+      # reports.
+      MAIN2MAIN_E2E_CHIPS: 'a2,310p'
       # Fork carrying the signal branch (the adapted code + test_groups.json)
       # that the E2E workflow checks out per round — same fork the PR head
       # lives on, so the pushed history is already known there.
       MAIN2MAIN_E2E_SIGNAL_REPO: vllm-ascend-ci/vllm-ascend
-      # Identifies this main run in the e2e workflow: prep dispatch inputs,
-      # the prepare-<chip>-<main_run_id> job names, and the hold guard's
-      # exec-dispatch detection all key on it.
+      # Identifies this main run in the e2e workflow: the prep dispatch
+      # inputs and the prepare-<chip>-<main_run_id> job names key on it,
+      # and the resident loop probes it to detect main-run completion.
       MAIN2MAIN_E2E_MAIN_RUN_ID: ${{ github.run_id }}
       # Pin the flow revision the install step clones.  Kept on
       # feature/e2e-external while the 3-runner E2E change is under
@@ -262,8 +267,8 @@ jobs:
         run: |
           set -euo pipefail
           # Dispatch the A2/A3/310P environment prep NOW (in parallel with
-          # the remaining CPU installs), then WAIT until all three NPU
-          # runners pick up their prepare jobs (machine resources
+          # the remaining CPU installs), then WAIT until each NPU
+          # runner picks up its prepare job (machine resources
           # allocated, pod up, runner online) before the main flow
           # proceeds — fail fast if the machines cannot come up.  The flow
           # reuses this run id (MAIN2MAIN_E2E_PREP_RUN_ID) instead of
@@ -283,7 +288,9 @@ jobs:
             --repo "${HEAD_FORK}" \
             --ref main \
             -f "vllm=${VLLM_COMMIT}" \
-            -f "base_ref=main" -f "round=prep" \
+            -f "base_ref=main" \
+            -f "signal_branch=${MAIN2MAIN_E2E_BRANCH}" \
+            -f "signal_repo=${MAIN2MAIN_E2E_SIGNAL_REPO}" \
             -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}" \
             -f "main_run_id=${GITHUB_RUN_ID}" \
             -f "main_run_repo=${GITHUB_REPOSITORY}"
@@ -309,7 +316,7 @@ jobs:
             sleep 10
           done
           if [ -z "${RUN_ID:-}" ]; then
-            echo "::error::prep run id not found after 30 polls — the three NPU runners were never dispatched"
+            echo "::error::prep run id not found after 30 polls — the NPU runners were never dispatched"
             exit 1
           fi
           echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
@@ -343,24 +350,38 @@ jobs:
                           if st.get('name') == NPU_STEP:
                               step_st = st.get('status') or 'missing'
                               step_con = (st.get('conclusion') or '') or 'missing'
-                      state[w[:-1]] = (step_st, step_con, j.get('status'))
+                      state[w[:-1]] = (step_st, step_con, j.get('status'),
+                                       j.get('conclusion') or 'missing')
           out = []
           for w in want:
               if w[:-1] in state:
-                  step_st, step_con, job_st = state[w[:-1]]
-                  out.append(f'{w[:-1]}|{step_st}|{step_con}|{job_st}')
+                  step_st, step_con, job_st, job_con = state[w[:-1]]
+                  out.append(f'{w[:-1]}|{step_st}|{step_con}|{job_st}|{job_con}')
               else:
-                  out.append(f'{w[:-1]}|missing|missing|missing')
+                  out.append(f'{w[:-1]}|missing|missing|missing|missing')
           print(';'.join(out))
-          ")
+          ") || true
+            if [ -z "${READY_STATE}" ]; then
+              echo "  runners: <gh api failed — retrying>"
+              sleep 30
+              continue
+            fi
             echo "  runners: ${READY_STATE}"
             ALL_READY=true
             for entry in $(echo "${READY_STATE}" | tr ';' '\n'); do
-              IFS='|' read -r jname jstep jconclusion jstatus <<< "${entry}"
+              IFS='|' read -r jname jstep jconclusion jstatus jjob_conclusion <<< "${entry}"
               case "${jstatus}" in
-                failed|skipped|cancelled|timed_out)
-                  echo "::error::${jname} job reached terminal state ${jstatus} — cannot wait for it"
-                  exit 1
+                completed)
+                  # failed/skipped/cancelled/timed_out are CONCLUSION values,
+                  # never job statuses — check the job conclusion once the
+                  # job completed (the resident loop keeps it in_progress
+                  # afterwards, so this only fires on an early death).
+                  case "${jjob_conclusion}" in
+                    failure|cancelled|timed_out|startup_failure|skipped)
+                      echo "::error::${jname} job completed with ${jjob_conclusion} — cannot wait for it"
+                      exit 1
+                      ;;
+                  esac
                   ;;
               esac
               case "${jstep}" in
@@ -697,39 +718,19 @@ jobs:
             --title "[main2main] main2main manual review required (${SHORT_NEW})" \
             --body-file /tmp/main2main-manual-review.md
 
-      # Stop the prep run's hold guard so the three NPU runners are
-      # released (pod reclaimed / runner freed for other CI).  Placed
-      # before "Chain next run": a chained run's fresh prep dispatch must
-      # not find this run's prep still holding the runners.  Cancel is
-      # idempotent (409 on an already-completed run is harmless).
+      # Cancel the resident-runner run so the NPU runners are released
+      # (pod reclaimed / runner freed for other CI).  The resident loop
+      # also self-releases on main-run completion; cancelling here is the
+      # prompt stop when the flow itself fails.  Placed before "Chain next
+      # run": a chained run's fresh dispatch must not find this run's
+      # residents still holding the runners.  Cancel is idempotent (409 on
+      # an already-completed run is harmless).
       - name: Release E2E runners
         if: always()
         run: |
           if [ -n "${MAIN2MAIN_E2E_PREP_RUN_ID:-}" ]; then
             gh api -X POST "repos/${MAIN2MAIN_E2E_REPO}/actions/runs/${MAIN2MAIN_E2E_PREP_RUN_ID}/cancel" || true
-            echo "Released E2E runners: cancelled prep run ${MAIN2MAIN_E2E_PREP_RUN_ID}"
-          fi
-          # Also stop any exec round still holding the machines: the exec
-          # guard (a) chain releases on main-run completion, but cancelling
-          # is faster and is the only prompt stop where the main-run probe
-          # 404s (cross-repo validation phase).  Scan for the newest
-          # in-progress run of this main run (run-name
-          # Main2Main-E2E-<main_run_id> — the runs API does not expose
-          # dispatch inputs).
-          LATEST_EXEC=$(gh api "repos/${MAIN2MAIN_E2E_REPO}/actions/runs?event=workflow_dispatch&branch=main&per_page=50" \
-            | python3 -c "
-          import json, sys
-          runs = json.load(sys.stdin).get('workflow_runs', [])
-          main_run = sys.argv[1]
-          want_name = 'Main2Main-E2E-' + main_run
-          cands = [r['id'] for r in runs
-                   if r.get('status') == 'in_progress'
-                   and (r.get('name') or '') == want_name]
-          print(max(cands) if cands else '')
-          " "${MAIN2MAIN_E2E_MAIN_RUN_ID}" 2>/dev/null || true)
-          if [ -n "${LATEST_EXEC:-}" ]; then
-            gh api -X POST "repos/${MAIN2MAIN_E2E_REPO}/actions/runs/${LATEST_EXEC}/cancel" || true
-            echo "Released E2E runners: cancelled exec run ${LATEST_EXEC}"
+            echo "Released E2E runners: cancelled resident-runner run ${MAIN2MAIN_E2E_PREP_RUN_ID}"
           fi
 
       - name: Chain next run
