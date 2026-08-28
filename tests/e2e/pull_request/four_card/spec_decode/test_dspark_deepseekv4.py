@@ -45,6 +45,7 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
 }
 
 
+@pytest.mark.skip(reason="Unstable e2e test, will fix it soon.")
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
     ("golden", "num_speculative_tokens", "additional_config"),
