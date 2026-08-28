@@ -123,7 +123,7 @@ jobs:
             SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend"
             SWR_TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend-temp"
             TAG_PREFIX="nightly-ci"
-            BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend"
+            BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend"
           fi
 
           CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
