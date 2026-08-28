@@ -29,6 +29,7 @@ from .helpers import (
     make_mamba_spec,
     make_metadata_groups,
     make_pp_metadata,
+    make_sfa_indexer_spec,
     make_sliding_spec,
     make_transfer_metadata,
 )
@@ -260,6 +261,68 @@ def test_compute_full_attention_blocks_skips_remote_prefix_and_balances_replica(
     )
 
     assert result == [(3, [10, 11], [21, 22])]
+
+
+@pytest.mark.parametrize(
+    ("remote_block_size", "remote_scale", "expected_remote_blocks"),
+    [
+        (32, 2, [42, 43, 44, 45]),
+        (64, 4, [82, 83, 84, 85]),
+    ],
+)
+def test_compute_sfa_indexer_blocks_uses_virtual_block_size_for_prefix(
+    remote_block_size: int,
+    remote_scale: int,
+    expected_remote_blocks: list[int],
+) -> None:
+    thread = make_thread(dcp_size=2)
+
+    result = thread._compute_group_block_ids(
+        request_id="request",
+        remote_tp_rank_groups=[[0]],
+        remote_dcp_size=remote_scale,
+        spec_index=0,
+        local_block_size=32,
+        remote_block_size=remote_block_size,
+        local_group_block_ids=[10, 11],
+        local_full_group_block_ids=[10, 11],
+        remote_group_block_ids=[20, 21, 22],
+        local_num_prompt_tokens=96,
+        remote_num_prompt_tokens=96,
+        num_computed_tokens=32,
+        local_block_size_scale=2,
+        remote_block_size_scale=remote_scale,
+        spec=make_sfa_indexer_spec(replication_size=2),
+        selection_index=0,
+    )
+
+    assert result == [(0, [20, 21, 22, 23], expected_remote_blocks)]
+
+
+def test_transfer_bucket_accepts_sfa_indexer_virtual_block_sizes() -> None:
+    spec = make_sfa_indexer_spec(replication_size=2)
+    thread = make_thread(
+        dcp_size=2,
+        kv_cache_specs=[spec],
+        layer_block_sizes=[32],
+        block_size_scales=[[2]],
+    )
+    remote = make_pp_metadata(
+        layer_block_sizes=[64],
+        block_size_scales=[[4]],
+    )
+
+    buckets, request_ids = thread._build_transfer_block_buckets(
+        remote_metadata=remote,
+        layer_pairs=[(0, 0)],
+        tp_rank_groups_by_layer={(0, 0): [[0]]},
+        remote_dcp_size=4,
+        requests={"request": make_req_meta()},
+        transfer_block_ids_by_spec={},
+    )
+
+    assert buckets[0][0][(0, 0)] == [("request", [20, 21, 22, 23], [80, 81, 82, 83])]
+    assert request_ids == {0: {"request"}}
 
 
 def test_compute_sliding_window_blocks_uses_unhashed_suffix() -> None:

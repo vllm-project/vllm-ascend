@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakePPTransferMetadata,
     MooncakeTPTransferMetadata,
@@ -41,6 +42,19 @@ def make_mamba_spec(block_size: int = 16) -> MambaSpec:
         block_size=block_size,
         shapes=((3, 16), (2, 4, 4)),
         dtypes=(torch.float16, torch.float16),
+    )
+
+
+def make_sfa_indexer_spec(
+    block_size: int = 16,
+    replication_size: int = 2,
+) -> AscendSFAIndexerCacheSpec:
+    return AscendSFAIndexerCacheSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+        sfa_dcp_replicated_indexer_size=replication_size,
     )
 
 

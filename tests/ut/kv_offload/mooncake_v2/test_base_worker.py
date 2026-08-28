@@ -17,7 +17,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKVConnectorStats
 
-from .helpers import make_full_spec, make_sliding_spec
+from .helpers import make_full_spec, make_sfa_indexer_spec, make_sliding_spec
 
 
 def test_build_spec_mappings_expands_uniform_group_by_layer_spec() -> None:
@@ -81,6 +81,40 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     assert metadata.block_size_scales == [[2, 2]]
     assert metadata.block_strides == [[k_cache.stride(0) * 2, v_cache.stride(0) * 2]]
     transfer_engine.register_buffer.assert_called_once()
+
+
+def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch) -> None:
+    spec = make_sfa_indexer_spec(block_size=16, replication_size=2)
+    cache = torch.empty((4, 16, 1, 8), dtype=torch.float16)
+    config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[KVCacheTensor(size=cache.nbytes, shared_by=["layer.0.indexer"])],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0.indexer"], kv_cache_spec=spec)],
+    )
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.kv_cache_config = config
+    worker.engine_id = "engine-d"
+    worker.te_rpc_port = 9000
+    worker.block_size = 16
+    worker.side_channel_host = "10.0.0.1"
+    worker.handshake_port = 5000
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.global_te",
+        transfer_engine,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.validate_register_region_count",
+        MagicMock(),
+    )
+
+    worker.register_kv_caches({"layer.0.indexer": cache})
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata is not None
+    assert metadata.layer_block_sizes == [32]
+    assert metadata.block_size_scales == [[2]]
+    assert metadata.layer_block_sizes[0] // metadata.block_size_scales[0][0] == spec.block_size
 
 
 def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
