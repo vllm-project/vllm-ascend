@@ -163,23 +163,6 @@ class AscendAttentionState(Enum):
     SpecDecoding = 4
 
 
-def _should_split_mixed_fia(attn_metadata: "AscendMetadata") -> bool:
-    """Whether a mixed prefill/decode batch must use separate FIA calls.
-
-    Batch-invariant execution requires prefill and decode to be processed
-    separately. Outside batch-invariant mode, preserve the existing A5
-    behavior for performance optimization and leave all other paths unchanged.
-    """
-    is_mixed_prefill_decode = attn_metadata.num_decodes > 0 and attn_metadata.num_prefills > 0
-    return is_mixed_prefill_decode and (
-        (
-            get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
-            and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
-        )
-        or envs_vllm.VLLM_BATCH_INVARIANT
-    )
-
-
 @dataclass
 class AscendMetadata:
     """
@@ -1458,7 +1441,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
-                if _should_split_mixed_fia(attn_metadata):
+                # ChunkedPrefill mixing prefill+decode: split into a per-phase
+                # FIA call each (A5 only).
+                # NOTE: Batch-invariant execution also requires prefill and
+                # decode to be processed separately, regardless of the device
+                # generation or attention state. Outside batch-invariant mode,
+                # preserve the existing A5 behavior for performance optimization.
+                if (
+                    (
+                        envs_vllm.VLLM_BATCH_INVARIANT
+                        or (
+                            get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
+                            and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+                        )
+                    )
+                    and attn_metadata.num_decodes > 0
+                    and attn_metadata.num_prefills > 0
+                ):
                     return self._forward_fia_chunked_prefill_split(
                         query, key, value, key, passed_value, block_size, block_table, attn_metadata, output
                     )
