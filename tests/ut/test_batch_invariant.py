@@ -27,40 +27,30 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
-    def test_tensor_sum_reuses_reduce_sum_for_last_dimension(self):
+    def test_reduce_sum_uses_batch_invariant_operator_for_npu_tensor(self):
         x = MagicMock(spec=torch.Tensor)
         x.device.type = "npu"
-        x.dtype = torch.float32
-        x.dim.return_value = 2
         expected = MagicMock(spec=torch.Tensor)
 
-        with patch("vllm_ascend.batch_invariant.reduce_sum", return_value=expected) as mock_reduce:
-            result = batch_invariant.tensor_sum(x, dim=-1, keepdim=True)
+        with patch.object(
+            batch_invariant.torch.ops.batch_invariant_ops,
+            "npu_reduce_sum_batch_invariant",
+            return_value=expected,
+        ) as mock_reduce:
+            result = batch_invariant.reduce_sum(x, dim=-1, keepdim=True)
 
         mock_reduce.assert_called_once_with(x, -1, True)
         assert result is expected
 
-    @pytest.mark.parametrize(
-        ("device_type", "dtype", "dim"),
-        [
-            ("cpu", torch.float32, -1),
-            ("npu", torch.bool, -1),
-            ("npu", torch.float32, 0),
-        ],
-    )
-    def test_tensor_sum_uses_native_sum_for_unsupported_calls(self, device_type, dtype, dim):
+    def test_reduce_sum_uses_native_operator_for_cpu_tensor(self):
         x = MagicMock(spec=torch.Tensor)
-        x.device.type = device_type
-        x.dtype = dtype
-        x.dim.return_value = 2
+        x.device.type = "cpu"
         expected = MagicMock(spec=torch.Tensor)
 
-        with patch("vllm_ascend.batch_invariant.torch_tensor_sum", return_value=expected) as native_sum:
-            result = batch_invariant.tensor_sum(x, dim=dim, keepdim=True)
+        with patch("vllm_ascend.batch_invariant.torch_sum", return_value=expected) as native_sum:
+            result = batch_invariant.reduce_sum(x, dim=-1, keepdim=True)
 
-        native_sum.assert_called_once_with(x, dim=dim, keepdim=True)
-        if device_type == "cpu" or dtype == torch.bool:
-            x.dim.assert_not_called()
+        native_sum.assert_called_once_with(x, -1, True)
         assert result is expected
 
     def test_override_envs_for_invariance(self):

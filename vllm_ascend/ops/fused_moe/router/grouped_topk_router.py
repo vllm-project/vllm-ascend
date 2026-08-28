@@ -53,7 +53,7 @@ class AscendGroupedTopKRouter(BaseRouter):
         topk_weights: torch.Tensor,
     ):
         if self.renormalize:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+            topk_weights = topk_weights / torch.sum(topk_weights, dim=-1, keepdim=True)
         return topk_weights
 
     def _native_grouped_topk(

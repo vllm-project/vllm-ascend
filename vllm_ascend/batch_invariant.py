@@ -26,9 +26,6 @@ from vllm.triton_utils import HAS_TRITON
 
 # in case recursive call in reduce_sum.
 torch_sum = torch.sum
-torch_tensor_sum = torch.Tensor.sum
-
-_BATCH_INVARIANT_SUM_DTYPES = {torch.float16, torch.float32, torch.bfloat16}
 
 
 if HAS_TRITON:
@@ -74,25 +71,6 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
     # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
     return torch_sum(x, dim, keepdim)
-
-
-def tensor_sum(x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-    """Route supported Tensor.sum calls through reduce_sum."""
-    if x.device.type != "npu" or x.dtype not in _BATCH_INVARIANT_SUM_DTYPES or kwargs.get("dtype") is not None:
-        return torch_tensor_sum(x, *args, **kwargs)
-
-    dim = args[0] if args else kwargs.get("dim")
-    keepdim = args[1] if len(args) > 1 else kwargs.get("keepdim", False)
-    reduce_dim = dim[0] if isinstance(dim, (tuple, list)) and len(dim) == 1 else dim
-    if not isinstance(reduce_dim, int):
-        return torch_tensor_sum(x, *args, **kwargs)
-
-    # NOTE: The AscendC op supports only the last dimension. For a 3-D
-    # tensor, dim=-1 and dim=2 use reduce_sum; other dimensions stay native.
-    ndim = x.dim()
-    if ndim <= 0 or reduce_dim < -ndim or reduce_dim >= ndim or reduce_dim % ndim != ndim - 1:
-        return torch_tensor_sum(x, *args, **kwargs)
-    return reduce_sum(x, reduce_dim, keepdim)
 
 
 def override_envs_for_invariance():
@@ -146,8 +124,6 @@ def enable_batch_invariant_mode():
         torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
-        # Add Tensor.sum support while preserving native behavior for unsupported calls.
-        torch.Tensor.sum = tensor_sum
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:
