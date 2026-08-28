@@ -24,6 +24,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLAAttention,
+    DeepseekV2DecoderLayer,
     DeepseekV2Model,
     Indexer,
     _get_llama_4_scaling,
@@ -355,3 +356,72 @@ def _patched_forward(
 
 
 DeepseekV2Model.forward = _patched_forward
+
+def _patched_decoder_layer_forward(
+    self,
+    positions: torch.Tensor,
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    llama_4_scaling: torch.Tensor | None = None,
+) -> torch.Tensor:
+    from vllm.model_executor.models.deepseek_v2 import (
+        DeepseekAttention,
+        DeepseekV2MLP,
+    )
+    from vllm.model_executor.models.utils import sequence_parallel_chunk
+    torch.npu.super_kernel_scope_begin("full")
+    full_num_tokens = positions.shape[0]
+    input_is_sequence_parallel = (
+        self.use_sequence_parallel_moe
+        and residual is not None
+        and hidden_states.shape[0] != full_num_tokens
+    )
+
+    if residual is None:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+    else:
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+    if input_is_sequence_parallel:
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        hidden_states = hidden_states[:full_num_tokens]
+
+    if self.use_mha:
+        hidden_states = self.self_attn(positions, hidden_states)
+    else:
+        hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
+
+    if (
+        not isinstance(self.self_attn, DeepseekAttention)
+        and hidden_states.dtype == torch.float16
+    ):
+        hidden_states *= 1.0 / self.routed_scaling_factor
+        if self.layer_idx == 0:
+            residual *= 1.0 / self.routed_scaling_factor
+
+    if self.use_sequence_parallel_moe:
+        tp_world_size = get_tensor_model_parallel_world_size()
+        sp_pad = (-hidden_states.shape[0]) % tp_world_size
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
+        hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+        if not input_is_sequence_parallel:
+            residual = sequence_parallel_chunk(residual)
+
+    hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+
+    if self.use_sequence_parallel_moe:
+        hidden_states = self.mlp(
+            hidden_states,
+            already_sequence_parallel=True,
+        )
+    else:
+        hidden_states = self.mlp(hidden_states)
+
+    if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+        hidden_states *= 1.0 / self.routed_scaling_factor
+    torch.npu.super_kernel_scope_end("full")
+    return hidden_states, residual
+
+
+DeepseekV2DecoderLayer.forward = _patched_decoder_layer_forward

@@ -219,6 +219,13 @@ class ACLGraphWrapper:
                         ) from exc
                     raise
 
+            aclgraph.super_kernel_optimize(
+                optimize_options= { 
+                    "dcci_after_kernel_end": [".*"],
+                },
+                debug_options={},
+            )
+            
             # here we always use weak ref for the workspaces
             # to save memory
             global _graph_params
