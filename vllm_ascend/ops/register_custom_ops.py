@@ -14,6 +14,7 @@ from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.distributed.parallel_state import get_ccu_sched_group
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
 from vllm_ascend.utils import enable_sp_by_pass, is_vl_model
@@ -252,6 +253,112 @@ direct_register_custom_op(
     op_name="muls_add",
     op_func=muls_add_triton,
     fake_impl=_muls_add_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+# Cache of the operand views the fused kernel needs, keyed by weight pointer, so
+# the transpose/contiguous work happens once per layer rather than per forward.
+_AG_MATMUL_OPERAND_CACHE: dict = {}
+
+
+def _all_gather_matmul_prequant_mxfp8_impl(
+    quantized_x: torch.Tensor,
+    pertoken_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    world_size: int,
+    group_size: int,
+    label: bool,
+    scale_dtype: int,
+) -> torch.Tensor:
+    """Fused AllGather + quant Matmul over a pre-quantized activation.
+
+    Takes the activation already quantized so that the upstream norm+quant
+    fusion stays visible to torch.compile instead of being absorbed in here.
+    Wrapping this in a custom op keeps the shape gate, the unpad and the hcom
+    lookup opaque to the compiler.
+    """
+    try:
+        get_forward_context()
+        flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
+    except AssertionError:
+        flash_comm_v1_enabled = False
+
+    # Same layout rule as the fused ReduceScatter: a transposed view of the
+    # weight plus the scale in its original order.
+    cached = _AG_MATMUL_OPERAND_CACHE.get(weight.data_ptr())
+    if cached is None:
+        cached = (weight.t().contiguous().t(), weight_scale.transpose(0, 1).contiguous())
+        _AG_MATMUL_OPERAND_CACHE[weight.data_ptr()] = cached
+    weight_view, weight_scale_view = cached
+
+    # The fused collective cannot allocate its comm resource during decode
+    # cudagraph capture, so gate it to prefill-sized inputs.
+    if flash_comm_v1_enabled and label and quantized_x.shape[0] * world_size > 1000:
+        hcom = (
+            get_ccu_sched_group()
+            .device_group._get_backend(torch.device("npu"))
+            .get_hccl_comm_name(get_tensor_model_parallel_rank())
+        )
+        output = torch_npu.npu_all_gather_quant_mm(
+            quantized_x,
+            weight_view,
+            hcom,
+            world_size,
+            x1_scale=pertoken_scale,
+            x2_scale=weight_scale_view,
+            group_sizes=[1, 1, group_size],
+            x1_scale_dtype=scale_dtype,
+            x2_scale_dtype=scale_dtype,
+            gather_index=0,
+            y_dtype=torch.bfloat16,
+            comm_mode="ai_cpu",
+        )
+        if isinstance(output, (tuple, list)):
+            output = output[0]
+        pad_size = _EXTRA_CTX.pad_size
+        return output[:-pad_size] if pad_size > 0 else output
+
+    # Decode, small shapes and the non-SP case: gather fp8, then plain matmul.
+    if flash_comm_v1_enabled and label:
+        quantized_x = tensor_model_parallel_all_gather(quantized_x, 0)
+        pertoken_scale = tensor_model_parallel_all_gather(pertoken_scale, 0)
+        pad_size = _EXTRA_CTX.pad_size
+        if pad_size > 0:
+            quantized_x = quantized_x[:-pad_size]
+            pertoken_scale = pertoken_scale[:-pad_size]
+    return torch_npu.npu_quant_matmul(
+        quantized_x,
+        weight,
+        weight_scale,
+        scale_dtype=torch_npu.float8_e8m0fnu,
+        pertoken_scale=pertoken_scale,
+        pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
+        output_dtype=torch.bfloat16,
+        group_sizes=[1, 1, group_size],
+    )
+
+
+def _all_gather_matmul_prequant_mxfp8_fake(
+    quantized_x: torch.Tensor,
+    pertoken_scale: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    world_size: int,
+    group_size: int,
+    label: bool,
+    scale_dtype: int,
+) -> torch.Tensor:
+    num_tokens = quantized_x.shape[0]
+    if _EXTRA_CTX.flash_comm_v1_enabled and label:
+        num_tokens = num_tokens * world_size
+    return torch.empty((num_tokens, weight.shape[1]), device=quantized_x.device, dtype=torch.bfloat16)
+
+
+direct_register_custom_op(
+    op_name="all_gather_matmul_prequant_mxfp8",
+    op_func=_all_gather_matmul_prequant_mxfp8_impl,
+    fake_impl=_all_gather_matmul_prequant_mxfp8_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

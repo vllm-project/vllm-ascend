@@ -984,6 +984,10 @@ def matmul_reduce_scatter_enable() -> bool:
     return get_ascend_config().enable_matmul_reduce_scatter
 
 
+def matmul_all_gather_enable() -> bool:
+    return get_ascend_config().enable_matmul_all_gather
+
+
 def create_hccl_pg_options(group_name: str):
     options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
     hccl_config = get_hccl_config_for_pg_options(group_name) or {}

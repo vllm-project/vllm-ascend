@@ -94,6 +94,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_MATMUL_REDUCE_SCATTER": lambda: bool(
         int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_REDUCE_SCATTER", "0"))
     ),
+    # Whether to fuse AllGather + Matmul on the FlashComm1 column path (A5 only).
+    "VLLM_ASCEND_ENABLE_MATMUL_ALL_GATHER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALL_GATHER", "0"))
+    ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
