@@ -15,7 +15,6 @@ _envs: &envs
       VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
       TASK_QUEUE_ENABLE: "1"
       VLLM_ASCEND_ENABLE_MLAPO: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -59,7 +58,7 @@ _benchmarks: &benchmarks
         max_out_len: 1024
         batch_size: 1
         request_rate: 0
-        baseline: 1
+        baseline: 26.10
         threshold: 0.97
       perf_16384_bs16:
         case_type: performance
@@ -70,7 +69,7 @@ _benchmarks: &benchmarks
         max_out_len: 1024
         batch_size: 4
         request_rate: 0.5
-        baseline: 1
+        baseline: 60.53
         threshold: 0.97
       perf_32768_bs4:
         case_type: performance
@@ -81,7 +80,7 @@ _benchmarks: &benchmarks
         max_out_len: 512
         batch_size: 1
         request_rate: 0
-        baseline: 1
+        baseline: 22.68
         threshold: 0.97
       perf_32768_bs8:
         case_type: performance
@@ -92,7 +91,7 @@ _benchmarks: &benchmarks
         max_out_len: 512
         batch_size: 2
         request_rate: 0.2
-        baseline: 1
+        baseline: 32.73
         threshold: 0.97
       perf_65536_bs4:
         case_type: performance
@@ -103,7 +102,7 @@ _benchmarks: &benchmarks
         max_out_len: 1024
         batch_size: 1
         request_rate: 0
-        baseline: 1
+        baseline: 22.77
         threshold: 0.97
       perf_65536_bs8:
         case_type: performance
@@ -114,7 +113,19 @@ _benchmarks: &benchmarks
         max_out_len: 1024
         batch_size: 2
         request_rate: 1
-        baseline: 1
+        baseline: 33.80
+        threshold: 0.97
+_benchmarks_2048: &benchmarks_2048
+      perf_16384_bs4:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in2048-bs4000-ds3.2
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 2048
+        batch_size: 32
+        request_rate: 0
+        baseline: 220
         threshold: 0.97
 
 test_cases:
@@ -125,3 +136,13 @@ test_cases:
     server_cmd: *server_cmd
     benchmarks:
       <<: *benchmarks
+  - name: "DeepSeek-V3.2-W8A8-mix-perf"
+    model: "vllm-ascend/DeepSeek-V3.2-W8A8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--async-scheduling"
+    benchmarks:
+      <<: *benchmarks_2048
+

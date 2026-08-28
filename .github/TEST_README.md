@@ -24,9 +24,13 @@ PR changed files
     ▼
 test_config.yaml ──► resolve base inheritance ──► match modules ──► collect test paths
                                                                          │
-                                                                Route by convention:
-                                                                 UT:  a2/, a2_2/, a3_2/, a3_4/, 310p/
-                                                                 E2E: one_card, two_card, four_card, *_310p.py
+                                                                runner_mapping regex
+                                                                         │
+                                                               default partition
+                                                                         │
+                                                           pinned_routes (optional)
+                                                                         │
+                                                              partition runner_label
                                                                          │
                                                                 runner_label.json
                                                                          │
@@ -40,6 +44,23 @@ test_config.yaml ──► resolve base inheritance ──► match modules ─�
 | `.github/workflows/scripts/select_tests.py` | Matches changed files, scans tests, routes to runners |
 | `.github/workflows/scripts/test_config.yaml` | Maps source paths to UT/E2E tests |
 | `.github/workflows/scripts/runner_label.json` | Defines runner labels, chip types, NPU count, and image tags |
+
+`runner_mapping` maps test paths to default logical partitions such as
+`a3-2` or `a3-4`. After selection, skip filtering, and containment-aware
+deduplication, `pinned_routes` can move selected files into dedicated logical
+partitions without changing their technical directory structure. A file-level
+pin also applies when only one of its `::nodeid` targets is selected. If both a
+bare file and one of its nodeids are selected, the bare file wins to prevent
+duplicate execution. Each entry in `partition` selects an exact key from
+`runner_label.json` and sets the load-balanced group count.
+Logical partition names use display-ready labels such as `a3-2` and
+`a3-800i-2`; GitHub jobs render them as `a3-2 card-(part 1-3)` while the
+numeric `partition` value remains available for artifacts and load balancing.
+
+Workflows that temporarily reroute selected tests can use
+`--runner-label-override` with an exact label from `runner_label.json`. This
+override is applied after pinned routes, has the highest priority, and creates
+a transient single-shard partition for that invocation.
 
 ## `test_config.yaml` Tutorial
 
@@ -138,6 +159,7 @@ All E2E tests run on NPU. E2E routing is determined by directory or `_310p` file
 | `tests/e2e/pull_request/one_card/` | A2 NPU x1 |
 | `tests/e2e/pull_request/two_card/` | A3 NPU x2 |
 | `tests/e2e/pull_request/four_card/` | A3 NPU x4 |
+| `tests/e2e/pull_request/eight_card/` | A3 NPU x8 |
 | `*_310p.py` under one/two-card paths | 310P NPU x1 |
 | `*_310p.py` under four-card paths | 310P NPU x4 |
 
@@ -172,6 +194,7 @@ If `tests` points to a directory, `select_tests.py` scans `test_*.py` files and 
    - 1-card: `tests/e2e/pull_request/one_card/test_new_feature.py`
    - 2-card: `tests/e2e/pull_request/two_card/test_new_feature.py`
    - 4-card: `tests/e2e/pull_request/four_card/test_new_feature.py`
+   - 8-card: `tests/e2e/pull_request/eight_card/test_new_feature.py`
 
 2. Register it in `.github/workflows/scripts/test_config.yaml` for PR selective testing.
 

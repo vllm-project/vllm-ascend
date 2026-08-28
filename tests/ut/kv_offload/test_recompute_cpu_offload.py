@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
 # Clean up stale mock modules installed by other kv offload tests that replace
 # real kv_transfer packages with fake modules, breaking imports of this package.
@@ -198,6 +197,7 @@ def test_recompute_cpu_offload_scheduler_aligns_sliding_window_blocks():
 def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():
     scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
     scheduler._group_is_sliding_window = [True]
+    scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )
@@ -232,6 +232,7 @@ def test_recompute_cpu_offload_scheduler_d2h_keeps_sliding_window_offsets():
 def test_recompute_cpu_offload_scheduler_h2d_skips_sliding_window_null_blocks():
     scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
     scheduler._group_is_sliding_window = [True]
+    scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )
@@ -263,6 +264,7 @@ def test_recompute_cpu_offload_scheduler_h2d_skips_sliding_window_null_blocks():
 def test_recompute_cpu_offload_scheduler_h2d_clips_mtp_tail_blocks():
     scheduler = RecomputeCPUOffloadScheduler.__new__(RecomputeCPUOffloadScheduler)
     scheduler._group_is_sliding_window = [False]
+    scheduler._group_is_mamba = [False]
     scheduler.cpu_kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))]
     )
@@ -600,9 +602,6 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
     scheduler.failed_recving_kv_req_ids = set()
     scheduler.finished_recving_kv_req_ids = {"req-1"}
     scheduler.kv_cache_manager = MagicMock()
-    scheduler.is_mtp_kv_consumer = True
-    scheduler.num_spec_tokens = 2
-    scheduler.max_model_len = 32
 
     request = SimpleNamespace(
         request_id="req-1",
@@ -616,7 +615,7 @@ def test_recompute_scheduler_remote_kv_restore_keeps_exact_token_position():
 
     scheduler.kv_cache_manager.cache_blocks.assert_called_once_with(request, 8)
     assert request.num_computed_tokens == 8
-    assert request.spec_token_ids == [PLACEHOLDER_TOKEN_ID] * 2
+    assert request.spec_token_ids == []
     assert scheduler.finished_recving_kv_req_ids == set()
 
 

@@ -151,6 +151,5 @@ vllm serve <model_path> \
 
 - RFork requires `YuanRong TransferEngine` at runtime. If the package is missing, RFork cannot initialize the transfer backend.
 - If RFORK is used, **each worker process** must bind a listening port. That port is assigned randomly.
-- RFork weight transfer does not support `additional_config.layer_sharding`. If `--load-format rfork` is used together with `layer_sharding`, RFork transfer is bypassed and the model is loaded through the default model loader.
 - RFork weight transfer does not support dynamic EPLB because expert weights and placement can change after the seed service starts. If `eplb_config.dynamic_eplb` or `eplb_config.expert_map_record_path` enables dynamic EPLB, RFork transfer is bypassed and the model is loaded through the default model loader.
 - The example [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) is only a simple mock implementation. If you need stronger scheduling, capacity management, or production-grade availability behavior, implement your own planner based on the RFork seed protocol.

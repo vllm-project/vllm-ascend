@@ -15,8 +15,13 @@
 #   $10 num_nodes       (multi_node only)
 #   $11 coord_dir       (multi_node only)
 #   $12 case_name       (optional)
+#   $13 soc             (optional)
 # ============================================================
 set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bisect_args.sh
+source "${SCRIPT_DIR}/bisect_args.sh"
 
 FT="${1:-unknown}"
 AGE="${2:-?}"
@@ -30,6 +35,29 @@ BAD_COMMIT="${9:-HEAD}"
 NUM_NODES="${10:-}"
 COORD_DIR="${11:-}"
 NAME="${12:-}"
+SOC="${13:-}"
+
+if [[ -z "$SOC" || "$SOC" == "unknown" ]]; then
+  echo "ERROR: valid soc is required for good-table lookup"
+  exit 1
+fi
+
+case "$SCENE" in
+  single_node|multi_node)
+    ;;
+  *)
+    echo "ERROR: invalid scene: '$SCENE'"
+    exit 1
+    ;;
+esac
+BISECT_GOOD_COMMIT="${14:-}"
+BISECT_FAIL_CONFIRM_RETRIES="${15:-}"
+BISECT_TRIAL_TIMEOUT="${16:-}"
+BISECT_BARRIER_TIMEOUT="${17:-}"
+BISECT_NO_VERIFY_GOOD="${18:-}"
+BISECT_NO_VERIFY_BAD="${19:-}"
+BISECT_FORCE_INITIAL_BUILD="${20:-}"
+BISECT_CONFIG_BASE_PATH="${21:-}"
 
 echo "================================================"
 echo " PROCESS - needs attention"
@@ -76,7 +104,7 @@ fi
 GOOD_TABLE="${GOOD_TABLE:-}"
 
 BISECT_CMD=(
-  python -m tests.e2e.nightly.bisect.auto_bisect
+  python -m tools.bisect.auto_bisect
   --scene "${SCENE}"
   --bad-commit "${BAD_COMMIT}"
   --good-table "${GOOD_TABLE}"
@@ -84,8 +112,11 @@ BISECT_CMD=(
 
 [ -n "$CONFIG" ]    && BISECT_CMD+=(--config-yaml "$CONFIG")
 [ -n "$NAME" ] && BISECT_CMD+=(--name "$NAME")
+[ -n "$SOC" ] && BISECT_CMD+=(--soc "$SOC")
 [ -n "$NUM_NODES" ] && BISECT_CMD+=(--num-nodes "$NUM_NODES")
 [ -n "$COORD_DIR" ] && BISECT_CMD+=(--coord-dir "$COORD_DIR")
+build_bisect_extra_args
+BISECT_CMD+=("${BISECT_EXTRA_ARGS[@]}")
 
 echo ""
 echo "=== Running auto bisect ==="

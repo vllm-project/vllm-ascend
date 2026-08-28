@@ -66,14 +66,12 @@ env_common: &env_common
   HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "0"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
 
 templates:
   - node_index: 0
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -97,7 +95,7 @@ templates:
       - --max-model-len
       - "140000"
       - --additional-config
-      - '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp": true}'
+      - '{"enable_dsa_cp": true,"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -134,7 +132,6 @@ templates:
   - node_index: 1
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -158,7 +155,7 @@ templates:
       - --max-model-len
       - "140000"
       - --additional-config
-      - '{"fuse_muls_add":true,"multistream_overlap_shared_expert":true,"enable_dsa_cp": true}'
+      - '{"enable_dsa_cp": true,"enable_fused_mc2":1}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -224,7 +221,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,64,96,128]}'
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true}'
+      - '{"recompute_scheduler_enable":true,"enable_fused_mc2":1}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -287,7 +284,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,64,96,128]}'
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true}'
+      - '{"recompute_scheduler_enable":true,"enable_fused_mc2":1}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"

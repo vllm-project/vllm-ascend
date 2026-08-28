@@ -13,6 +13,10 @@ import pytest
 import vllm
 
 from tests.e2e.conftest import DisaggEpdProxy, RemoteEPDServer, RemoteOpenAIServer
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
+from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import (
+    create_single_node_kv_pool_manager,
+)
 from tests.e2e.nightly.single_node.models.scripts.single_node_config import (
     SingleNodeConfig,
     SingleNodeConfigLoader,
@@ -39,7 +43,7 @@ async def run_completion_test(config: SingleNodeConfig, server: "RemoteOpenAISer
 async def run_image_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
     from tools.send_mm_request import send_image_request
 
-    send_image_request(config.model, server)
+    send_image_request(config, server)
 
 
 async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
@@ -51,6 +55,76 @@ async def run_chat_completion_test(config: SingleNodeConfig, server: "RemoteOpen
         server=server,
         request_args=config.api_keyword_args,
     )
+
+
+async def run_messages_test(config: SingleNodeConfig, server: "RemoteOpenAIServer | DisaggEpdProxy") -> None:
+    import requests
+
+    url = f"http://{server.host}:{server.port}"
+    prompts = config.prompts if config.prompts else ["Hello!"]
+
+    if isinstance(config.api_keyword_args, list):
+        api_args_list = config.api_keyword_args
+        if len(api_args_list) != len(prompts):
+            raise ValueError(f"""
+            api_keyword_args list length ({len(api_args_list)})must match prompts length ({len(prompts)})""")
+    else:
+        api_args_list = [config.api_keyword_args] * len(prompts)
+
+    for prompt, api_args in zip(prompts, api_args_list):
+        max_tokens = api_args.get("max_tokens", 100) if isinstance(api_args, dict) else 100
+        tools = api_args.get("tools") if isinstance(api_args, dict) else None
+        stream = api_args.get("stream", False) if isinstance(api_args, dict) else False
+
+        request_body = {
+            "model": config.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            request_body["tools"] = tools
+        if stream:
+            request_body["stream"] = True
+
+        if stream:
+            with requests.post(
+                f"{url}/v1/messages",
+                headers={"Content-Type": "application/json"},
+                json=request_body,
+                stream=True,
+            ) as response:
+                assert response.status_code == 200, f"Streaming request failed for prompt '{prompt}': {response.text}"
+                events = [line.decode("utf-8") for line in response.iter_lines() if line]
+                assert len(events) > 0, f"No SSE events received for prompt '{prompt}'"
+                assert any("message_start" in e for e in events), f"Missing 'message_start' event for prompt '{prompt}'"
+                assert any("content_block_delta" in e for e in events), f"""Missing 'content_block_delta'
+                event for prompt '{prompt}'"""
+                assert any("message_stop" in e for e in events), f"Missing 'message_stop' event for prompt '{prompt}'"
+                print(f"Messages API streaming test passed for prompt '{prompt}' (events={len(events)})")
+        else:
+            with requests.post(
+                f"{url}/v1/messages",
+                headers={"Content-Type": "application/json"},
+                json=request_body,
+            ) as response:
+                assert response.status_code == 200, f"Request failed for prompt '{prompt}': {response.text}"
+                data = response.json()
+                assert data["type"] == "message", f"Expected type 'message', got {data.get('type')}"
+                assert data["role"] == "assistant", f"Expected role 'assistant', got {data.get('role')}"
+                assert "content" in data, "Response missing 'content' field"
+                assert isinstance(data["content"], list), "Expected content to be a list"
+                assert len(data["content"]) > 0, f"Expected non-empty content for prompt '{prompt}'"
+
+            if tools:
+                valid_blocks = [block for block in data["content"] if block.get("type") in ["text", "tool_use"]]
+                assert len(valid_blocks) > 0, f"No text or tool_use content found for prompt '{prompt}'"
+            else:
+                text_content = [block for block in data["content"] if block.get("type") == "text"]
+                assert len(text_content) > 0, f"No text content found for prompt '{prompt}'"
+                actual_text = text_content[0].get("text", "")
+                assert actual_text and actual_text.strip(), f"Empty text response for prompt '{prompt}'"
+
+            print(f"Messages API test passed for prompt '{prompt}': {data}")
 
 
 def run_benchmark_comparisons(config: SingleNodeConfig, results: Any) -> None:
@@ -147,6 +221,7 @@ TEST_HANDLERS = {
     "completion": run_completion_test,
     "image": run_image_test,
     "chat_completion": run_chat_completion_test,
+    "messages": run_messages_test,
     "check_rank0_process_count": run_check_rank0_process_count,
 }
 
@@ -185,13 +260,11 @@ def _extract_hardware(runner: str) -> str:
 _PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
 
 _FEATURE_ENVS: dict[str, str] = {
-    "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
-    "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
     "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
-    "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
 }
+
+_FEATURE_CONFIGS: dict[str, str] = {"enable_fused_mc2": "fused_mc2"}
 
 _PERF_METRIC_RENAME: dict[str, str] = {
     "Benchmark Duration": "Benchmark_Duration(BD)",
@@ -233,12 +306,12 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
     features: list[str] = []
 
     # Features from --additional-config JSON
-    additional = _parse_json_flag(cmd_list, "--additional-config")
-    if additional.get("enable_weight_nz_layout"):
+    additional = _parse_json_flag(cmd_list, "--additional-config") or _parse_json_flag(cmd_list, "--additional_config")
+    for config_key, feature_name in _FEATURE_CONFIGS.items():
+        if additional.get(config_key):
+            features.append(feature_name)
+    if additional.get("weight_nz_mode", 0) != 0:
         features.append("weight_nz_layout")
-    wp = additional.get("weight_prefetch_config") or {}
-    if isinstance(wp, dict) and wp.get("enabled"):
-        features.append("weight_prefetch")
     tc = additional.get("torchair_graph_config") or {}
     if isinstance(tc, dict) and tc.get("enabled"):
         features.append("torchair_graph")
@@ -265,8 +338,6 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
         val = str(envs.get(env_key, "0"))
         if val not in ("0", "", "false", "False"):
             features.append(feature_name)
-    if int(envs.get("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)) > 0:
-        features.append("flashcomm2")
 
     return features
 
@@ -388,6 +459,11 @@ def _save_benchmark_results_json(config: SingleNodeConfig, benchmark_keys: list[
     logger.info("Benchmark results saved to %s", output_path)
     print(f"Benchmark results saved to {output_path}")
 
+    postprocess_benchmark_results(
+        list(zip(benchmark_keys, case_configs, results)),
+        job_name=job_name,
+    )
+
 
 def _run_benchmarks(config: SingleNodeConfig, port: int) -> None:
     """Run Aisbench benchmarks and process benchmark-dependent custom assertions."""
@@ -422,9 +498,14 @@ async def test_single_node(config: SingleNodeConfig) -> None:
                 f"{k}=={v}",
             ]
             subprocess.call(command)
+    kv_pool_manager = create_single_node_kv_pool_manager(config.kv_pool, config.name)
     if config.service_mode == "epd":
         with (
-            RemoteEPDServer(vllm_serve_args=config.epd_server_cmds, env_dict=config.envs) as _,
+            kv_pool_manager,
+            RemoteEPDServer(
+                vllm_serve_args=config.epd_server_cmds,
+                env_dict={**config.envs, **kv_pool_manager.server_envs},
+            ) as _,
             DisaggEpdProxy(proxy_args=config.epd_proxy_args, env_dict=config.envs) as proxy,
         ):
             await _dispatch_tests(config, proxy)
@@ -432,12 +513,15 @@ async def test_single_node(config: SingleNodeConfig) -> None:
         return
 
     # Standard OpenAI service mode
-    with RemoteOpenAIServer(
-        model=config.model,
-        vllm_serve_args=config.server_cmd,
-        server_port=config.server_port,
-        env_dict=config.envs,
-        auto_port=False,
-    ) as server:
+    with (
+        kv_pool_manager,
+        RemoteOpenAIServer(
+            model=config.model,
+            vllm_serve_args=config.server_cmd,
+            server_port=config.server_port,
+            env_dict={**config.envs, **kv_pool_manager.server_envs},
+            auto_port=False,
+        ) as server,
+    ):
         await _dispatch_tests(config, server)
         _run_benchmarks(config, config.server_port)

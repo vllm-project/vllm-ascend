@@ -2,7 +2,7 @@
 
 The feature support principle of vLLM Ascend is: **aligned with vLLM**. We are also actively collaborating with the community to accelerate support.
 
-Functional call: <https://docs.vllm.ai/en/latest/features/tool_calling/>
+Tool calling: [vLLM documentation](https://docs.vllm.ai/en/latest/features/tool_calling/)
 
 You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is the feature support status of vLLM Ascend:
 
@@ -16,16 +16,16 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Enc-dec                       | 🟡 Planned       | vLLM should support this feature first.                                |
 | Multi Modality                | 🟢 Functional    | [Multi Modality][multimodal], optimizing and adapting more models            |
 | LogProbs                      | 🟢 Functional    | CI needed                                                              |
-| Prompt logProbs               | 🟢 Functional    | CI needed                                                              |
+| Prompt LogProbs               | 🟢 Functional    | CI needed                                                              |
 | Async output                  | 🟢 Functional    | CI needed                                                              |
 | Beam search                   | 🔵 Experimental  | CI needed                                                              |
 | Guided Decoding               | 🟢 Functional    | [vllm-ascend#177][guided_decoding]                                     |
 | Tensor Parallel               | 🟢 Functional    | Make TP >4 work with graph mode.                                        |
-| Pipeline Parallel             | 🟢 Functional    | Write official guide and tutorial.                                     |
-| Expert Parallel               | 🟢 Functional    | Support dynamic EPLB.                                                  |
+| Pipeline Parallel             | 🟢 Functional    | See [Pipeline Parallelism][pipeline_parallel]. An end-to-end tutorial is planned. |
+| Expert Parallel               | 🟢 Functional    | Supports MRv1 legacy EPLB and MRv2 upstream synchronous EPLB; see [EPLB][eplb]. |
 | Data Parallel                 | 🟢 Functional    | Data Parallel support for Qwen3 MoE.                                   |
 | Prefill Decode Disaggregation | 🟢 Functional    | Functional, xPyD is supported.                                         |
-| Quantization                  | 🟢 Functional    | W8A8 available; working on more quantization method support (W4A8, etc) |
+| Quantization                  | 🟢 Functional    | W8A8 available; working on more quantization method support (W4A8, etc.) |
 | Graph Mode                    | 🟢 Functional    | Functional, see detailed note: [Graph Mode][graph_mode]                 |
 | Sleep Mode                    | 🟢 Functional    | Functional, see detailed note: [Sleep Mode][sleep_mode]                 |
 | Context Parallel              | 🟢 Functional    | Functional, see detailed note: [Context Parallel][context_parallel]     |
@@ -46,3 +46,5 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [1P1D]: https://github.com/vllm-project/vllm-ascend/pull/950
 [context_parallel]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html
 [sleep_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html
+[eplb]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/expert_parallelism_load_balancer.html
+[pipeline_parallel]: ../feature_guide/pipeline_parallel.md

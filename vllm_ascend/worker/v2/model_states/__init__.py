@@ -22,6 +22,8 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
+from vllm_ascend.device.device_config import is_310p
+
 
 def init_asecnd_model_state(
     vllm_config: VllmConfig,
@@ -29,6 +31,35 @@ def init_asecnd_model_state(
     encoder_cache: EncoderCache | None,
     device: torch.device,
 ):
+    # Keep model-provided state overrides ahead of the platform defaults.
+    if hasattr(model, "get_model_state_cls"):
+        cls = model.get_model_state_cls()
+        return cls(vllm_config, model, encoder_cache, device)
+
+    if vllm_config.model_config.is_hybrid:
+        from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
+            AscendMambaHybridModelState,
+        )
+
+        return AscendMambaHybridModelState(
+            vllm_config,
+            model,
+            encoder_cache,
+            device,
+        )
+
+    if is_310p():
+        from vllm_ascend._310p.worker.v2.model_state import (
+            Ascend310PModelState,
+        )
+
+        return Ascend310PModelState(
+            vllm_config,
+            model,
+            encoder_cache,
+            device,
+        )
+
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
     return AscendModelState(vllm_config, model, encoder_cache, device)

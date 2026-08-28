@@ -61,7 +61,7 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
     def test_quant_type_is_w8a8fp8(self):
         from vllm_ascend.quantization.quant_type import QuantType
 
-        self.assertEqual(self.quant_method.quant_type, QuantType.W8A8FP8)
+        self.assertEqual(self.quant_method.quant_type, QuantType.W8A8FP)
 
     def test_get_weight_dtype_is_float8_e4m3fn(self):
         param_dict = self.quant_method.get_weight(
@@ -84,8 +84,7 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
             self.assertEqual(param_dict["w2_weight"].shape[0], num_experts)
 
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")
-    def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_select_experts, mock_extra_ctx):
+    def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_extra_ctx):
         tokens = 4
         hidden_size = self.hidden_size
         layer = torch.nn.Module()
@@ -100,31 +99,33 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
         layer.swiglu_limit = 1000000
 
         x = torch.randn(tokens, hidden_size, dtype=torch.float32)
-        router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
         topk_ids = torch.randint(0, self.num_experts, (tokens, 2), dtype=torch.int64)
         mc2_mask = torch.tensor([1, 0, 1, 0], dtype=torch.bool)
         pertoken_scale = torch.randn(tokens, dtype=torch.float32)
+        layer.activation = "gelu"
+        layer.apply_router_weight_on_input = True
+        layer.ascend_expert_map = None
+        layer.global_redundant_expert_num = 0
+        layer.log2phy = None
+        layer.ascend_mc2_mask = mc2_mask
+        layer.ascend_pertoken_scale = pertoken_scale
+        layer.swiglu_alpha = 1.0
+        layer.swiglu_beta = 0.0
 
-        mock_select_experts.return_value = (topk_weights, topk_ids)
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, hidden_size, dtype=torch.float32)
         mock_extra_ctx.moe_comm_method = mock_comm
         mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
-        self.quant_method.multistream_overlap_gate = False
         self.quant_method.in_dtype = torch.float32
 
         self.quant_method.apply(
             layer=layer,
             x=x,
-            router_logits=router_logits,
-            top_k=2,
-            renormalize=True,
-            num_experts=self.num_experts,
-            activation="gelu",
-            apply_router_weight_on_input=True,
-            mc2_mask=mc2_mask,
-            pertoken_scale=pertoken_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
         )
 
         fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]

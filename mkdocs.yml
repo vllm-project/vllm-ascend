@@ -16,6 +16,7 @@ repo_name: vllm-project/vllm-ascend
 edit_uri: edit/main/docs/source/
 
 docs_dir: !ENV [DOCS_DIR, docs/source]
+use_directory_urls: false
 
 # ---- Theme: Material for MkDocs ----
 theme:
@@ -111,7 +112,11 @@ markdown_extensions:
   - pymdownx.arithmatex:
       generic: true
   - pymdownx.betterem:
-      smart_enable: all
+      # Chinese text does not use spaces between words, so smart emphasis
+      # treats valid constructs such as ``中文**加粗**文本`` as intraword
+      # markup. The Chinese build enables smart handling only for
+      # underscores, preserving identifiers such as ``foo_bar_baz``.
+      smart_enable: !ENV [DOCS_BETTEREM_SMART_ENABLE, all]
   - pymdownx.caret
   - pymdownx.details
   - pymdownx.emoji:
@@ -140,6 +145,10 @@ markdown_extensions:
 extra_css:
   - stylesheets/extra.css
 
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
 extra:
   # Toggle via DOCS_IS_RELEASE env var (set by .readthedocs.yaml for tag builds).
   is_release: !ENV [DOCS_IS_RELEASE, false]
@@ -148,15 +157,15 @@ extra:
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
   # Version substitutions used by macros plugin
-  vllm_version: v0.22.1
-  vllm_ascend_version: v0.22.1rc1
-  pip_vllm_ascend_version: 0.22.1rc1
-  pip_vllm_version: 0.22.1
-  cann_image_tag: 9.0.0-910b-ubuntu22.04-py3.12
+  vllm_version: v0.23.0
+  vllm_ascend_version: v0.23.0
+  pip_vllm_ascend_version: 0.23.0
+  pip_vllm_version: 0.23.0
+  cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
-  main_cann_version: "9.0.0"
-  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0"
-  main_triton_ascend_version: "3.2.1"
+  main_cann_version: "9.1.0"
+  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post4"
+  main_triton_ascend_version: "3.2.2"
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend
@@ -181,15 +190,18 @@ nav:
         - tutorials/models/Qwen3-VL-30B-A3B-Instruct.md
         - tutorials/models/Qwen3-VL-235B-A22B-Instruct.md
         - tutorials/models/Qwen3-Coder-30B-A3B.md
-        - tutorials/models/Qwen3_embedding.md
+        - tutorials/models/Qwen3-Embedding.md
         - tutorials/models/Qwen3-VL-Embedding.md
-        - tutorials/models/Qwen3_reranker.md
+        - tutorials/models/Qwen3-Reranker.md
         - tutorials/models/Qwen3-VL-Reranker.md
         - tutorials/models/Qwen3-Next.md
         - tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md
         - tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md
+        - tutorials/models/Qwen3.5-Dense.md
         - tutorials/models/Qwen3.5-397B-A17B.md
         - tutorials/models/Qwen3.6-35B-A3B.md
+        - tutorials/models/Qwen3.8-2.4T-A95B.md
+        - tutorials/models/Qwen3.8-27B.md
         - tutorials/models/DeepSeek-V3.1.md
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
@@ -204,6 +216,7 @@ nav:
         - tutorials/models/Kimi-K2.6.md
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
+        - tutorials/models/MiniMax-M3.md
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
         - tutorials/models/Minitron-8B-Base.md
@@ -211,28 +224,26 @@ nav:
         - tutorials/models/gpt-oss-120b.md
         - tutorials/models/Mixtral-8x7B-Instruct-v0.1.md
         - tutorials/models/Qwen3-ASR-1.7B.md
+        - tutorials/models/Cohere-Transcribe.md
         - tutorials/models/Qwen2.5-Math-RM-72B.md
         - tutorials/models/InternVL3.5.md
+        - tutorials/models/Dots3-Note.md
     - Feature Tutorials:
         - tutorials/features/index.md
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
         - tutorials/features/pd_disaggregation_mooncake_single_node.md
         - tutorials/features/pd_disaggregation_mooncake_multi_node.md
-        - tutorials/features/long_sequence_context_parallel_single_node.md
-        - tutorials/features/long_sequence_context_parallel_multi_node.md
         - tutorials/features/dynamic_chunked_pipeline_parallel.md
         - tutorials/features/suffix_speculative_decoding.md
         - tutorials/features/ray.md
-    - Hardware Tutorials:
-        - tutorials/hardwares/index.md
-        - tutorials/hardwares/310p.md
     - faqs.md
   - User Guide:
     - user_guide/index.md
-    - user_guide/support_matrix/index.md
-    - user_guide/support_matrix/supported_models.md
-    - user_guide/support_matrix/supported_features.md
-    - user_guide/support_matrix/feature_matrix.md
+    - Features and Models:
+        - user_guide/support_matrix/index.md
+        - user_guide/support_matrix/supported_models.md
+        - user_guide/support_matrix/supported_features.md
+        - user_guide/support_matrix/feature_matrix.md
     - Configuration:
         - user_guide/configuration/index.md
         - user_guide/configuration/env_vars.md
@@ -249,23 +260,26 @@ nav:
         - user_guide/feature_guide/expert_parallelism_load_balancer.md
         - user_guide/feature_guide/netloader.md
         - user_guide/feature_guide/rfork.md
-        - user_guide/feature_guide/dynamic_batch.md
         - user_guide/feature_guide/epd_disaggregation.md
         - user_guide/feature_guide/kv_pool.md
+        - user_guide/feature_guide/layerwise_kv_pool.md
+        - user_guide/feature_guide/layerwise_and_sparse_kv_cache_offloading.md
         - user_guide/feature_guide/kv_cache_cpu_offload.md
-        - user_guide/feature_guide/external_dp.md
+        - user_guide/feature_guide/recompute_cpu_offload.md
         - user_guide/feature_guide/large_scale_ep.md
         - user_guide/feature_guide/ucm_deployment.md
         - user_guide/feature_guide/Fine_grained_TP.md
-        - user_guide/feature_guide/layer_sharding.md
         - user_guide/feature_guide/speculative_decoding.md
         - user_guide/feature_guide/context_parallel.md
-        - user_guide/feature_guide/weight_prefetch.md
         - user_guide/feature_guide/sequence_parallelism.md
         - user_guide/feature_guide/batch_invariance.md
         - user_guide/feature_guide/lmcache_ascend_deployment.md
+        - user_guide/feature_guide/pipeline_parallel.md
         - user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md
         - user_guide/feature_guide/flash_attention.md
+        - user_guide/feature_guide/short_request_first.md
+        - user_guide/feature_guide/batch_job_aware_scheduler.md
+        - user_guide/feature_guide/rl.md
     - Deployment Guide:
         - user_guide/deployment_guide/index.md
         - user_guide/deployment_guide/using_volcano_kthena.md
@@ -286,11 +300,14 @@ nav:
         - developer_guide/Design_Documents/cpu_binding.md
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
         - developer_guide/Design_Documents/disaggregated_prefill.md
+        - developer_guide/Design_Documents/layerwise_and_sparse_kv_cache_offloading.md
         - developer_guide/Design_Documents/eplb_swift_balancer.md
+        - developer_guide/Design_Documents/model_runner_v2_eplb.md
         - developer_guide/Design_Documents/ACL_Graph.md
         - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md
         - developer_guide/Design_Documents/add_custom_aclnn_op.md
         - developer_guide/Design_Documents/context_parallel.md
+        - developer_guide/Design_Documents/balance_schedule_refactor.md
         - developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md
         - developer_guide/Design_Documents/quantization.md
         - developer_guide/Design_Documents/npugraph_ex.md

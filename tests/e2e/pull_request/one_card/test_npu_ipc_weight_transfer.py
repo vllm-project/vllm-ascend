@@ -75,22 +75,6 @@ def _generate(client, model, prompts):
     return completions
 
 
-def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
-    """Probe ``/start_weight_update``; also performs the actual call when present."""
-    try:
-        response = requests.post(
-            server.url_for("start_weight_update"),
-            json={"is_checkpoint_format": True},
-            timeout=CONTROL_TIMEOUT,
-        )
-    except requests.RequestException:
-        return False
-    if response.status_code == 404:
-        return False
-    response.raise_for_status()
-    return True
-
-
 @pytest.mark.skipif(
     torch.npu.device_count() < 1,
     reason="NPU IPC weight transfer e2e test requires at least 1 NPU.",
@@ -104,7 +88,7 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
         "--load-format",
         "dummy",
         "--weight-transfer-config",
-        '{"backend": "ipc"}',
+        '{"backend": "npu_ipc"}',
         "--max-model-len",
         "1024",
         # IPC co-locates the trainer on the same NPU, so leave room for it.
@@ -143,32 +127,37 @@ def test_npu_ipc_weight_transfer_updates_server_weights():
         train_model = _build_trainer_model(INFERENCE_DEVICE_INDEX)
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
+        from vllm.distributed.weight_transfer.base import ModuleSource
+        from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+        from vllm.distributed.weight_transfer.factory import (
+            WeightTransferTrainerFactory,
+        )
+
+        from vllm_ascend.distributed.weight_transfer import register_engine
         from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
-            NPUIPCTrainerSendWeightsArgs,
-            NPUIPCWeightTransferEngine,
+            NPUIPCTrainerInitInfo,
         )
 
         _post(server, "init_weight_transfer_engine", json={"init_info": {}})
 
         _post(server, "pause")
-        # The probe performs /start_weight_update when present, so it must not
-        # be called again below. Older vLLM without the lifecycle endpoints is
-        # out of scope for this IPC test.
-        if not _has_lifecycle_endpoints(server):
-            _post(server, "resume")
-            pytest.skip("vLLM build lacks the /start_weight_update lifecycle endpoints required by NPU IPC.")
+        _post(server, "start_weight_update")
 
-        # trainer_send_weights POSTs to /update_weights itself; the server
-        # rebuilds tensors locally and loads them before the POST returns (no
-        # collective back to the trainer, so no background thread is needed).
-        # train_model stays referenced so the shared NPU storage outlives it.
-        trainer_args = NPUIPCTrainerSendWeightsArgs(send_mode="http", url=server.url_root)
-        NPUIPCWeightTransferEngine.trainer_send_weights(
-            iterator=train_model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+        register_engine()
 
+        # The lifecycle probe above left a weight update active; the
+        # stateful engine drives its own start/finish lifecycle, so close
+        # the probe's update first.
         _post(server, "finish_weight_update")
+
+        init_info = NPUIPCTrainerInitInfo(rank=0, packed=False)
+        engine = WeightTransferTrainerFactory.trainer_init(
+            init_info,
+            client=HTTPVLLMWeightSyncClient(base_url=server.url_root),
+            source=ModuleSource(train_model),
+        )
+        engine.send_weights()
+
         _post(server, "resume")
 
         outputs_after = _generate(client, MODEL_NAME, PROMPTS)

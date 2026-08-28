@@ -9,7 +9,6 @@ _envs: &envs
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_BALANCE_SCHEDULING: "0"
 _server_cmd: &server_cmd
   - "--enable-expert-parallel"
   - "--tensor-parallel-size"
@@ -30,12 +29,10 @@ _server_cmd: &server_cmd
   - "--quantization"
   - "ascend"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "multistream_overlap_shared_expert": false, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+  - '{"multistream_overlap_shared_expert":false,"ascend_compilation_config":{"enable_npugraph_ex":true},"scheduler_config":{"enable_balance_scheduling":false}}'
   - "--speculative-config"
   - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 
-_special_dependencies: &special_dependencies
-  transformers: "5.2.0"
 
 _benchmarks: &benchmarks
   acc:
@@ -66,7 +63,6 @@ _benchmarks: &benchmarks
 test_cases:
   - name: "GLM-5-TP16-DP1-decodegraph"
     model: "Eco-Tech/GLM-5-w4a8"
-    special_dependencies: *special_dependencies
     envs:
       <<: *envs
     server_cmd: *server_cmd

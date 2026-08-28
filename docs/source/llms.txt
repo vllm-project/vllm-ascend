@@ -50,4 +50,4 @@ Documentation: https://docs.vllm.ai/projects/ascend/en/latest/index.html
 - [User Stories](https://docs.vllm.ai/projects/ascend/en/latest/community/user_stories/index.html): community usage cases.
 
 ## License
-- [Apache License 2.0](https://github.com/vllm-project/vllm-ascend/blob/main/LICENSE)
+- [Apache License 2.0](https://github.com/vllm-project/vllm-ascend/blob/main/LICENSE).

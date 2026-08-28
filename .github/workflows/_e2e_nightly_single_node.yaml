@@ -26,7 +26,7 @@ on:
       image:
         required: false
         type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12"
       tests:
         required: false
         type: string
@@ -38,6 +38,15 @@ on:
         type: string
         default: ''
         description: override CONFIG_BASE_PATH used by the yaml loader (defaults to nightly path)
+      soc_version:
+        required: true
+        type: string
+        description: hardware generation used in the good-table composite key
+      test_frequency:
+        required: false
+        type: string
+        default: nightly
+        description: good-table namespace and baseline cadence (nightly or weekly)
       name:
         required: false
         type: string
@@ -69,10 +78,57 @@ on:
         type: boolean
         default: false
         description: enable AOP hooks (capture / classify / skip-or-process)
+      bisect_good_commit:
+        required: false
+        type: string
+        default: ''
+        description: explicit good commit for bisect (overrides good_table lookup)
+      bisect_bad_commit:
+        required: false
+        type: string
+        default: 'HEAD'
+        description: bad commit to bisect from (default HEAD)
+      bisect_fail_confirm_retries:
+        required: false
+        type: string
+        default: ''
+        description: flaky guard retry count for bisect (default 1)
+      bisect_trial_timeout:
+        required: false
+        type: string
+        default: ''
+        description: per-trial pytest timeout in seconds for bisect (default 7200)
+      bisect_barrier_timeout:
+        required: false
+        type: string
+        default: ''
+        description: multi-node barrier timeout in seconds for bisect (default 3600)
+      bisect_no_verify_good:
+        required: false
+        type: boolean
+        default: false
+        description: skip good endpoint verification in bisect
+      bisect_no_verify_bad:
+        required: false
+        type: boolean
+        default: false
+        description: skip bad endpoint verification in bisect
+      bisect_force_initial_build:
+        required: false
+        type: boolean
+        default: false
+        description: clean-rebuild on the first bisect trial
+      bisect_config_base_path:
+        required: false
+        type: string
+        default: ''
+        description: override CONFIG_BASE_PATH for bisect
     secrets:
       OBS_ACCESS_KEY_ID:
         required: false
       OBS_SECRET_ACCESS_KEY:
+        required: false
+      OPENLIBING_SECRET:
         required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -105,6 +161,8 @@ jobs:
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
+      VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
     steps:
       - name: Check npu and CANN info
         run: |
@@ -153,6 +211,11 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install -e .
+
+      - name: Uninstall Triton for 310P tests
+        if: ${{ inputs.soc_version == '310P' }}
+        run: |
+          pip uninstall -y triton-ascend triton
 
       - name: Install aisbench
         if: ${{ inputs.request_id != '' }}
@@ -264,6 +327,7 @@ jobs:
       - name: Update good_table.csv on success
         if: >-
           ${{ always() &&
+          inputs.request_id == '' &&
           (steps.pytest-driven.outcome == 'success' || steps.pytest-driven.outcome == 'skipped') &&
           (steps.yaml-test.outcome == 'success' || steps.yaml-test.outcome == 'skipped') &&
           (steps.pytest-driven.outcome == 'success' || steps.yaml-test.outcome == 'success') }}
@@ -276,10 +340,12 @@ jobs:
           VLLM_ASCEND_VERSION: ${{ env.VLLM_ASCEND_VERSION }}
         run: |
           python3 tests/e2e/nightly/scripts/update_good_table.py \
-            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv" \
+            --cache-csv "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/${{ inputs.test_frequency }}/good_table.csv" \
             --test-name "$TEST_NAME" \
             --test-path "$TEST_PATH" \
             --config-base-path "$CONFIG_BASE_PATH" \
+            --scene "single_node" \
+            --soc "${{ inputs.soc_version }}" \
             --run-link  "$RUN_LINK" \
             --vllm-dir  "/vllm-workspace/vllm" \
             --vllm-ascend-dir "/vllm-workspace/vllm-ascend" \
@@ -291,7 +357,7 @@ jobs:
 
       - name: Capture test result
         id: test-result
-        if: ${{ always() && inputs.aop_single_enabled && (inputs.config_file_path != '' || inputs.tests != '') }}
+        if: ${{ always() && inputs.aop_single_enabled && inputs.config_file_path != '' }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           bash tests/e2e/nightly/scripts/aop_capture.sh \
@@ -325,16 +391,23 @@ jobs:
 
       - name: Check commit age
         id: commit-age
-        if: ${{ always() && inputs.aop_single_enabled && steps.classify.outputs.failure_type == 'not_env_failure' }}
+        if: >-
+          ${{ always() && inputs.aop_single_enabled &&
+          inputs.bisect_good_commit == '' &&
+          steps.classify.outputs.failure_type == 'not_env_failure' }}
         working-directory: /vllm-workspace/vllm-ascend
         run: |
           bash tests/e2e/nightly/scripts/aop_commit_age.sh \
             "${{ inputs.name || inputs.config_file_path || inputs.tests }}" \
-            "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv"
+            "/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/${{ inputs.test_frequency }}/good_table.csv" \
+            "${{ inputs.test_frequency == 'weekly' && 8 || 3 }}" \
+            "${{ inputs.soc_version }}" \
+            "single_node"
 
       - name: Skip - old commit
         if: >-
           ${{ always() && inputs.aop_single_enabled &&
+          inputs.bisect_good_commit == '' &&
           steps.classify.outputs.failure_type == 'not_env_failure' &&
           steps.commit-age.outputs.is_old == 'true' }}
         working-directory: /vllm-workspace/vllm-ascend
@@ -351,10 +424,20 @@ jobs:
         if: >-
           ${{ always() && inputs.aop_single_enabled &&
           steps.classify.outputs.failure_type == 'not_env_failure' &&
-          steps.commit-age.outputs.is_old == 'false' }}
+          (inputs.bisect_good_commit != '' || steps.commit-age.outputs.is_old == 'false') }}
         working-directory: /vllm-workspace/vllm-ascend
         env:
-          GOOD_TABLE: /root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/nightly/good_table.csv
+          GOOD_TABLE: /root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch }}/${{ inputs.test_frequency }}/good_table.csv
+          CONFIG_BASE_PATH: ${{ inputs.config_base_path }}
+          BISECT_BAD_COMMIT: ${{ inputs.bisect_bad_commit }}
+          BISECT_GOOD_COMMIT: ${{ inputs.bisect_good_commit }}
+          BISECT_FAIL_CONFIRM_RETRIES: ${{ inputs.bisect_fail_confirm_retries }}
+          BISECT_TRIAL_TIMEOUT: ${{ inputs.bisect_trial_timeout }}
+          BISECT_BARRIER_TIMEOUT: ${{ inputs.bisect_barrier_timeout }}
+          BISECT_NO_VERIFY_GOOD: ${{ inputs.bisect_no_verify_good }}
+          BISECT_NO_VERIFY_BAD: ${{ inputs.bisect_no_verify_bad }}
+          BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
+          BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
         run: |
           bash tests/e2e/nightly/scripts/aop_process.sh \
             "${{ steps.classify.outputs.failure_type }}" \
@@ -365,9 +448,19 @@ jobs:
             "${{ steps.test-result.outputs.pytest_summary }}" \
             "${{ steps.test-result.outputs.yaml_summary }}" \
             "single_node" \
-            "HEAD" \
+            "$BISECT_BAD_COMMIT" \
             "" \
-            "${{ inputs.name }}"
+            "" \
+            "${{ inputs.name }}" \
+            "${{ inputs.soc_version }}" \
+            "$BISECT_GOOD_COMMIT" \
+            "$BISECT_FAIL_CONFIRM_RETRIES" \
+            "$BISECT_TRIAL_TIMEOUT" \
+            "$BISECT_BARRIER_TIMEOUT" \
+            "$BISECT_NO_VERIFY_GOOD" \
+            "$BISECT_NO_VERIFY_BAD" \
+            "$BISECT_FORCE_INITIAL_BUILD" \
+            "$BISECT_CONFIG_BASE_PATH"
 
       - name: On success
         if: ${{ always() && inputs.aop_single_enabled && steps.test-result.outputs.result == 'success' }}

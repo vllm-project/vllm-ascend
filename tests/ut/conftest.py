@@ -59,6 +59,10 @@ if not _npu_available:
     torch_npu.npu_format_cast = MagicMock(side_effect=lambda weight, fmt: weight)  # type: ignore[attr-defined]
     torch_npu._C = MagicMock()  # type: ignore[attr-defined]
     torch_npu._C._NPUTaskGroupHandle = MagicMock
+    # Note: Assign missing attributes with values from real scenarios
+    torch_npu.float4_e2m1fn_x2 = 296  # type: ignore[attr-defined]
+    torch_npu.hifloat8 = 290  # type: ignore[attr-defined]
+    torch_npu.float8_e8m0fnu = 293  # type: ignore[attr-defined]
     sys.modules["torch_npu"] = torch_npu
     sys.modules["torch_npu._C"] = torch_npu._C
     sys.modules["torch_npu._C._distributed_c10d"] = torch_npu._C._distributed_c10d
@@ -81,6 +85,7 @@ if not _npu_available:
     except RuntimeError:
         pass
     torch.npu = MagicMock()
+    torch.npu.is_available = MagicMock(return_value=False)
     torch.npu.Stream = MagicMock
     torch.version.cann = None
     torch.distributed.is_hccl_available = MagicMock(return_value=True)
@@ -91,6 +96,11 @@ mooncake_engine = types.ModuleType("mooncake.engine")
 mooncake_engine.__spec__ = importlib.util.spec_from_loader("mooncake.engine", loader=None)
 mooncake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules.setdefault("mooncake.engine", mooncake_engine)
+
+build_info = types.ModuleType("vllm_ascend._build_info")
+build_info.__spec__ = importlib.util.spec_from_loader("vllm_ascend._build_info", loader=None)
+setattr(build_info, "__device_type__", "A2")  # noqa: B010
+sys.modules.setdefault("vllm_ascend._build_info", build_info)
 
 from vllm_ascend.utils import (  # noqa: E402
     adapt_patch,
@@ -105,6 +115,10 @@ if not _npu_available:
     sys.modules["torch_npu"]._npu_flash_attention = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"]._npu_paged_attention_splitfuse = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"]._npu_reshape_and_cache = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_scatter_pa_kv_cache = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_gather_pa_kv_cache = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_fused_infer_attention_score = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"]._npu_fused_infer_attention_score_get_max_workspace = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_moe_gating_top_k_softmax = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_quant_matmul = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_rms_norm = MagicMock()  # type: ignore[attr-defined]
@@ -133,3 +147,23 @@ for _m in _stale_modules:
 def _clear_enable_sp_before_test():
     clear_enable_sp()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _mock_ascend_store_deps(request):
+    # ascend_store code imports vllm_ascend helpers (AttentionComputeStartGate,
+    # get/reset_attention_compute_start_gate, ...) which _mock_deps.py no longer
+    # mocks globally (mutating the real modules leaked into other UTs). Mock them
+    # per-test, scoped to the ascend_store tests only.
+    if "distributed/ascend_store/" not in request.node.nodeid:
+        yield
+        return
+    from unittest.mock import patch
+
+    _pfx = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store"
+    with (
+        patch(f"{_pfx}.pool_worker.get_attention_compute_start_gate"),
+        patch(f"{_pfx}.pool_worker.reset_attention_compute_start_gate"),
+        patch(f"{_pfx}.metadata.AttentionComputeStartGate", type("AttentionComputeStartGate", (), {})),
+    ):
+        yield

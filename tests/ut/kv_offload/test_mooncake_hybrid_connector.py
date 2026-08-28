@@ -6,7 +6,9 @@ import unittest
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import torch
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -51,6 +53,90 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.finished_request_markers = set()
         thread.request_task_counts_lock = threading.Lock()
         return thread
+
+    def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
+        expected_device = torch.device("npu:5")
+        kv_cache = MagicMock(device=expected_device)
+        model_config = types.SimpleNamespace(
+            is_deepseek_mla=False,
+            hf_config=types.SimpleNamespace(compress_ratios=[1]),
+            hf_text_config=types.SimpleNamespace(num_hidden_layers=1),
+        )
+        vllm_config = types.SimpleNamespace(
+            model_config=model_config,
+            cache_config=types.SimpleNamespace(block_size=16),
+        )
+        kv_cache_config = types.SimpleNamespace(kv_cache_groups=[])
+        worker_events: defaultdict[int, list[tuple[str, int | str]]] = defaultdict(list)
+        events_lock = threading.Lock()
+        both_workers_started = threading.Event()
+        release_workers = threading.Event()
+
+        def record_set_device(device):
+            device_index = device if isinstance(device, int) else torch.device(device).index
+            with events_lock:
+                worker_events[threading.get_ident()].append(("set_device", device_index))
+
+        with (
+            patch("torch.npu.set_device", side_effect=record_set_device),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.is_vl_model",
+                return_value=False,
+            ),
+        ):
+            thread = KVCacheRecvingThread(
+                tp_rank=1,
+                tp_size=2,
+                _prefill_pp_size=1,
+                engine=MagicMock(),
+                local_engine_id="local_engine",
+                local_handshake_port=5555,
+                side_channel_port=30000,
+                local_kv_caches_base_addr=[0x1000],
+                block_len_per_addr=[1024],
+                block_stride_per_addr=[1024],
+                addr_group_idx=[0],
+                mamba_ssm_size=(0, 0),
+                use_hybrid=False,
+                has_mamba=False,
+                hma_group_size=1,
+                ready_event=threading.Event(),
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                kv_caches={"layer.0": (kv_cache, kv_cache)},
+            )
+
+            def handle_request(req_meta: dict[str, Any]):
+                with events_lock:
+                    worker_events[threading.get_ident()].append(("handle", req_meta["request_id"]))
+                    handled_worker_count = sum(
+                        any(event == "handle" for event, _ in events) for events in worker_events.values()
+                    )
+                    if handled_worker_count == 2:
+                        both_workers_started.set()
+                release_workers.wait()
+
+            thread._handle_request = handle_request  # type: ignore[method-assign]
+            try:
+                for index in range(2):
+                    thread._submit_request(
+                        {
+                            "request_id": f"req-{index}",
+                            "remote_host": f"host-{index}",
+                            "remote_handshake_port": 6000 + index,
+                            "all_task_done": True,
+                        }
+                    )
+                self.assertTrue(both_workers_started.wait(timeout=5.0), "executor did not start two workers")
+            finally:
+                release_workers.set()
+                thread.executor.shutdown(wait=True, cancel_futures=True)
+
+        handled_worker_events = [events for events in worker_events.values() if any(e == "handle" for e, _ in events)]
+        self.assertEqual(len(handled_worker_events), 2)
+        for events in handled_worker_events:
+            self.assertEqual(events[0], ("set_device", expected_device.index))
+            self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):
         thread = self._make_thread()
@@ -154,8 +240,8 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         scheduler.use_hybrid = True
         scheduler.use_compress = True
         scheduler.num_swa_blocks = [0, 2]
-        scheduler.group_block_size = [128, 128]
-        scheduler.group_compress_ratio = [4, 1]
+        # C4 exposes a 512-token logical block backed by one 128-token page.
+        scheduler.group_block_size = [512, 128]
         scheduler._reqs_need_send = {}
         scheduler.block_size = 128
         scheduler.engine_id = "engine"
@@ -172,6 +258,29 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         transfer_block_ids = scheduler._compute_transfer_block_ids(block_ids, prompt_len=129)
 
         self.assertEqual(transfer_block_ids, ([0], [100, 101]))
+
+    def test_request_finished_trims_logical_compressed_group_spans(self):
+        scheduler = self._make_scheduler()
+        scheduler.group_block_size = [512, 16384]
+        scheduler.num_swa_blocks = [0, 0]
+        request = MockRequest(
+            "req-compressed",
+            prompt_token_ids=list(range(513)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+
+        delay_free, params = scheduler.request_finished_all_groups(
+            request,
+            ([10, 11, 12], [20, 21]),
+        )
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(params["remote_block_ids"], ([10, 11], [20]))
+        # This unused compatibility field remains in the legacy physical-block unit.
+        self.assertEqual(params["num_prompt_blocks"], 5)
 
     def test_request_finished_trims_before_swa_clip(self):
         scheduler = self._make_scheduler()

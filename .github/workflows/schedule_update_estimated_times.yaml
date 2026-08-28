@@ -38,6 +38,10 @@ on:
         type: string
         default: ''
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 permissions:
   contents: read
   pull-requests: write
@@ -52,14 +56,24 @@ jobs:
     outputs:
       test_groups: ${{ steps.scope.outputs.test_groups }}
       has_tests: ${{ steps.scope.outputs.has_tests }}
+      csrc_cache_target_ids: ${{ steps.scope.outputs.csrc_cache_target_ids }}
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       release_tag: ${{ steps.vllm.outputs.release_tag }}
+      vllm_ascend_ref: ${{ steps.source.outputs.source_ref }}
+      base_sha: ${{ steps.source.outputs.base_sha }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v6
+      - name: Resolve source snapshot
+        id: source
+        run: |
+          git fetch origin main
+          echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -94,34 +108,52 @@ jobs:
             filter="${filter} and .partition == \"${{ inputs.filter_partition }}\""
           fi
           filtered="$(echo "$groups_json" | jq -c "[.[] | select(${filter})]")"
+          cache_target_ids="$(echo "$filtered" | jq -c '[.[].csrc_cache_target] | unique')"
           has_tests="false"
           if [ "$(echo "$filtered" | jq 'length')" -gt 0 ]; then has_tests="true"; fi
           sed -i "s|^test_groups=.*|test_groups=${filtered}|" "$GITHUB_OUTPUT"
           sed -i "s|^has_tests=.*|has_tests=${has_tests}|" "$GITHUB_OUTPUT"
+          sed -i "s|^csrc_cache_target_ids=.*|csrc_cache_target_ids=${cache_target_ids}|" "$GITHUB_OUTPUT"
+
+  ensure-csrc-cache:
+    needs: select-tests
+    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
+    uses: ./.github/workflows/_ensure_csrc_cache.yaml
+    with:
+      target_ids: ${{ needs.select-tests.outputs.csrc_cache_target_ids }}
+      source_ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
+      base_ref: main
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
 
   run-tests-main:
-    needs: select-tests
+    needs: [select-tests, ensure-csrc-cache]
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ needs.select-tests.outputs.main_commit }}
+      ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
+      base_ref: main
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
       upload_timing: true
       continue_on_error: true
 
   run-tests-release:
-    needs: select-tests
+    needs: [select-tests, ensure-csrc-cache]
     if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ needs.select-tests.outputs.release_tag }}
+      ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
+      base_ref: main
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
       upload_timing: true
       continue_on_error: true
 
   update-estimated-times:
     needs: [run-tests-main, run-tests-release]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -134,7 +166,7 @@ jobs:
           path: timing-artifacts/
           merge-multiple: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -159,18 +191,23 @@ jobs:
             git diff .github/workflows/scripts/test_config.yaml
           fi
 
+      - name: Setup git remote
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add fork "https://github.com/vllm-ascend-ci/vllm-ascend.git"
+
       - name: Commit and push
         if: steps.check.outputs.changed == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           BRANCH="auto/update-estimated-times-${{ github.run_id }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           git add .github/workflows/scripts/test_config.yaml
           git commit -s -m "[CI] Auto-update estimated test times in test_config.yaml"
-          git push origin "$BRANCH"
+          git push -f fork "$BRANCH"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "Pushed branch: $BRANCH"
 
@@ -180,14 +217,15 @@ jobs:
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           BRANCH: auto/update-estimated-times-${{ github.run_id }}
+          PR_HEAD: vllm-ascend-ci:auto/update-estimated-times-${{ github.run_id }}
         with:
           github-token: ${{ secrets.PAT_TOKEN }}
           script: |
             try {
               const pr = await github.rest.pulls.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                head: process.env.BRANCH,
+                owner: 'vllm-project',
+                repo: 'vllm-ascend',
+                head: process.env.PR_HEAD,
                 base: 'main',
                 title: '[CI] Auto-update estimated test times in test_config.yaml',
                 body: '## Summary\n\n' +

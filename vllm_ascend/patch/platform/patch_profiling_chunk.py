@@ -32,8 +32,6 @@ patches inside the child process before any ``EngineCore`` is instantiated.
 from vllm.logger import logger
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
-from vllm_ascend.utils import vllm_version_is
-
 _profiling_patches_applied = False
 _original_update_from_output = None
 _original_schedule = None
@@ -64,7 +62,7 @@ def _record_execution_timing(scheduler, scheduler_output, model_output):
         try:
             from vllm_ascend.ascend_config import get_ascend_config
 
-            get_ascend_config().profiling_chunk_config.need_timing = False
+            get_ascend_config().scheduler_config.profiling_chunk_config.need_timing = False
         except RuntimeError:
             pass
         # Mark the scheduler so that the next scheduler_output carries
@@ -170,10 +168,7 @@ def _ensure_schedule_wrapped(scheduler):
     _original_schedule = cls.schedule
 
     def _wrapped_schedule(self, throttle_prefills: bool = False):
-        if vllm_version_is("0.23.0"):
-            output = _original_schedule(self)
-        else:
-            output = _original_schedule(self, throttle_prefills)
+        output = _original_schedule(self, throttle_prefills)
         if getattr(self, "_profiling_timing_done", False) and output is not None:
             output.disable_profiling_timing = True
         return output

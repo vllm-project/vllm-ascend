@@ -1,0 +1,270 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Ensure csrc Cache
+
+on:
+  workflow_call:
+    inputs:
+      target_ids:
+        type: string
+        required: true
+        description: 'JSON array of csrc cache target IDs.'
+      source_ref:
+        type: string
+        required: true
+        description: 'Immutable vllm-ascend source commit.'
+      repository:
+        type: string
+        required: false
+        default: ''
+        description: 'Source repository. Defaults to the current repository.'
+      base_ref:
+        type: string
+        required: false
+        default: ''
+        description: 'Base ref containing the fixed base commit.'
+      base_repository:
+        type: string
+        required: false
+        default: ''
+        description: 'Base repository. Defaults to the source repository.'
+      base_sha:
+        type: string
+        required: false
+        default: ''
+        description: 'Fixed base commit to rebase onto.'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  prepare-cache-checks:
+    name: Prepare csrc cache checks
+    # During rollout, cache preparation is observational and must not block the
+    # existing NPU build path. Remove this tolerance once CPU caching is stable.
+    continue-on-error: true
+    runs-on: linux-amd64-cpu-2-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+      has_targets: ${{ steps.targets.outputs.has_targets }}
+      csrc_hash: ${{ steps.hash.outputs.csrc_hash }}
+      missing_targets: ${{ steps.misses.outputs.missing_targets }}
+      has_missing: ${{ steps.misses.outputs.has_missing }}
+    steps:
+      - name: Install csrc cache dependencies
+        run: |
+          apt-get update -y
+          apt-get install -y zstd
+
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      # Treat target metadata and its resolver as workflow code rather than
+      # source inputs. source_ref may point to a fork or an older commit, so a
+      # separate sparse checkout keeps the helpers compatible with this workflow
+      # without modifying the source snapshot that will be hashed.
+      - name: Checkout cache workflow helpers
+        uses: actions/checkout@v7
+        with:
+          path: .csrc-cache-workflow
+          sparse-checkout: |
+            .github/workflows/scripts/csrc_cache_targets.json
+            .github/workflows/scripts/resolve_csrc_cache_targets.py
+          sparse-checkout-cone-mode: false
+
+      - name: Rebase on ${{ inputs.base_ref }} snapshot
+        if: inputs.base_sha != ''
+        env:
+          SOURCE_REPOSITORY: ${{ inputs.repository || github.repository }}
+          BASE_REPOSITORY: ${{ inputs.base_repository || inputs.repository || github.repository }}
+          BASE_REF: ${{ inputs.base_ref }}
+          BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          # Include base-branch csrc changes before hashing. Pinning the SHA in
+          # the caller keeps lookup, cache build, and tests on the same snapshot
+          # even if the base branch advances while this run is in progress.
+          if [ -z "$BASE_REF" ]; then
+            echo "::error::base_ref is required when base_sha is set."
+            exit 1
+          fi
+
+          # Container users may not own the checkout. Trust the runtime workspace
+          # instead of a repository-specific path so forks and renames still work.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "vllm-ascend-ci"
+          git config user.email "vllm-ascend-ci@users.noreply.github.com"
+
+          # A fork checkout does not necessarily contain the upstream base commit.
+          BASE_REMOTE=origin
+          if [ "$BASE_REPOSITORY" != "$SOURCE_REPOSITORY" ]; then
+            BASE_REMOTE=csrc-base
+            git remote add "$BASE_REMOTE" "https://github.com/${BASE_REPOSITORY}.git"
+          fi
+          git fetch "$BASE_REMOTE" "$BASE_REF"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git rebase "$BASE_SHA"
+
+      - name: Calculate csrc hash
+        id: hash
+        run: |
+          # Fail closed: without pipefail, a git failure can be hidden by the
+          # pipeline and produce sha256(empty) as a valid-looking cache key.
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+
+          # Limit invalidation to tracked inputs that can change csrc artifacts.
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+          if [ -z "$CSRC_MANIFEST" ]; then
+            echo "::error::No tracked csrc inputs found."
+            exit 1
+          fi
+
+          CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
+          echo "csrc_hash=$CSRC_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve requested cache targets
+        id: targets
+        env:
+          TARGET_IDS: ${{ inputs.target_ids }}
+        run: |
+          python3 .csrc-cache-workflow/.github/workflows/scripts/resolve_csrc_cache_targets.py \
+            --target-ids "$TARGET_IDS"
+
+      # This coordinator only needs to know whether a cache exists; downloading
+      # large artifacts here would add latency before the actual consumer jobs.
+      - name: Look up csrc cache (a2-arm64-ubuntu)
+        id: lookup-a2
+        if: contains(fromJSON(inputs.target_ids), 'a2-arm64-ubuntu')
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-ARM64-9.1.0-910b-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          lookup-only: 'true'
+
+      - name: Look up csrc cache (a3-arm64-ubuntu)
+        id: lookup-a3
+        if: contains(fromJSON(inputs.target_ids), 'a3-arm64-ubuntu')
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-ARM64-9.1.0-a3-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          lookup-only: 'true'
+
+      - name: Look up csrc cache (310p-arm64-ubuntu)
+        id: lookup-310p
+        if: contains(fromJSON(inputs.target_ids), '310p-arm64-ubuntu')
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-ARM64-9.1.0-310p-ubuntu22.04-py3.12-${{ steps.hash.outputs.csrc_hash }}
+          lookup-only: 'true'
+
+      - name: Summarize csrc cache results
+        id: misses
+        env:
+          A2_CACHE_HIT: ${{ steps.lookup-a2.outputs.cache-hit }}
+          A3_CACHE_HIT: ${{ steps.lookup-a3.outputs.cache-hit }}
+          P310_CACHE_HIT: ${{ steps.lookup-310p.outputs.cache-hit }}
+          TARGETS: ${{ steps.targets.outputs.targets }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          cache_hits = {
+              "a2-arm64-ubuntu": os.environ["A2_CACHE_HIT"] == "true",
+              "a3-arm64-ubuntu": os.environ["A3_CACHE_HIT"] == "true",
+              "310p-arm64-ubuntu": os.environ["P310_CACHE_HIT"] == "true",
+          }
+          targets = json.loads(os.environ["TARGETS"])
+          # Lookup steps are intentionally explicit. Fail when configuration
+          # expands before this workflow is taught how to check the new target.
+          unsupported = sorted(
+              target["id"]
+              for target in targets
+              if target["id"] not in cache_hits
+          )
+          if unsupported:
+              print(
+                  "::error::Unsupported csrc cache targets: "
+                  + ", ".join(unsupported)
+              )
+              raise SystemExit(1)
+
+          missing = [
+              target
+              for target in targets
+              if not cache_hits[target["id"]]
+          ]
+
+          print("csrc cache lookup results:")
+          for target in targets:
+              cache_hit = cache_hits[target["id"]]
+              print(f"- {target['id']}: {'hit' if cache_hit else 'miss'}")
+          if not targets:
+              print("- no csrc cache targets requested")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(
+                  "missing_targets=" + json.dumps(missing, separators=(",", ":")),
+                  file=output,
+              )
+              print(f"has_missing={str(bool(missing)).lower()}", file=output)
+          PY
+
+  build-missing-caches:
+    name: Build csrc cache (${{ matrix.target.id }})
+    needs: prepare-cache-checks
+    if: needs.prepare-cache-checks.outputs.has_missing == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.prepare-cache-checks.outputs.missing_targets) }}
+    uses: ./.github/workflows/_build_csrc_cache.yaml
+    with:
+      target: ${{ toJSON(matrix.target) }}
+      csrc_hash: ${{ needs.prepare-cache-checks.outputs.csrc_hash }}
+      source_ref: ${{ inputs.source_ref }}
+      repository: ${{ inputs.repository }}
+      base_repository: ${{ inputs.base_repository }}
+      base_ref: ${{ inputs.base_ref }}
+      base_sha: ${{ inputs.base_sha }}
+      # Preserve CI during rollout if a missing cache cannot yet be built on CPU.
+      # The standalone push workflow keeps the build workflow's default false.
+      continue_on_error: true

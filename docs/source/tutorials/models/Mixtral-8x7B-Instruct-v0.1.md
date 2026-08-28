@@ -65,7 +65,7 @@ docker run --rm \
 
 ### Single-node Deployment
 
-- `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
+- `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8).
 
 Run the following script to execute online inference.
 
@@ -78,7 +78,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 ```
 
 ``` bash
@@ -96,7 +95,7 @@ vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" \
 **Notice:**
 The parameters are explained as follows:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For testing purposes, a value of `4096` is used here.
 - `--dtype float16` specifies the data type for model weights and computations.
 - `--trust-remote-code` allows loading models with custom code.
@@ -151,13 +150,15 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
+## Accuracy Evaluation
+
 ### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
 2. After execution, you can get the result. For reference, Mixtral-8x7B-Instruct-v0.1 typically performs well on various benchmarks including reasoning, comprehension, and instruction following tasks.
 
-## Performance
+## Performance Evaluation
 
 ### Using AISBench
 

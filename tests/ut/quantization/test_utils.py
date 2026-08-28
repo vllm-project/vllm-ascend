@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from vllm.config import KVTransferConfig
@@ -12,9 +13,71 @@ from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME,
 from vllm_ascend.quantization.utils import (
     detect_quantization_method,
     enable_fa_quant,
+    get_dynamic_mx_quant_scale_alg,
     maybe_auto_detect_quantization,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, AscendDeviceType
+
+
+class TestDynamicMxQuantScaleAlg(TestBase):
+    @staticmethod
+    def _config(architecture, model_type=None):
+        return SimpleNamespace(
+            model_config=SimpleNamespace(
+                architectures=[architecture] if architecture else [],
+                hf_text_config=SimpleNamespace(model_type=model_type),
+            )
+        )
+
+    @patch("vllm_ascend.quantization.utils.get_ascend_device_type")
+    def test_uses_one_only_for_minimax_m3_on_a5(self, mock_device_type):
+        minimax_config = self._config("MiniMaxM3SparseForCausalLM")
+        other_config = self._config("DeepseekV3ForCausalLM")
+
+        mock_device_type.return_value = AscendDeviceType.A5
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(minimax_config), 1)
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(other_config), 0)
+
+        mock_device_type.return_value = AscendDeviceType.A3
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(minimax_config), 0)
+
+    @patch("vllm_ascend.quantization.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch("vllm.config.get_current_vllm_config")
+    def test_uses_current_vllm_config_when_config_is_omitted(self, mock_current_config, _mock_device_type):
+        minimax_config = self._config(None, model_type="minimax_m3")
+        mock_current_config.return_value = minimax_config
+
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(), 1)
+
+    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm.forward_context.is_forward_context_available", return_value=True)
+    @patch("vllm_ascend.quantization.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    def test_uses_forward_vllm_config_when_available(
+        self,
+        _mock_device_type,
+        _mock_forward_context_available,
+        mock_forward_context,
+    ):
+        mock_forward_context.return_value.additional_kwargs = {"dynamic_mx_quant_scale_alg": 1}
+
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(), 1)
+
+    @patch("vllm.config.get_current_vllm_config")
+    @patch("vllm.forward_context.get_forward_context")
+    @patch("vllm.forward_context.is_forward_context_available", return_value=True)
+    @patch("vllm_ascend.quantization.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    def test_falls_back_to_current_config_when_forward_scale_is_missing(
+        self,
+        _mock_device_type,
+        _mock_forward_context_available,
+        mock_forward_context,
+        mock_current_config,
+    ):
+        minimax_config = self._config(None, model_type="minimax_m3")
+        mock_forward_context.return_value.additional_kwargs = {}
+        mock_current_config.return_value = minimax_config
+
+        self.assertEqual(get_dynamic_mx_quant_scale_alg(), 1)
 
 
 class TestDetectQuantizationMethod(TestBase):

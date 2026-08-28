@@ -33,20 +33,12 @@ class TestBlockTable310(TestBase):
         self.device = torch.device("cpu")
         self.kernel_sizes = [128]
 
-    def _create_block_table(self, dcp_world_size, dcp_rank, pcp_world_size, pcp_rank, cp_kv_cache_interleave_size):
-        with (
-            patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group,
-            patch("vllm_ascend.worker.block_table.get_pcp_group") as mock_get_pcp_group,
-        ):
+    def _create_block_table(self, dcp_world_size, dcp_rank, cp_kv_cache_interleave_size):
+        with patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group:
             mock_dcp_group = MagicMock(spec=GroupCoordinator)
             mock_dcp_group.world_size = dcp_world_size
             mock_dcp_group.rank_in_group = dcp_rank
             mock_get_dcp_group.return_value = mock_dcp_group
-
-            mock_pcp_group = MagicMock(spec=GroupCoordinator)
-            mock_pcp_group.world_size = pcp_world_size
-            mock_pcp_group.rank_in_group = pcp_rank
-            mock_get_pcp_group.return_value = mock_pcp_group
 
             from vllm_ascend._310p.block_table import BlockTable
 
@@ -66,8 +58,6 @@ class TestBlockTable310(TestBase):
         self,
         dcp_world_size,
         dcp_rank,
-        pcp_world_size,
-        pcp_rank,
         cp_kv_cache_interleave_size,
         block_sizes=None,
         max_num_blocks=None,
@@ -77,19 +67,11 @@ class TestBlockTable310(TestBase):
         max_num_blocks = max_num_blocks or [self.max_num_blocks_per_req] * len(block_sizes)
         kernel_sizes = kernel_sizes or [[self.block_size]] * len(block_sizes)
 
-        with (
-            patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group,
-            patch("vllm_ascend.worker.block_table.get_pcp_group") as mock_get_pcp_group,
-        ):
+        with patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group:
             mock_dcp_group = MagicMock(spec=GroupCoordinator)
             mock_dcp_group.world_size = dcp_world_size
             mock_dcp_group.rank_in_group = dcp_rank
             mock_get_dcp_group.return_value = mock_dcp_group
-
-            mock_pcp_group = MagicMock(spec=GroupCoordinator)
-            mock_pcp_group.world_size = pcp_world_size
-            mock_pcp_group.rank_in_group = pcp_rank
-            mock_get_pcp_group.return_value = mock_pcp_group
 
             from vllm_ascend._310p.block_table import MultiGroupBlockTable
 
@@ -115,8 +97,6 @@ class TestBlockTable310(TestBase):
         block_table = self._create_block_table(
             dcp_world_size=1,
             dcp_rank=0,
-            pcp_world_size=1,
-            pcp_rank=0,
             cp_kv_cache_interleave_size=1,
         )
         self._setup_block_table_data(block_table, num_reqs=2)
@@ -134,8 +114,6 @@ class TestBlockTable310(TestBase):
         multi_group_block_table = self._create_multi_group_block_table(
             dcp_world_size=1,
             dcp_rank=0,
-            pcp_world_size=1,
-            pcp_rank=0,
             cp_kv_cache_interleave_size=1,
         )
         self._setup_block_table_data(multi_group_block_table[0], num_reqs=2)
@@ -153,8 +131,6 @@ class TestBlockTable310(TestBase):
         multi_group_block_table = self._create_multi_group_block_table(
             dcp_world_size=1,
             dcp_rank=0,
-            pcp_world_size=1,
-            pcp_rank=0,
             cp_kv_cache_interleave_size=1,
             block_sizes=[self.block_size, self.block_size],
             max_num_blocks=[self.max_num_blocks_per_req, self.max_num_blocks_per_req],
@@ -193,10 +169,8 @@ class TestBlockTable310(TestBase):
 
     def test_compute_slot_mapping_with_req_indices_signature(self):
         block_table = self._create_block_table(
-            dcp_world_size=4,
+            dcp_world_size=8,
             dcp_rank=0,
-            pcp_world_size=2,
-            pcp_rank=0,
             cp_kv_cache_interleave_size=1,
         )
         self._setup_block_table_data(block_table, num_reqs=1)
@@ -214,8 +188,6 @@ class TestBlockTable310(TestBase):
         block_table = self._create_block_table(
             dcp_world_size=1,
             dcp_rank=0,
-            pcp_world_size=1,
-            pcp_rank=0,
             cp_kv_cache_interleave_size=1,
         )
         self._setup_block_table_data(block_table, num_reqs=2)

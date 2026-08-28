@@ -46,15 +46,9 @@ If the W8A8 quantized weights are not available for direct download, you can obt
 
 You can use the official all-in-one Docker image for Qwen3 MoE models.
 
-**Docker Pull:**
+=== "A3 series"
 
-```bash
-docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-```
-
-**Docker Run:**
-
-=== "Atlas 800I A3"
+    **Docker Run:**
 
     ```bash
 
@@ -62,9 +56,8 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run \
         --name vllm-ascend-env \
-        --shm-size=128g \
-        --net=host \
-        --privileged=true \
+        --ipc host \
+        --net host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -89,12 +82,6 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /home:/home \
-        -v /data:/data \
-        -v /tmp:/tmp \
-        -v /mnt:/mnt \
-        -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-        -v /root:/host_root \
         -it -d $IMAGE bash
     ```
 
@@ -103,7 +90,9 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
         A3 has 8 NPUs with dual-die design (16 chips total: `/dev/davinci[0-15]`).
         If you are on a shared machine, map only the chips you need (e.g., `/dev/davinci[0-7]` for NPU 0-3).
 
-=== "Atlas 800I A2"
+=== "A2 series"
+
+    **Docker Run:**
 
     ```bash
 
@@ -111,9 +100,8 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 
     docker run \
         --name vllm-ascend-env \
-        --shm-size=128g \
-        --net=host \
-        --privileged=true \
+        --ipc host \
+        --net host \
         --device /dev/davinci0 \
         --device /dev/davinci1 \
         --device /dev/davinci2 \
@@ -130,14 +118,11 @@ docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
         -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /usr/local/sbin:/usr/local/sbin \
-        -v /home:/home \
-        -v /data:/data \
-        -v /tmp:/tmp \
-        -v /mnt:/mnt \
-        -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-        -v /root:/host_root \
         -it -d $IMAGE bash
     ```
+
+!!! tip
+    The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
 
 The default workdir is `/workspace`. vLLM and vLLM-Ascend are installed as Python packages in site-packages.
 
@@ -191,7 +176,7 @@ Expected result: The version information for both packages is displayed, confirm
 
 For more details, please refer to the [Installation Guide](../../installation.md).
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -202,11 +187,9 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Atlas 800I A2/A3:**
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -220,12 +203,11 @@ vllm serve your_model_path \
     --quantization ascend \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
-    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
+    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
 ```
 
 !!! note
@@ -462,11 +444,9 @@ vllm bench serve \
 **Low Latency Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -479,10 +459,9 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -499,11 +478,9 @@ vllm serve your_model_path \
 **High Throughput Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -515,7 +492,6 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"weight_nz_mode": 2}' \
@@ -535,11 +511,9 @@ vllm serve your_model_path \
 **Long Context Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -552,10 +526,9 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -572,11 +545,11 @@ vllm serve your_model_path \
 ### 9.2 Tuning Guidelines
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/). This chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers model-specific issues.
 
 ### Q: How do I enable long context (beyond 256K)?
 

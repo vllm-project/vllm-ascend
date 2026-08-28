@@ -18,6 +18,7 @@ from tests.e2e.nightly.multi_node.external_dp.scripts.runtime import (
     ExternalDPProxyLauncher,
     ExternalDPServerManager,
     build_all_server_commands,
+    create_kv_pool_manager,
     format_http_status,
     master_rank_health_url,
     proxy_server_health_url,
@@ -108,9 +109,8 @@ def test_external_dp() -> None:
     max_wait_seconds = int(os.environ.get("EXTERNAL_DP_MAX_WAIT_SECONDS", "3600"))
     is_master = current_node_index == 0
 
-    server_manager = ExternalDPServerManager(
+    kv_pool_manager = create_kv_pool_manager(
         config=config,
-        ranks=ranks,
         current_node_index=current_node_index,
         log_root=log_root,
     )
@@ -122,7 +122,17 @@ def test_external_dp() -> None:
     )
 
     try:
-        with server_manager, proxy_launcher:
+        with (
+            kv_pool_manager,
+            ExternalDPServerManager(
+                config=config,
+                ranks=ranks,
+                current_node_index=current_node_index,
+                log_root=log_root,
+                extra_envs=kv_pool_manager.server_envs,
+            ),
+            proxy_launcher,
+        ):
             if is_master:
                 wait_ranks_ready(ranks, timeout=max_wait_seconds)
                 proxy_launcher.wait_ready()

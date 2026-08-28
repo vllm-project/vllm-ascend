@@ -33,6 +33,7 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
     """
 
     act_quant_type: torch.dtype = torch.float8_e4m3fn
+    supports_tp_weight_switch = False
 
     def __init__(self):
         pass
@@ -70,7 +71,7 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
 class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
     """FusedMoE method for Ascend W8A8FP8_DYNAMIC."""
 
-    quant_type: QuantType = QuantType.W8A8FP8
+    quant_type: QuantType = QuantType.W8A8FP
 
     def __init__(self):
         super().__init__()

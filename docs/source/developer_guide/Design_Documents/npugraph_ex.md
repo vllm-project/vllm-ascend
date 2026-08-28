@@ -4,7 +4,11 @@
 
 This is an optimization based on FX graphs, which can be considered an acceleration solution for the aclgraph mode.
 
-You can get its code [code](https://gitcode.com/Ascend/torchair)
+You can get its code [torchair source code repository](https://gitcode.com/Ascend/torchair)
+
+!!! note "Atlas 300I DUO"
+
+    Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
 
 ## Default FX Graph Optimization
 
@@ -19,7 +23,7 @@ npugraph_ex now provides some operator fusion passes, and more will be added in 
 
 Operator combinations that meet the replacement rules can be replaced with the corresponding fused operators.
 
-You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/2600/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
+You can get the default [fusion pass list](https://www.hiascend.com/document/detail/zh/Pytorch/latest/modthirdparty/torchairuseguide/docs/zh/npugraph_ex/basic/pattern_fusion_pass.md#功能简介)
 
 ## Custom fusion pass
 
@@ -40,7 +44,7 @@ register_replacement(search_fn, replace_fn, example_inputs, trace_fn=fwd_only, e
 |extra_check|Input|Find the extra verification function after operator fusion. The function's input parameter must be a Match object from torch._inductor.pattern_matcher, and it is used for further custom checks on the matching result, such as checking whether the fused operators are on the same stream, checking the device type, checking the input shapes, and so on.|No|
 |search_fn_pattern|Input|A custom pattern object is generally unnecessary to provide. Its definition follows the rules of the native PyTorch MultiOutputPattern object. After passing this parameter, search_fn will no longer be used to match operator combinations; instead, this parameter will be used directly as the matching rule.|No|
 
-Usage Example
+### Usage Example
 
 ```python
 import functools
@@ -69,12 +73,12 @@ def extra_check(match: Match):
     x1 = match.kwargs.get("x1")
 
     if x1 is None:
-        return False 
+        return False
     if not hasattr(x1, "meta") or "val" not in x1.meta:
         return False
 
     a_shape = x1.meta["val"].shape
-    return a_shape[-1] == 7168 
+    return a_shape[-1] == 7168
 
 # Define some sample inputs to trace search_fn and replace_fn into an FX graph
 fake_mode = FakeTensorMode()

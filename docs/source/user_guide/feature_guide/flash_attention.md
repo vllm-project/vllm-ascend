@@ -44,7 +44,7 @@ The `flash_attn_with_kvcache` interface on NPU is semantically consistent with t
 
 ## Hardware Requirements
 
-FA3 currently requires Ascend Atlas A2 and A3 inference products NPUs.
+FA3 currently requires Ascend Atlas A2 and A3 inference NPUs.
 We will support other NPUs in the future.
 
 ## Software Requirements
@@ -53,22 +53,25 @@ FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_npu_v3
 
 ### Installation
 
-Install the `flash_attn_npu` wheel package refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
+To install the `flash_attn_npu` wheel package, refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/main/README.md#installation>.
 
 ## Enabling Flash Attention 3
 
-To enable FA3, you need to:
+Enable FA3 through the RL configuration by setting `rl_config.enabled` and
+`rl_config.enable_training_consistency` to `true`.
 
-1. Set the environment variable `export VLLM_BATCH_INVARIANT=1` to enable batch invariant mode
-2. Specify the attention backend as `FLASH_ATTN` via the LLM parameter `attention_backend="FLASH_ATTN"`
+Batch invariant mode is independent of FA3. If it is also required, set
+`rl_config.enable_batch_invariant` to `true`. You do not need to set
+`VLLM_BATCH_INVARIANT`, `HCCL_DETERMINISTIC`, or `LCCL_DETERMINISTIC`
+manually when using this configuration path.
 
 ### Online Inference (Server Mode)
 
 To start a vLLM server with FA3 enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
-  --attention-backend FLASH_ATTN \
+vllm serve Qwen/Qwen3-8B \
+  --additional-config '{"rl_config": {"enabled": true, "enable_training_consistency": true}}' \
   --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
 ```
 
@@ -98,9 +101,6 @@ print(response.choices[0].text)
 For offline batch inference with FA3:
 
 ```python
-import os
-os.environ["VLLM_BATCH_INVARIANT"] = "1"
-
 from vllm import LLM, SamplingParams
 
 prompts = [
@@ -118,7 +118,12 @@ sampling_params = SamplingParams(
 llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
-    attention_backend="FLASH_ATTN",
+    additional_config={
+        "rl_config": {
+            "enabled": True,
+            "enable_training_consistency": True,
+        },
+    },
     compilation_config={"cudagraph_mode": "PIECEWISE"},
 )
 

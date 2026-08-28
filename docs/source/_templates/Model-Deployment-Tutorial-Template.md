@@ -37,11 +37,11 @@ This section introduces the features supported by the model, including supported
 
 **Example 1: Feature Support List**
 
-| Model Name | Support Status | Remarks | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Caching | LoRA | Speculative Decoding | Asynchronous Scheduling | Tensor Parallelism | Pipeline Parallelism | Expert Parallelism | Data Parallelism | Prefill-Decode Separation | Segmented ACL Graph Execution | Full ACL Graph Execution | Max Model Length | MLP Weight Prefetch | Documentation |
-| ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ------------- | ------------- | ---------- |
-| DeepSeek V3/3.1 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
-| DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | ✅ | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
-| Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | ✅ | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
+| Model Name | Support Status | Remarks | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Caching | LoRA | Speculative Decoding | Asynchronous Scheduling | Tensor Parallelism | Pipeline Parallelism | Expert Parallelism | Data Parallelism | Prefill-Decode Separation | Segmented ACL Graph Execution | Full ACL Graph Execution | Max Model Length | Documentation |
+| ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ---------- | ---- |
+| DeepSeek V3/3.1 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | ✅ | | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 240k | [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
+| DeepSeek V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../../tutorials/models/DeepSeek-V3.2.md) |
+| Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | [Qwen3-Dense](../../tutorials/models/Qwen3-Dense.md) |
 
 >**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
 
@@ -59,8 +59,8 @@ Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for fe
 
 **Example:**
 
-- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+- `DeepSeek-V3.2-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
 
@@ -77,41 +77,31 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide specific installation steps and commands (parameters should be explained with meaning, value range, units, etc.).
 - **Version Number Writing Specification:** Prefer using placeholders (values are centrally configured). If a fixed value is used and it differs from the documented validation version, a comment MUST be added stating: "Please replace with your actual version."
 - Provide verification commands and expected status: guide users to check the installation result by executing commands (e.g., docker ps), specifying success criteria such as status codes or output characteristics.
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
+- When multiple hardware series (e.g., A3/A2 series) are involved, the tab markup syntax MUST be used to present them in separate tabs, with tabs ordered by newer hardware series first.
 
 ### 4.1 Docker Image Installation
 
-**Example:**
+**Example: (For MkDocs + Material tab syntax (`=== "label"`) and Sphinx + MyST-Parser tab syntax (`::::{tab-item}`), please refer to the [Syntax Supplement](template-supplement.md#3-tabs).)**
 
-:::::{tab-set}
-:sync-group: install
+=== "A3 series"
 
-::::{tab-item} A3 series
-:sync: A3
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run ...
+    ```
 
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run ...
-```
+=== "A2 series"
 
-::::
-
-::::{tab-item} A2 series
-:sync: A2
-
-```bash
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run ...
-```
-
-::::
-:::::
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
+    docker run ...
+    ```
 
 ### 4.2 Source Code Installation
 
 **Example:** Omitted
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -120,8 +110,8 @@ docker run ...
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
+- When multiple hardware series (e.g., A3/A2 series) are involved, the tab markup syntax MUST be used to present them in separate tabs, with tabs ordered by newer hardware series first;For detailed syntax differences between MkDocs and Sphinx frameworks, see the [Syntax Supplement](template-supplement.md#3-tabs).
 
 **Example:**
 
@@ -133,7 +123,7 @@ Startup Command:
 # Omitted
 ```
 
-Common Issues Tip: If you encounter XXX issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter XXX issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 Service Verification:
 
@@ -150,7 +140,7 @@ Expected Result: Omitted (fill in according to actual output).
 - Describe the principles of PD separation architecture and applicable scenarios.
 - Provide startup procedures, key configurations, and **deployment verification instructions**, and indicate performance metrics.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
+- When multiple hardware series (e.g., A3/A2 series) are involved, the tab markup syntax MUST be used to present them in separate tabs, with tabs ordered by newer hardware series first.
 
 **Example:** Omitted
 
@@ -227,7 +217,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 #### Table 1: Scenario Overview
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
-|----------|----------------|-------------|----------------|------------------------|
+| ---------- | ---------------- | ------------- | ---------------- | ------------------------ |
 | High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
 | Long Context | | | | |
 | Low Latency | | | | |
@@ -237,7 +227,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 #### Table 2: Detailed Node Configuration
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
-|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
+| ---------- | --------------- | ------- | ---- | ---- | ---- | ------------- | -------------------- | --------------------- | ----------- | ----------- | -------------- | ------------------ |
 | High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 4096 | 30k | 3 | Off | On | On | On |
 | High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 4096 | 30k | 12 | Off | On | Off | On |
 | Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
@@ -258,7 +248,7 @@ If no special tuning is involved, directly provide a feature combination table a
 **Example:**
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Model-Specific Optimizations (Optional)
 
@@ -283,9 +273,7 @@ The following optimizations are enabled by default and require no additional con
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | --------------------- | -------------------- | ----------------- | ------------------- | ----------- |
-| FlashComm_v1 | High-concurrency, Tensor Parallelism (TP) scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
-| Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
-| Weight Prefetch | MLP-intensive scenarios (Dense models) | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | Requires coordination with prefetch buffer size adjustment |
+| Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling sequence parallelism | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as sequence parallelism, has threshold protection |
 
 ## 10 FAQ
 

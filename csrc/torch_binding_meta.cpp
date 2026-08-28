@@ -39,21 +39,12 @@ const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
 
-#ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
-std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
-    at::Tensor &input,
-    const int64_t org_vocab_start_index,
-    const int64_t org_vocab_end_index,
-    const int64_t num_org_vocab_padding,
-    const int64_t added_vocab_start_index,
-    const int64_t added_vocab_end_index) {
-
-    at::Tensor masked_input = at::empty_like(input);
-    at::Tensor mask = at::empty_like(input, input.options().dtype(at::kBool));
-
-    return {masked_input, mask};
+c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
+{
+    return (value + c10::SymInt(divisor - 1)) / c10::SymInt(divisor);
 }
 
+#ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
                         int64_t slice_offset, int64_t slice_size) {
     at::Tensor y_out = at::empty_like(y);
@@ -75,8 +66,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     const at::Tensor &wuq,
     const c10::optional<at::Tensor> &descale1,
     const at::Tensor &gamma2,
-    const at::Tensor &cos,
-    const at::Tensor &sin,
+    const c10::optional<at::Tensor> &cos,
+    const c10::optional<at::Tensor> &sin,
     const at::Tensor &wuk,
     const at::Tensor &kv_cache,
     const at::Tensor &kv_cache_rope,
@@ -99,6 +90,9 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     at::Tensor &inner_out
     )
 {
+    TORCH_CHECK(
+        cos.has_value() == sin.has_value(),
+        "mla_preprocess requires cos and sin to both be tensors or both be None.");
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out};
 }
 
@@ -125,15 +119,18 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
     double swiglu_limit)
 {
-    int m = x.sizes()[0];
-    int n = weight.sizes()[2];
+    auto m = x.sym_size(0);
+    auto n = weight.sym_size(2);
     bool is_a8w4 = x.dtype() == at::kChar && weight.dtype() == at::kInt;
     if (is_a8w4) {
-        n *= INT4_NUMS_IN_INT32;
+        n *= c10::SymInt(INT4_NUMS_IN_INT32);
     }
-    at::Tensor output = at::empty({m, n/2}, x.options().dtype(c10::ScalarType::Char));
-    at::Tensor output_scale = at::empty({m}, x.options().dtype(c10::ScalarType::Float));
-    at::Tensor output_offset = at::empty({}, x.options().dtype(c10::ScalarType::Float));
+    c10::SymDimVector output_shape = {m, n / c10::SymInt(2)};
+    c10::SymDimVector scale_shape = {m};
+    c10::SymDimVector scalar_shape;
+    at::Tensor output = at::empty_symint(output_shape, x.options().dtype(c10::ScalarType::Char));
+    at::Tensor output_scale = at::empty_symint(scale_shape, x.options().dtype(c10::ScalarType::Float));
+    at::Tensor output_offset = at::empty_symint(scalar_shape, x.options().dtype(c10::ScalarType::Float));
     return {output, output_scale, output_offset};
 }
 
@@ -147,14 +144,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     const c10::optional<at::Tensor> & offset,
     double swiglu_limit)
 {
-    auto x_size = x.sizes();
-    int n = weight[0].sizes()[1];
-    int m = x_size[0];
-    int k = x_size[1];
+    auto m = x.sym_size(0);
+    auto n = weight[0].sym_size(1);
 
-    at::Tensor output = at::zeros({m, n/2}, c10::dtype(c10::ScalarType::Char));
-    at::Tensor output_scale = at::zeros({m}, c10::dtype(c10::ScalarType::Float));
-    at::Tensor output_offset = at::zeros({m}, c10::dtype(c10::ScalarType::Float));
+    c10::SymDimVector output_shape = {m, n / c10::SymInt(2)};
+    c10::SymDimVector scale_shape = {m};
+    at::Tensor output = at::empty_symint(output_shape, x.options().dtype(c10::ScalarType::Char));
+    at::Tensor output_scale = at::empty_symint(scale_shape, x.options().dtype(c10::ScalarType::Float));
+    at::Tensor output_offset = at::empty_symint(scale_shape, x.options().dtype(c10::ScalarType::Float));
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
@@ -178,51 +175,18 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_v2_meta(
     double swiglu_limit)
 {
 
-    auto x_size = x.sizes();
-    int n = weight_scale[0].sizes().back();
-    int m = x_size[0];
-    int k = x_size[1];
+    auto m = x.sym_size(0);
+    auto n = weight_scale[0].sym_size(weight_scale[0].dim() - 1);
 
-    at::Tensor output =  at::empty({m, n/2}, x.options().dtype(at::kChar));
-    at::Tensor output_scale =  at::empty({m}, x.options().dtype(at::kFloat));
+    c10::SymDimVector output_shape = {m, n / c10::SymInt(2)};
+    c10::SymDimVector scale_shape = {m};
+    at::Tensor output =  at::empty_symint(output_shape, x.options().dtype(at::kChar));
+    at::Tensor output_scale =  at::empty_symint(scale_shape, x.options().dtype(at::kFloat));
 
 
 
     return std::tuple<at::Tensor, at::Tensor>(output, output_scale);
 }
-std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(
-    const at::Tensor &x,
-    const at::Tensor &expert_ids,
-    const at::TensorList &gmm1_permuted_weight,
-    const at::TensorList &gmm1_permuted_weight_scale,
-    const at::TensorList &gmm2_weight,
-    const at::TensorList &gmm2_weight_scale,
-    const at::Tensor &expert_scales,
-    const c10::optional<at::Tensor> &expert_smooth_scales,
-    const c10::optional<at::Tensor> &x_active_mask,
-    c10::string_view group_ep,
-    int64_t ep_rank_size,
-    int64_t ep_rank_id,
-    int64_t moe_expert_num,
-    int64_t shared_expert_num,
-    int64_t shared_expert_rank_num,
-    int64_t quant_mode,
-    int64_t global_bs)
-{
-    auto x_shape = x.sizes();
-    int bs = x_shape[0];
-    int h = x_shape[1];
-
-    at::Tensor output = at::empty({bs, h}, x.options().device(at::kMeta));
-
-    bool is_shared_expert = (ep_rank_id < shared_expert_rank_num);
-    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (ep_rank_size - shared_expert_rank_num);
-    auto opts = expert_ids.options().dtype(at::kLong);
-    at::Tensor expert_token_nums = at::empty({num_local_experts}, opts.device(at::kMeta));
-
-    return {output, expert_token_nums};
-}
-
 std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const at::Tensor& x,
     const at::TensorList& weight1,
@@ -251,38 +215,29 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_meta(
     c10::string_view layout_key, int64_t sparse_count, int64_t sparse_mode,
     int64_t pre_tokens, int64_t next_tokens, bool return_value)
 {
-    // npu tensor max size
-    constexpr int64_t SIZE = 8;
     constexpr int64_t DIM_0 = 0;
     constexpr int64_t DIM_1 = 1;
     constexpr int64_t DIM_2 = 2;
 
-    TORCH_CHECK(query.numel() > 0, "Query is empty.");
-    TORCH_CHECK(key.numel() > 0, "Key is empty.");
-    TORCH_CHECK(weights.numel() > 0, "Weights is empty.");
-    for (size_t i = 0; i < query.sizes().size(); i++) {
-        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
-                                       "than 0, but shape[", i, "] is ", query.size(i));
-    }
     TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
 
     std::string query_layout_str = std::string(layout_query);
     std::string key_layout_str = std::string(layout_key);
-    at::SmallVector<int64_t, SIZE> output_size;
+    c10::SymDimVector output_size;
     if (query_layout_str == "BSND") {
-        output_size = {query.size(DIM_0), query.size(DIM_1), key.size(DIM_2), sparse_count};
+        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), key.sym_size(DIM_2), c10::SymInt(sparse_count)};
     } else {
         int n_dim_index = 0;
         n_dim_index = (key_layout_str == "TND") ? DIM_1 : DIM_2;
-        output_size = {query.size(DIM_0), key.size(n_dim_index), sparse_count};
+        output_size = {query.sym_size(DIM_0), key.sym_size(n_dim_index), c10::SymInt(sparse_count)};
     }
     // construct the output tensor
-    at::Tensor sparse_indices_out = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor sparse_indices_out = at::empty_symint(output_size, query.options().dtype(at::kInt));
     at::Tensor sparse_values_out;
     if (return_value) {
-        sparse_values_out = at::empty(output_size, query.options().dtype(query.dtype()));
+        sparse_values_out = at::empty_symint(output_size, query.options().dtype(query.dtype()));
     } else {
-        sparse_values_out = at::empty({0}, query.options().dtype(query.dtype()));
+        sparse_values_out = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(query.dtype()));
     }
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
@@ -299,7 +254,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens,
     int64_t attention_mode, bool return_softmax_lse)
 {
-    constexpr int64_t SIZE = 8;
     constexpr int64_t DIM_0 = 0;
     constexpr int64_t DIM_1 = 1;
     constexpr int64_t DIM_2 = 2;
@@ -310,141 +264,160 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     TORCH_CHECK(layout_query_str == "BSND" || layout_query_str == "TND",
                 "The layout of query only support BSND and TND, but got ",
                 layout_query_str);
-    for (size_t i = 0; i < query.sizes().size(); i++) {
-        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
-                                       "than 0, but shape[", i, "] is ", query.size(i));
-    }
-
-    at::SmallVector<int64_t, SIZE> output_size;
+    c10::SymDimVector output_size;
     if (layout_query_str == "TND") {
         TORCH_CHECK(query.dim() == DIM_3,
                     "When the layout of query is TND, the query dimension must be 3, but got ",
                     query.dim());
-        output_size = {query.size(DIM_0), query.size(DIM_1), query.size(DIM_2)};
+        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), query.sym_size(DIM_2)};
     } else {
         TORCH_CHECK(query.dim() == DIM_4,
                     "When the layout of query is BSND, the query dimension must be 4, but got ",
                     query.dim());
-        output_size = {query.size(DIM_0), query.size(DIM_1), query.size(DIM_2), query.size(DIM_3)};
+        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), query.sym_size(DIM_2), query.sym_size(DIM_3)};
     }
 
-    at::Tensor output = at::empty(output_size, query.options().dtype(query.dtype()));
-    at::SmallVector<int64_t, SIZE> softmax_size;
+    at::Tensor output = at::empty_symint(output_size, query.options().dtype(query.dtype()));
+    c10::SymDimVector softmax_size;
     if (return_softmax_lse) {
         if (query.dim() == DIM_3) {
-            softmax_size = {key.size(DIM_1), query.size(DIM_0), query.size(DIM_1) / key.size(DIM_1)};
+            const auto layout_kv_str = std::string(layout_kv);
+            const auto kv_head_num =
+                layout_kv_str == "PA_BSND" ? key.sym_size(DIM_2) : key.sym_size(DIM_1);
+            softmax_size = {
+                kv_head_num,
+                query.sym_size(DIM_0),
+                query.sym_size(DIM_1) / kv_head_num,
+            };
         } else {
             softmax_size = {
-                query.size(DIM_0), key.size(DIM_2), query.size(DIM_1), query.size(DIM_2) / key.size(DIM_2)};
+                query.sym_size(DIM_0),
+                key.sym_size(DIM_2),
+                query.sym_size(DIM_1),
+                query.sym_size(DIM_2) / key.sym_size(DIM_2),
+            };
         }
     } else {
-        softmax_size = {0};
+        softmax_size = {c10::SymInt(0)};
     }
 
-    at::Tensor softmax_max = at::empty(softmax_size, query.options().dtype(at::kFloat));
-    at::Tensor softmax_sum = at::empty(softmax_size, query.options().dtype(at::kFloat));
+    at::Tensor softmax_max = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
+    at::Tensor softmax_sum = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
-std::tuple<at::Tensor, at::Tensor> matmul_allreduce_add_rmsnorm_meta(
-    const at::Tensor &x1,
-    const at::Tensor &x2,
-    const at::Tensor &residual,
-    const at::Tensor &gamma,
-    c10::string_view group_tp,
-    int64_t tp_rank_size,
-    int64_t tp_rank_id,
-    double epsilon,
-    bool is_trans_b,
-    bool is_gather_add_out)
-    {
-        at::Tensor output = at::empty_like(residual);
-        at::Tensor add_out = at::empty_like(residual);
 
-        return {output, add_out};
-    }
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_moe_init_routing_custom_meta(
-    const at::Tensor &x, const at::Tensor &expert_idx,
-    const c10::optional<at::Tensor> &scale, const c10::optional<at::Tensor> &offset, int64_t active_num,
-    int64_t expert_capacity, int64_t expert_num, int64_t drop_pad_mode, int64_t expert_tokens_num_type,
-    bool expert_tokens_num_flag, int64_t quant_mode, at::IntArrayRef active_expert_range, int64_t row_idx_type)
+at::Tensor npu_sparse_attention_score_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &select_idx, const at::Tensor &block_table,
+    const c10::optional<at::Tensor> &select_num_idx,
+    const c10::optional<at::Tensor> &q_dequant_scale,
+    const c10::optional<at::Tensor> &k_dequant_scale,
+    const c10::optional<at::Tensor> &v_dequant_scale,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    c10::string_view q_input_layout, c10::string_view kv_input_layout,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise)
 {
-    constexpr int64_t DIM_X = 2;
-    constexpr int64_t DIM_EXPERT_IDX = 2;
-    constexpr int64_t LENGTH_ACTIVE_EXPERT_RANGE = 2;
-    constexpr int64_t EXPERT_TOKENS_COUNT = 1;
-    constexpr int64_t EXPERT_TOKENS_KEY_VALUE = 2;
-    constexpr int64_t QUANT_MODE_UNQUANT = -1;
-    constexpr int64_t QUANT_MODE_DYNAMIC_QUANT = 1;
-    constexpr int64_t CUMSUM = 0;
-    constexpr int64_t COUNT = 1;
-    constexpr int64_t KEY_VALUE = 2;
-
-    if (active_expert_range.empty()) {
-        active_expert_range =  at::IntArrayRef({0, expert_num});
-    }
-
-    int64_t x_dim = x.dim();
-    TORCH_CHECK(x_dim == DIM_X, "The x should be ", DIM_X,
-                "-Dimension, current is ", x_dim, "-Dimension.");
-
-    int64_t expert_idx_dim = expert_idx.dim();
-    TORCH_CHECK(expert_idx_dim == DIM_EXPERT_IDX, "The expert_idx should be ", DIM_EXPERT_IDX,
-                "-Dimension, current is ", expert_idx_dim, "-Dimension.");
-
-    int64_t active_expert_range_length = active_expert_range.size();
-    TORCH_CHECK(active_expert_range_length == LENGTH_ACTIVE_EXPERT_RANGE, "The active_expert_range should be ", LENGTH_ACTIVE_EXPERT_RANGE,
-                "-Dimension, current is ", expert_idx_dim, "-Dimension.");
-
-    int expert_length = active_expert_range[1] - active_expert_range[0];
-    auto x_size = x.sizes();
-    auto expert_idx_size = expert_idx.sizes();
-
-    int bs = x_size[0];
-    int h = x_size[1];
-    int k = expert_idx_size[1];
-    int64_t expanded_scale_len = 0;
-    at::Tensor expanded_x;
-
-    if (drop_pad_mode == 1) { // Drop/Pad
-        if (quant_mode == QUANT_MODE_UNQUANT) {
-            expanded_x = at::empty({expert_num, expert_capacity, h}, x.options());
-        } else {
-            expanded_x = at::empty({expert_num, expert_capacity, h}, x.options().dtype(at::kChar));
-        }
-        expanded_scale_len = expert_num * expert_capacity;
-    } else { // Dropless / Active
-        if (active_num > 0) { // Active
-            int64_t num_out_tokens = std::min((int64_t)bs * k, active_num);
-            if (quant_mode == QUANT_MODE_UNQUANT) {
-                expanded_x = at::empty({num_out_tokens, h}, x.options());
-            } else {
-                expanded_x = at::empty({num_out_tokens, h}, x.options().dtype(at::kChar));
-            }
-            expanded_scale_len = num_out_tokens;
-        } else { // Dropless
-            if (quant_mode == QUANT_MODE_UNQUANT) {
-                expanded_x = at::empty({bs * k, h}, x.options());
-            } else {
-                expanded_x = at::empty({bs * k, h}, x.options().dtype(at::kChar));
-            }
-            expanded_scale_len = bs * k;
-        }
-    }
-
-    at::Tensor expanded_row_idx = at::empty({bs * k}, expert_idx.options());
-    at::Tensor expert_tokens_count_or_cumsum;
-    if (expert_tokens_num_type >= CUMSUM && expert_tokens_num_type <= COUNT) {
-        // expert_tokens_count_or_cumsum in [end-start, ]
-        expert_tokens_count_or_cumsum = at::empty({expert_length}, x.options().dtype(at::kLong));
-    } else if (expert_tokens_num_type == KEY_VALUE) {
-        // key_value in [2, end-start]
-        expert_tokens_count_or_cumsum = at::empty({expert_num, 2}, x.options().dtype(at::kLong));
-    }
-
-    at::Tensor expanded_scale = at::empty({expanded_scale_len}, x.options().dtype(at::kFloat));
-    return {expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale};
+    TORCH_CHECK(std::string(q_input_layout) == "TND",
+                "npu_sparse_attention_score only supports query TND layout");
+    at::ScalarType out_dtype = (query.scalar_type() == at::kFloat8_e4m3fn)
+                                   ? at::kHalf
+                                   : query.scalar_type();
+    return at::empty_symint(query.sym_sizes(),
+                            query.options().dtype(out_dtype).device(c10::kMeta));
 }
+
+at::Tensor npu_msa_index_score_meta(
+    const at::Tensor &query, const at::Tensor &,
+    const at::Tensor &block_table, const at::Tensor &,
+    const c10::optional<at::Tensor> &,
+    const c10::optional<at::Tensor> &,
+    const c10::optional<at::Tensor> &,
+    const c10::optional<at::Tensor> &,
+    c10::string_view, int64_t, int64_t, int64_t)
+{
+    const c10::SymInt score_stride =
+        ceil_div(block_table.sym_size(1), 16) * c10::SymInt(16);
+    const std::vector<c10::SymInt> output_size = {
+        query.sym_size(1), query.sym_size(0), score_stride};
+    return at::empty_symint(
+        output_size, query.options().dtype(at::kFloat).device(c10::kMeta));
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(
+    const at::Tensor &query,
+    const at::Tensor &key,
+    const at::Tensor &value,
+    const at::Tensor &sparse_indices,
+    double scale_value,
+    int64_t key_quant_mode,
+    int64_t value_quant_mode,
+    const c10::optional<at::Tensor> &key_dequant_scale,
+    const c10::optional<at::Tensor> &value_dequant_scale,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &actual_seq_lengths_query,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv,
+    int64_t sparse_block_size,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode,
+    int64_t pre_tokens,
+    int64_t next_tokens,
+    int64_t attention_mode,
+    int64_t quant_scale_repo_mode,
+    int64_t tile_size,
+    int64_t rope_head_dim,
+    bool return_softmax_lse)
+{
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t DIM_3 = 3;
+    constexpr int64_t DIM_4 = 4;
+
+    std::string layout_query_str = std::string(layout_query);
+    std::string layout_kv_str = std::string(layout_kv);
+    TORCH_CHECK(layout_query_str == "BSND" || layout_query_str == "TND",
+                "The layout of query only support BSND and TND, but got ",
+                layout_query_str);
+    c10::SymDimVector output_size;
+    if (layout_query_str == "BSND") {
+        TORCH_CHECK(query.dim() == DIM_4,
+                    "When the layout of query is BSND, the query dimension must be 4, but got ",
+                    query.dim());
+        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), query.sym_size(DIM_2),
+                       query.sym_size(DIM_3) - c10::SymInt(rope_head_dim)};
+    } else {
+        TORCH_CHECK(query.dim() == DIM_3,
+                    "When the layout of query is TND, the query dimension must be 3, but got ",
+                    query.dim());
+        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1),
+                       query.sym_size(DIM_2) - c10::SymInt(rope_head_dim)};
+    }
+
+    at::Tensor output = at::empty_symint(output_size, query.options().dtype(query.dtype()));
+    c10::SymDimVector softmax_size;
+    if (return_softmax_lse) {
+        if (query.dim() == DIM_3) {
+            const c10::SymInt kv_head_dim =
+                layout_kv_str == "PA_BSND" ? key.sym_size(DIM_2) : key.sym_size(DIM_1);
+            softmax_size = {kv_head_dim, query.sym_size(DIM_0),
+                            query.sym_size(DIM_1) / kv_head_dim};
+        } else {
+            softmax_size = {
+                query.sym_size(DIM_0), key.sym_size(DIM_2), query.sym_size(DIM_1),
+                query.sym_size(DIM_2) / key.sym_size(DIM_2)};
+        }
+    } else {
+        softmax_size = {c10::SymInt(0)};
+    }
+
+    at::Tensor softmax_max = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
+    at::Tensor softmax_sum = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
+}
+
 std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
     const at::Tensor& x,
     int64_t k,
@@ -466,19 +439,16 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
         "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
         x.scalar_type());
 
-    auto x_size = x.sizes();
-    auto rows = x_size[0];
-    auto expert_num = x_size[1];
+    auto rows = x.sym_size(0);
+    auto expert_num = x.sym_size(1);
     const at::Tensor &bias = c10::value_or_else(bias_opt, [] { return at::Tensor(); });
     if (bias.defined()) {
         TORCH_CHECK(x.scalar_type() == bias.scalar_type(), "The dtype of x and bias should be same");
         TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
-        auto bias_size = bias.sizes();
-        TORCH_CHECK(bias_size[0] == expert_num, "The bias first dim should be same as x second dim");
     }
-    at::Tensor y = at::empty({rows, k}, x.options());
-    at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
-    at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
+    at::Tensor y = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options());
+    at::Tensor expert_idx = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options().dtype(at::kInt));
+    at::Tensor out = at::empty_symint(c10::SymDimVector{rows, expert_num}, x.options().dtype(at::kFloat));
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
@@ -514,50 +484,17 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
-at::Tensor npu_reshape_and_cache_bnsd_meta(const at::Tensor& hashq,
-                                           const at::Tensor& hashkCache,
-                                           const at::Tensor& slotMapping,
-                                           const at::Tensor& seqLen,
-                                           const at::Tensor& hashkCacheOut) {
-    at::Tensor output = at::empty(hashkCache.sizes(), hashkCache.options().dtype(hashkCache.dtype()).device(hashkCache.device()));
-    return output;
-}
-
-
-at::Tensor npu_hamming_dist_top_k_meta(const at::Tensor &hashq,
-                                       const at::Tensor &hashkCache,
-                                       const at::Tensor& hashkCacheRope,
-                                       const at::Tensor &topN,
-                                       const at::Tensor &seqLen,
-                                       const c10::optional<at::Tensor> &chunkSize,
-                                       const c10::optional<int64_t> maxSeqLen,
-                                       const c10::optional<int64_t> sink,
-                                       const c10::optional<int64_t> recent,
-                                       const c10::optional<int64_t> supportOffload,
-                                       const c10::optional<at::Tensor> &blockTable,
-                                       const c10::optional<at::Tensor> &mask,
-                                       const c10::optional<at::Tensor>& indices) {
-    if (indices.has_value()) {
-        return at::empty_like(indices.value());
-    }
-    uint32_t MAX_BLOCK_PER_REQ_INHSA = 512;
-
-    auto n_bs = hashq.size(0);
-    auto n_kv_heads = hashkCache.size(1);
-    auto n_max_kv = MAX_BLOCK_PER_REQ_INHSA;
-    at::Tensor out = at::empty({n_bs, n_kv_heads, n_max_kv}, torch::TensorOptions().dtype(torch::kInt32).device(hashq.device()));
-    return out;
-}
-
 at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
                                    const int64_t size) {
-    int64_t ySize = (input.size(0) + 7) / 8;
-    int64_t outDim = 0;
+    auto ySize = ceil_div(input.sym_size(0), 8);
+    c10::SymInt outDim(0);
     if (size != 0) {
-        outDim = ySize / size;
+        outDim = ySize / c10::SymInt(size);
     }
 
-    at::Tensor out = torch::empty({size, outDim}, torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));
+    at::Tensor out = at::empty_symint(
+        c10::SymDimVector{c10::SymInt(size), outDim},
+        torch::TensorOptions().dtype(torch::kUInt8).device(input.device()));
     return out;
 }
 
@@ -614,15 +551,18 @@ npu_copy_and_expand_eagle_inputs_meta(
     bool shift_input_ids,
     int64_t total_draft_tokens)
 {
-    int64_t total_input_tokens = target_token_ids.size(0);
-    int64_t num_reqs = query_start_loc.size(0) - 1;
+    auto total_input_tokens = target_token_ids.sym_size(0);
+    auto num_reqs = query_start_loc.sym_size(0) - c10::SymInt(1);
 
-    at::Tensor out_input_ids = at::empty({total_draft_tokens}, target_token_ids.options());
-    at::Tensor out_positions = at::empty({total_draft_tokens}, target_token_ids.options());
-    at::Tensor out_is_rejected_token_mask = at::empty({total_draft_tokens}, target_token_ids.options().dtype(at::kChar));
-    at::Tensor out_is_masked_token_mask = at::empty({total_draft_tokens}, target_token_ids.options().dtype(at::kChar));
-    at::Tensor out_new_token_indices = at::empty({num_reqs * num_padding_slots_per_request}, target_token_ids.options());
-    at::Tensor out_hidden_state_mapping = at::empty({total_input_tokens}, target_token_ids.options());
+    c10::SymDimVector draft_shape = {c10::SymInt(total_draft_tokens)};
+    at::Tensor out_input_ids = at::empty_symint(draft_shape, target_token_ids.options());
+    at::Tensor out_positions = at::empty_symint(draft_shape, target_token_ids.options());
+    at::Tensor out_is_rejected_token_mask = at::empty_symint(draft_shape, target_token_ids.options().dtype(at::kChar));
+    at::Tensor out_is_masked_token_mask = at::empty_symint(draft_shape, target_token_ids.options().dtype(at::kChar));
+    at::Tensor out_new_token_indices = at::empty_symint(
+        c10::SymDimVector{num_reqs * c10::SymInt(num_padding_slots_per_request)}, target_token_ids.options());
+    at::Tensor out_hidden_state_mapping = at::empty_symint(
+        c10::SymDimVector{total_input_tokens}, target_token_ids.options());
 
     return {out_input_ids, out_positions, out_is_rejected_token_mask, out_is_masked_token_mask,
             out_new_token_indices, out_hidden_state_mapping};
@@ -634,10 +574,10 @@ at::Tensor npu_causal_conv1d_custom_meta(
     const at::Tensor& weight,
     const at::Tensor& conv_state,
     const c10::optional<at::Tensor>& bias_opt,
-    at::IntArrayRef query_start_loc_opt,
-    at::IntArrayRef cache_indices_opt,
-    at::IntArrayRef initial_state_mode_opt,
-    at::IntArrayRef num_accepted_tokens_opt,
+    const c10::optional<at::Tensor>& query_start_loc_opt,
+    const c10::optional<at::Tensor>& cache_indices_opt,
+    const c10::optional<at::Tensor>& initial_state_mode_opt,
+    const c10::optional<at::Tensor>& num_accepted_tokens_opt,
     int64_t  activation_mode,
     int64_t  pad_slot_id,
     int64_t  run_mode)
@@ -700,25 +640,44 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     return output;
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
-    const at::Tensor& A_log,
-    const at::Tensor& a,
-    const at::Tensor& b,
+at::Tensor recurrent_kda_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& gate,
+    const at::Tensor& beta,
+    at::Tensor& initial_state,
+    const at::Tensor& actual_seq_lengths,
+    const at::Tensor& ssm_state_indices,
+    const at::Tensor& a_log,
     const at::Tensor& dt_bias,
-    double beta,
-    double threshold)
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    double scale,
+    bool use_qk_l2norm_in_kernel,
+    bool use_gate_in_kernel,
+    bool use_beta_sigmoid_in_kernel,
+    bool allow_neg_eigval,
+    bool safe_gate,
+    double lower_bound)
 {
+    (void)query;
+    (void)key;
+    (void)gate;
     (void)beta;
-    (void)threshold;
-    int64_t batch = a.size(0);
-    int64_t num_heads = a.size(1);
-
-    at::Tensor g = at::empty_symint(
-        {1, batch, num_heads}, a.options().dtype(c10::kFloat));
-    at::Tensor beta_output = at::empty_symint(
-        {1, batch, num_heads}, b.options());
-
-    return std::make_tuple(g, beta_output);
+    (void)actual_seq_lengths;
+    (void)ssm_state_indices;
+    (void)a_log;
+    (void)dt_bias;
+    (void)num_accepted_tokens;
+    (void)scale;
+    (void)use_qk_l2norm_in_kernel;
+    (void)use_gate_in_kernel;
+    (void)use_beta_sigmoid_in_kernel;
+    (void)allow_neg_eigval;
+    (void)safe_gate;
+    (void)lower_bound;
+    (void)initial_state;
+    return at::empty_symint(value.sym_sizes(), value.options());
 }
 
 std::vector<at::Tensor> moe_grouped_matmul_meta(
@@ -737,12 +696,12 @@ std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::TensorList weight_list = at::TensorList(weight);
     std::vector<at::Tensor> y;
     c10::TensorOptions options = x[0].options().dtype(x[0].scalar_type());
-    auto m = x[0].sizes()[0];
-    auto n = weight[0].sizes()[1];
+    auto m = x[0].sym_size(0);
+    auto n = weight[0].sym_size(1);
     if (!transpose_weight) {
-        n = weight[0].sizes()[2];
+        n = weight[0].sym_size(2);
     }
-    at::Tensor y_0 = at::zeros(at::IntArrayRef{m, n}, options);
+    at::Tensor y_0 = at::empty_symint(c10::SymDimVector{m, n}, options);
     y.emplace_back(y_0);
     at::TensorList result = at::TensorList(y);
 
@@ -784,20 +743,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
     TORCH_CHECK(routed_scaling_factor > 0.0,
                 "routed_scaling_factor must be > 0, but got ", routed_scaling_factor);
 
-    const auto sizes = x.sizes();
-    const int64_t rows = sizes[0];
-    const int64_t expert_num = sizes[1];
-
-    TORCH_CHECK(expert_num > 0, "expert_num must be > 0");
-    TORCH_CHECK(expert_num <= 2048,
-                "expert_num (E) must be <= 2048, but got ", expert_num);
+    auto rows = x.sym_size(0);
+    auto expert_num = x.sym_size(1);
 
     if (bias_opt.has_value() && bias_opt->defined()) {
         const auto& bias = *bias_opt;
         TORCH_CHECK(bias.dim() == 1, "bias must be 1D, but got dim=", bias.dim());
-        TORCH_CHECK(bias.size(0) == expert_num,
-                    "bias.size(0) must equal expert_num. bias.size(0)=",
-                    bias.size(0), ", expert_num=", expert_num);
         TORCH_CHECK(bias.scalar_type() == x.scalar_type(),
                     "bias dtype must equal x dtype. x=", x.scalar_type(),
                     ", bias=", bias.scalar_type());
@@ -807,9 +758,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
         const auto& input_ids = *input_ids_opt;
         TORCH_CHECK(input_ids.scalar_type() == at::kInt || input_ids.scalar_type() == at::kLong,
                     "input_ids dtype must be int32 or int64, but got ", input_ids.scalar_type());
-        TORCH_CHECK(input_ids.numel() == rows,
-                    "input_ids.numel() must equal x.size(0). input_ids.numel()=",
-                    input_ids.numel(), ", rows=", rows);
     }
 
     if (tid2eid_opt.has_value() && tid2eid_opt->defined()) {
@@ -819,9 +767,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
         TORCH_CHECK(tid2eid.dim() >= 1, "tid2eid must have dim>=1, but got dim=", tid2eid.dim());
     }
 
-    at::Tensor y = at::empty({rows, k}, x.options());
-    at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
-    at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
+    at::Tensor y = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options());
+    at::Tensor expert_idx = at::empty_symint(c10::SymDimVector{rows, c10::SymInt(k)}, x.options().dtype(at::kInt));
+    at::Tensor out = at::empty_symint(c10::SymDimVector{rows, expert_num}, x.options().dtype(at::kFloat));
 
     return {y, expert_idx, out};
 }
@@ -831,18 +779,18 @@ std::tuple<at::Tensor> construct_compressor_output_tensor(const at::Tensor &x, c
 {
     constexpr int DIM_3 = 3;
     auto x_dim = x.dim();
-    at::SmallVector<int64_t, 8> cmp_kv_size;
+    c10::SymDimVector cmp_kv_size;
     at::Tensor cmp_kv;
-    auto cmp_s = 0;
+    c10::SymInt cmp_s(0);
     if (x_dim == DIM_3) {
-        cmp_s = (x.size(1) + cmp_ratio - 1) / cmp_ratio;
-        cmp_kv_size = {x.size(0), cmp_s, norm_weight.size(0)};
+        cmp_s = ceil_div(x.sym_size(1), cmp_ratio);
+        cmp_kv_size = {x.sym_size(0), cmp_s, norm_weight.sym_size(0)};
     } else {
-        cmp_s = rope_sin.size(0);
-        cmp_kv_size = {cmp_s, norm_weight.size(0)};
+        cmp_s = rope_sin.sym_size(0);
+        cmp_kv_size = {cmp_s, norm_weight.sym_size(0)};
     }
 
-    cmp_kv = at::empty(cmp_kv_size, x.options().dtype(x.dtype()));
+    cmp_kv = at::empty_symint(cmp_kv_size, x.options().dtype(x.dtype()));
 
     return std::tuple<at::Tensor>(cmp_kv);
 }
@@ -875,34 +823,25 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     TORCH_CHECK(rope_cos.dim() == 2 && rope_sin.dim() == 2, "rope_cos and rope_sin should be 2D tensors");
     TORCH_CHECK(rope_cos.scalar_type() == rope_sin.scalar_type(),
                 "rope_cos and rope_sin should have same dtype");
-    TORCH_CHECK(rope_cos.size(0) == rope_sin.size(0) && rope_cos.size(1) == rope_sin.size(1),
-                "rope_cos and rope_sin should have same shape");
-    TORCH_CHECK(rope_cos.size(0) > VALUE_0 && rope_cos.size(1) > VALUE_0,
-                "rope_cos shape should be non-empty");
     TORCH_CHECK(kv_block_size > VALUE_0, "kv_block_size should be greater than 0");
     TORCH_CHECK(compress_ratio > VALUE_0, "compress_ratio should be greater than 0");
     TORCH_CHECK(num_compressed_tokens > VALUE_0, "num_compressed_tokens should be greater than 0");
     TORCH_CHECK(num_reqs_actual > VALUE_0, "num_reqs_actual should be greater than 0");
-    TORCH_CHECK(cu_seqlens.size(0) > num_reqs_actual,
-                "cu_seqlens dim0 should be greater than num_reqs_actual");
-    TORCH_CHECK(start_pos.size(0) >= num_reqs_actual,
-                "start_pos dim0 should be greater than or equal to num_reqs_actual");
-    TORCH_CHECK(kv_block_table.size(0) >= num_reqs_actual,
-                "kv_block_table dim0 should be greater than or equal to num_reqs_actual");
 
-    at::SmallVector<int64_t, 4> rope_output_size = {num_compressed_tokens, 1, 1, rope_cos.size(1)};
-    at::Tensor compress_cos = at::empty(rope_output_size, rope_cos.options());
-    at::Tensor compress_sin = at::empty(rope_output_size, rope_sin.options());
+    c10::SymDimVector rope_output_size = {
+        c10::SymInt(num_compressed_tokens), c10::SymInt(1), c10::SymInt(1), rope_cos.sym_size(1)};
+    at::Tensor compress_cos = at::empty_symint(rope_output_size, rope_cos.options());
+    at::Tensor compress_sin = at::empty_symint(rope_output_size, rope_sin.options());
 
-    at::SmallVector<int64_t, 2> slot_mapping_size;
+    c10::SymDimVector slot_mapping_size;
     if (slot_mapping_format == DSA_SLOT_MAPPING_BLOCK_OFFSET) {
-        slot_mapping_size = {num_compressed_tokens, 2};
+        slot_mapping_size = {c10::SymInt(num_compressed_tokens), c10::SymInt(2)};
     } else {
         TORCH_CHECK(slot_mapping_format == DSA_SLOT_MAPPING_FLAT,
                     "slot_mapping_format should be 1(flat) or 2(block_offset), but got ", slot_mapping_format);
-        slot_mapping_size = {num_compressed_tokens};
+        slot_mapping_size = {c10::SymInt(num_compressed_tokens)};
     }
-    at::Tensor slot_mapping = at::empty(slot_mapping_size, kv_block_table.options().dtype(at::kInt));
+    at::Tensor slot_mapping = at::empty_symint(slot_mapping_size, kv_block_table.options().dtype(at::kInt));
     return std::make_tuple(compress_cos, compress_sin, slot_mapping);
 }
 
@@ -910,33 +849,23 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tens
                                                            int64_t sparse_count, std::string query_layout_str,
                                                            std::string key_layout_str, bool return_value)
 {
-    constexpr int64_t SIZE = 8;
     constexpr int64_t DIM_0 = 0;
     constexpr int64_t DIM_1 = 1;
     constexpr int64_t DIM_2 = 2;
-    constexpr int64_t DIM_3 = 3;
-    at::SmallVector<int64_t, SIZE> output_size;
-    for (size_t i = 0; i < query.sizes().size(); i++) {
-        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
-            "than 0, but shape[", i, "] is ", query.size(i));
-    }
-    for (size_t i = 0; i < key.sizes().size(); i++) {
-        TORCH_CHECK(key.size(i) > 0, "All values within key's shape should be greater "
-            "than 0, but shape[", i, "] is ", key.size(i));
-    }
+    c10::SymDimVector output_size;
     TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-    int64_t keyHeadNum = (key_layout_str == "TND")? key.size(DIM_1) : key.size(DIM_2);
+    c10::SymInt keyHeadNum = (key_layout_str == "TND") ? key.sym_size(DIM_1) : key.sym_size(DIM_2);
     if (query_layout_str == "BSND") {
-        output_size = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, sparse_count};
+        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), keyHeadNum, c10::SymInt(sparse_count)};
     } else {
-        output_size = {query.size(DIM_0), keyHeadNum, sparse_count};
+        output_size = {query.sym_size(DIM_0), keyHeadNum, c10::SymInt(sparse_count)};
     }
-    at::Tensor sparse_indices_out = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor sparse_indices_out = at::empty_symint(output_size, query.options().dtype(at::kInt));
     at::Tensor sparse_values_out;
     if (return_value) {
-        sparse_values_out = at::empty(output_size, query.options().dtype(at::kFloat));
+        sparse_values_out = at::empty_symint(output_size, query.options().dtype(at::kFloat));
     } else {
-        sparse_values_out = at::empty({0}, query.options().dtype(at::kFloat));
+        sparse_values_out = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(at::kFloat));
     }
 
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
@@ -966,22 +895,14 @@ std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_meta(
 std::tuple<at::Tensor, at::Tensor> construct_output_tensor(const at::Tensor &q, std::string layout,
     bool return_softmax_lse)
 {
-    for (size_t i = 0; i < q.sizes().size(); i++) {
-        TORCH_CHECK(q.size(i) > 0,
-            "All values within query's shape should be greater "
-            "than 0, but shape[",
-            i,
-            "] is ",
-            q.size(i));
-    }
-    at::Tensor output = at::empty(q.sizes(), q.options().dtype(q.dtype()));
+    at::Tensor output = at::empty_symint(q.sym_sizes(), q.options().dtype(q.dtype()));
     at::Tensor softmax_lse;
     if (return_softmax_lse) {
-        std::vector<int64_t> lse_sizes(q.sizes().begin(), q.sizes().end());
-        lse_sizes.back() = 1;
-        softmax_lse = at::empty(lse_sizes, q.options().dtype(c10::ScalarType::Float));
+        c10::SymDimVector lse_sizes(q.sym_sizes().begin(), q.sym_sizes().end());
+        lse_sizes.back() = c10::SymInt(1);
+        softmax_lse = at::empty_symint(lse_sizes, q.options().dtype(c10::ScalarType::Float));
     } else {
-        softmax_lse = at::empty({0}, q.options().dtype(c10::ScalarType::Float));
+        softmax_lse = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, q.options().dtype(c10::ScalarType::Float));
     }
     return std::tuple<at::Tensor, at::Tensor>(output, softmax_lse);
 }
@@ -1030,15 +951,25 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
     constexpr int64_t OUTPUT_SIZE = 1024;
     at::Tensor output;
     if (cu_seqlens_q.has_value()) {
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_q.value().device()));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cu_seqlens_q.value().device()));
     } else if (cu_seqlens_ori_kv.has_value()) {
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_ori_kv.value().device()));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cu_seqlens_ori_kv.value().device()));
     } else if (cu_seqlens_cmp_kv.has_value()) {
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_cmp_kv.value().device()));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cu_seqlens_cmp_kv.value().device()));
     } else if (seqused_q.has_value()) {
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(seqused_q.value().device()));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(seqused_q.value().device()));
     } else if (seqused_kv.has_value()) {
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(seqused_kv.value().device()));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(seqused_kv.value().device()));
     } else {
         auto deviceOri = at::Device(std::string(device));
         std::string device_str = "meta";
@@ -1046,7 +977,9 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_meta(
             device_str += ":";
             device_str += std::to_string(deviceOri.index());
         }
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(at::Device(device_str)));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(at::Device(device_str)));
     }
     return output;
 }
@@ -1060,9 +993,13 @@ at::Tensor npu_vllm_quant_lightning_indexer_metadata_meta(
     constexpr int64_t OUTPUT_SIZE = 1024;
     at::Tensor output;
     if (actual_seq_lengths_query.has_value()) {
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(actual_seq_lengths_query.value().device()));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(actual_seq_lengths_query.value().device()));
     } else if (actual_seq_lengths_key.has_value()) {
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(actual_seq_lengths_key.value().device()));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(actual_seq_lengths_key.value().device()));
     } else {
         auto deviceOri = at::Device(std::string(device));
         std::string device_str = "meta";
@@ -1070,7 +1007,9 @@ at::Tensor npu_vllm_quant_lightning_indexer_metadata_meta(
             device_str += ":";
             device_str += std::to_string(deviceOri.index());
         }
-        output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(at::Device(device_str)));
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(at::Device(device_str)));
     }
 
     return output;
@@ -1121,96 +1060,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_output_tensor(co
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
 }
 
-at::Tensor construct_hc_pre_rsqrt_output_tensor(const at::Tensor& x, float epsilon=1e-6)
-{
-    constexpr int64_t SIZE = 8;
-    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
-
-    auto options = x.options();
-    auto xDims = x.dim();
-    c10::SmallVector<int64_t, SIZE> yOut_shape;
-    for (size_t i = 0; i < xDims - 2; i++) {
-        yOut_shape.push_back(x.sizes()[i]);
-    }
-    yOut_shape.push_back(1);
-    at::Tensor yOut = at::empty(yOut_shape, options.dtype(at::kFloat));
-
-    return yOut;
-}
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_meta(
     const at::Tensor& x, const at::Tensor& hc_fn, const at::Tensor& hc_scale, const at::Tensor& hc_base,
     int64_t hc_mult, int64_t hc_sinkhorn_iters, double norm_eps, double hc_eps)
 {
     auto output_tensors = construct_hc_pre_output_tensor(x, hc_mult);
-    at::Tensor y = std::get<0>(output_tensors);
-    at::Tensor post = std::get<1>(output_tensors);
-    at::Tensor comb_frag = std::get<2>(output_tensors);
-
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
-}
-
-at::Tensor construct_hc_pre_inv_rms_output_tensor(const at::Tensor& x, float epsilon=1e-20)
-{
-    constexpr int64_t SIZE = 8;
-    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
-
-    auto options = x.options();
-    auto xDims = x.dim();
-    c10::SmallVector<int64_t, SIZE> yOut_shape;
-    for (auto i = 0; i < xDims - 2; i++) {
-        yOut_shape.push_back(x.sizes()[i]);
-    }
-    yOut_shape.push_back(1);
-    at::Tensor yOut = at::empty(yOut_shape, options.dtype(at::kFloat));
-
-    return yOut;
-}
-
-at::Tensor npu_hc_pre_inv_rms_meta(const at::Tensor& x, double epsilon=1e-20)
-{
-    TORCH_CHECK(x.numel() > 0, "Input tensor x should not be empty.");
-    TORCH_CHECK(epsilon >= 0, "epsilon should be greater than 0.");
-
-    at::Tensor yOut;
-    yOut = construct_hc_pre_inv_rms_output_tensor(x, epsilon);
-
-    return yOut;
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_sinkhorn_output_tensor(const at::Tensor& mixes, const at::Tensor& x, int64_t hc_mult)
-{
-    auto xDims = x.dim();
-    at::SmallVector<int64_t, 8> y_size;
-    at::SmallVector<int64_t, 8> post_size;
-    at::SmallVector<int64_t, 8> comb_frag_size;
-    if (xDims == 4) {
-        auto batch = x.size(0);
-        auto size = x.size(1);
-        auto d = x.size(3);
-        y_size = {batch, size, d};
-        post_size = {batch, size, hc_mult};
-        comb_frag_size = {batch, size, hc_mult, hc_mult};
-    } else if (xDims == 3){
-        auto bs = x.size(0);
-        auto d = x.size(2);
-        y_size = {bs, d};
-        post_size = {bs, hc_mult};
-        comb_frag_size = {bs, hc_mult, hc_mult};
-    }
-
-    at::Tensor y = at::empty(y_size, x.options().dtype(at::kBFloat16));
-    at::Tensor post = at::empty(post_size, x.options().dtype(at::kFloat));
-    at::Tensor comb_frag = at::empty(comb_frag_size, x.options().dtype(at::kFloat));
-
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
-}
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_sinkhorn_meta(
-    const at::Tensor& mixes, const at::Tensor& rsqrt, const at::Tensor& hc_scale, const at::Tensor& hc_base,
-    const at::Tensor& x, int64_t hc_mult, int64_t hc_sinkhorn_iters, double hc_eps)
-{
-    auto output_tensors = construct_hc_pre_sinkhorn_output_tensor(mixes, x, hc_mult);
     at::Tensor y = std::get<0>(output_tensors);
     at::Tensor post = std::get<1>(output_tensors);
     at::Tensor comb_frag = std::get<2>(output_tensors);
@@ -1236,27 +1090,15 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_meta(
     const c10::optional<at::Tensor>& beta,
     double epsilon)
 {
-    constexpr int32_t SIZE = 8;
     at::Tensor y_out = at::empty_like(x);
     auto options = x.options();
-    c10::SmallVector<int64_t, SIZE> scale_out_shape;
-    for (size_t i = 0; i < x.sizes().size() - 1; i++) {
-        scale_out_shape.push_back(x.sizes()[i]);
+    c10::SymDimVector scale_out_shape;
+    for (size_t i = 0; i < x.dim() - 1; i++) {
+        scale_out_shape.push_back(x.sym_size(i));
     }
-    at::Tensor scale_out = at::empty(scale_out_shape, options.dtype(at::kFloat));
+    at::Tensor scale_out = at::empty_symint(scale_out_shape, options.dtype(at::kFloat));
 
     return std::make_tuple(y_out, scale_out);
-}
-
-void indexer_compress_epilog_meta(
-    at::Tensor& indexer_compress_cache,
-    at::Tensor& indexer_compress_cache_scale,
-    const at::Tensor& x,
-    const at::Tensor& slot_mapping,
-    int64_t quant_mode = 1,
-    bool round_scale = true)
-{
-    return;
 }
 
 void kv_compress_epilog_meta(
@@ -1333,19 +1175,29 @@ at::Tensor npu_kv_quant_sparse_attn_sharedkv_metadata_meta(
 {
     constexpr int64_t OUTPUT_SIZE = 1024;
     if (cu_seqlens_q.has_value()) {
-        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_q.value().device()));
+        return at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cu_seqlens_q.value().device()));
     }
     if (cu_seqlens_ori_kv.has_value()) {
-        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_ori_kv.value().device()));
+        return at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cu_seqlens_ori_kv.value().device()));
     }
     if (cu_seqlens_cmp_kv.has_value()) {
-        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(cu_seqlens_cmp_kv.value().device()));
+        return at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cu_seqlens_cmp_kv.value().device()));
     }
     if (seqused_q.has_value()) {
-        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(seqused_q.value().device()));
+        return at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(seqused_q.value().device()));
     }
     if (seqused_kv.has_value()) {
-        return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(seqused_kv.value().device()));
+        return at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(seqused_kv.value().device()));
     }
 
     auto device_ori = at::Device(std::string(device));
@@ -1354,7 +1206,9 @@ at::Tensor npu_kv_quant_sparse_attn_sharedkv_metadata_meta(
         device_str += ":";
         device_str += std::to_string(device_ori.index());
     }
-    return torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(at::Device(device_str)));
+    return at::empty_symint(
+        c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+        torch::dtype(torch::kInt32).device(at::Device(device_str)));
 }
 
 int64_t get_type_code(at::ScalarType dst_type)
@@ -1364,6 +1218,8 @@ int64_t get_type_code(at::ScalarType dst_type)
             return 35;
         case at::ScalarType::Float8_e4m3fn:
             return 36;
+        case at::ScalarType::Float4_e2m1fn_x2:
+            return 40;
         case at::ScalarType::Half:
             return 1;
         case at::ScalarType::BFloat16:
@@ -1380,7 +1236,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_outp
     int64_t quant_mode,
     bool ue8m0_scale)
 {
-    constexpr int64_t SIZE = 8;
     constexpr int64_t SWIGLU_FACTOR = 2;
     constexpr int64_t PER_BLOCK_FP16 = 128;
     constexpr int64_t PER_MX_FP16 = 32;
@@ -1389,41 +1244,33 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_swiglu_group_quant_outp
     constexpr int64_t MX_QUANT = 2;
     constexpr int64_t FP8_QUANT = 3;
 
-    at::SmallVector<int64_t, SIZE> y_size(x.sizes().begin(), x.sizes().end());
+    c10::SymDimVector y_size(x.sym_sizes().begin(), x.sym_sizes().end());
     TORCH_CHECK(x.dtype() == at::kHalf || x.dtype() == at::kBFloat16,
                 "x should be FLOAT16 or BFLOAT16.");
-    int64_t x_last_dim = x.sizes().back();
     TORCH_CHECK(quant_mode == GROUP_QUANT || quant_mode == MX_QUANT || quant_mode == FP8_QUANT,
                 "Unsupported quant mode, only support ", GROUP_QUANT, " or ", MX_QUANT, " or ", FP8_QUANT, ".");
-    if (quant_mode == GROUP_QUANT || quant_mode == FP8_QUANT) {
-        TORCH_CHECK(x_last_dim % 256 == 0,
-                    "In group quant, the last dim of x should be divisible by 256, actual ", x_last_dim, ".");
-    } else {
-        TORCH_CHECK(x_last_dim % 128 == 0,
-                    "In mx quant, the last dim of x should be divisible by 128, actual ", x_last_dim, ".");
-    }
 
-    y_size.back() = y_size.back() / SWIGLU_FACTOR;
-    int64_t y_last_dim = y_size.back();
+    y_size.back() = y_size.back() / c10::SymInt(SWIGLU_FACTOR);
+    c10::SymInt y_last_dim = y_size.back();
     auto y_dtype = dst_type == 35 ? at::kFloat8_e5m2 : at::kFloat8_e4m3fn;
-    at::Tensor y = at::empty(y_size, x.options().dtype(y_dtype));
+    at::Tensor y = at::empty_symint(y_size, x.options().dtype(y_dtype));
 
-    at::SmallVector<int64_t, SIZE> scale_size(y_size.begin(), y_size.end());
+    c10::SymDimVector scale_size(y_size.begin(), y_size.end());
     if (quant_mode == GROUP_QUANT || quant_mode == FP8_QUANT) {
-        scale_size.back() = (y_last_dim + PER_BLOCK_FP16 - 1) / PER_BLOCK_FP16;
+        scale_size.back() = ceil_div(y_last_dim, PER_BLOCK_FP16);
     } else if (quant_mode == MX_QUANT) {
-        int64_t scale_last_dim = (y_last_dim + PER_MX_FP16 - 1) / PER_MX_FP16;
-        scale_last_dim = (scale_last_dim + MX_SCALE_ALIGN_FACTOR - 1) / MX_SCALE_ALIGN_FACTOR;
+        c10::SymInt scale_last_dim = ceil_div(y_last_dim, PER_MX_FP16);
+        scale_last_dim = ceil_div(scale_last_dim, MX_SCALE_ALIGN_FACTOR);
         scale_size.back() = scale_last_dim;
-        scale_size.push_back(MX_SCALE_ALIGN_FACTOR);
+        scale_size.push_back(c10::SymInt(MX_SCALE_ALIGN_FACTOR));
     }
 
     auto scale_type = at::kFloat;
     if (quant_mode == MX_QUANT || (quant_mode == FP8_QUANT && ue8m0_scale)) {
         scale_type = at::kFloat8_e8m0fnu;
     }
-    at::Tensor scale = at::empty(scale_size, x.options().dtype(scale_type));
-    at::Tensor y_origin = at::empty(y_size, x.options().dtype(x.dtype()));
+    at::Tensor scale = at::empty_symint(scale_size, x.options().dtype(scale_type));
+    at::Tensor y_origin = at::empty_symint(y_size, x.options().dtype(x.dtype()));
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, scale, y_origin);
 }
@@ -1443,26 +1290,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_swiglu_group_quant_meta(
 {
     int64_t dst_type_code = get_type_code(dst_type);
     return construct_swiglu_group_quant_output_tensor(x, dst_type_code, quant_mode, ue8m0_scale);
-}
-
-std::tuple<at::Tensor, at::Tensor> construct_load_index_kv_cache_output_tensor(
-    const at::Tensor& kv_cache,
-    const at::Tensor& slot_mapping)
-{
-    constexpr int64_t KV_LAST_DIM = 128;
-    int64_t n = slot_mapping.size(0);
-
-    at::Tensor kv = at::empty({n, KV_LAST_DIM}, kv_cache.options().dtype(at::kFloat8_e4m3fn));
-    at::Tensor kv_scale = at::empty({n}, kv_cache.options().dtype(at::kFloat));
-
-    return std::tuple<at::Tensor, at::Tensor>(kv, kv_scale);
-}
-
-std::tuple<at::Tensor, at::Tensor> npu_load_index_kv_cache_meta(
-    const at::Tensor& kv_cache,
-    const at::Tensor& slot_mapping)
-{
-    return construct_load_index_kv_cache_output_tensor(kv_cache, slot_mapping);
 }
 
 void indexer_compress_epilog_v2_meta(
@@ -1489,16 +1316,16 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant_meta(
     double glu_alpha,
     double glu_bias)
 {
-    c10::SmallVector<int64_t, 8> y_size;
-    c10::SmallVector<int64_t, 8> scale_size;
+    c10::SymDimVector y_size;
+    c10::SymDimVector scale_size;
     for (int64_t i = 0; i < x.dim() - 1; ++i) {
-        y_size.push_back(x.size(i));
-        scale_size.push_back(x.size(i));
+        y_size.push_back(x.sym_size(i));
+        scale_size.push_back(x.sym_size(i));
     }
-    y_size.push_back(x.size(x.dim() - 1) / 2);
+    y_size.push_back(x.sym_size(x.dim() - 1) / c10::SymInt(2));
 
-    at::Tensor y = at::empty(y_size, x.options().dtype(c10::ScalarType::Char));
-    at::Tensor scale = at::empty(scale_size, x.options().dtype(c10::ScalarType::Float));
+    at::Tensor y = at::empty_symint(y_size, x.options().dtype(c10::ScalarType::Char));
+    at::Tensor scale = at::empty_symint(scale_size, x.options().dtype(c10::ScalarType::Float));
     return {y, scale};
 }
 
@@ -1513,31 +1340,79 @@ at::Tensor npu_lightning_indexer_quant_meta(
     std::string query_layout_str = std::string(layout_query);
     std::string key_layout_str = std::string(layout_key);
 
-    const int SIZE = 8;
     const int DIM_0 = 0;
     const int DIM_1 = 1;
     const int DIM_2 = 2;
-    const int DIM_3 = 3;
 
-    at::SmallVector<int64_t, SIZE> output_size;
-    for (size_t i = 0; i < query.sizes().size(); i++) {
-        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
-            "than 0, but shape[", i, "] is ", query.size(i));
-    }
-    for (size_t i = 0; i < key.sizes().size(); i++) {
-        TORCH_CHECK(key.size(i) > 0, "All values within key's shape should be greater "
-            "than 0, but shape[", i, "] is ", key.size(i));
-    }
+    c10::SymDimVector output_size;
     TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
-    int64_t keyHeadNum = (key_layout_str == "TND")? key.size(DIM_1) : key.size(DIM_2);
+    c10::SymInt keyHeadNum = (key_layout_str == "TND") ? key.sym_size(DIM_1) : key.sym_size(DIM_2);
     if (query_layout_str == "BSND") {
-        output_size = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, sparse_count};
+        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), keyHeadNum, c10::SymInt(sparse_count)};
     } else {
-        output_size = {query.size(DIM_0), keyHeadNum, sparse_count};
+        output_size = {query.sym_size(DIM_0), keyHeadNum, c10::SymInt(sparse_count)};
     }
-    at::Tensor lightning_indexer_quant_output = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor lightning_indexer_quant_output = at::empty_symint(output_size, query.options().dtype(at::kInt));
 
     return lightning_indexer_quant_output;
+}
+
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
+    const at::Tensor &q2k,
+    const at::Tensor &cu_seqlens,
+    const at::Tensor &cu_block_lens,
+    int64_t order_method,
+    int64_t total_rows,
+    int64_t max_kv,
+    int64_t use_simt,
+    int64_t q_global_offset = 0)
+{
+    (void)cu_seqlens;
+    (void)cu_block_lens;
+    (void)order_method;
+    (void)max_kv;
+    (void)use_simt;
+    (void)q_global_offset;
+
+    TORCH_CHECK(q2k.dim() == 3, "q2k must be 3-D [H, T, topk]");
+    const c10::SymInt H = q2k.sym_size(0);
+    const c10::SymInt T = q2k.sym_size(1);
+    const c10::SymInt topk = q2k.sym_size(2);
+    // ACLGraph capture should pass total_rows explicitly; fallback keeps shape valid.
+    const c10::SymInt tr = total_rows >= 0 ? c10::SymInt(total_rows) : c10::SymInt(1);
+    auto opts = q2k.options().dtype(at::kInt);
+    at::Tensor row_ptr = at::empty_symint(c10::SymDimVector{H, tr + 1}, opts);
+    at::Tensor q_ind = at::empty_symint(c10::SymDimVector{H, T * topk}, opts);
+    at::Tensor slot = at::empty_symint(c10::SymDimVector{H, T * topk}, opts);
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(row_ptr, q_ind, slot);
+}
+
+at::Tensor npu_sparse_attention_score_prefill_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &block_table,
+    const at::Tensor &k2q_row_ptr,
+    const at::Tensor &k2q_q_indices,
+    const at::Tensor &k2q_slot_indices,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv)
+{
+    (void)key;
+    (void)value;
+    (void)block_table;
+    (void)k2q_row_ptr;
+    (void)k2q_q_indices;
+    (void)k2q_slot_indices;
+    (void)num_key_value_heads;
+    (void)scale_value;
+    (void)block_size;
+    (void)top_k;
+    (void)inner_precise;
+    (void)actual_seq_lengths;
+    (void)actual_seq_lengths_kv;
+    return at::empty_like(query);
 }
 
 void npu_scatter_nd_update_v2_meta(
@@ -1548,22 +1423,149 @@ void npu_scatter_nd_update_v2_meta(
     return;
 }
 
-// N-gram spec decode meta
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_ngram_spec_decode_meta(
-    at::Tensor &token_ids,
-    const at::Tensor &num_tokens_no_spec,
-    const at::Tensor &sampled_token_ids,
-    const at::Tensor &discard_request_mask,
-    int64_t vocab_size,
-    int64_t min_n,
-    int64_t max_n,
-    int64_t k)
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_prolog_v3_meta(
+    const at::Tensor &token_x,
+    const at::Tensor &weight_dq,
+    const at::Tensor &weight_uq_qr,
+    const at::Tensor &weight_uk,
+    const at::Tensor &weight_dkv_kr,
+    const at::Tensor &rmsnorm_gamma_cq,
+    const at::Tensor &rmsnorm_gamma_ckv,
+    const at::Tensor &rope_sin,
+    const at::Tensor &rope_cos,
+    at::Tensor &kv_cache,
+    at::Tensor &kr_cache,
+    const c10::optional<at::Tensor> &cache_index,
+    const c10::optional<at::Tensor> &dequant_scale_x,
+    const c10::optional<at::Tensor> &dequant_scale_w_dq,
+    const c10::optional<at::Tensor> &dequant_scale_w_uq_qr,
+    const c10::optional<at::Tensor> &dequant_scale_w_dkv_kr,
+    const c10::optional<at::Tensor> &quant_scale_ckv,
+    const c10::optional<at::Tensor> &quant_scale_ckr,
+    const c10::optional<at::Tensor> &smooth_scales_cq,
+    const c10::optional<at::Tensor> &actual_seq_len,
+    const c10::optional<at::Tensor> &k_nope_clip_alpha,
+    double rmsnorm_epsilon_cq,
+    double rmsnorm_epsilon_ckv,
+    c10::string_view cache_mode,
+    bool query_norm_flag,
+    int64_t weight_quant_mode,
+    int64_t kv_cache_quant_mode,
+    int64_t query_quant_mode,
+    int64_t ckvkr_repo_mode,
+    int64_t quant_scale_repo_mode,
+    int64_t tile_size,
+    double qc_qr_scale,
+    double kc_scale)
 {
-    int64_t batch_size = token_ids.size(0);
-    at::Tensor next_token_ids = at::empty({batch_size}, token_ids.options());
-    at::Tensor draft_token_ids = at::empty({batch_size, k}, token_ids.options());
-    at::Tensor num_valid_draft_tokens = at::empty({batch_size}, token_ids.options());
-    return std::make_tuple(token_ids, next_token_ids, draft_token_ids, num_valid_draft_tokens);
+    constexpr int64_t FP8_E4M3_BLOCK_SIZE = 32;
+    const bool need_dequant_scale_q_nope =
+        (weight_quant_mode == 2 || weight_quant_mode == 3 || weight_quant_mode == 4 ||
+         weight_quant_mode == 5) &&
+        kv_cache_quant_mode == 1;
+
+    // rope_sin/rope_cos are required args; empty tensors mean RoPE off (Dr defaults to 64).
+    // symbolic-meta-ok: empty rope_sin (numel==0) is the concrete RoPE-off runtime sentinel.
+    const bool rope_enabled = rope_sin.defined() && rope_sin.numel() > 0;
+    at::ScalarType query_dtype = rope_enabled ? rope_sin.scalar_type() : at::kBFloat16;
+    if (weight_quant_mode == 3 && kv_cache_quant_mode == 1) {
+        query_dtype = at::kFloat8_e4m3fn;
+    } else if (weight_quant_mode == 2 && kv_cache_quant_mode == 1) {
+        query_dtype = at::kChar;
+    }
+
+    at::ScalarType query_norm_dtype = at::kBFloat16;
+    if (weight_quant_mode == 3 || weight_quant_mode == 4) {
+        query_norm_dtype = at::kFloat8_e4m3fn;
+    } else if (weight_quant_mode != 0) {
+        query_norm_dtype = weight_uq_qr.scalar_type();
+    }
+
+    at::ScalarType dequant_scale_q_norm_dtype =
+        weight_quant_mode == 3 ? at::kFloat8_e8m0fnu : at::kFloat;
+
+    c10::SymDimVector query_shape;
+    c10::SymDimVector query_rope_shape;
+    c10::SymDimVector dequant_scale_q_nope_shape;
+    c10::SymDimVector query_norm_shape;
+    c10::SymDimVector dequant_scale_q_norm_shape;
+
+    if (token_x.dim() == 3) {
+        c10::SymInt rope_dim = rope_enabled ? rope_sin.sym_size(2) : c10::SymInt(64);
+        query_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_uk.sym_size(0),
+                       weight_uk.sym_size(2)};
+        query_rope_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_uk.sym_size(0),
+                            rope_dim};
+        dequant_scale_q_nope_shape = {token_x.sym_size(0) * token_x.sym_size(1),
+                                      weight_uk.sym_size(0), c10::SymInt(1)};
+        query_norm_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_dq.sym_size(1)};
+        dequant_scale_q_norm_shape = {token_x.sym_size(0) * token_x.sym_size(1)};
+        if (weight_quant_mode == 3) {
+            dequant_scale_q_norm_shape.push_back(weight_dq.sym_size(1) / c10::SymInt(FP8_E4M3_BLOCK_SIZE));
+        } else {
+            dequant_scale_q_norm_shape.push_back(c10::SymInt(1));
+        }
+    } else {
+        c10::SymInt rope_dim = rope_enabled ? rope_sin.sym_size(1) : c10::SymInt(64);
+        query_shape = {token_x.sym_size(0), weight_uk.sym_size(0), weight_uk.sym_size(2)};
+        query_rope_shape = {token_x.sym_size(0), weight_uk.sym_size(0), rope_dim};
+        dequant_scale_q_nope_shape = {token_x.sym_size(0), weight_uk.sym_size(0), c10::SymInt(1)};
+        query_norm_shape = {token_x.sym_size(0), weight_dq.sym_size(1)};
+        dequant_scale_q_norm_shape = {token_x.sym_size(0)};
+        if (weight_quant_mode == 3) {
+            dequant_scale_q_norm_shape.push_back(weight_dq.sym_size(1) / c10::SymInt(FP8_E4M3_BLOCK_SIZE));
+        } else {
+            dequant_scale_q_norm_shape.push_back(c10::SymInt(1));
+        }
+    }
+
+    at::Tensor query = at::empty_symint(query_shape, token_x.options().dtype(query_dtype));
+    at::Tensor query_rope = at::empty_symint(query_rope_shape, token_x.options().dtype(at::kBFloat16));
+    at::Tensor dequant_scale_q_nope =
+        need_dequant_scale_q_nope
+            ? at::empty_symint(dequant_scale_q_nope_shape, token_x.options().dtype(at::kFloat))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(at::kFloat));
+    at::Tensor query_norm =
+        query_norm_flag
+            ? at::empty_symint(query_norm_shape, token_x.options().dtype(query_norm_dtype))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(query_norm_dtype));
+    at::Tensor dequant_scale_q_norm =
+        (query_norm_flag && weight_quant_mode != 0)
+            ? at::empty_symint(dequant_scale_q_norm_shape,
+                               token_x.options().dtype(dequant_scale_q_norm_dtype))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(dequant_scale_q_norm_dtype));
+
+    (void)weight_dkv_kr;
+    (void)rmsnorm_gamma_cq;
+    (void)rmsnorm_gamma_ckv;
+    (void)rope_cos;
+    (void)kv_cache;
+    (void)kr_cache;
+    (void)cache_index;
+    (void)dequant_scale_x;
+    (void)dequant_scale_w_dq;
+    (void)dequant_scale_w_uq_qr;
+    (void)dequant_scale_w_dkv_kr;
+    (void)quant_scale_ckv;
+    (void)quant_scale_ckr;
+    (void)smooth_scales_cq;
+    (void)actual_seq_len;
+    (void)k_nope_clip_alpha;
+    (void)rmsnorm_epsilon_cq;
+    (void)rmsnorm_epsilon_ckv;
+    (void)cache_mode;
+    (void)query_quant_mode;
+    (void)ckvkr_repo_mode;
+    (void)quant_scale_repo_mode;
+    (void)tile_size;
+    (void)qc_qr_scale;
+    (void)kc_scale;
+
+    return {query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm};
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
@@ -1587,31 +1589,30 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta
     const at::Tensor &g_ = c10::value_or_else(g, [] { return at::Tensor(); });
     const at::Tensor &gk_ = c10::value_or_else(gk, [] { return at::Tensor(); });
 
-    auto k_sizes = k.sizes();
-    auto u_sizes = u.sizes();
-    int K = k_sizes[3];
-    int B = k_sizes[0];
-    int T = k_sizes[2];
-    int HV = u_sizes[1];
-    int V = u_sizes[3];
+    auto K = k.sym_size(3);
+    auto B = k.sym_size(0);
+    auto T = k.sym_size(2);
+    auto HV = u.sym_size(1);
+    auto V = u.sym_size(3);
 
-    int NT = 0;
+    c10::SymInt NT(0);
     if (chunk_indices.has_value()) {
         auto chunk_indices_ref = chunk_indices.value();
-        NT = chunk_indices_ref.size() / 2;
+        // symbolic-meta-ok: chunk_indices is an IntArrayRef schema argument, not a Tensor shape.
+        NT = c10::SymInt(chunk_indices_ref.size() / 2);
     } else {
-        NT = (T + chunk_size_ - 1) / chunk_size_;
+        NT = ceil_div(T, chunk_size_);
     }
 
-    at::Tensor h_out = at::zeros({B, HV, NT, K, V}, k.options());
-    at::Tensor v_new_out = at::zeros(u.sizes(), u.options());
+    at::Tensor h_out = at::empty_symint(c10::SymDimVector{B, HV, NT, K, V}, k.options());
+    at::Tensor v_new_out = at::empty_symint(u.sym_sizes(), u.options());
     at::Tensor final_state_out;
     if (output_final_state_) {
-        int N = cu_seqlens.has_value() ? cu_seqlens->size() - 1 : B;
+        c10::SymInt N = cu_seqlens.has_value() ? c10::SymInt(cu_seqlens->size() - 1) : B;
         auto state_options = initial_state.has_value() ? initial_state->options() : h_out.options();
-        final_state_out = at::empty({N, HV, K, V}, state_options);
+        final_state_out = at::empty_symint(c10::SymDimVector{N, HV, K, V}, state_options);
     } else {
-        final_state_out = at::empty({1}, k.options());
+        final_state_out = at::empty_symint(c10::SymDimVector{c10::SymInt(1)}, k.options());
     }
 
     bool save_new_value_ = save_new_value.value_or(true);
@@ -1638,7 +1639,7 @@ at::Tensor chunk_fwd_o_meta(
     c10::optional<int64_t> chunk_size,
     c10::optional<bool> transpose_state_layout)
 {
-    at::Tensor o = at::zeros(v.sizes(), v.options());
+    at::Tensor o = at::empty_symint(v.sym_sizes(), v.options());
     int64_t chunk_size_ = chunk_size.has_value() ? chunk_size.value() : 64;
     const at::Tensor &g_ = c10::value_or_else(g, [] { return at::Tensor(); });
     (void)g_gamma;
@@ -1647,18 +1648,169 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> store_kv_block_pre(
-    const at::Tensor &slot_mapping_npu,
-    at::IntArrayRef slot_mapping_list,
-    int64_t block_size)
+std::tuple<at::Tensor, c10::optional<at::Tensor>, c10::optional<at::Tensor>, at::Tensor, at::Tensor,
+           c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
+           c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
+           c10::optional<at::Tensor>>
+chunk_kda_fwd_meta(
+    const at::Tensor &q,
+    const at::Tensor &k,
+    const at::Tensor &v,
+    const at::Tensor &g,
+    const at::Tensor &beta,
+    double scale,
+    int64_t chunk_size,
+    c10::string_view layout,
+    const c10::optional<at::Tensor> &initial_state,
+    c10::optional<bool> output_final_state,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<at::IntArrayRef> chunk_indices,
+    c10::optional<bool> safe_gate,
+    c10::optional<double> lower_bound,
+    c10::optional<bool> use_gate_in_kernel,
+    const c10::optional<at::Tensor> &A_log,
+    const c10::optional<at::Tensor> &dt_bias,
+    c10::optional<bool> disable_recompute,
+    c10::optional<bool> return_intermediate_states,
+    c10::optional<bool> state_v_first)
 {
-    auto s_size = slot_mapping_npu.sizes();
-    at::Tensor group_len = at::empty({s_size[0]}, slot_mapping_npu.options());
-    at::Tensor group_key_idx = at::empty({s_size[0]}, slot_mapping_npu.options());
-    at::Tensor group_key_cache_idx = at::empty({s_size[0]}, slot_mapping_npu.options());
-    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(group_len, group_key_idx, group_key_cache_idx);
+    std::string layout_str = std::string(layout);
+    bool is_tnd = layout_str == "TND";
+    bool is_ntd = layout_str == "NTD";
+    bool is_bnsd = layout_str == "BNSD";
+    bool is_rank3 = is_tnd || is_ntd;
+    bool output_final_state_ = output_final_state.value_or(false);
+    bool use_gate_in_kernel_ = use_gate_in_kernel.value_or(false);
+    bool disable_recompute_ = disable_recompute.value_or(false);
+    bool return_intermediate_states_ = return_intermediate_states.value_or(false);
+    bool state_v_first_ = state_v_first.value_or(false);
 
+    c10::SymInt B = is_rank3 ? c10::SymInt(1) : q.sym_size(0);
+    c10::SymInt T = is_tnd ? q.sym_size(0) :
+        (is_ntd ? q.sym_size(1) : (is_bnsd ? q.sym_size(2) : q.sym_size(1)));
+    c10::SymInt K = is_rank3 ? q.sym_size(2) : q.sym_size(3);
+    c10::SymInt HV = is_tnd ? v.sym_size(1) :
+        (is_ntd ? v.sym_size(0) : (is_bnsd ? v.sym_size(1) : v.sym_size(2)));
+    c10::SymInt V = is_rank3 ? v.sym_size(2) : v.sym_size(3);
+    // symbolic-meta-ok: cu_seqlens is an IntArrayRef schema argument, not a Tensor shape.
+    c10::SymInt seq_num = cu_seqlens.has_value() ?
+        c10::SymInt(static_cast<int64_t>(cu_seqlens->size()) - 1) : B;
+    c10::SymInt total_chunks(0);
+    if (chunk_indices.has_value()) {
+        // symbolic-meta-ok: chunk_indices is an IntArrayRef schema argument, not a Tensor shape.
+        total_chunks = c10::SymInt(static_cast<int64_t>(chunk_indices->size()) / 2);
+    } else if (cu_seqlens.has_value()) {
+        int64_t concrete_total_chunks = 0;
+        // symbolic-meta-ok: cu_seqlens is an IntArrayRef schema argument, not a Tensor shape.
+        for (size_t i = 0; i + 1 < cu_seqlens->size(); ++i) {
+            concrete_total_chunks += ((*cu_seqlens)[i + 1] - (*cu_seqlens)[i] + chunk_size - 1) / chunk_size;
+        }
+        total_chunks = c10::SymInt(concrete_total_chunks);
+    } else {
+        total_chunks = (T + c10::SymInt(chunk_size - 1)) / c10::SymInt(chunk_size);
+    }
+
+    c10::SymDimVector attn_shape = is_rank3 ? c10::SymDimVector{T, HV, V}
+                                                   : c10::SymDimVector{B, T, HV, V};
+    c10::SymDimVector state_shape = state_v_first_ ? c10::SymDimVector{seq_num, HV, V, K}
+                                                   : c10::SymDimVector{seq_num, HV, K, V};
+    c10::SymDimVector matrix_shape = is_rank3 ? c10::SymDimVector{HV, T, c10::SymInt(chunk_size)}
+                                               : c10::SymDimVector{B, HV, T, c10::SymInt(chunk_size)};
+    c10::SymDimVector k_shape = is_rank3 ? c10::SymDimVector{HV, T, K}
+                                         : c10::SymDimVector{B, HV, T, K};
+    c10::SymDimVector v_shape = is_rank3 ? c10::SymDimVector{HV, T, V}
+                                         : c10::SymDimVector{B, HV, T, V};
+    c10::SymDimVector h_shape =
+        is_rank3 ? (state_v_first_ ? c10::SymDimVector{total_chunks, HV, V, K}
+                                   : c10::SymDimVector{total_chunks, HV, K, V})
+                 : (state_v_first_ ? c10::SymDimVector{B, total_chunks, HV, V, K}
+                                   : c10::SymDimVector{B, total_chunks, HV, K, V});
+
+    at::Tensor o = at::empty_symint(attn_shape, v.options());
+    c10::optional<at::Tensor> final_state;
+    if (output_final_state_) {
+        final_state = at::empty_symint(state_shape, q.options().dtype(at::kFloat));
+    }
+    c10::optional<at::Tensor> gk;
+    if (!use_gate_in_kernel_ || disable_recompute_) {
+        gk = at::empty_symint(k_shape, q.options().dtype(at::kFloat));
+    }
+    at::Tensor aqk = at::empty_symint(matrix_shape, q.options());
+    at::Tensor akk = at::empty_like(aqk);
+    c10::optional<at::Tensor> w;
+    c10::optional<at::Tensor> u;
+    c10::optional<at::Tensor> qg;
+    c10::optional<at::Tensor> kg;
+    c10::optional<at::Tensor> v_new;
+    if (disable_recompute_) {
+        w = at::empty_symint(k_shape, q.options());
+        u = at::empty_symint(v_shape, q.options());
+        qg = at::empty_symint(k_shape, q.options());
+        kg = at::empty_symint(k_shape, q.options());
+        v_new = at::empty_symint(v_shape, q.options());
+    }
+    c10::optional<at::Tensor> h;
+    if (disable_recompute_ || return_intermediate_states_) {
+        h = at::empty_symint(h_shape, q.options());
+    }
+    c10::optional<at::Tensor> initial_state_out =
+        initial_state.has_value() && initial_state->defined() ? initial_state : c10::nullopt;
+    (void)k;
+    (void)g;
+    (void)beta;
+    (void)scale;
+    (void)safe_gate;
+    (void)lower_bound;
+    (void)A_log;
+    (void)dt_bias;
+    return std::make_tuple(o, final_state, gk, aqk, akk, w, u, qg, kg, v_new, h, initial_state_out);
 }
+
+at::Tensor kda_gate_cumsum_meta(
+    const at::Tensor &g,
+    int64_t chunk_size,
+    const c10::optional<at::Tensor> &A_log,
+    const c10::optional<at::Tensor> &dt_bias,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<bool> use_gate_in_kernel,
+    c10::optional<bool> safe_gate,
+    c10::optional<double> lower_bound,
+    c10::string_view layout)
+{
+    (void)chunk_size;
+    (void)A_log;
+    (void)dt_bias;
+    (void)cu_seqlens;
+    (void)use_gate_in_kernel;
+    (void)safe_gate;
+    (void)lower_bound;
+    (void)layout;
+    return at::empty_symint(g.sym_sizes(), g.options().dtype(at::kFloat));
+}
+
+at::Tensor kda_layout_swap12_meta(
+    const at::Tensor &x,
+    const c10::optional<at::Tensor> &dependency)
+{
+    c10::SymDimVector y_sizes(x.sym_sizes().begin(), x.sym_sizes().end());
+    if (x.dim() == 3) {
+        std::swap(y_sizes[0], y_sizes[1]);
+    } else {
+        std::swap(y_sizes[1], y_sizes[2]);
+    }
+    (void)dependency;
+    return at::empty_symint(y_sizes, x.options());
+}
+
+void store_kv_block_metadata(
+    const at::Tensor &slot_mapping_npu,
+    const at::Tensor &group_len,
+    const at::Tensor &group_key_idx,
+    const at::Tensor &group_key_cache_idx,
+    int64_t block_size)
+ {
+    return;
+ }
 
 void store_kv_block(
     const at::Tensor &key_in,
@@ -1670,7 +1822,86 @@ void store_kv_block(
 {
     return;
 
-} 
+}
+std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
+    const at::Tensor& x,
+    const c10::optional<at::Tensor>& weight_scale,
+    const c10::optional<at::Tensor>& activation_scale,
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<at::Tensor>& quant_scale,
+    const c10::optional<at::Tensor>& quant_offset,
+    const c10::optional<at::Tensor>& group_index,
+    double beta,
+    double linear_beta,
+    bool activate_left,
+    c10::string_view quant_mode)
+{
+    (void)weight_scale;
+    (void)activation_scale;
+    (void)bias;
+    (void)quant_scale;
+    (void)quant_offset;
+    (void)group_index;
+    (void)beta;
+    (void)linear_beta;
+    (void)activate_left;
+    (void)quant_mode;
+
+    TORCH_CHECK(x.dim() == 2,
+                "dequant_situ_quant: x must be 2-dimensional [rows, width], but got rank ",
+                x.dim());
+    TORCH_CHECK(x.scalar_type() == at::kInt || x.scalar_type() == at::kBFloat16,
+                "dequant_situ_quant: x must be int32 or bfloat16, but got ", x.scalar_type());
+    const c10::SymInt input_width = x.sym_size(1);
+    TORCH_CHECK(input_width % 2 == 0,
+                "dequant_situ_quant: x last dimension must be even");
+
+    c10::SymDimVector y_shape(x.sym_sizes().begin(), x.sym_sizes().end());
+    y_shape.back() = input_width / 2;
+    c10::SymDimVector scale_shape;
+    scale_shape.push_back(x.sym_size(0));
+    at::Tensor y = at::empty_symint(y_shape, x.options().dtype(at::kChar));
+    at::Tensor scale = at::empty_symint(scale_shape, x.options().dtype(at::kFloat));
+    return {y, scale};
+}
+
+std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
+    const at::Tensor& x,
+    double beta,
+    double linear_beta,
+    bool activate_left,
+    int64_t dst_type)
+{
+    constexpr int64_t DST_TYPE_E5M2 = 35;
+    constexpr int64_t DST_TYPE_E4M3FN = 36;
+    constexpr int64_t MX_BLOCK_SPAN = 64;
+    constexpr int64_t MX_SCALE_ALIGN = 2;
+
+    TORCH_CHECK(x.dim() >= 1,
+                "situ_mx_quant: x must be at least 1-dimensional, but got ",
+                x.dim());
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16,
+                "situ_mx_quant: x must be bfloat16, but got ", x.scalar_type());
+    TORCH_CHECK(beta > 0.0,
+                "situ_mx_quant: beta must be greater than 0, but got ", beta);
+    TORCH_CHECK(dst_type == DST_TYPE_E4M3FN || dst_type == DST_TYPE_E5M2,
+                "situ_mx_quant: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
+                dst_type);
+
+    (void)linear_beta;
+    (void)activate_left;
+
+    c10::SymDimVector y_shape(x.sym_sizes().begin(), x.sym_sizes().end());
+    y_shape.back() = y_shape.back() / 2;
+    c10::SymDimVector mxscale_shape(y_shape.begin(), y_shape.end());
+    mxscale_shape.back() = (mxscale_shape.back() + MX_BLOCK_SPAN - 1) / MX_BLOCK_SPAN;
+    mxscale_shape.emplace_back(MX_SCALE_ALIGN);
+
+    auto y_dtype = dst_type == DST_TYPE_E5M2 ? at::kFloat8_e5m2 : at::kFloat8_e4m3fn;
+    at::Tensor y = at::empty_symint(y_shape, x.options().dtype(y_dtype));
+    at::Tensor mxscale = at::empty_symint(mxscale_shape, x.options().dtype(at::kFloat8_e8m0fnu));
+    return {y, mxscale};
+}
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -1689,6 +1920,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_kda_fwd
+    ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
+    // kda_gate_cumsum
+    ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
+    // kda_layout_swap12
+    ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
 }
 }
 #else
@@ -1699,13 +1936,15 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // recurrent_gated_delta_rule meta implementation
     ops.impl("npu_recurrent_gated_delta_rule", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_meta);
+    ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
+    ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
+    ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
     ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel meta implementations
-    ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
     // Bgmv expand
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand
@@ -1723,28 +1962,25 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", &vllm_ascend::meta::grouped_matmul_swiglu_quant_weight_nz_tensor_list_meta);
     // Grouped matmul swiglu quant v2
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
-    // dispatch_gmm_combine_decode meta implementation
-    ops.impl("dispatch_gmm_combine_decode", &vllm_ascend::meta::dispatch_gmm_combine_decode_meta);
     // Lightning indexer
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
+    ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);
+    ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
+    ops.impl("npu_sparse_attention_score_prefill",
+             &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
+    ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);
+    ops.impl("npu_kv_quant_sparse_flash_attention",
+             &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
-    // matmul allreduce add rmsnorm
-    ops.impl("matmul_allreduce_add_rmsnorm", &vllm_ascend::meta::matmul_allreduce_add_rmsnorm_meta);
-    // moe_init_routing_custom
-    ops.impl("npu_moe_init_routing_custom", &vllm_ascend::meta::npu_moe_init_routing_custom_meta);
     // Moe_gating_top_k
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
-    // hamming_dist_top_k
-    ops.impl("npu_hamming_dist_top_k", &vllm_ascend::meta::npu_hamming_dist_top_k_meta);
-    // reshape_and_cache_bnsd
-    ops.impl("npu_reshape_and_cache_bnsd", &vllm_ascend::meta::npu_reshape_and_cache_bnsd_meta);
     // npu_sign_bits_pack
     ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
@@ -1761,35 +1997,34 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);
-    ops.impl("npu_hc_pre", &vllm_ascend::meta::npu_hc_pre_meta);
     ops.impl("npu_hc_pre_v2", &vllm_ascend::meta::npu_hc_pre_meta);
-    ops.impl("npu_hc_pre_inv_rms", &vllm_ascend::meta::npu_hc_pre_inv_rms_meta);
-    ops.impl("npu_hc_pre_sinkhorn", &vllm_ascend::meta::npu_hc_pre_sinkhorn_meta);
     ops.impl("inplace_partial_rotary_mul", &vllm_ascend::meta::inplace_partial_rotary_mul_meta);
     ops.impl("npu_rms_norm_dynamic_quant", &vllm_ascend::meta::npu_rms_norm_dynamic_quant_meta);
-    ops.impl("indexer_compress_epilog", &vllm_ascend::meta::indexer_compress_epilog_meta);
     ops.impl("kv_compress_epilog", &vllm_ascend::meta::kv_compress_epilog_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv", &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_meta);
     ops.impl("npu_kv_quant_sparse_attn_sharedkv_metadata",
              &vllm_ascend::meta::npu_kv_quant_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_swiglu_group_quant", &vllm_ascend::meta::npu_swiglu_group_quant_meta);
-    ops.impl("npu_load_index_kv_cache", &vllm_ascend::meta::npu_load_index_kv_cache_meta);
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
-    // N-gram spec decode
-    ops.impl("npu_ngram_spec_decode", &vllm_ascend::meta::npu_ngram_spec_decode_meta);
+    // MLA prolog (MlaPrologV3), Ascend950-only; name aligned with torch_npu
+    ops.impl("npu_mla_prolog_v3", &vllm_ascend::meta::npu_mla_prolog_v3_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_kda_fwd
+    ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
+    // kda_gate_cumsum
+    ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
+    // kda_layout_swap12
+    ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
      // store_kv_block
-    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_pre);
+    ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);
-    // npu_fused_gdn_gating
-    ops.impl("npu_fused_gdn_gating", &vllm_ascend::meta::npu_fused_gdn_gating_meta);
 }
 }
 #endif

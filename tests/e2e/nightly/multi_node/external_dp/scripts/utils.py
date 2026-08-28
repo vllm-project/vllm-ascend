@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shlex
@@ -22,6 +23,7 @@ from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     get_vllm_version,
     write_results_json,
 )
+from tests.e2e.nightly.scripts.result_postprocess import postprocess_benchmark_results
 
 logger = logging.getLogger(__name__)
 
@@ -168,14 +170,21 @@ def _extract_features(commands: list["ServerCommand"]) -> list[str]:
     if any("cudagraph_mode" in display for display in command_displays):
         features.append("aclgraph")
 
+    for command in commands:
+        flag = next(
+            (candidate for candidate in ("--additional-config", "--additional_config") if candidate in command.cmd),
+            None,
+        )
+        if flag is None:
+            continue
+        flag_index = command.cmd.index(flag)
+        additional_config = json.loads(command.cmd[flag_index + 1])
+        if additional_config.get("enable_fused_mc2") and "fused_mc2" not in features:
+            features.append("fused_mc2")
+
     feature_envs = {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM": "flashcomm",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "flashcomm1",
         "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-        "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "matmul_allreduce",
         "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
-        "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "context_parallel",
-        "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
     }
     for env_key, feature_name in feature_envs.items():
         values = [str(command.env.get(env_key, "0")) for command in commands]
@@ -234,4 +243,10 @@ def write_benchmark_results_json(
 ) -> Path:
     output = build_benchmark_results(config=config, ranks=ranks, commands=commands, results=results)
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "") or config.test_name.replace(" ", "-")
-    return write_results_json(output, job_name=job_name, output_dir=output_dir)
+    path = write_results_json(output, job_name=job_name, output_dir=output_dir)
+    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
+    postprocess_benchmark_results(
+        [(key, case, result) for (key, case), result in zip(valid_items, results)],
+        job_name=job_name,
+    )
+    return path

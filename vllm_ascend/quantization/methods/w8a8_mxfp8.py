@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -27,16 +26,16 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.device.mxfp_compat import (
-    FLOAT8_E8M0FNU_DTYPE,
-    ensure_mxfp8_linear_available,
-    ensure_mxfp8_moe_available,
-)
-from vllm_ascend.flash_common3_context import get_flash_common3_context
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
-from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .base import (
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherSpec,
+)
 from .registry import register_scheme
 
 
@@ -50,11 +49,21 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     """
 
     model_dtype = None
+    tp_weight_gather_specs = (
+        TPWeightGatherSpec("weight"),
+        TPWeightGatherSpec("weight_scale"),
+    )
+    tp_weight_output_gather_specs = (
+        TPWeightGatherSpec("weight", gather_dim=1),
+        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    )
+    supports_tp_weight_switch = True
 
     def __init__(self):
-        ensure_mxfp8_linear_available("W8A8_MXFP8 linear quantization")
         vllm_config = get_current_vllm_config()
-        self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
+        self.group_size = quant_description.get("group_size", 32)
+        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         params_dict = {"weight": torch.empty(output_size, input_size, dtype=torch.float8_e4m3fn)}
@@ -83,7 +92,11 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             original_shape = x.shape
             if x.dim() > 2:
                 x = x.view(-1, x.shape[-1])
-            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(x, dst_type=torch.float8_e4m3fn)
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+                x,
+                dst_type=torch.float8_e4m3fn,
+                scale_alg=self.dynamic_mx_quant_scale_alg,
+            )
             output_dtype = x.dtype
 
         if bias is not None and bias.dtype != torch.float32:
@@ -93,9 +106,9 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
             quantized_x,
             layer.weight,
             layer.weight_scale,
-            scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            scale_dtype=torch_npu.float8_e8m0fnu,
             pertoken_scale=pertoken_scale,
-            pertoken_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
             bias=bias,
             output_dtype=output_dtype,
             group_sizes=[1, 1, self.group_size],
@@ -117,6 +130,12 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         this method stores original shapes and can be called multiple times safely.
         Use restore_weights_for_rl_loading() before weight reload, then call this
         method again after loading.
+
+        Address stability for ACL graph:
+        The transformed buffer is what the ACL graph captures and replays. It is
+        allocated once and cached on the layer; subsequent calls copy the
+        (re)loaded original-shape data in place into the cached buffer so its
+        data_ptr never changes across RL weight reloads.
         """
 
         # Check if already transformed to avoid double transformation
@@ -134,12 +153,23 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         n_dim, k_dim = layer.weight_scale.data.shape
         # Shape should be padded if it cannot be divided by 2
         if layer.weight_scale.data.shape[-1] % 2 != 0:
-            layer.weight_scale.data = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
-            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2 + 1, 2)
+            reshaped_scale = F.pad(layer.weight_scale.data, (0, 1), mode="constant", value=0)
+            reshaped_scale = reshaped_scale.reshape(n_dim, k_dim // 2 + 1, 2)
         else:
-            layer.weight_scale.data = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
-        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight_scale.data = layer.weight_scale.data.transpose(0, 1).contiguous()
+            reshaped_scale = layer.weight_scale.data.reshape(n_dim, k_dim // 2, 2)
+        target_scale = reshaped_scale.transpose(0, 1)
+
+        if not hasattr(layer, "_mxfp8_weight_buf"):
+            # First call: allocate the persistent transformed buffers.
+            layer._mxfp8_weight_buf = layer.weight.data.transpose(0, 1).contiguous()
+            layer._mxfp8_scale_buf = target_scale.contiguous()
+        else:
+            # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
+            layer._mxfp8_weight_buf.copy_(layer.weight.data.transpose(0, 1).contiguous())
+            layer._mxfp8_scale_buf.copy_(target_scale.contiguous())
+
+        layer.weight.data = layer._mxfp8_weight_buf
+        layer.weight_scale.data = layer._mxfp8_scale_buf
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -193,23 +223,22 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
 @register_scheme("W8A8_MXFP8", "moe")
 class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
-    """FusedMoe method for Ascend W8A8_DYNAMIC."""
+    """FusedMoe method for Ascend W8A8_MXFP8."""
 
     model_dtype = None
-    quant_type: QuantType = QuantType.MXFP8
+    quant_type: QuantType = QuantType.W8A8MXFP
+    supports_eplb = True
 
     def __init__(self):
-        ensure_mxfp8_moe_available("W8A8_MXFP8 MoE quantization")
-
         vllm_config = get_current_vllm_config()
-        self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
+        quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
+        self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.use_aclgraph = (
             vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not vllm_config.model_config.enforce_eager
         )
-        self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
-        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
 
     @staticmethod
     def get_weight(
@@ -239,71 +268,15 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        is_prefill: bool = True,
-        enable_force_load_balance: bool = True,
-        log2phy: torch.Tensor = None,
-        global_redundant_expert_num: int = 0,
-        pertoken_scale: Any | None = None,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        mc2_mask: torch.Tensor | None = None,
-        tid2eid: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: Any | None,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        num_shared_experts = getattr(layer, "n_shared_experts", 0)
-        if num_shared_experts is None:
-            num_shared_experts = 0
-        num_logical_experts = get_moe_num_logical_experts(
-            layer,
-            num_experts,
-            global_redundant_expert_num=global_redundant_expert_num,
-            num_shared_experts=num_shared_experts,
-        )
-        assert router_logits.shape[1] == num_logical_experts, "Number of global experts mismatch (excluding redundancy)"
-        if self.multistream_overlap_gate:
-            fc3_context = get_flash_common3_context()
-            assert fc3_context is not None
-            topk_weights = fc3_context.topk_weights
-            topk_ids = fc3_context.topk_ids
-        else:
-            topk_weights, topk_ids = select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                top_k=top_k,
-                use_grouped_topk=use_grouped_topk,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-                num_experts=num_logical_experts,
-                tid2eid=tid2eid,
-            )
-
         if topk_weights is None or topk_ids is None:
             raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
-
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
-        if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
-            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
         if x.dtype not in [torch.float8_e4m3fn]:
             topk_weights = topk_weights.to(x.dtype)
@@ -318,23 +291,30 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2=layer.w2_weight,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
-                expert_map=expert_map,
-                global_redundant_expert_num=global_redundant_expert_num,
-                mc2_mask=mc2_mask,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                log2phy=log2phy,
-                pertoken_scale=pertoken_scale,
-                activation=activation,
+                expert_map=layer.ascend_expert_map,
+                global_redundant_expert_num=layer.global_redundant_expert_num,
+                mc2_mask=layer.ascend_mc2_mask,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                pertoken_scale=layer.ascend_pertoken_scale,
+                activation=layer.activation,
                 mxfp_act_quant_type=torch.float8_e4m3fn,
                 mxfp_weight_quant_type=torch.float8_e4m3fn,
-                mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
-                mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
+                mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                swiglu_limit=layer.swiglu_limit,
             )
         )
+
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        return [
+            layer.w13_weight.transpose(1, 2),
+            layer.w2_weight.transpose(1, 2),
+            layer.w13_weight_scale.transpose(1, 2),
+            layer.w2_weight_scale.transpose(1, 2),
+        ]
 
     def process_weights_after_loading(self, layer):
         """Process weights after loading for MXFP8 inference.

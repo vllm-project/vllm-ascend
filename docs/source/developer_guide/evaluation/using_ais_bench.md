@@ -97,7 +97,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
     unzip mmlu.zip
     rm mmlu.zip
     ```
@@ -106,7 +106,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
     unzip gpqa.zip
     rm gpqa.zip
     ```
@@ -115,7 +115,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
     unzip math.zip
     rm math.zip
     ```
@@ -134,7 +134,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
     cd ais_bench/datasets
     mkdir aime/
     cd aime/
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
     unzip aime.zip
     rm aime.zip
     ```
@@ -143,14 +143,14 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
     unzip gsm8k.zip
     rm gsm8k.zip
     ```
 
 #### Configuration
 
-Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
+Update the file `ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
 There are several arguments that you should update according to your environment.
 
 - `attr`: Identifier for the inference backend type, fixed as `service` (serving-based inference) or `local` (local model).
@@ -159,7 +159,7 @@ There are several arguments that you should update according to your environment
 - `path`: Update to your model weight path.
 - `model`: Update to your model name in vLLM.
 - `host_ip` and `host_port`: Update to your vLLM server ip and port.
-- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len`(config in your vllm server), `32768` will be suitable for most datasets.
+- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max_model_len` (config in your vllm server), `32768` will be suitable for most datasets.
 - `batch_size`: Update according to your dataset.
 - `temperature`: Update inference argument.
 

@@ -5,7 +5,7 @@
 This section guides you through container-based environment setup and large model inference, using the Qwen3-0.6B offline single-GPU inference script as an example.
 
 - For details on using different models, see the corresponding model tutorial in the "Model Tutorials" directory, for example, [Qwen3-30B-A3B](tutorials/models/Qwen3-30B-A3B.md).
-- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (Deepseek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
+- For details on using different functions, see the corresponding function tutorial in the "Function Tutorials" directory, for example, [Prefill-Decode Disaggregation (DeepSeek)](tutorials/features/pd_disaggregation_mooncake_multi_node.md).
 
 ## Prerequisites
 
@@ -15,28 +15,51 @@ This section guides you through container-based environment setup and large mode
 - Atlas 800I A2 inference series (Atlas 800I A2)
 - Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 inference series (Atlas 800I A3)
-- [Experimental] Atlas 300I inference series (Atlas 300I Duo)
+- Atlas 950DT inference series (Atlas 950DT)
+- Atlas 300I DUO
+- Atlas 200I Pro
 
 ## Requirements
 
 - OS: Linux
 - Python: >= 3.10, < 3.13
-- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series.
+- Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series and Atlas 300I DUO.
 - Software:
 
-    | Software      | Supported version                | Note                                      |
-    |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
+    === "Atlas A2/A3/950DT inference products"
+
+        | Software      | Supported version                | Note                                      |
+        |---------------|----------------------------------|-------------------------------------------|
+        | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
+        | CANN          | == 9.1.0                        | Required for vllm-ascend and TorchNPU    |
+        | TorchNPU     | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+        | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
+        | NNAL          | == 9.1.0                        | Required for libatb.so, enables advanced tensor operations |
+
+    === "Atlas 300I DUO"
+
+        | Software      | Supported version                | Note                                      |
+        |---------------|----------------------------------|-------------------------------------------|
+        | Ascend HDK    | Refer to the documentation [CANN 9.1.0](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910/softwareinst/releasenote/9.1.0/release-notes.md) | Required for CANN |
+        | CANN          | == 9.1.0                 | Required for vllm-ascend and TorchNPU    |
+        | TorchNPU     | == 2.10.0.post4                 | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+        | torch         | == 2.10.0                       | Required for TorchNPU and vllm, No need to install manually, it will be auto installed in below steps |
+        | NNAL          | == 9.1.0                 | Required for libatb.so, enables advanced tensor operations |
+        | triton / triton-ascend | Not supported          | Uninstalled in `Dockerfile.310p` |
+
+!!! note "Atlas 300I DUO"
+
+    Atlas 300I DUO uses `float16`. Use the `-310p` image suffix for Ubuntu or `-310p-openeuler` for openEuler. Atlas 300I DUO does not support `triton` or `triton-ascend`.
+
+    Atlas 300I DUO and Atlas 200I Pro do not support `enable_npugraph_ex`. Set --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex":false}}'.
+
+    Atlas 200I Pro requires additional device nodes and driver mounts. See [Set up using Docker](installation.md#set-up-using-docker) for the complete container commands.
 
 ## Setup environment using container
 
-Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-docker/) for installation instructions.
+Before using containers, make sure Docker is installed on your system. If Docker is not installed, please refer to the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) for installation instructions.
 
-=== "Ubuntu"
+=== "Ubuntu (A2)"
 
     ```bash
 
@@ -45,8 +68,6 @@ Before using containers, make sure Docker is installed on your system. If Docker
     # Update the vllm-ascend image
     # Atlas A2:
     # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    # Atlas A3:
-    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
     --name vllm-ascend \
@@ -67,7 +88,97 @@ Before using containers, make sure Docker is installed on your system. If Docker
     apt-get update -y && apt-get install -y curl
     ```
 
-=== "openEuler"
+=== "Ubuntu (A3)"
+
+    ```bash
+
+    # A3 requires at least 2 NPUs to work together.
+    # Update DEVICE0 and DEVICE1 according to your devices (/dev/davinci[0-15])
+    export DEVICE0=/dev/davinci0
+    export DEVICE1=/dev/davinci1
+    # Update the vllm-ascend image
+    # Atlas A3:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE0 \
+    --device $DEVICE1 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    apt-get update -y && apt-get install -y curl
+    ```
+
+=== "Ubuntu (Atlas 950DT)"
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    # Ascend 950DT:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    apt-get update -y && apt-get install -y curl
+    ```
+
+=== "Ubuntu (Atlas 300I DUO)"
+
+    The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    apt-get update -y && apt-get install -y curl
+    ```
+
+=== "openEuler (A2)"
 
     ```bash
 
@@ -76,9 +187,97 @@ Before using containers, make sure Docker is installed on your system. If Docker
     # Update the vllm-ascend image
     # Atlas A2:
     # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    yum update -y && yum install -y curl
+    ```
+
+=== "openEuler (A3)"
+
+    ```bash
+
+    # A3 requires at least 2 NPUs to work together.
+    # Update DEVICE0 and DEVICE1 according to your devices (/dev/davinci[0-15])
+    export DEVICE0=/dev/davinci0
+    export DEVICE1=/dev/davinci1
+    # Update the vllm-ascend image
     # Atlas A3:
     # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-openeuler
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE0 \
+    --device $DEVICE1 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    yum update -y && yum install -y curl
+    ```
+
+=== "openEuler (Atlas 950DT)"
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    # Ascend 950DT:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler
+    docker run --rm \
+    --name vllm-ascend \
+    --shm-size=1g \
+    --device $DEVICE \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -p 8000:8000 \
+    -it $IMAGE bash
+    # Install curl
+    yum update -y && yum install -y curl
+    ```
+
+=== "openEuler (Atlas 300I DUO)"
+
+    The following command applies to Atlas 300I DUO. For Atlas 200I Pro, use the additional device nodes and driver mounts documented in [Installation](installation.md#set-up-using-docker).
+
+    ```bash
+
+    # Update DEVICE according to your device (/dev/davinci[0-7])
+    export DEVICE=/dev/davinci0
+    # Update the vllm-ascend image
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler
     docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -166,8 +365,6 @@ There are two ways to start vLLM on Ascend NPU:
 
     ```bash
     Prompt: 'Hello, my name is', Generated text: ' Lucy and I am an 8 year old who loves to draw and write stories'
-    Prompt: 'The president of the United States is', Generated text: " a key leader in the federal government, and the president's role in the executive"
-    Prompt: 'The capital of France is', Generated text: ' a city. What is the capital of France? The capital of France is Paris'
     Prompt: 'The future of AI is', Generated text: ' a topic that is being discussed in various contexts. In the business world, AI'
     ```
 
@@ -232,8 +429,8 @@ There are two ways to start vLLM on Ascend NPU:
     <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
     ```bash
-      VLLM_PID=$(pgrep -f "vllm serve")
-      kill -2 "$VLLM_PID"
+    VLLM_PID=$(pgrep -f "vllm serve")
+    kill -2 "$VLLM_PID"
     ```
 
     The output is as below:

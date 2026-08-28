@@ -133,6 +133,10 @@ def get_chip_type() -> str:
 
 
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
+hardware = load_module_from_path(
+    "vllm_ascend_hardware",
+    os.path.join(ROOT_DIR, "vllm_ascend", "device", "hardware.py"),
+)
 
 if not envs.SOC_VERSION:
     soc_version = get_chip_type()
@@ -152,39 +156,7 @@ if not envs.SOC_VERSION:
 
 def gen_build_info():
     soc_version = envs.SOC_VERSION
-
-    soc_to_device = {
-        "910b": "A2",
-        "910c": "A3",
-        "310p": "_310P",
-        "ascend910b1": "A2",
-        "ascend910b2": "A2",
-        "ascend910b2c": "A2",
-        "ascend910b3": "A2",
-        "ascend910b4": "A2",
-        "ascend910b4-1": "A2",
-        "ascend910_9391": "A3",
-        "ascend910_9381": "A3",
-        "ascend910_9372": "A3",
-        "ascend910_9392": "A3",
-        "ascend910_9382": "A3",
-        "ascend910_9362": "A3",
-        "ascend310p1": "_310P",
-        "ascend310p3": "_310P",
-        "ascend310p5": "_310P",
-        "ascend310p7": "_310P",
-        "ascend310p3vir01": "_310P",
-        "ascend310p3vir02": "_310P",
-        "ascend310p3vir04": "_310P",
-        "ascend310p3vir08": "_310P",
-    }
-    if "ascend950" in soc_version:
-        device_type = "A5"
-    else:
-        assert soc_version in soc_to_device, (
-            f"Undefined soc_version: {soc_version}. Please file an issue to vllm-ascend."
-        )
-        device_type = soc_to_device[soc_version]
+    device_type = hardware.device_type_from_soc_version(soc_version).name
 
     package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
     with open(package_dir, "w+") as f:
@@ -535,6 +507,9 @@ setup(
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
+    package_data={
+        "vllm_ascend.observability": ["config/*.yaml"],
+    },
     python_requires=">=3.10",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
@@ -547,6 +522,9 @@ setup(
             "ascend_model_loader = vllm_ascend:register_model_loader",
             "ascend_service_profiling = vllm_ascend:register_service_profiling",
             "ascend_model = vllm_ascend:register_model",
+        ],
+        "ms_service_metric.providers": [
+            "vllm-ascend = vllm_ascend.observability:get_metric_provider",
         ],
     },
 )

@@ -21,22 +21,18 @@ Run `pytest tests/ops/test_fused_moe.py`.
 """
 
 import gc
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.nn.functional as F
 import torch_npu
 
-from vllm_ascend.ops.fused_moe.experts_selector import check_npu_moe_gating_top_k, select_experts
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
+from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.fused_moe.moe_runtime_args import (
-    MoEQuantParams,
-    MoERoutingParams,
-    MoETokenDispatchInput,
-    build_fused_experts_input,
-    build_mlp_compute_input,
-)
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -146,7 +142,7 @@ def test_token_dispatcher_with_all_gather(
             hidden_states=a,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            routing=MoERoutingParams(
+            routing=MoeRouterInput(
                 expert_map=expert_map,
                 global_redundant_expert_num=0,
                 mc2_mask=None,
@@ -227,7 +223,7 @@ def test_token_dispatcher_with_all_gather_quant(
             hidden_states=a,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            routing=MoERoutingParams(
+            routing=MoeRouterInput(
                 expert_map=expert_map,
                 global_redundant_expert_num=0,
                 mc2_mask=None,
@@ -260,102 +256,6 @@ def test_token_dispatcher_with_all_gather_quant(
         hidden_states=expert_output, combine_metadata=combine_metadata, bias=None
     )
     assert combined_output.shape == (m, k)
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
-
-
-@pytest.mark.skip("Probabilistic failure, need zengiant after fix")
-@pytest.mark.parametrize("m", [1, 33, 64])
-@pytest.mark.parametrize("n", [128, 2048])
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
-@pytest.mark.parametrize("use_grouped_topk", [True, False])
-@pytest.mark.parametrize("renormalize", [True, False])
-@pytest.mark.parametrize("with_e_correction", [True, False])
-@pytest.mark.parametrize("custom_routing", [True, False])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("device", DEVICE)
-def test_select_experts(
-    m: int,
-    n: int,
-    e: int,
-    topk: int,
-    scoring_func: str,
-    use_grouped_topk: bool,
-    renormalize: bool,
-    with_e_correction: bool,
-    custom_routing: bool,
-    dtype: torch.dtype,
-    device: str,
-):
-    topk_group = 4 if use_grouped_topk else None
-    num_expert_group = e // 4 if use_grouped_topk else None
-
-    hidden_states = torch.randn(m, n, device=device, dtype=dtype)
-    router_logits = torch.randn(m, e, device=device, dtype=dtype)
-
-    e_score_correction_bias = torch.randn(e, device=device, dtype=dtype) if with_e_correction else None
-
-    custom_routing_function = None
-    if custom_routing:
-        custom_routing_function = MagicMock()
-        mock_weights = torch.randn(m, topk, device=device, dtype=dtype)
-        mock_ids = torch.randint(0, e, (m, topk), device=device, dtype=torch.int32)
-        custom_routing_function.return_value = (mock_weights, mock_ids)
-
-    with (
-        patch("vllm_ascend.ops.fused_moe.experts_selector._native_grouped_topk") as mock_native_grouped_topk,
-        patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock()),
-    ):
-        mock_native_grouped_topk.side_effect = lambda x, num_groups, k: torch.randn_like(x)
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=topk,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-        )
-
-        call_moe_gatingtopk = check_npu_moe_gating_top_k(
-            hidden_states, topk, renormalize, topk_group, num_expert_group, scoring_func, custom_routing_function
-        )
-        if not call_moe_gatingtopk and use_grouped_topk:
-            mock_native_grouped_topk.assert_called_once()
-        else:
-            mock_native_grouped_topk.assert_not_called()
-
-    assert topk_weights.shape == (m, topk)
-    assert topk_ids.shape == (m, topk)
-    assert topk_ids.dtype == torch.int32
-
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
-
-
-@pytest.mark.skip("Probabilistic failure, need zengiant after fix")
-@pytest.mark.parametrize("device", DEVICE)
-def test_select_experts_invalid_scoring_func(device: str):
-    with (
-        patch("vllm_ascend.ops.fused_moe.experts_selector.get_weight_prefetch_method", return_value=MagicMock()),
-        pytest.raises(ValueError, match="Unsupported scoring function: invalid"),
-    ):
-        select_experts(
-            hidden_states=torch.randn(1, 128, device=device),
-            router_logits=torch.randn(1, 8, device=device),
-            top_k=2,
-            use_grouped_topk=False,
-            renormalize=False,
-            scoring_func="invalid",
-        )
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

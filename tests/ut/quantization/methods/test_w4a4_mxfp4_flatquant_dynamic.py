@@ -54,7 +54,6 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
             quant_description={"group_size": group_size, "max_supported_tp": max_supported_tp}
         )
         with (
-            patch("vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.ensure_mxfp4_flatquant_linear_available"),
             patch(
                 "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_current_vllm_config",
                 return_value=mock_vllm_config,

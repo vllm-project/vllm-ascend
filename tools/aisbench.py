@@ -90,6 +90,8 @@ class AisbenchRunner:
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
+        self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
+        self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.exp_folder = None
         self.result_line = None
         self._init_dataset_conf()
@@ -237,6 +239,18 @@ class AisbenchRunner:
             f"The current Output Token Throughput is {output_throughput} token/s, "
             f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
         )
+        if self.input_throughput_threshold is not None:
+            input_throughput = str(self.result_json["Input Token Throughput"]["total"]).replace("token/s", "")
+            assert float(input_throughput) >= float(self.input_throughput_threshold), (
+                f"Input Token Throughput verification failed. The current value is {input_throughput} token/s, "
+                f"which is not greater than {self.input_throughput_threshold} token/s."
+            )
+        if self.tpot_threshold is not None:
+            tpot = float(str(self.result_csv.loc["TPOT", "Average"]).replace("ms", ""))
+            assert tpot <= float(self.tpot_threshold), (
+                f"TPOT verification failed. The current TPOT is {tpot} ms, "
+                f"which is greater than {self.tpot_threshold} ms."
+            )
 
     def _accuracy_verify(self):
         self._get_result_accuracy()

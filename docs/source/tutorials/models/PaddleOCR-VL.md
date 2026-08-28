@@ -10,9 +10,9 @@ This document is validated and written based on **vLLM-Ascend v0.21.0rc1**. The 
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -52,7 +52,7 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
-=== "Atlas 300 inference products"
+=== "Atlas 300I DUO"
 
     ```bash
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
@@ -76,21 +76,17 @@ Select an image based on your machine type and start the docker image on your no
 
 After a successful docker run, you can verify the running container service by executing the `docker ps` command.
 
-### 4.2 Source Code Installation
+### 4.2 Source Code Installation {: #42-source-code-installation }
 
 If you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
-!!! note
-
-    If you are using Atlas 300 inference products, you may need to uninstall `triton-ascend` to avoid dependency conflicts.
-
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
-PaddleOCR-VL supports single-node single-card deployment on the A2 series and Atlas 300 inference products platform. Single-node deployment completes both Prefill and Decode within the same node.
+PaddleOCR-VL supports single-node single-card deployment on the A2 series and Atlas 300I DUO platform. Single-node deployment completes both Prefill and Decode within the same node.
 
 Follow these steps to start the inference service:
 
@@ -120,8 +116,15 @@ Startup Command:
               --additional_config '{"enable_cpu_binding":true}' \
               --port 8000
     ```
+    Key Parameter Descriptions:
 
-=== "Atlas 300 inference products"
+    - `--max-num-batched-tokens` specifies the maximum number of tokens batched in a single forward pass. Adjust this parameter for throughput optimization.
+    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+    - `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
+    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
+    - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
+
+=== "Atlas 300I DUO"
 
     ```bash
     #!/bin/sh
@@ -138,30 +141,27 @@ Startup Command:
               --mm-processor-cache-gb 0 \
               --dtype float16 \
               --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-              --additional_config '{"ascend_compilation_config": {"fuse_norm_quant": false}, "enable_cpu_binding":true}' \
+              --additional_config '{"enable_cpu_binding":true}' \
               --port 8000
     ```
 
-!!! note
+    !!! note
 
-    On Atlas 300 inference products:
+        On Atlas 300I DUO:
 
-    - Only `float16` dtype is supported.
-    - The `--max_model_len` option is added to prevent errors when generating the attention operator mask.
-    - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
-    - The `fuse_norm_quant` option in `--additional_config` is disabled (`false`) because it is not supported by the graph compilation on this hardware. Keep this setting unchanged.
+        - Only `float16` dtype is supported.
+        - Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**. If your CANN version is lower, please revert to eager mode by replacing the `--compilation-config` argument with `--enforce-eager`.
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
-- `--max-num-batched-tokens` specifies the maximum number of tokens batched in a single forward pass. Adjust this parameter for throughput optimization.
-- `--max_model_len` specifies the maximum context length — that is, the sum of input and output tokens for a single request.
-- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
-- `--dtype float16` specifies the model dtype. On Atlas 300 inference products, only `float16` is supported.
-- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance. On Atlas 300 inference products, `fuse_norm_quant` in graph compilation is disabled by default in `--additional_config`.
-- `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
+    - `--max_model_len` specifies the maximum context length — that is, the sum of input and output tokens for a single request.
+    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+    - `--mm-processor-cache-gb` sets the size of the multimodal processor cache (in GB). A value of `0` disables caching.
+    - `--dtype float16` specifies the model dtype. On Atlas 300I DUO, only `float16` is supported.
+    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
+    - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
 
-Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/) for troubleshooting.
+Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ### 5.2 Multi-Node PD Separation Deployment
 
@@ -204,7 +204,7 @@ In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-
         ```bash
         python -m pip install paddlepaddle==3.2.0
         wget https://paddle-whl.bj.bcebos.com/stable/npu/paddle-custom-npu/paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
-        pip  install  paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
+        pip install paddle_custom_npu-3.2.0-cp310-cp310-linux_aarch64.whl
         python -m pip install -U "paddleocr[doc-parser]"
         pip install safetensors
         ```
@@ -225,20 +225,20 @@ In the above example, we demonstrated how to use vLLM to infer the PaddleOCR-VL-
                 python -m pip install opencv-python==3.4.18.65
                 ```
 
-=== "Atlas 300 inference products"
+=== "Atlas 300I DUO"
 
-    The Atlas 300 inference products support only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
+    The Atlas 300I DUO supports only the OM model inference. For details about the process, see the guide provided in [ModelZoo](https://gitcode.com/Ascend/ModelZoo-PyTorch/tree/master/ACL_PyTorch/built-in/ocr/PP-DocLayoutV2).
 
-##### 5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
+#### 5.3.2 Using vLLM as the backend, combined with PP-DocLayoutV2 for offline inference
 
 ```python
 from paddleocr import PaddleOCRVL
 
 doclayout_model_path = "/path/to/your/PP-DocLayoutV2/"
 
-pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", 
-                       vl_rec_server_url="http://localhost:8000/v1", 
-                       layout_detection_model_name="PP-DocLayoutV2",  
+pipeline = PaddleOCRVL(vl_rec_backend="vllm-server",
+                       vl_rec_server_url="http://localhost:8000/v1",
+                       layout_detection_model_name="PP-DocLayoutV2",
                        layout_detection_model_dir=doclayout_model_path,
                        device="npu")
 
@@ -275,7 +275,7 @@ TASKS = {
     "ocr": "OCR:",
     "table": "Table Recognition:",
     "formula": "Formula Recognition:",
-    "chart": "Chart Recognition:",
+    "chart": "Chart Recognition:"
 }
 
 messages = [
@@ -343,7 +343,7 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 | Scenario | Hardware | *Total NPUs | Weight Version | Key Considerations |
 |----------|----------|------------|---------------|-------------------|
 | High Throughput | A2 series | 1 | PaddleOCR-VL-0.9B | - |
-| High Throughput | Atlas 300 inference products | 1 | PaddleOCR-VL-0.9B | Graph compilation requires **CANN >= 9.0.0** |
+| High Throughput | Atlas 300I DUO | 1 | PaddleOCR-VL-0.9B | Graph compilation requires **CANN >= 9.0.0** |
 
 > `*Total NPUs` indicates the total number of NPUs used across all nodes.
 
@@ -351,8 +351,8 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 | Scenario | Configuration | NPUs | TP | DP | Max Model Len | Max Num Batched Tokens | Graph Compilation | dtype |
 |----------|-------------|------|----|----|---------------|------------------------|--------------------|-------|
-| High Throughput | A2 series / Single Machine | 1 | — | — | — | 16384 | FULL_DECODE_ONLY | bfloat16 (default) |
-| High Throughput | Atlas 300 inference products / Single Machine | 1 | — | — | 16384 | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
+| High Throughput | A2 series / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY | bfloat16 (default) |
+| High Throughput | Atlas 300I DUO / Single Machine | 1 | — | — | — | — | FULL_DECODE_ONLY; otherwise enforce-eager | float16 |
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
@@ -362,16 +362,16 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 For performance tuning, please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, including OS optimization (jemalloc, tcmalloc), `torch_npu` optimization (memory and scheduling), and CANN optimization.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs/); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
-- **Q: What are the deployment requirements for Atlas 300 inference products?**
+- **Q: What are the deployment requirements for Atlas 300I DUO?**
 
-  A: On Atlas 300 inference products, only `float16` dtype is supported. Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**; if your CANN version is lower, use `--enforce-eager` instead.
+  A: On Atlas 300I DUO, only `float16` dtype is supported. Graph compilation (`--compilation-config`) requires **CANN version >= 9.0.0**; if your CANN version is lower, use `--enforce-eager` instead.
 
-- **Q: What should I do if I encounter dependency conflicts during installation on Atlas 300 inference products?**
+- **Q: What should I do if I encounter dependency conflicts during installation on Atlas 300I DUO?**
 
-  A: You may need to uninstall `triton-ascend` to avoid dependency conflicts. See [Section 4.2](#42-source-code-installation) for details.
+  A: You may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts. See [Section 4.2](#42-source-code-installation) for details.

@@ -167,27 +167,6 @@ def _collect_weight_metadata(train_model):
     return names, dtype_names, shapes, packed_buffer_size_bytes
 
 
-def _has_lifecycle_endpoints(server: RemoteOpenAIServer) -> bool:
-    """Detect whether the server exposes the vLLM-main start/finish endpoints.
-
-    On vLLM main, ``/start_weight_update`` and ``/finish_weight_update`` drive
-    the layerwise reload lifecycle. On v0.20.2 these endpoints do not exist and
-    ``update_weights`` is self-contained, so a probe returns 404.
-    """
-    try:
-        response = requests.post(
-            server.url_for("start_weight_update"),
-            json={"is_checkpoint_format": True},
-            timeout=CONTROL_TIMEOUT,
-        )
-    except requests.RequestException:
-        return False
-    if response.status_code == 404:
-        return False
-    response.raise_for_status()
-    return True
-
-
 @pytest.mark.skipif(
     torch.npu.device_count() < 2,
     reason="HCCL weight transfer e2e test requires at least 2 NPUs.",
@@ -199,7 +178,7 @@ def test_hccl_weight_transfer_updates_server_weights():
         "--load-format",
         "dummy",
         "--weight-transfer-config",
-        '{"backend": "nccl"}',
+        '{"backend": "hccl"}',
         "--tensor-parallel-size",
         str(INFERENCE_WORLD_SIZE),
         "--max-model-len",
@@ -282,12 +261,10 @@ def test_hccl_weight_transfer_updates_server_weights():
         init_thread.raise_if_failed()
         _log("HCCL process group established")
 
-        # 4) Pause generation and start the weight update lifecycle. On vLLM
-        #    main this probe also performs the actual /start_weight_update call,
-        #    so we must not call it again below.
+        # 4) Pause generation and start the weight update lifecycle.
         _post(server, "pause")
-        use_lifecycle = _has_lifecycle_endpoints(server)
-        _log(f"paused; lifecycle endpoints available: {use_lifecycle}")
+        _post(server, "start_weight_update")
+        _log("paused; weight update lifecycle started")
 
         names, dtype_names, shapes, packed_buffer_size_bytes = _collect_weight_metadata(train_model)
         update_info = dict(
@@ -297,10 +274,6 @@ def test_hccl_weight_transfer_updates_server_weights():
             packed=True,
             packed_buffer_size_bytes=packed_buffer_size_bytes,
         )
-        if not use_lifecycle:
-            # v0.20.2 folds the layerwise reload lifecycle into update_weights.
-            update_info["is_checkpoint_format"] = True
-
         # update_weights blocks on the server while it waits for HCCL broadcasts,
         # so run it in a thread while the trainer produces the data.
         _log(f"broadcasting {len(names)} tensors via HCCL (packed) ...")
@@ -327,8 +300,7 @@ def test_hccl_weight_transfer_updates_server_weights():
         _log("weight broadcast complete")
 
         # 5) Finalize the lifecycle and resume generation.
-        if use_lifecycle:
-            _post(server, "finish_weight_update")
+        _post(server, "finish_weight_update")
         _post(server, "resume")
 
         # 6) Generation after the broadcast weights are loaded.

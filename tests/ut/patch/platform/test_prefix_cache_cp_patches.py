@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FullAttentionManager,
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -14,9 +20,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -24,6 +33,9 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
+    _get_kimi_k3_dspark_mixed_kv_cache_groups,
+    _get_kv_cache_config_deepseek_v4,
+    group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
@@ -57,9 +69,68 @@ def _make_hybrid_kv_cache_config(
     )
 
 
+def _make_kimi_k3_dspark_kv_cache_specs(
+    *,
+    block_size: int = 384,
+    page_size: int = 488448,
+    target_layer_count: int = 24,
+    draft_layer_count: int = 5,
+    mamba_layer_count: int = 69,
+    draft_uses_mla: bool = False,
+) -> dict:
+    target_mla_spec = AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        page_size_padded=page_size,
+        cache_dtype_str="auto",
+    )
+    if draft_uses_mla:
+        draft_attention_spec = AscendMLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+            cache_dtype_str="auto",
+            non_causal_multi_token_decode=True,
+        )
+    else:
+        draft_attention_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+        )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((10, 2304), (6, 128, 128)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=page_size,
+        mamba_cache_mode="align",
+        num_speculative_blocks=7,
+    )
+    specs = {
+        f"language_model.model.layers.{layer_idx}.self_attn.attn": target_mla_spec
+        for layer_idx in range(target_layer_count)
+    }
+    specs.update(
+        {
+            f"model.layers.{layer_idx}.self_attn.attn": draft_attention_spec
+            for layer_idx in range(93, 93 + draft_layer_count)
+        }
+    )
+    specs.update(
+        {f"language_model.model.layers.{layer_idx}.self_attn": mamba_spec for layer_idx in range(mamba_layer_count)}
+    )
+    return specs
+
+
 def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
     c4_spec = MLAAttentionSpec(
-        block_size=128,
+        block_size=128 * 4,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
@@ -67,7 +138,7 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
         model_version="deepseek_v4",
     )
     c128_spec = MLAAttentionSpec(
-        block_size=128,
+        block_size=128 * 128,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
@@ -95,39 +166,81 @@ def _make_vllm_config(
     *,
     enable_prefix_caching: bool,
     dcp: int,
-    pcp: int,
     block_size: int = 16,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
+            mamba_cache_mode="align",
+            prefix_match_unit=None,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
-            prefill_context_parallel_size=pcp,
         ),
+        kv_transfer_config=None,
     )
 
 
 def _make_coordinator_for_effective_block_size(
     *,
     dcp_world_size: int,
-    pcp_world_size: int,
     enable_caching: bool,
 ) -> AscendHybridKVCacheCoordinator:
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
     coordinator.dcp_world_size = dcp_world_size
-    coordinator.pcp_world_size = pcp_world_size
     coordinator.enable_caching = enable_caching
     return coordinator
+
+
+def test_ascend_mla_page_size_includes_scale_storage() -> None:
+    spec = AscendMLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+    )
+
+    expected_page_size = 16 * (128 * 2 + 2)
+    assert spec.unpadded_page_size_bytes == expected_page_size
+    assert spec.real_page_size_bytes == expected_page_size
+    assert spec.page_size_bytes == expected_page_size
+
+
+def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
+    spec = AscendMLAAttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        cache_dtype_str="fp8_ds_mla",
+        page_size_padded=(512 // 4) * (128 * 2 + 2) + 128,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+        indexes_kv_by_block_stride=True,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+    )
+
+    merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
+
+    assert merged.block_size == spec.block_size
+    assert merged.real_page_size_bytes == (512 // 4) * (128 * 2 + 2)
+    assert merged.page_size_bytes == spec.page_size_padded
+    assert merged.compress_ratio == spec.compress_ratio
+    assert merged.model_version == spec.model_version
+    assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
+    assert merged.scale_dim == spec.scale_dim
+    assert merged.scale_dtype == spec.scale_dtype
 
 
 @pytest.mark.parametrize(
     ("enable_prefix_caching", "expected_hash_block_size"),
     [
-        pytest.param(False, math.lcm(16, 32) * 2 * 2, id="cp-without-prefix-caching"),
-        pytest.param(True, math.gcd(16, 32), id="cp-with-prefix-caching"),
+        pytest.param(False, math.lcm(16, 32) * 2, id="dcp-without-prefix-caching"),
+        pytest.param(True, math.gcd(16, 32), id="dcp-with-prefix-caching"),
     ],
 )
 def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
@@ -138,7 +251,6 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     vllm_config = _make_vllm_config(
         enable_prefix_caching=enable_prefix_caching,
         dcp=2,
-        pcp=2,
     )
 
     scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
@@ -146,13 +258,177 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
         vllm_config,
     )
 
-    expected_scheduler_block_size = math.lcm(16, 32) * 2 * 2
+    expected_scheduler_block_size = math.lcm(16, 32) * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
 
 
+def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
+    c128_spec = MLAAttentionSpec(
+        block_size=128 * 128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=128,
+        model_version="deepseek_v4",
+    )
+    c4_spec = MLAAttentionSpec(
+        block_size=128 * 4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        compress_ratio=4,
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=512,
+    )
+
+    grouped_specs = group_and_unify_kv_cache_specs(
+        {
+            "c128": c128_spec,
+            "swa": swa_spec,
+            "c4": c4_spec,
+        }
+    )
+
+    assert grouped_specs is not None
+    assert [group.block_size for group in grouped_specs[:2]] == [512, 16384]
+    for group in grouped_specs[:2]:
+        spec = next(iter(group.kv_cache_specs.values()))
+        assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+
+
 @pytest.mark.parametrize(
-    ("spec_factory", "dcp", "pcp", "enable_caching", "expected"),
+    ("block_size", "page_size", "draft_uses_mla"),
+    [
+        pytest.param(384, 488448, False, id="gqa-tp16"),
+        pytest.param(768, 976896, False, id="gqa-tp8"),
+        pytest.param(384, 488448, True, id="mla-tp16"),
+    ],
+)
+def test_kimi_k3_dspark_uses_four_mixed_kv_groups(block_size, page_size, draft_uses_mla) -> None:
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(
+        _make_kimi_k3_dspark_kv_cache_specs(
+            block_size=block_size,
+            page_size=page_size,
+            draft_uses_mla=draft_uses_mla,
+        )
+    )
+
+    assert groups is not None
+    assert [len(group.layer_names) for group in groups] == [29, 23, 23, 23]
+    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups)
+    mixed_specs = groups[0].kv_cache_spec.kv_cache_specs
+    expected_mla_count = 29 if draft_uses_mla else 24
+    assert sum(isinstance(spec, MLAAttentionSpec) for spec in mixed_specs.values()) == expected_mla_count
+    assert all(isinstance(spec, FullAttentionSpec) for spec in mixed_specs.values())
+
+
+def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> None:
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
+    assert groups is not None
+    max_model_len = 133120
+    vllm_config = _make_vllm_config(enable_prefix_caching=True, dcp=1, block_size=384)
+    worker_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+
+    assert worker_config.has_mamba_layers
+    assert worker_config.needs_kv_cache_zeroing
+    worker_mamba_widths = {
+        group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len) for group in groups[1:]
+    }
+    assert worker_mamba_widths == {354}
+
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+    assert isinstance(scheduler_config.kv_cache_groups[0].kv_cache_spec, MLAAttentionSpec)
+    assert all(isinstance(group.kv_cache_spec, MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
+    scheduler_mamba_widths = {
+        group.kv_cache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+        for group in scheduler_config.kv_cache_groups[1:]
+    }
+    assert scheduler_mamba_widths == worker_mamba_widths
+    assert scheduler_config.needs_kv_cache_zeroing
+
+
+def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> None:
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
+    assert groups is not None
+    page_size = 488448
+    expected_num_blocks = 100
+    available_memory = page_size * 29 * expected_num_blocks
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, num_blocks: num_blocks,
+    )
+
+    num_blocks, tensors = _get_kv_cache_config_deepseek_v4(
+        SimpleNamespace(),
+        groups,
+        available_memory,
+    )
+
+    assert num_blocks == expected_num_blocks
+    assert len(tensors) == 29
+    assert [len(tensor.shared_by) for tensor in tensors] == [4] * 23 + [1] * 6
+    assert all(tensor.size == page_size * expected_num_blocks for tensor in tensors)
+    assert sum(tensor.size for tensor in tensors) == available_memory
+
+
+def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
+    specs = _make_kimi_k3_dspark_kv_cache_specs()
+    specs["unrecognized.layer"] = next(iter(specs.values()))
+
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
+
+
+def test_kimi_k3_dspark_group_count_is_derived_from_layer_ratio() -> None:
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(
+        _make_kimi_k3_dspark_kv_cache_specs(
+            target_layer_count=20,
+            draft_layer_count=4,
+            mamba_layer_count=70,
+        )
+    )
+
+    assert groups is not None
+    assert [len(group.layer_names) for group in groups] == [24, 24, 23, 23]
+
+
+def test_kimi_k3_dspark_mixed_grouping_falls_back_on_unaligned_pages() -> None:
+    specs = _make_kimi_k3_dspark_kv_cache_specs()
+    draft_layer = "model.layers.93.self_attn.attn"
+    specs[draft_layer] = replace(specs[draft_layer], page_size_padded=976896)
+
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
+
+
+def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=1,
+        block_size=128,
+    )
+
+    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+        kv_cache_config,
+        vllm_config,
+    )
+
+    assert scheduler_block_size == 16384
+    assert hash_block_size == 512
+
+
+@pytest.mark.parametrize(
+    ("spec_factory", "dcp", "enable_caching", "expected"),
     [
         pytest.param(
             lambda: FullAttentionSpec(
@@ -162,10 +438,9 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
                 dtype=torch.float16,
             ),
             2,
-            2,
             True,
-            64,
-            id="full-attention-scales-with-cp",
+            32,
+            id="full-attention-scales-with-dcp",
         ),
         pytest.param(
             lambda: MambaSpec(
@@ -174,7 +449,6 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
                 dtypes=(torch.float32,),
                 mamba_cache_mode="none",
             ),
-            2,
             2,
             True,
             16,
@@ -188,7 +462,6 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
                 dtype=torch.float16,
             ),
             1,
-            1,
             True,
             16,
             id="full-attention-no-cp",
@@ -198,13 +471,11 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
 def test_get_effective_block_size(
     spec_factory,
     dcp: int,
-    pcp: int,
     enable_caching: bool,
     expected: int,
 ) -> None:
     coordinator = _make_coordinator_for_effective_block_size(
         dcp_world_size=dcp,
-        pcp_world_size=pcp,
         enable_caching=enable_caching,
     )
 
@@ -263,7 +534,7 @@ def test_get_kv_cache_coordinator_delegates_hybrid_without_caching(monkeypatch) 
         enable_caching=False,
         enable_kv_cache_events=False,
         dcp_world_size=2,
-        pcp_world_size=2,
+        pcp_world_size=1,
         hash_block_size=16,
     )
 
@@ -325,7 +596,6 @@ def test_verify_and_split_propagates_eagle_to_managers() -> None:
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
     coordinator.kv_cache_config = kv_cache_config
     coordinator.dcp_world_size = 1
-    coordinator.pcp_world_size = 1
     coordinator.enable_caching = True
     # The c128 group (index 1) carries the EAGLE/MTP layers.
     coordinator.eagle_group_ids = {1}
@@ -363,7 +633,6 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
     coordinator.kv_cache_config = kv_cache_config
     coordinator.dcp_world_size = 1
-    coordinator.pcp_world_size = 1
     coordinator.enable_caching = True
     # Only the MTP sibling (gid 2) is flagged, exactly as upstream does.
     coordinator.eagle_group_ids = {2}
@@ -415,9 +684,55 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
         enable_caching=True,
         kv_cache_group_id=1,
         dcp_world_size=2,
-        pcp_world_size=2,
+        pcp_world_size=1,
     )
     manager_kwargs["scheduler_block_size"] = mamba_spec.block_size
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+
+
+def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
+    """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
+    (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``
+    must produce a sparse mask rather than returning ``None``.
+
+    Before the fix, ``alignment_tokens`` was the LCM of raw block_sizes (e.g. 32),
+    making ``need >= per_segment`` always true for Ascend's SWA configuration and
+    the mask returned ``None`` (cache everything). After the fix the alignment is
+    ``lcm_block_size`` (e.g. 4096), which is large enough that only the tail
+    blocks within each segment need caching.
+    """
+    spec = SlidingWindowMLASpec(
+        block_size=32,  # Ascend SWA block_size (--block-size 32)
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float32,
+        sliding_window=128,  # DeepSeek V4 window
+        compress_ratio=1,
+    )
+    alignment_tokens = 4096  # lcm_block_size
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=256,  # 256 × 32 = 8192 tokens (2 × alignment_tokens)
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=None,
+    )
+
+    # Must produce a sparse mask, not None.
+    assert mask is not None, "should produce sparse mask with lcm alignment"
+
+    true_blocks = sum(mask)
+
+    # need = cdiv(window−1, block_size) = cdiv(127, 32) = 4
+    # per_segment = alignment_tokens // block_size = 4096 // 32 = 128
+    # Each 128-block segment caches the last 4 blocks (= 0 % sparse padding).
+    total_blocks = len(mask)
+    expected = 4 * (total_blocks // 128)
+    assert true_blocks == expected, (
+        f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
+    )
+    assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"

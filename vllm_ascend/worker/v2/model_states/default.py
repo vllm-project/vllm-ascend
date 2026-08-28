@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.config.compilation import CUDAGraphMode
@@ -28,9 +28,14 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+
 
 class AscendModelState(DefaultModelState):
     """Model state for Ascend NPUs."""
+
+    pcp_manager: "AscendPCPManager | None" = None
 
     def prepare_attn(
         self,
@@ -46,19 +51,36 @@ class AscendModelState(DefaultModelState):
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
-            num_tokens = input_batch.num_tokens_after_padding
+            num_input_tokens = input_batch.num_tokens_after_padding
         else:
             # For piecewise cudagraphs and eager, use unpadded sizes.
             num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
+            num_input_tokens = input_batch.num_tokens
+
+        num_actual_reqs = input_batch.num_reqs
+        num_actual_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        pcp_context = (
+            self.pcp_manager.build_attention_context(
+                input_batch,
+                block_tables,
+                slot_mappings,
+            )
+            if self.pcp_manager is not None
+            else None
+        )
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
         self.attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
-            num_tokens=num_tokens,
+            num_actual_reqs=num_actual_reqs,
+            num_tokens=num_input_tokens,
+            num_actual_tokens=num_actual_tokens,
+            num_input_tokens=num_input_tokens,
+            is_prefilling=is_prefilling,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
@@ -72,6 +94,7 @@ class AscendModelState(DefaultModelState):
             seq_lens_np=input_batch.seq_lens_np,
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
+            pcp_context=pcp_context,
             for_cudagraph_capture=for_capture,
         )
         return self.attn_metadata

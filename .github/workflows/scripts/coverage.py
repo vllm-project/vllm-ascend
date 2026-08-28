@@ -30,6 +30,23 @@ for module in config:
         if "tests/ut/" in t:
             all_yaml_ut_paths.add(t)
 
+_pins = dict(meta.get("pinned_routes", {}) or {})
+for pin_config in _pins.values():
+    if not isinstance(pin_config, dict):
+        continue
+    tests = pin_config.get("tests", [])
+    if not isinstance(tests, list):
+        continue
+    for t in tests:
+        if not isinstance(t, str):
+            continue
+        t = t.rstrip("/")
+        all_yaml_paths.add(t)
+        if "tests/e2e/" in t:
+            all_yaml_e2e_paths.add(t)
+        if "tests/ut/" in t:
+            all_yaml_ut_paths.add(t)
+
 # ============================================================
 # 1. BROKEN PATHS — A non-existent path is referenced in yaml
 # ============================================================
@@ -147,7 +164,7 @@ for pattern_str, runner_config in sorted(_rm.items()):
 rm_broken = len(rm_errors) > 0
 
 # ============================================================
-# 7. partition validity
+# 7. partition and pinned route validity
 # ============================================================
 part_errors: list[str] = []
 # Collect actual runner keys used in routing
@@ -159,21 +176,56 @@ for p in all_expanded:
                 actual_runner_keys.add(rk)
             break
 
+actual_runner_keys.update(str(target_partition) for target_partition in _pins)
+
+for key in sorted(actual_runner_keys - _part.keys()):
+    part_errors.append(f"Referenced partition {key!r}: missing configuration")
+
 for key, val in sorted(_part.items()):
-    if "_x" not in key:
-        part_errors.append(f"Key {key!r}: missing '_x' separator")
+    if not isinstance(val, dict):
+        part_errors.append(f"Key {key!r}: configuration must be a mapping")
         continue
-    parts = key.rsplit("_x", 1)
+    if "-" not in key:
+        part_errors.append(f"Key {key!r}: missing '-' separator")
+        continue
+    parts = key.rsplit("-", 1)
     if not parts[1].isdigit():
         part_errors.append(f"Key {key!r}: num_npus '{parts[1]}' is not a number")
         continue
-    if key == "cpu_x0":
+    if key == "cpu-0":
         # CPU is the default fallback runner, always valid
         continue
     if key not in actual_runner_keys:
         part_errors.append(f"Key {key!r}: no tests route to this runner (unused)")
 
 part_broken = len(part_errors) > 0
+
+# ============================================================
+# 8. E2E marker coverage (values enforced; unmarked still transitional)
+# ============================================================
+_marker_unmarked: list[str] = []
+_marker_unknown_values: list[str] = []
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from tests.e2e.generate_coverage_html import (  # type: ignore[import-not-found]
+        E2E_PR_ROOT as _E2E_PR_ROOT,
+    )
+    from tests.e2e.generate_coverage_html import (
+        _process_test_file,
+        _validate,
+    )
+
+    for fp in sorted(_E2E_PR_ROOT.rglob("test_*.py")):
+        records = _process_test_file(fp, root=_E2E_PR_ROOT)
+        for r in records:
+            if not r.has_coverage():
+                _marker_unmarked.append(f"{r.filepath}::{r.test_name}")
+        # Accumulate across all files (do NOT reassign — that would discard
+        # every file's warnings except the last one).
+        _marker_unknown_values.extend(_validate(records))
+except Exception:
+    _marker_unmarked = []
+    _marker_unknown_values = []
 
 # ============================================================
 # REPORT
@@ -243,12 +295,30 @@ if rm_errors:
 else:
     print("    ✓ All patterns valid and match at least one test")
 
-print("\n[7] partition validation:")
+print("\n[7] partition and pinned route validation:")
 if part_errors:
     for err in part_errors:
         print(f"    ✗ {err}")
 else:
     print("    ✓ All partition keys valid and map to active runners")
+
+print("\n[8] E2E marker coverage (values enforced; unmarked still transitional):")
+if _marker_unmarked:
+    print(f"    ⚠ {len(_marker_unmarked)} test(s) without e2e_coverage marker:")
+    for p in _marker_unmarked[:20]:
+        print(f"      - {p}")
+    if len(_marker_unmarked) > 20:
+        print(f"      ... and {len(_marker_unmarked) - 20} more")
+else:
+    print("    ✓ All tests have e2e_coverage markers")
+if _marker_unknown_values:
+    print(f"    ✗ {len(_marker_unknown_values)} unknown marker value(s) — failing:")
+    for w in _marker_unknown_values[:10]:
+        print(f"      - {w}")
+    if len(_marker_unknown_values) > 10:
+        print(f"      ... and {len(_marker_unknown_values) - 10} more")
+else:
+    print("    ✓ All marker values are within the taxonomy")
 
 print("\n" + "=" * 70)
 
@@ -261,6 +331,10 @@ has_errors = bool(
     or cpu_ut_leaked
     or rm_errors
     or part_errors
+    # Out-of-taxonomy marker values are a hard CI failure — values must come
+    # from tests/e2e/coverage_taxonomy.py. Unmarked tests remain WARNING-only
+    # during the migration period.
+    or _marker_unknown_values
 )
 if has_errors:
     sys.exit(1)

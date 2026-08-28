@@ -1,138 +1,60 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
 msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-02 07:02+0000\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
 "Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
-"Generated-By: Babel 2.18.0\n"
+"Generated-By: detect_po_changes.py\n"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:1
-msgid "Dynamic Chunked Pipeline Parallel (DeepSeek-V3.1)"
-msgstr "动态分块流水线并行 (DeepSeek-V3.1)"
+msgid "# Dynamic Chunked Pipeline Parallel (DeepSeek-V3.1)"
+msgstr "# 动态分块流水线并行 (DeepSeek-V3.1)"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:3
-msgid "Getting Started"
-msgstr "快速入门"
+msgid "## Getting Started"
+msgstr "## 快速开始"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:5
-msgid ""
-"vLLM-Ascend supports Dynamic Chunked Pipeline Parallel (CPP) for optimizing "
-"prefill performance in Pipeline Parallelism scenarios. This guide "
-"demonstrates deployment with DeepSeek-V3.1 on 1 Atlas 800T A3 server (64G × "
-"16)."
-msgstr ""
-"vLLM-Ascend 支持动态分块流水线并行 (CPP) 以优化流水线并行场景中的预填充性能。本指南演示在1台 Atlas 800T A3 服务器 "
-"(64G × 16) 上使用 DeepSeek-V3.1 进行部署。"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:7
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:118
-msgid ""
-"For configuration details, see the [Feature "
-"Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)."
-msgstr ""
-"配置详情请参阅[特性指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:9
 msgid ""
 "For design details, see the [Design "
 "Document](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)."
 msgstr ""
 "设计详情请参阅[设计文档](../../developer_guide/Design_Documents/dynamic_chunked_pipeline_parallel.md)。"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:11
-msgid "Environment Preparation"
-msgstr "环境准备"
+msgid "## Environment Preparation"
+msgstr "## 环境准备"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:13
-msgid "Model Weight"
-msgstr "模型权重"
+msgid "### Model Weight"
+msgstr "### 模型权重"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:15
-msgid ""
-"`DeepSeek-V3.1-w8a8` (Quantized version): 1 Atlas 800T A3 (64G × 16) node"
-msgstr "`DeepSeek-V3.1-w8a8` (量化版本)：1个 Atlas 800T A3 (64G × 16) 节点"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:17
 msgid "Download to shared directory such as `/mnt/weight/`"
 msgstr "下载到共享目录，例如 `/mnt/weight/`"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:19
-msgid "Run with Docker"
-msgstr "使用 Docker 运行"
+msgid "### Run with Docker"
+msgstr "### 使用 Docker 运行"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:60
-msgid "Deployment"
-msgstr "部署"
+msgid "## Deployment"
+msgstr "## 部署"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:62
-msgid "Startup Script"
-msgstr "启动脚本"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:107
-msgid "Key Parameters"
-msgstr "关键参数"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:109
-msgid "`--pipeline-parallel-size 2`: Enables Pipeline Parallelism (required)"
-msgstr "`--pipeline-parallel-size 2`：启用流水线并行（必需）"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:110
-msgid "`--enable-chunked-prefill`: Enables Chunked Prefill (required)"
-msgstr "`--enable-chunked-prefill`：启用分块预填充（必需）"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:111
 msgid ""
-"`--max-num-batched-tokens 32768`: Initial chunk size (recommended for 128K "
-"sequences)"
-msgstr "`--max-num-batched-tokens 32768`：初始分块大小（推荐用于128K序列）"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:112
-msgid ""
-"`profiling_chunk_config.enabled`: Enables Dynamic Chunked Pipeline Parallel"
-msgstr "`profiling_chunk_config.enabled`：启用动态分块流水线并行"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:113
-msgid ""
-"`profiling_chunk_config.smooth_factor`:  Smoothing factor (0 < x ≤ 1.0). "
-"Higher values trust dynamic prediction more"
-msgstr "`profiling_chunk_config.smooth_factor`：平滑因子 (0 < x ≤ 1.0)。值越大越信任动态预测"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:114
-msgid ""
-"`profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic "
-"calculation. Should be smaller than `max-num-batched-tokens`"
+"For configuration details, see the [Feature "
+"Guide](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)."
 msgstr ""
-"`profiling_chunk_config.min_chunk`：动态计算的最小分块大小。应小于 `max-num-batched-tokens`"
+"配置详情请参阅[特性指南](../../user_guide/feature_guide/dynamic_chunk_pipeline_parallel.md)。"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:115
-msgid ""
-"`profiling_chunk_config.need_timing`: Enable/disable Online Calibration"
-msgstr "`profiling_chunk_config.need_timing`：启用/禁用在线校准"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:116
-msgid ""
-"`profiling_chunk_config.max_fit_chunk`: Number of chunk-time data for Online"
-" Calibration. Should be more when profiling failed"
-msgstr "`profiling_chunk_config.max_fit_chunk`：在线校准的分块时间数据数量。性能分析失败时应增大此值"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:120
-msgid "Online Calibration"
-msgstr "在线校准"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:122
 msgid ""
 "For optimal performance, online calibrate with real data before production:"
 msgstr "为获得最佳性能，请在投产前使用真实数据进行在线校准："
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:124
 msgid ""
 "You can use aisbench to generate fixed-length random datasets. Refer to "
 "[Using AISBench for performance "
@@ -143,58 +65,36 @@ msgstr ""
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:126
 msgid ""
-"Modify "
+"1. Modify "
 "`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:"
 msgstr ""
-"修改 "
+"1. 修改 "
 "`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`："
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:146
-msgid "Run for online calibration:"
-msgstr "运行在线校准："
+msgid "2. Run for online calibration:"
+msgstr "2. 运行以进行在线校准："
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:152
 msgid ""
 "Configure online calibration data length to match your `max-model-len`. Use "
 "`batch_size=1` and ensure data differs to avoid cache hits if prefix caching"
 " is enabled."
 msgstr ""
-"配置在线校准数据长度以匹配您的 `max-model-len`。使用 `batch_size=1` 并确保数据不同，以避免启用前缀缓存时命中缓存。"
+"将在线校准数据长度配置为与您的 `max-model-len` 匹配。使用 `batch_size=1` "
+"并确保数据不同，以避免在启用前缀缓存时命中缓存。"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:154
-msgid "Accuracy Evaluation"
-msgstr "精度评估"
+msgid "## Accuracy Evaluation"
+msgstr "## 精度评估"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:156
 msgid ""
 "Refer to [Using "
 "AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
 msgstr ""
 "详情请参阅[使用 AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "dataset"
-msgstr "数据集"
+msgid "## Performance Benchmark"
+msgstr "## 性能基准测试"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "accuracy"
-msgstr "精度"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "gsm8k"
-msgstr "gsm8k"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "95.83"
-msgstr "95.83"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:162
-msgid "Performance Benchmark"
-msgstr "性能基准测试"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:164
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
@@ -204,190 +104,250 @@ msgstr ""
 "进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation)。"
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:166
-msgid ""
-"To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in long "
-"sequence LLM inference scenarios, we use **DeepSeek-V3.1-W8A8** and "
-"**Qwen3-235B**, deploy P instance in Ascend Atlas A3 inference products*64G "
-"(A3), the configuration and performance data are as follows."
-msgstr ""
-"为评估动态分块流水线并行在长序列 LLM 推理场景中的效果，我们使用 **DeepSeek-V3.1-W8A8** 和 **Qwen3-235B**，在"
-" Ascend Atlas A3 推理产品*64G (A3) 中部署 P 实例，配置和性能数据如下。"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:168
 msgid "**Fixed-length requests, concurrency=1**:"
 msgstr "**固定长度请求，并发数=1**："
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:170
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:184
-msgid "DeepSeek-V3.1-W8A8:"
-msgstr "DeepSeek-V3.1-W8A8："
+msgid "- Qwen3-235B:"
+msgstr "- Qwen3-235B："
 
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "Configuration"
-msgstr "配置"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "CPP <br> (Dynamic Chunk, <br> chunksize=32k)"
-msgstr "CPP <br> (动态分块, <br> 分块大小=32k)"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "PP <br>(Static Chunk, <br> chunksize=32k)"
-msgstr "PP <br>(静态分块, <br> 分块大小=32k)"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "Input length  128k"
-msgstr "输入长度 128k"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "TTFT: 22.5s"
-msgstr "TTFT: 22.5s"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "TTFT: 27.0s"
-msgstr "TTFT: 27.0s"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:176
-msgid "Qwen3-235B:"
-msgstr "Qwen3-235B："
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "Input length  256k"
-msgstr "输入长度 256k"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "TTFT: 53.5s"
-msgstr "TTFT: 53.5s"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "TTFT: 61.4s"
-msgstr "TTFT: 61.4s"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:182
 msgid "**Variable-length requests, concurrency=4**:"
-msgstr "**变长请求，并发数=4**："
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99%"
-msgstr "4k~64k 输入, mean=32k, std=32k <br> 前缀命中率=99%"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "CPP2TP8"
-msgstr "CPP2TP8"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "Input throughput: 22424 tps/card"
-msgstr "输入吞吐量: 22424 tps/卡"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "DP2TP8"
-msgstr "DP2TP8"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "Input throughput: 16150 tps/card"
-msgstr "输入吞吐量: 16150 tps/卡"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "PCP2TP8"
-msgstr "PCP2TP8"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "Input throughput: 18197 tps/card"
-msgstr "输入吞吐量: 18197 tps/卡"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "TP16"
-msgstr "TP16"
-
-#: ../../source/tutorials/features/dynamic_chunked_pipeline_parallel.md:21
-msgid "Input throughput: 18875 tps/card"
-msgstr "输入吞吐量: 18875 tps/卡"
-
-msgid "# Dynamic Chunked Pipeline Parallel (DeepSeek-V3.1)"
-msgstr ""
-
-msgid "## Getting Started"
-msgstr ""
-
-msgid "## Environment Preparation"
-msgstr ""
-
-msgid "### Model Weight"
-msgstr ""
-
-msgid ""
-"- `DeepSeek-V3.1-w8a8` (Quantized version): 1 Atlas 800T A3 (64G × 16) node"
-msgstr ""
-
-msgid "### Run with Docker"
-msgstr ""
-
-msgid "## Deployment"
-msgstr ""
-
-msgid "### Startup Script"
-msgstr ""
-
-msgid "### Key Parameters"
-msgstr ""
-
-msgid ""
-"- `--pipeline-parallel-size 2`: Enables Pipeline Parallelism (required)\n"
-"- `--enable-chunked-prefill`: Enables Chunked Prefill (required)\n"
-"- `--max-num-batched-tokens 32768`: Initial chunk size (recommended for 128K sequences)\n"
-"- `profiling_chunk_config.enabled`: Enables Dynamic Chunked Pipeline Parallel\n"
-"- `profiling_chunk_config.smooth_factor`:  Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more\n"
-"- `profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`\n"
-"- `profiling_chunk_config.need_timing`: Enable/disable Online Calibration\n"
-"- `profiling_chunk_config.max_fit_chunk`: Number of chunk-time data for Online Calibration. Should be more when profiling failed"
-msgstr ""
-
-msgid "### Online Calibration"
-msgstr ""
-
-msgid ""
-"1. Modify "
-"`<YOUR_AISBENCH_PATH>/benchmark/ais_bench/datasets/synthetic/synthetic_config.py`:"
-msgstr ""
-
-msgid "2. Run for online calibration:"
-msgstr ""
-
-msgid "## Accuracy Evaluation"
-msgstr ""
-
-msgid ""
-"| dataset | accuracy |\n"
-"|---------|----------|\n"
-"| gsm8k   | 95.83    |"
-msgstr ""
-
-msgid "## Performance Benchmark"
-msgstr ""
+msgstr "**可变长度请求，并发数=4**："
 
 msgid "- DeepSeek-V3.1-W8A8:"
-msgstr ""
+msgstr "- DeepSeek-V3.1-W8A8："
+
+msgid "| dataset | accuracy |"
+msgstr "| 数据集 | 准确率 |"
 
 msgid ""
-"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | Input length  128k    | TTFT: 22.5s | TTFT: 27.0s |"
-msgstr ""
-
-msgid "- Qwen3-235B:"
-msgstr ""
+"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP "
+"<br>(Static Chunk, <br> chunksize=32k) |"
+msgstr "| 配置 | CPP <br> (动态分块, <br> 块大小=32k) | PP <br>(静态分块, <br> 块大小=32k) |"
 
 msgid ""
-"| Configuration | CPP <br> (Dynamic Chunk, <br> chunksize=32k) | PP <br>(Static Chunk, <br> chunksize=32k) |\n"
-"    | ----------------------------- | ------------------------- | ------------------------- |\n"
-"    | Input length  256k    | TTFT: 53.5s | TTFT: 61.4s |"
-msgstr ""
+"| Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |"
+msgstr "| 配置 | 4k~64k 输入, 均值=32k, 标准差=32k <br> 前缀命中率=99% |"
 
 msgid ""
-"| Configuration | 4k~64k Input, mean=32k, std=32k <br> prefix hit rate=99% |\n"
-"    | ----------------------------- | ------------------------- |\n"
-"    |  CPP2TP8   | Input throughput: 22424 tps/card |\n"
-"    |  DP2TP8   | Input throughput: 16150 tps/card |\n"
-"    |  PCP2TP8   | Input throughput: 18197 tps/card |\n"
-"    |  TP16   | Input throughput: 18875 tps/card |"
+"The server has started successfully if the log outputs: `vLLM API server "
+"started on 0.0.0.0:8003`."
+msgstr "如果日志输出 `vLLM API server started on 0.0.0.0:8003`，则表示服务器已成功启动。"
+
+msgid ""
+"vLLM-Ascend supports Dynamic Chunked Pipeline Parallel (CPP) for optimizing "
+"prefill performance in Pipeline Parallelism scenarios. This feature is "
+"supported starting from version `v0.19.1rc1`."
 msgstr ""
+"vLLM-Ascend 支持动态分块流水线并行（CPP），用于优化流水线并行场景下的预填充性能。此功能自版本 `v0.19.1rc1` 起支持。"
+
+msgid ""
+"**CPP is designed to be used on the P (Prefiller) node in Prefill-Decode "
+"(PD) disaggregation deployments.** The D (Decoder) node does not require CPP"
+" configuration. By dynamically calculating the optimal chunk size based on "
+"profiling data, CPP significantly reduces Time-To-First-Token (TTFT) for "
+"long sequences on P nodes."
+msgstr ""
+"**CPP 专为预填充-解码（PD）分离部署中的 P（预填充）节点设计。** D（解码）节点无需配置 "
+"CPP。通过基于性能分析数据动态计算最优分块大小，CPP 可显著降低 P 节点上长序列的首令牌时间（TTFT）。"
+
+msgid ""
+"This guide demonstrates PD disaggregation deployment with DeepSeek-V3.1 on 3"
+" Atlas 800T A3 servers (64GB × 16): one server acts as the Prefiller (P "
+"node, with CPP enabled) and two servers act as the Decoder (D nodes, without"
+" CPP, DP32 standard configuration)."
+msgstr ""
+"本指南演示了在 3 台 Atlas 800T A3 服务器（64GB × 16）上使用 DeepSeek-V3.1 进行 PD "
+"分离部署：一台服务器作为预填充节点（P 节点，启用 CPP），两台服务器作为解码节点（D 节点，不启用 CPP，采用 DP32 标准配置）。"
+
+msgid ""
+"For complete PD disaggregation setup instructions (environment verification,"
+" Mooncake installation, proxy deployment), see:"
+msgstr "有关完整的 PD 分离设置说明（环境验证、Mooncake 安装、代理部署），请参阅："
+
+msgid ""
+"- [PD Disaggregation Single Node (Qwen2.5-VL)](pd_disaggregation_mooncake_single_node.md)\n"
+"- [PD Disaggregation Multi Node (DeepSeek)](pd_disaggregation_mooncake_multi_node.md)"
+msgstr ""
+"- [PD 分离单节点（Qwen2.5-VL）](pd_disaggregation_mooncake_single_node.md)\n"
+"- [PD 分离多节点（DeepSeek）](pd_disaggregation_mooncake_multi_node.md)"
+
+msgid ""
+"- `DeepSeek-V3.1-W8A8` (Quantized version): 1 Atlas 800T A3 (64GB × 16) node"
+msgstr "- `DeepSeek-V3.1-W8A8`（量化版本）：1 台 Atlas 800T A3（64GB × 16）节点"
+
+msgid "Start a Docker container on each node."
+msgstr "在每个节点上启动 Docker 容器。"
+
+msgid "### Install Mooncake"
+msgstr "### 安装 Mooncake"
+
+msgid ""
+"Mooncake is required for PD disaggregation KV cache transfer. Refer to [PD "
+"Disaggregation Multi Node - Install "
+"Mooncake](pd_disaggregation_mooncake_multi_node.md#install-mooncake) for "
+"installation and compilation steps."
+msgstr ""
+"PD 分离的 KV 缓存传输需要 Mooncake。有关安装和编译步骤，请参阅 [PD 分离多节点 - 安装 "
+"Mooncake](pd_disaggregation_mooncake_multi_node.md#install-mooncake)。"
+
+msgid ""
+"In a PD disaggregation setup, enable CPP **only on the P (Prefiller) node**."
+" The D (Decoder) node runs without pipeline parallelism and focuses on low-"
+"latency token-by-token decoding."
+msgstr "在 PD 分离部署中，**仅在 P（预填充）节点上**启用 CPP。D（解码）节点不启用流水线并行，专注于低延迟的逐令牌解码。"
+
+msgid ""
+"- It is recommended to use `MooncakeConnectorV1` as the `kv_connector`, as it provides more comprehensive support for PP.\n"
+"    - It is recommended **not** to enable `async-scheduling` on P nodes of PP, as it may cause performance degradation in the prefill stage."
+msgstr ""
+"- 建议使用 `MooncakeConnectorV1` 作为 `kv_connector`，因为它对 PP 提供了更全面的支持。\n"
+"    - 建议**不要**在 PP 的 P 节点上启用 `async-scheduling`，因为这可能导致预填充阶段性能下降。"
+
+msgid ""
+"Assume the P server IP is `192.0.0.1`, and the D server IPs are `192.0.0.3` "
+"(decoder 1) and `192.0.0.4` (decoder 2)."
+msgstr ""
+"假设 P 服务器 IP 为 `192.0.0.1`，D 服务器 IP 为 `192.0.0.3`（解码器 1）和 `192.0.0.4`（解码器 2）。"
+
+msgid "=== \"P Node (Prefiller — with CPP)\""
+msgstr "=== \"P 节点（预填充 — 启用 CPP）\""
+
+msgid "=== \"D Node (Decoder — without CPP)\""
+msgstr "=== \"D 节点（解码 — 不启用 CPP）\""
+
+msgid ""
+"The D nodes use `launch_online_dp.py` to start multiple DP instances per "
+"node. Obtain the launcher and template scripts from the repository:"
+msgstr "D 节点使用 `launch_online_dp.py` 在每个节点上启动多个 DP 实例。从仓库获取启动器和模板脚本："
+
+msgid ""
+"- [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)\n"
+"    - [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)"
+msgstr ""
+"- [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)\n"
+"    - [run_dp_template.sh](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/run_dp_template.sh)"
+
+msgid ""
+"Modify `run_dp_template.sh` on each D node. The launcher passes seven "
+"positional arguments (`$1`–`$7`) to the template. For a full explanation of "
+"each parameter, refer to [PD Disaggregation Multi "
+"Node](pd_disaggregation_mooncake_multi_node.md#run_dp_template-sh)."
+msgstr ""
+"在每个 D 节点上修改 `run_dp_template.sh`。启动器向模板传递七个位置参数（`$1`–`$7`）。有关每个参数的完整说明，请参阅 "
+"[PD 分离多节点](pd_disaggregation_mooncake_multi_node.md#run_dp_template-sh)。"
+
+msgid "=== \"Decoder node 1 (192.0.0.3)\""
+msgstr "=== \"解码器节点 1（192.0.0.3）\""
+
+msgid "=== \"Decoder node 2 (192.0.0.4)\""
+msgstr "=== \"解码器节点 2（192.0.0.4）\""
+
+msgid "Start the service on each D node:"
+msgstr "在每个 D 节点上启动服务："
+
+msgid "=== \"Example Proxy for Deployment\""
+msgstr "=== \"部署示例代理\""
+
+msgid ""
+"Run a proxy server on the same node with the prefiller service instance. You"
+" can get the proxy program in the repository's examples: "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+"在与预填充服务实例相同的节点上运行代理服务器。您可以在仓库的示例中获取代理程序：[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)"
+
+msgid "| Parameter | Meaning |"
+msgstr "| 参数 | 含义 |"
+
+msgid "    | --port | Port of proxy |"
+msgstr "    | --port | 代理端口 |"
+
+msgid "    | --prefiller-port | All ports of prefill |"
+msgstr "    | --prefiller-port | 预填充的所有端口 |"
+
+msgid "    | --decoder-ports | All ports of decoder |"
+msgstr "    | --decoder-ports | 解码器的所有端口 |"
+
+msgid "=== \"Verification\""
+msgstr "=== \"验证\""
+
+msgid "Check service health using the proxy server endpoint."
+msgstr "使用代理服务器端点检查服务健康状态。"
+
+msgid ""
+"To verify CPP is active on the P node, check the startup logs for profiling-"
+"related messages such as `profiling_chunk_config` enabled and chunk size "
+"calculation outputs."
+msgstr ""
+"要验证 P 节点上的 CPP 是否已激活，请检查启动日志中与性能分析相关的消息，例如 `profiling_chunk_config` "
+"已启用以及分块大小计算输出。"
+
+msgid ""
+"> **Key Parameters**\n"
+">\n"
+"> - `--pipeline-parallel-size 2`: Enables Pipeline Parallelism (required, P node only)\n"
+"> - `--enable-chunked-prefill`: Enables Chunked Prefill (required, P node only)\n"
+"> - `--max-num-batched-tokens 32768`: Initial chunk size (recommended for 128K sequences)\n"
+"> - `profiling_chunk_config.enabled`: Enables Dynamic Chunked Pipeline Parallel\n"
+"> - `profiling_chunk_config.smooth_factor`:  Smoothing factor (0 < x ≤ 1.0). Higher values trust dynamic prediction more\n"
+"> - `profiling_chunk_config.min_chunk`: Minimum chunk size for dynamic calculation. Should be smaller than `max-num-batched-tokens`\n"
+"> - `profiling_chunk_config.need_timing`: Enable/disable Online Calibration\n"
+"> - `profiling_chunk_config.max_fit_chunk`: Number of chunk-time data for Online Calibration. Should be more when profiling failed\n"
+">\n"
+"> **Key points for PD disaggregation with CPP:**\n"
+">\n"
+"> - CPP (`profiling_chunk_config.enabled`, `--pipeline-parallel-size > 1`) is configured **only on the P node**.\n"
+"> - The D nodes run without pipeline parallelism (DP32 TP1 standard configuration) — they focus on low-latency token-by-token decoding.\n"
+"> - For complete PD disaggregation setup instructions (environment verification, Mooncake installation, proxy deployment), see:\n"
+">     - [PD Disaggregation Single Node](pd_disaggregation_mooncake_single_node.md)\n"
+">     - [PD Disaggregation Multi Node](pd_disaggregation_mooncake_multi_node.md)"
+msgstr ""
+"> **关键参数**\n"
+">\n"
+"> - `--pipeline-parallel-size 2`：启用流水线并行（必需，仅 P 节点）\n"
+"> - `--enable-chunked-prefill`：启用分块预填充（必需，仅 P 节点）\n"
+"> - `--max-num-batched-tokens 32768`：初始分块大小（建议用于 128K 序列）\n"
+"> - `profiling_chunk_config.enabled`：启用动态分块流水线并行\n"
+"> - `profiling_chunk_config.smooth_factor`：平滑因子（0 < x ≤ 1.0）。值越高越信任动态预测\n"
+"> - `profiling_chunk_config.min_chunk`：动态计算的最小分块大小。应小于 `max-num-batched-tokens`\n"
+"> - `profiling_chunk_config.need_timing`：启用/禁用在线校准\n"
+"> - `profiling_chunk_config.max_fit_chunk`：在线校准的分块时间数据数量。性能分析失败时应增加\n"
+">\n"
+"> **使用 CPP 进行 PD 分离的关键点：**\n"
+">\n"
+"> - CPP（`profiling_chunk_config.enabled`、`--pipeline-parallel-size > 1`）**仅在 P 节点上**配置。\n"
+"> - D 节点不启用流水线并行（DP32 TP1 标准配置）——它们专注于低延迟的逐令牌解码。\n"
+"> - 有关完整的 PD 分离设置说明（环境验证、Mooncake 安装、代理部署），请参阅：\n"
+">     - [PD 分离单节点](pd_disaggregation_mooncake_single_node.md)\n"
+">     - [PD 分离多节点](pd_disaggregation_mooncake_multi_node.md)"
+
+msgid "## Online Calibration"
+msgstr "## 在线校准"
+
+msgid ""
+"To evaluate the effectiveness of Dynamic Chunked Pipeline Parallel in PD "
+"disaggregation long sequence LLM inference scenarios, we use "
+"**DeepSeek-V3.1-W8A8** and **Qwen3-235B**, deploy prefill instance in Ascend"
+" Atlas 800T A3 server (64GB × 16), the configuration and performance data "
+"are as follows."
+msgstr ""
+"为了评估动态分块流水线并行在 PD 分离长序列 LLM 推理场景中的有效性，我们使用 **DeepSeek-V3.1-W8A8** 和 "
+"**Qwen3-235B**，在 Ascend Atlas 800T A3 服务器（64GB × 16）上部署预填充实例，配置和性能数据如下。"
+
+msgid "    | Input length 128k | TTFT: 22.5s | TTFT: 27.0s |"
+msgstr "    | 输入长度 128k | TTFT：22.5s | TTFT：27.0s |"
+
+msgid "    | Input length 256k | TTFT: 53.5s | TTFT: 61.4s |"
+msgstr "    | 输入长度256k | TTFT: 53.5s | TTFT: 61.4s |"
+
+msgid "    | CPP2TP8 | Input throughput: 22424 tps/card |"
+msgstr "    | CPP2TP8 | 输入吞吐量: 22424 tps/卡 |"
+
+msgid "    | DP2TP8 | Input throughput: 16150 tps/card |"
+msgstr "    | DP2TP8 | 输入吞吐量: 16150 tps/卡 |"
+
+msgid "    | TP16 | Input throughput: 18875 tps/card |"
+msgstr "    | TP16 | 输入吞吐量: 18875 tps/卡 |"

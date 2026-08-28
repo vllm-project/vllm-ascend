@@ -9,11 +9,15 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
+    AscendAttentionPCPImpl,
+    AscendAttentionPCPMetadata,
+    AscendAttentionPCPMetadataBuilder,
     AscendAttentionState,
+    AscendC8AttentionBackendImpl,
 )
-from vllm_ascend.attention.kvcomp_attn.attention_utils import get_kvcomp_decode_params, reshape_and_cache_kvcomp
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
+    PagedAttentionGraphParam,
     cache_graph_workspace,
     needs_layer_aware_fia_graph_replay,
     using_paged_attention,
@@ -64,9 +68,15 @@ class TestAscendAttentionBackend(TestBase):
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
 
-        from vllm_ascend.attention.utils import enable_cp
+        from vllm_ascend.attention.utils import enable_dcp, enable_pcp
 
-        enable_cp.cache_clear()
+        self.enable_dcp = enable_dcp
+        self.enable_pcp = enable_pcp
+        enable_dcp.cache_clear()
+        enable_pcp.cache_clear()
+        self.addCleanup(self.utils_patcher.stop)
+        self.addCleanup(enable_dcp.cache_clear)
+        self.addCleanup(enable_pcp.cache_clear)
 
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "CUSTOM")
@@ -76,6 +86,35 @@ class TestAscendAttentionBackend(TestBase):
 
     def test_get_builder_cls(self):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
+
+    def test_get_impl_cls_with_pcp(self):
+        self.mock_config.parallel_config.prefill_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
+
+        self.assertIs(
+            AscendAttentionBackend.get_impl_cls(),
+            AscendAttentionPCPImpl,
+        )
+
+    def test_get_builder_cls_with_pcp(self):
+        self.mock_config.parallel_config.prefill_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
+
+        self.assertIs(
+            AscendAttentionBackend.get_builder_cls(),
+            AscendAttentionPCPMetadataBuilder,
+        )
+
+    def test_pcp_and_dcp_are_rejected_together(self):
+        self.mock_config.parallel_config.prefill_context_parallel_size = 2
+        self.mock_config.parallel_config.decode_context_parallel_size = 2
+        self.enable_pcp.cache_clear()
+        self.enable_dcp.cache_clear()
+
+        with self.assertRaisesRegex(NotImplementedError, "PCP and DCP"):
+            AscendAttentionBackend.get_impl_cls()
+        with self.assertRaisesRegex(NotImplementedError, "PCP and DCP"):
+            AscendAttentionBackend.get_builder_cls()
 
     def test_get_kv_cache_shape_not(self):
         result = AscendAttentionBackend.get_kv_cache_shape(10, 20, 30, 40)
@@ -145,7 +184,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
 
-    @patch("vllm_ascend.attention.attention_v1.AscendMetadata")
+    @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
     def test_build(self, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=torch.tensor([0, 2, 5, 9]),
@@ -167,6 +206,112 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         mock_model = MagicMock()
 
         self.builder.build(1, common_attn_metadata, mock_model)
+
+
+def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
+    builder = AscendAttentionPCPMetadataBuilder.__new__(AscendAttentionPCPMetadataBuilder)
+    builder.pcp_size = 2
+    common_metadata = SimpleNamespace(
+        slot_mapping=torch.tensor(
+            [10, 11, -1, -1, 20, 21, -1, -1],
+            dtype=torch.int64,
+        )
+    )
+    metadata = AscendAttentionPCPMetadata(
+        num_actual_tokens=3,
+        num_decode_tokens=1,
+        num_prefills=1,
+        attn_state=AscendAttentionState.PrefillCacheHit,
+    )
+
+    with patch.object(
+        AscendAttentionMetadataBuilder,
+        "build",
+        return_value=metadata,
+    ):
+        result = builder.build(0, common_metadata)
+
+    assert result.slot_mapping is common_metadata.slot_mapping
+    assert result.pcp_local_num_input_tokens == 4
+    assert result.attn_state == AscendAttentionState.ChunkedPrefill
+
+
+def test_pcp_cache_write_uses_gathered_inputs() -> None:
+    impl = AscendAttentionPCPImpl.__new__(AscendAttentionPCPImpl)
+    impl.attn_type = attn_module.AttentionType.DECODER
+    impl.key_cache = None
+    impl.value_cache = None
+    impl.kv_sharing_target_layer_name = None
+    impl.is_kv_producer = True
+
+    query = torch.empty((4, 2, 1))
+    output = torch.empty((4, 2, 1))
+    key = torch.arange(4).reshape(4, 1, 1)
+    value = key + 10
+    gathered_key = torch.arange(20, 27).reshape(7, 1, 1)
+    gathered_value = torch.arange(30, 37).reshape(7, 1, 1)
+    gathered_slots = torch.tensor([10, 11, -1, -1, 21, -1, -1])
+    slot_mapping = torch.tensor([10, 11, -1, -1, 20, 21, -1, -1])
+    metadata = AscendAttentionPCPMetadata(
+        num_actual_tokens=3,
+        num_decode_tokens=1,
+        pcp_local_num_input_tokens=4,
+        slot_mapping=slot_mapping,
+    )
+    key_cache = torch.empty((8, 1, 1))
+    value_cache = torch.empty((8, 1, 1))
+
+    with (
+        patch(
+            "vllm_ascend.attention.attention_v1._gather_prefill_cache_inputs",
+            return_value=(
+                (gathered_key, gathered_value),
+                gathered_slots,
+            ),
+        ) as gather_inputs,
+        patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
+        patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
+    ):
+        result = impl.reshape_and_cache(
+            query,
+            key,
+            value,
+            (key_cache, value_cache),
+            metadata,
+            output,
+        )
+
+    local_inputs, actual_slots, num_decode_tokens = gather_inputs.call_args.args
+    torch.testing.assert_close(local_inputs[0], key)
+    torch.testing.assert_close(local_inputs[1], value)
+    assert actual_slots is slot_mapping
+    assert num_decode_tokens == 1
+
+    cache_args = reshape_and_cache.call_args.kwargs
+    torch.testing.assert_close(cache_args["key"], gathered_key)
+    torch.testing.assert_close(cache_args["value"], gathered_value)
+    torch.testing.assert_close(cache_args["slot_mapping"], gathered_slots)
+    assert metadata.slot_mapping is slot_mapping
+    assert metadata.num_actual_tokens == 3
+    assert result[0] is query
+    assert result[1] is key
+    assert result[2] is value
+    assert result[3] is output
+
+
+def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
+    builder = AscendAttentionPCPMetadataBuilder.__new__(AscendAttentionPCPMetadataBuilder)
+    builder.decode_threshold = 1
+    common_metadata = SimpleNamespace(
+        context_parallel_metadata=None,
+        max_query_len=4,
+        num_reqs=2,
+        num_actual_tokens=5,
+        query_start_loc_cpu=torch.tensor([0, 1, 5], dtype=torch.int32),
+        is_prefilling=torch.tensor([True, True], dtype=torch.bool),
+    )
+
+    assert builder._split_decodes_and_prefills(common_metadata) == (0, 2, 0, 5)
 
 
 class TestAscendAttentionBackendImpl(TestBase):
@@ -288,6 +433,32 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name=None,
         )
 
+        self.impl_kv_share = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name="producer_layer",
+        )
+
+        self.impl_c8_kv_share = AscendC8AttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name="producer_layer",
+        )
+
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
         query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
@@ -379,6 +550,56 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fia.assert_called_once()
         self.assertEqual(result[0].shape, query.shape)
 
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    def test_kv_sharing_target_skips_cache_write(self, mock_reshape_and_cache):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        kv_cache = (
+            torch.empty(4, 128, 8, 64),
+            torch.empty(4, 128, 8, 64),
+        )
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+        self.impl_kv_share.is_kv_producer = False
+
+        returned = self.impl_kv_share.reshape_and_cache(query, key, value, kv_cache, metadata, output)
+
+        mock_reshape_and_cache.assert_not_called()
+        self.assertIs(self.impl_kv_share.key_cache, kv_cache[0])
+        self.assertIs(self.impl_kv_share.value_cache, kv_cache[1])
+        self.assertIs(returned[0], query)
+        self.assertIs(returned[1], key)
+        self.assertIs(returned[2], value)
+        self.assertIs(returned[3], output)
+
+    @patch("torch_npu.npu_scatter_pa_kv_cache", create=True)
+    def test_c8_kv_sharing_target_skips_nz_cache_write(self, mock_scatter_pa_kv_cache):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        kv_cache = (
+            torch.empty(4, 128, 8, 64),
+            torch.empty(4, 128, 8, 64),
+        )
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+        self.impl_c8_kv_share.is_kv_producer = False
+
+        returned = self.impl_c8_kv_share._reshape_and_cache(query, key, value, kv_cache, metadata, output)
+
+        mock_scatter_pa_kv_cache.assert_not_called()
+        self.assertIs(self.impl_c8_kv_share.key_cache, kv_cache[0])
+        self.assertIs(self.impl_c8_kv_share.value_cache, kv_cache[1])
+        self.assertIs(returned[0], query)
+        self.assertIs(returned[1], key)
+        self.assertIs(returned[2], value)
+        self.assertIs(returned[3], output)
+
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""
         query = torch.randn(10, 8 * 64)
@@ -392,11 +613,11 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         assert output.shape == (10, 8 * 64)
 
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_fused_infer_attention(
-        self, mock_get_forward_context, mock_npu_fused_infer_attention_score, mock_npu_reshape_and_cache
+        self, mock_get_forward_context, mock_npu_fused_infer_attention_score, mock_npu_scatter_pa_kv_cache
     ):
         """Test forward pass in PrefillCacheHit state"""
         query = torch.randn(10, 8, 64)
@@ -427,10 +648,10 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
     @patch("torch_npu._npu_paged_attention")
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_forward_paged_attention(
-        self, mock_get_forward_context, mock_npu_reshape_and_cache, mock_paged_attention, mock_using_paged_attention
+        self, mock_get_forward_context, mock_npu_scatter_pa_kv_cache, mock_paged_attention, mock_using_paged_attention
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(4, 8 * 64)
@@ -459,9 +680,9 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     def test_forward_decode_only_swa(
-        self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score, mock_get_forward_context
+        self, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score, mock_get_forward_context
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
@@ -490,9 +711,9 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu.npu_fused_infer_attention_score_v2")
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     def test_forward_decode_only_swa_sink(
-        self, mock_npu_reshape_and_cache, mock_fused_infer_attention_score, mock_get_forward_context
+        self, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score, mock_get_forward_context
     ):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
@@ -522,10 +743,10 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("torch_npu._npu_paged_attention")
     @patch("torch_npu.npu_fused_infer_attention_score")
-    @patch("torch_npu._npu_reshape_and_cache")
+    @patch("torch_npu.npu_scatter_pa_kv_cache")
     def test_forward_decode_only_swa_seq_len_mismatch(
         self,
-        mock_npu_reshape_and_cache,
+        mock_npu_scatter_pa_kv_cache,
         mock_fused_infer_attention_score,
         mock_paged_attention,
         mock_get_forward_context,
@@ -559,169 +780,6 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         assert output.shape == (10, 8, 64)
 
-    def test_get_kvcomp_params_early_exit(self):
-        """
-        Test that get_kvcomp_decode_params returns original values
-        when kvcomp is disabled or hashk_cache is missing.
-        """
-        query = torch.randn(10, 8, 64)
-        key = torch.randn(10, 8, 64)
-        block_table = torch.zeros(1, 5, dtype=torch.long)
-        actual_seq_lengths_kv = [10]
-
-        metadata = MagicMock()
-        # Mocking the case where hashk_caches is not properly initialized
-        kvcomp_metadata = MagicMock()
-        kvcomp_metadata.hashk_caches = [None]
-        metadata.kvcomp_metadata = kvcomp_metadata
-
-        self.impl.enable_hamming_sparse = True
-        self.impl.layerIndex = 0
-
-        res_bt, res_sl = get_kvcomp_decode_params(0, kvcomp_metadata, query, key, block_table, actual_seq_lengths_kv)
-
-        self.assertIs(res_bt, block_table)
-        self.assertEqual(res_sl, actual_seq_lengths_kv)
-
-    def test_get_kvcomp_params_reuse(self):
-        """
-        Test that in DecodeOnly state, if the current layer is a skip layer,
-        it correctly reuses the Hamming results from a previous layer.
-        """
-        query = torch.randn(10, 8, 64)
-        key = torch.randn(10, 8, 64)
-        block_table = torch.zeros(1, 5, dtype=torch.long)
-        actual_seq_lengths_kv = [10]
-
-        self.impl.enable_hamming_sparse = True
-        self.impl.layerIndex = 1
-
-        metadata = MagicMock()
-        metadata.attn_state = AscendAttentionState.DecodeOnly
-        expected_bt = torch.ones(1, 5)
-        expected_sl = torch.tensor([5])
-
-        # Construct kvcomp_metadata
-        kvcomp_metadata = MagicMock()
-        kvcomp_metadata.hashk_caches = [MagicMock(), MagicMock()]
-        kvcomp_metadata.hamming_output = expected_bt
-        kvcomp_metadata.seq_lens_from_hamming = expected_sl
-
-        kvcomp_config = MagicMock()
-        kvcomp_config.vllm_hash_attention_skip_layers = [False, True]
-        kvcomp_config.top_k_index_reuse = [0, 0]
-        kvcomp_metadata.kvcomp_config = kvcomp_config
-        metadata.kvcomp_metadata = kvcomp_metadata
-
-        metadata.hamming_output_records = [{"new_block_table": expected_bt, "new_seq_lens_list": expected_sl}, None]
-
-        res_bt, res_sl = get_kvcomp_decode_params(1, kvcomp_metadata, query, key, block_table, actual_seq_lengths_kv)
-
-        self.assertTrue(torch.equal(res_bt, expected_bt))
-        self.assertTrue(torch.equal(res_sl, expected_sl))
-
-    @patch("torch.ops._C_ascend.npu_reshape_and_cache_bnsd", create=True)
-    def test_get_kvcomp_params_prefill(self, mock_reshape_and_cache):
-        """
-        Test that in non-DecodeOnly state (e.g., Prefill), only Hash compute
-        and Cache update are performed, and original params are returned.
-        """
-        key = torch.randn(2, 8, 64)
-
-        self.impl.enable_hamming_sparse = True
-        self.impl.layerIndex = 0
-
-        metadata = MagicMock()
-        metadata.attn_state = AscendAttentionState.PrefillCacheHit
-        metadata.slot_mapping = torch.zeros(2)
-        metadata.actual_seq_lengths_q_device = torch.tensor([1, 1])
-        metadata.num_actual_tokens = 2
-        metadata.actual_query_lens = torch.tensor([1, 1], dtype=torch.int32)
-        metadata.query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
-
-        kvcomp_metadata = MagicMock()
-        kvcomp_metadata.hashk_caches = [MagicMock()]
-        kvcomp_config = MagicMock()
-        kvcomp_config.vllm_hash_attention_skip_layers = [False]
-        kvcomp_metadata.kvcomp_config = kvcomp_config
-
-        # Mock HashEncoder
-        hash_encoder = MagicMock()
-        hash_encoder.compute_hash.return_value = torch.ones(2, 8, 8)
-        kvcomp_metadata.hash_encoder = hash_encoder
-
-        metadata.kvcomp_metadata = kvcomp_metadata
-
-        reshape_and_cache_kvcomp(kvcomp_metadata, 0, key)
-
-        # Ensure cache update was called but Hamming was bypassed
-        self.assertTrue(mock_reshape_and_cache.called)
-
-    @patch("torch.ops._C_ascend.npu_reshape_and_cache_bnsd", create=True)
-    @patch("torch.ops._C_ascend.npu_hamming_dist_top_k", create=True)
-    def test_get_kvcomp_params_decode_hamming(self, mock_hamming, mock_reshape):
-        """
-        Test that in DecodeOnly state, the full flow including Hash computation
-        and Hamming Distance Top-K operation is executed.
-        """
-        query = torch.randn(2, 8, 64)
-        key = torch.randn(2, 8, 64)
-        block_table = torch.zeros(2, 5, dtype=torch.long)
-        actual_seq_lengths_kv = [10, 10]
-
-        self.impl.enable_hamming_sparse = True
-        self.impl.layerIndex = 0
-
-        metadata = MagicMock()
-        metadata.attn_state = AscendAttentionState.DecodeOnly
-        metadata.seq_lens = torch.tensor([10, 10])
-        metadata.actual_seq_lengths_q_device = torch.tensor([1, 1])
-        metadata.slot_mapping = torch.zeros(2)
-        metadata.block_tables = block_table
-        metadata.hamming_output_records = [None]
-        metadata.num_actual_tokens = 2
-        metadata.actual_query_lens = torch.tensor([1, 1], dtype=torch.int32)
-        metadata.query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
-        metadata.chunk_sizes_for_hamming = torch.tensor([64, 64], dtype=torch.int32)
-        metadata.max_seq_len_for_hamming = 1024
-        metadata.block_tables_for_hamming = torch.zeros(2, 10, dtype=torch.int32)
-        metadata.new_seq_lens_list = torch.tensor([5, 5], dtype=torch.int32)
-
-        kvcomp_metadata = MagicMock()
-        kvcomp_metadata.hashk_caches = [MagicMock()]
-
-        kvcomp_config = MagicMock()
-        kvcomp_config.vllm_hash_attention_skip_layers = [False]
-        kvcomp_config.chunk_size = 64
-        kvcomp_metadata.kvcomp_config = kvcomp_config
-
-        # Mock necessary Hamming parameters
-        kvcomp_metadata.chunk_sizes_for_hamming_full = torch.tensor([1, 1])
-        kvcomp_metadata.topk_for_hamming_full = torch.tensor([1, 1])
-        kvcomp_metadata.topk_for_hamming_full_cpu = torch.tensor([1, 1])
-        kvcomp_metadata.hamming_output = torch.zeros(2, 1)
-
-        # Mock HashEncoder
-        hash_encoder = MagicMock()
-        hash_encoder.compute_hash.return_value = torch.ones(2, 8, 8)
-        kvcomp_metadata.hash_encoder = hash_encoder
-
-        metadata.kvcomp_metadata = kvcomp_metadata
-
-        # Mock npu_hamming_dist_top_k output; note the squeeze(1) in implementation
-        mock_hamming.return_value = torch.ones(2, 1, 5)
-
-        res_bt, res_sl = get_kvcomp_decode_params(0, kvcomp_metadata, query, key, block_table, actual_seq_lengths_kv)
-
-        self.assertTrue(mock_reshape.called)
-        self.assertTrue(mock_hamming.called)
-        # Verify shape after squeeze(1) becomes (2, 5)
-        self.assertEqual(res_bt.shape, (2, 5))
-        self.assertTrue(torch.equal(res_bt, torch.ones(2, 5)))
-        # Verify the result is recorded in hamming_output_records
-        self.assertTrue(torch.equal(kvcomp_metadata.hamming_output, torch.ones(2, 5)))
-        self.assertIsNotNone(kvcomp_metadata.seq_lens_for_hamming)
-
     @patch("torch.npu.stream")
     @patch("torch.npu.graph_task_update_begin")
     @patch("torch.npu.graph_task_update_end")
@@ -747,9 +805,10 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_EXTRA_CTX.sinks = False
         mock_EXTRA_CTX.is_draft_model = False
 
-        param: list[MagicMock | None] = [MagicMock()] * 21
-        param[16] = None
-        param[20] = None
+        param: list[MagicMock | None] = [MagicMock()] * 22
+        param[16] = None  # sliding_window
+        param[17] = None  # c8_k_aq_scale
+        param[21] = None  # layer_name
 
         mock_get_graph_params.return_value.attn_params = {1: [tuple(param)] * 3}
         mock_get_graph_params.return_value.handles = {1: [MagicMock()] * 3}
@@ -772,3 +831,67 @@ class TestAscendAttentionBackendImpl(TestBase):
         ]
         self.assertEqual(attn_module._ATTN_KEYS_BUFFER, expected)
         self.assertEqual(mock_fia.out.call_count, 3)
+
+    @patch("torch.npu.stream")
+    @patch("torch.npu.graph_task_update_begin")
+    @patch("torch.npu.graph_task_update_end")
+    @patch("torch_npu._npu_paged_attention")
+    @patch("torch_npu._npu_paged_attention_get_workspace", return_value=MagicMock())
+    @patch("vllm_ascend.attention.attention_v1.get_graph_params")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
+    @patch("vllm_ascend.attention.attention_v1.needs_layer_aware_fia_graph_replay", return_value=False)
+    @patch("vllm_ascend.attention.attention_v1._ATTN_KEYS_BUFFER", new=[])
+    def test_update_graph_params_handles_captured_paged_attention_params(
+        self,
+        mock_needs_layer_aware_fia_graph_replay,
+        mock_using_paged_attention,
+        mock_EXTRA_CTX,
+        mock_get_graph_params,
+        mock_get_workspace,
+        mock_paged_attention,
+        mock_graph_task_update_end,
+        mock_graph_task_update_begin,
+        mock_stream,
+    ):
+        mock_EXTRA_CTX.sinks = False
+        mock_EXTRA_CTX.is_draft_model = False
+
+        query = MagicMock()
+        key_cache = MagicMock()
+        value_cache = MagicMock()
+        block_table = MagicMock()
+        output = MagicMock()
+        captured_seq_lens = MagicMock()
+        current_seq_lens = MagicMock()
+        pa_param = PagedAttentionGraphParam(
+            (
+                query,
+                key_cache,
+                value_cache,
+                8,
+                8,
+                1.0,
+                block_table,
+                captured_seq_lens,
+                output,
+            ),
+            "model.layers.0.self_attn.attn",
+        )
+
+        mock_get_graph_params.return_value.attn_params = {1: [pa_param]}
+        mock_get_graph_params.return_value.handles = {1: [MagicMock()]}
+        mock_get_graph_params.return_value.events = {1: [MagicMock()]}
+
+        forward_context = MagicMock()
+        forward_context.attn_metadata = {
+            "model.layers.0.self_attn.attn": MagicMock(seq_lens=current_seq_lens),
+        }
+
+        self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)
+
+        mock_get_workspace.assert_called_once()
+        mock_paged_attention.assert_called_once()
+        self.assertEqual(mock_paged_attention.call_args.kwargs["context_lens"], current_seq_lens)
+        mock_graph_task_update_begin.assert_called_once()
+        mock_graph_task_update_end.assert_called_once()

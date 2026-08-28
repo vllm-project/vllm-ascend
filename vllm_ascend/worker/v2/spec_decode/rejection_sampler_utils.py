@@ -19,25 +19,15 @@
 
 import torch
 from vllm.triton_utils import tl, triton
-
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.23.0"):
-    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-        _compute_global_logsumexp as _compute_global_lse,
-    )
-    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-        _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
-    )
-    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-        _insert_resampled_kernel,
-    )
-else:
-    from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-        _compute_block_stats_kernel,
-        _compute_global_lse,
-        _insert_resampled_kernel,
-    )
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _compute_global_logsumexp as _compute_global_lse,
+)
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
+)
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _insert_resampled_kernel,
+)
 
 
 @triton.jit
@@ -294,8 +284,19 @@ def _probabilistic_rejection_kernel(
                     PADDED_VOCAB_NUM_BLOCKS,
                 )
                 target_log_prob = target_logit - target_lse
-                # NPU does not support tl_rand64; always accept the draft token.
-                u = tl.full([], 0.0, dtype=tl.float32)
+                # Draw the acceptance threshold u ~ U(0, 1). Upstream uses
+                # tl_rand64/tl_rand32; NPU Triton lacks float64 tl_rand64 and
+                # scalar tl.rand, so generate u from a 1-element block (same
+                # pattern as _npu_gumbel_block_argmax) and clamp away from 0
+                # so that tl.log(u) stays finite.
+                # NPU: cast pos to int32 so philox uses the 32-bit path.
+                # uint64 umulhi is not supported by the Ascend vector core
+                # (matches _npu_gumbel_block_argmax). Position values fit in
+                # int32 in practice.
+                u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
+                u_seed = tl.randint(seed, u_pos)
+                u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
+                u = tl.maximum(u, 4.6566127342e-10)
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr

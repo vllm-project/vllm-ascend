@@ -19,7 +19,7 @@ The benchmarking tool used in this tutorial is AISBench, which supports performa
 
 ## **Download vllm-ascend Image**
 
-This tutorial uses the official image, version v0.13.0rc1. Use the following command to download:
+This tutorial uses the official image, version `{{ vllm_ascend_version }}`. Use the following command to download:
 
 ```bash
 
@@ -82,9 +82,6 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export TASK_QUEUE_ENABLE=1
 # Enable the AIVector core to directly schedule ROCE communication.
 export HCCL_OP_EXPANSION_MODE="AIV"
-# Enable FlashComm_v1 optimization when tensor parallel is enabled.
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
 vllm serve /data/Qwen3-32B \
   --served-model-name qwen3 \
   --trust-remote-code \
@@ -142,7 +139,7 @@ ais_bench --models vllm-api-stream-chat \
 
 ## **Test Results**
 
-Below are the detailed test results of the six open-source datasets in this evaluation. Compared to the baseline performance, the improvement in TPOT and throughput performance at different concurrency levels after enabling Suffix Decoding varies across datasets. The extent of improvement after enabling Suffix Decoding differs among the datasets. Below is a summary of the results:
+Below are the detailed test results of the six open-source datasets in this evaluation. Compared to the baseline, the improvement in TPOT and throughput performance at different concurrency levels after enabling Suffix Decoding varies across datasets. Below is a summary of the results:
 
 | **Dataset Category** | **Typical Representative** | **Throughput Improvement (BS=1-10)** | **SLO TPOT** |
 | -------------------- | -------------------------- | ------------------------------------ | ------------ |
@@ -153,7 +150,7 @@ Below is the raw detailed test results:
 
 | Concurrency         | Avg Input | Avg Output | Requests | Base TPOT(ms) | Base Throughput(TPS) | Suffix TPOT(ms) | Suffix Throughput(TPS) | Accept Rate | TPOT Gain | TPS Gain |
 | ------------------- | --------- | ---------- | -------- | ------------- | -------------------- | --------------- | ---------------------- | ----------- | --------- | -------- |
-| **Humaneval**       |           |            |          |               |                      |                 |                        |             |           |          |
+| **HumanEval**       |           |            |          |               |                      |                 |                        |             |           |          |
 | 1                   | 150       | 2700       | 100      | 55.1          | 18.1                 | 37.9            | 26.3                   | 27.0%       | 45.2%     | 45.1%    |
 | 15                  | 150       | 2700       | 100      | 61.6          | 233.8                | 45.8            | 318.2                  | 27.0%       | 34.6%     | 36.1%    |
 | 26                  | 150       | 2700       | 100      | 64.7          | 403.8                | 50.9            | 519.2                  | 27.0%       | 27.2%     | 28.6%    |

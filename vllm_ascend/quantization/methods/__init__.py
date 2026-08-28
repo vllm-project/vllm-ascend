@@ -30,10 +30,22 @@ Usage:
 from typing import Any
 
 # Import base classes
-from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
+from .base import (
+    AscendAttentionScheme,
+    AscendLinearScheme,
+    AscendMoEScheme,
+    QuantType,
+    TPWeightGatherPart,
+    TPWeightGatherSpec,
+    TPWeightRepeatPart,
+    TPWeightRepeatSpec,
+    TPWeightSwitchMixin,
+    TPWeightSwitchState,
+)
 
 # Import all scheme classes for external access
 from .fp8 import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DSDynamicLinearMethod
+from .fp8_block import AscendFp8BlockFusedMoEMethod, AscendFp8BlockLinearMethod, resolve_block_scales
 from .kv_c8 import AscendFAQuantAttentionMethod
 
 # Import registry functions
@@ -42,13 +54,13 @@ from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
 from .w4a4_mxfp4_flatquant import AscendW4A4MXFP4FlatQuantDynamicLinearMethod
-from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
+from .w4a8 import AscendW4A8DynamicFusedMoEMethod
 from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod, AscendW4A8MXFPDynamicLinearMethod
 from .w4a16 import AscendW4A16FusedMoEMethod
 from .w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from .w8a8_pdmix import AscendW8A8PDMixFusedMoeMethod, AscendW8A8PDMixLinearMethod
+from .w8a8_pdmix import AscendW8A8PDMixLinearMethod
 from .w8a8_static import AscendW8A8LinearMethod
 from .w8a8fp8_dynamic import AscendW8A8FP8DynamicFusedMoEMethod, AscendW8A8FP8DynamicLinearMethod
 from .w8a16 import AscendW8A16LinearMethod
@@ -74,11 +86,18 @@ __all__ = [
     "AscendLinearScheme",
     "AscendMoEScheme",
     "QuantType",
+    "TPWeightGatherPart",
+    "TPWeightGatherSpec",
+    "TPWeightRepeatPart",
+    "TPWeightRepeatSpec",
+    "TPWeightSwitchMixin",
+    "TPWeightSwitchState",
     # Registry functions
     "register_scheme",
     "get_scheme_class",
     # Utility functions
     "is_mx_quant_type",
+    "resolve_block_scales",
     # Scheme classes
     "AscendW8A8LinearMethod",
     "AscendW8A8DynamicLinearMethod",
@@ -87,9 +106,7 @@ __all__ = [
     "AscendW8A8FP8DynamicFusedMoEMethod",
     "AscendW8A8MXFP8DynamicLinearMethod",
     "AscendW8A8PDMixLinearMethod",
-    "AscendW8A8PDMixFusedMoeMethod",
     "AscendW8A16LinearMethod",
-    "AscendW4A8DynamicLinearMethod",
     "AscendW4A8DynamicFusedMoEMethod",
     "AscendW4A16FusedMoEMethod",
     "AscendW4A4FlatQuantDynamicLinearMethod",
@@ -100,4 +117,6 @@ __all__ = [
     "AscendW4A4MXFP4FlatQuantDynamicLinearMethod",
     "AscendW8A8MXFP8DSDynamicLinearMethod",
     "AscendW4A8MXFPDSDynamicFusedMoEMethod",
+    "AscendFp8BlockLinearMethod",
+    "AscendFp8BlockFusedMoEMethod",
 ]

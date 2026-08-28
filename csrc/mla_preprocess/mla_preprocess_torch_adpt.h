@@ -20,15 +20,20 @@
 #include "op_host/mla_preprocess.h"
 
 namespace vllm_ascend {
+constexpr int64_t MLA_PREPROCESS_FULLY_SUPPORTED_KV_LORA_RANK = 512;
+constexpr int64_t MLA_PREPROCESS_FULLY_SUPPORTED_QK_ROPE_HEAD_DIM = 64;
+
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const c10::optional<at::Tensor> &descale0, const at::Tensor &gamma1, const c10::optional<at::Tensor> &beta1, const at::Tensor &wuq,
-    const c10::optional<at::Tensor> &descale1, const at::Tensor &gamma2, const at::Tensor &cos, const at::Tensor &sin,
+    const c10::optional<at::Tensor> &descale1, const at::Tensor &gamma2,
+    const c10::optional<at::Tensor> &cos, const c10::optional<at::Tensor> &sin,
     const at::Tensor &wuk, const at::Tensor &kv_cache, const at::Tensor &kv_cache_rope, const at::Tensor &slotmapping,
     const c10::optional<at::Tensor> &quant_scale0, const c10::optional<at::Tensor> &quant_offset0, const c10::optional<at::Tensor> &bias0,
     const c10::optional<at::Tensor> &quant_scale1, const c10::optional<at::Tensor> &quant_offset1, const c10::optional<at::Tensor> &bias1,
     const c10::optional<at::Tensor> &ctkv_scale, const c10::optional<at::Tensor> &q_nope_scale,
-    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode, c10::optional<bool> enable_inner_out, at::Tensor &q_out0,
+    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode,
+    c10::optional<bool> enable_inner_out, at::Tensor &q_out0,
     at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1, at::Tensor &inner_out)
 {
     at::Tensor Descale0 =
@@ -79,16 +84,46 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
         enable_inner_out.has_value()
             ? enable_inner_out.value()
             : false;
-    
+    TORCH_CHECK(
+        cos.has_value() == sin.has_value(),
+        "mla_preprocess requires cos and sin to both be tensors or both be None.");
+    bool enableRope = cos.has_value();
+    // Use placeholder tensors because device kernels initialize RoPE input addresses unconditionally.
+    at::Tensor Cos =
+        cos.has_value()
+            ? cos.value()
+            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
+    at::Tensor Sin =
+        sin.has_value()
+            ? sin.value()
+            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
+    int64_t kvLoraRank = wuk.size(-1);
+    int64_t qkRopeHeadDim = kv_cache_rope.size(-1);
+    if (kvLoraRank != MLA_PREPROCESS_FULLY_SUPPORTED_KV_LORA_RANK ||
+        qkRopeHeadDim != MLA_PREPROCESS_FULLY_SUPPORTED_QK_ROPE_HEAD_DIM) {
+        TORCH_WARN_ONCE(
+            "mla_preprocess currently fully supports only kv_lora_rank=",
+            MLA_PREPROCESS_FULLY_SUPPORTED_KV_LORA_RANK,
+            " and qk_rope_head_dim=",
+            MLA_PREPROCESS_FULLY_SUPPORTED_QK_ROPE_HEAD_DIM,
+            ", but received kv_lora_rank=",
+            kvLoraRank,
+            " and qk_rope_head_dim=",
+            qkRopeHeadDim,
+             ". Inputs outside the fully supported configuration are allowed to continue, "
+             "but may produce accuracy issues.");
+    }
     auto [workspace_tensor, tiling, block_dim] = mlapo::mla_preprocess_tiling(
         hiddenState,
         wdqkv,
         wuk,
         gamma1,
+        kv_cache,
         kv_cache_rope,
         cache_mode,
         quant_mode,
-        enableInnerOut
+        enableInnerOut,
+        enableRope
     );
 
     void *hidden_state_ptr = hiddenState.data_ptr();
@@ -101,8 +136,8 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &>
     void *quant_scale1_ptr = Quant_scale1.data_ptr();
     void *quant_offset1_ptr = Quant_offset1.data_ptr();
     void *gamma2_ptr = gamma2.data_ptr();
-    void *sin_ptr = sin.data_ptr();
-    void *cos_ptr = cos.data_ptr();
+    void *sin_ptr = Sin.data_ptr();
+    void *cos_ptr = Cos.data_ptr();
     void *kv_cache_ptr = kv_cache.data_ptr();
     void *slotmapping_ptr = slotmapping.data_ptr();
     void *wuq_ptr = wuq.data_ptr();

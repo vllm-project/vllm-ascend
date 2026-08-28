@@ -13,7 +13,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       SERVER_PORT: "DEFAULT_PORT"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
       VLLM_RPC_TIMEOUT: "6000"
     server_cmd:
@@ -36,7 +35,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.9"
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":0}'
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--compilation-config"
@@ -72,5 +71,5 @@ test_cases:
         max_out_len: 1024
         batch_size: 2
         request_rate: 0
-        baseline: 56.357
+        baseline: 70.82067
         threshold: 0.97

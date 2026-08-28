@@ -40,6 +40,7 @@ export DOCS_IS_RELEASE=$( [ "${READTHEDOCS_VERSION_TYPE:-}" = tag ] && echo true
 
 # --- Chinese-mode settings -------------------------------------------------
 if [ "$DOCS_LANG" = "zh" ]; then
+    export DOCS_BETTEREM_SMART_ENABLE="${DOCS_BETTEREM_SMART_ENABLE:-underscore}"
     export DOCS_DIR=docs/source/zh
     export DOCS_MACROS_DIR=docs/source/zh
     export DOCS_SITE_NAME="vLLM Ascend (中文)"
@@ -62,6 +63,14 @@ if [ "$DOCS_LANG" = "zh" ]; then
     echo "[rtd-build] Mirroring shared static assets into docs/source/zh/..."
     mkdir -p docs/source/zh/stylesheets
     cp docs/source/stylesheets/extra.css docs/source/zh/stylesheets/extra.css
+else
+    export DOCS_BETTEREM_SMART_ENABLE="${DOCS_BETTEREM_SMART_ENABLE:-all}"
+fi
+
+# --- Local development server ---------------------------------------------
+if [ "${DOCS_SERVE:-}" = true ]; then
+    echo "[rtd-build] Serving docs locally (DOCS_LANG=$DOCS_LANG, DOCS_IS_RELEASE=$DOCS_IS_RELEASE)..."
+    exec mkdocs serve
 fi
 
 # --- Output directory ------------------------------------------------------

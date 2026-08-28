@@ -16,12 +16,13 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
+DEFAULT_TENANT_ID = "default"
 
 
 @functools.lru_cache(maxsize=1)
@@ -60,7 +61,7 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
 
 
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
@@ -70,6 +71,7 @@ class MooncakeBackend(Backend):
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
         self._lazy_init = lazy_init and self._use_fabric_mem
+        self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
 
@@ -77,7 +79,7 @@ class MooncakeBackend(Backend):
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def _ensure_initialized(self):
+    def ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -102,9 +104,11 @@ class MooncakeBackend(Backend):
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
         ssd_kwargs = _ssd_setup_kwargs(self.config)
-        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
-            # Per-rank SSD directory keyed by the globally unique rank so that
-            # DP/TP/PP/CP replicas never share a directory (dense and MoE alike).
+        # Each rank that contributes memory to the pool uses its own SSD
+        # directory to avoid bucket file collisions. Key by the globally unique
+        # rank so that DP/TP/PP/CP replicas never share a directory (dense and
+        # MoE alike); only ranks that contribute memory need an offload dir.
+        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
             global_rank = get_global_rank(self.parallel_config)
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
@@ -112,6 +116,9 @@ class MooncakeBackend(Backend):
             except OSError as e:
                 raise RuntimeError(f"Failed to create per-rank SSD offload directory: {rank_path!r} ({e})")
             ssd_kwargs["ssd_offload_path"] = rank_path
+        setup_kwargs = dict(ssd_kwargs)
+        if self.config.tenant_id != DEFAULT_TENANT_ID:
+            setup_kwargs["tenant_id"] = self.config.tenant_id
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
@@ -121,25 +128,25 @@ class MooncakeBackend(Backend):
             ret = store.setup(
                 local_hostname=self.local_seg,
                 metadata_server=self.config.metadata_server,
-                global_segment_size=self.config.global_segment_size,
-                local_buffer_size=self.config.local_buffer_size,
+                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
+                local_buffer_size=self.config.local_buffer_size if self._contribute_memory else 0,
                 protocol=self.config.protocol,
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
                 engine=transfer_engine.get_engine(),
-                **ssd_kwargs,
+                **setup_kwargs,
             )
         else:
             self.local_seg = local_hostname
             ret = store.setup(
                 local_hostname=self.local_seg,
                 metadata_server=self.config.metadata_server,
-                global_segment_size=self.config.global_segment_size,
+                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
                 local_buffer_size=0,
                 protocol=self.config.protocol,
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
-                **ssd_kwargs,
+                **setup_kwargs,
             )
 
         if ret != 0:
@@ -155,7 +162,13 @@ class MooncakeBackend(Backend):
                 "Mooncake SSD offload enabled (Mode A): path=%s",
                 self.config.ssd_offload_path,
             )
+        logger.info("Mooncake tenant_id=%s", self.config.tenant_id)
         return store
+
+    @classmethod
+    def create_scheduler_client(cls, parallel_config: ParallelConfig):
+        torch.npu.set_device(0)
+        return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
         local_rank = get_world_group().local_rank
@@ -179,9 +192,9 @@ class MooncakeBackend(Backend):
         return self.store.batch_is_exist(keys)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        self.ensure_initialized()
+        assert self.store is not None
         try:
-            self._ensure_initialized()
-            assert self.store is not None
             config = ReplicateConfig()
             if self.config.preferred_segment:
                 config.preferred_segment = self.local_seg
@@ -202,16 +215,13 @@ class MooncakeBackend(Backend):
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
-                "Failed to put %d keys out of %d. Check store state and memory.",
+                "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
                 len(keys),
                 len(keys),
-            )
-            logger.debug(
-                "Failed to put key details. keys=%s, type=%s, error=%s",
-                keys,
                 type(e).__name__,
                 e,
             )
+            logger.debug("Failed to put key details. keys=%s", keys)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
 
@@ -251,16 +261,13 @@ class MooncakeBackend(Backend):
             return res_list
         except Exception as e:
             logger.error(
-                "Failed to get %d keys out of %d. Check store state and network.",
+                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
                 len(keys),
                 len(keys),
-            )
-            logger.debug(
-                "Failed to get key details. keys=%s, type=%s, error=%s",
-                keys,
                 type(e).__name__,
                 e,
             )
+            logger.debug("Failed to get key details. keys=%s", keys)
             return None
 
 
@@ -276,6 +283,7 @@ class MooncakeStoreConfig:
     prefer_alloc_in_same_node: bool
     enable_ssd_offload: bool = False
     ssd_offload_path: str = ""
+    tenant_id: str = DEFAULT_TENANT_ID
 
     def __post_init__(self) -> None:
         if not self.enable_ssd_offload:
@@ -310,6 +318,7 @@ class MooncakeStoreConfig:
             prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
             enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
             ssd_offload_path=config.get("ssd_offload_path", ""),
+            tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
         )
 
     @staticmethod
@@ -318,6 +327,15 @@ class MooncakeStoreConfig:
         if not config_path:
             raise ValueError("The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
         return MooncakeStoreConfig.from_file(config_path)
+
+
+def _normalize_tenant_id(value: Any) -> str:
+    if value is None:
+        return DEFAULT_TENANT_ID
+    if not isinstance(value, str):
+        raise TypeError(f"tenant_id must be a string or null, got {type(value).__name__}: {value!r}")
+    tenant_id = value.strip()
+    return tenant_id if tenant_id else DEFAULT_TENANT_ID
 
 
 def _parse_global_segment_size(value) -> int:

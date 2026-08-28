@@ -1,6 +1,6 @@
 # GLM-4.5/4.6/4.7
 
-## Introduction
+## 1 Introduction
 
 GLM-4.x series models use a Mixture-of-Experts (MoE) architecture and are foundational models specifically designed for agent applications.
 
@@ -8,27 +8,29 @@ The `GLM-4.5` model is first supported in `vllm-ascend:v0.10.0rc1`.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-## Supported Features
+## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment Preparation
+## 3 Prerequisites
 
-### Model Weight
+### 3.1 Model Weight
 
 - `GLM-4.5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5).
 - `GLM-4.6`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6).
 - `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
 - `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
-- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Last month, it was supported; you can use the following quantization scheme to add mtp weights to the quantized weights.
-- `GLM-4.7-w8a8-with-float-mtp`(Quantized version without mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
+- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Since it is now supported, you can use the following quantization scheme to add mtp weights to the quantized weights.
+- `GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
 - `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
-### Installation
+## 4 Installation
+
+### 4.1 Docker Image Installation
 
 You can use our official docker image to run `GLM-4.x` directly.
 
@@ -74,7 +76,7 @@ You can use our official docker image to run `GLM-4.x` directly.
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```bash
 
@@ -104,18 +106,20 @@ You can use our official docker image to run `GLM-4.x` directly.
         -it $IMAGE bash
     ```
 
+### 4.2 Source Code Installation
+
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
 - Install `vllm-ascend` from source, refer to [installation](../../installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
-### Single-node Deployment
+### 5.1 Single-node Deployment
 
 - In low-latency scenarios, we recommend a single-machine deployment.
-- Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
+- Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8).
 
 Run the following script to execute online inference.
 
@@ -126,7 +130,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -141,122 +144,121 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --quantization ascend \
   --trust-remote-code \
   --gpu-memory-utilization 0.9 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+  --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
 ```
 
 **Notice:**
 The parameters are explained as follows:
 
 - `fusion_ops_gmmswigluquant` The performance of the GmmSwigluQuant fusion operator tends to degrade when the total number of NPUs is ≤ 16.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1` Due to the FD feature of the FIA operator being invalidated by padding data introduced by this feature, we recommend disabling the `flashcomm1` feature for long-sequence (≥16k) and low-concurrency (≤8 batch size) scenarios.For long-sequence and high-concurrency scenarios, you may enable this feature to achieve improved Prefill performance.
 
-### Multi-node Deployment
+### 5.2 Multi-node Deployment
 
-While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64G × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
+While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64GB × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
 
-**Node 0**
+=== "Node 0"
 
-```shell
-#!/bin/sh
+    ```shell
 
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
+    #!/bin/sh
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_BUFFSIZE=512
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xxxx"
 
-vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
-  --host 0.0.0.0 \
-  --port 8004 \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 0 \
-  --data-parallel-address $local_ip \
-  --data-parallel-rpc-port 13389 \
-  --tensor-parallel-size 8 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --max-model-len 140000 \
-  --max-num-batched-tokens 8192 \
-  --max-num-seqs 16 \
-  --quantization ascend \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --enable-auto-tool-choice \
-  --reasoning-parser glm45 \
-  --tool-call-parser glm47 \
-  --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
-  --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
-```
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_BUFFSIZE=512
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
-**Node 1**
+    vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
+    --host 0.0.0.0 \
+    --port 8004 \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 0 \
+    --data-parallel-address $local_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --max-model-len 140000 \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 16 \
+    --quantization ascend \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --served-model-name glm47 \
+    --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
+    --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
+    ```
 
-```shell
-#!/bin/sh
+=== "Node 1"
 
-# this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip of the current node
-nic_name="xxxx"
-local_ip="xxxx"
-node0_ip="xxxx" # same as the local_IP address in node 0
+    ```shell
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_BUFFSIZE=512
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+    #!/bin/sh
 
-vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
-  --host 0.0.0.0 \
-  --port 8004 \
-  --headless \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 1 \
-  --data-parallel-address $node0_ip \
-  --data-parallel-rpc-port 13389 \
-  --tensor-parallel-size 8 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --max-model-len 140000 \
-  --max-num-batched-tokens 8192 \
-  --max-num-seqs 16 \
-  --quantization ascend \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --enable-auto-tool-choice \
-  --reasoning-parser glm45 \
-  --tool-call-parser glm47 \
-  --served-model-name glm47 \
-  --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
-  --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
-```
+    # this obtained through ifconfig
+    # nic_name is the network interface name corresponding to local_ip of the current node
+    nic_name="xxxx"
+    local_ip="xxxx"
+    node0_ip="xxxx" # same as the local_IP address in node 0
 
-### Prefill-Decode Disaggregation
+    export HCCL_IF_IP=$local_ip
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export HCCL_BUFFSIZE=512
+    export OMP_PROC_BIND=false
+    export OMP_NUM_THREADS=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_OP_EXPANSION_MODE=AIV
+    export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
-We'd like to show the deployment guide of `GLM-4.7` on multi-node environment with 2P1D for better performance.
+    vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
+    --host 0.0.0.0 \
+    --port 8004 \
+    --headless \
+    --data-parallel-size 2 \
+    --data-parallel-size-local 1 \
+    --data-parallel-start-rank 1 \
+    --data-parallel-address $node0_ip \
+    --data-parallel-rpc-port 13389 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --max-model-len 140000 \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 16 \
+    --quantization ascend \
+    --trust-remote-code \
+    --gpu-memory-utilization 0.9 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --served-model-name glm47 \
+    --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
+    --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
+    ```
+
+### 5.3 Prefill-Decode Disaggregation
+
+We'd like to show the deployment guide of `GLM-4.7` in a multi-node environment with 2P1D for better performance.
 
 Before you start, please
 
@@ -365,9 +367,10 @@ Before you start, please
 
 2. prepare the script `run_dp_template.sh` on each node.
 
-    1. Prefill node 0
+    === "Prefill node 0"
 
         ```shell
+
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
@@ -406,7 +409,7 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"mtp", "enforce_eager":true}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
@@ -427,9 +430,10 @@ Before you start, please
 
         ```
 
-    2. Prefill node 1
+    === "Prefill node 1"
 
         ```shell
+
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
@@ -468,7 +472,7 @@ Before you start, please
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 1, "method":"mtp", "enforce_eager":true}' \
             --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}' \
             --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
@@ -488,9 +492,10 @@ Before you start, please
             }' 2>&1
         ```
 
-    3. Decode node 0
+    === "Decode node 0"
 
         ```shell
+
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
         export HCCL_IF_IP=$local_ip
@@ -512,7 +517,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -532,13 +536,13 @@ Before you start, please
             --trust-remote-code \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
-            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
+            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "enable_fused_mc2": 1, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
@@ -556,9 +560,10 @@ Before you start, please
             }'
         ```
 
-    4. Decode node 1
+    === "Decode node 1"
 
         ```shell
+
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
         export HCCL_IF_IP=$local_ip
@@ -580,7 +585,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -600,13 +604,13 @@ Before you start, please
             --trust-remote-code \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp"}' \
+            --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
             --profiler-config \
             '{"profiler": "torch",
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
-            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
+            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "enable_fused_mc2": 1, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
@@ -626,35 +630,39 @@ Before you start, please
 
 Once the preparation is done, you can start the server with the following command on each node:
 
-1. Prefill node 0
+=== "Prefill node 0"
 
     ```shell
+
     # change ip to your own
     python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p0_ip --dp-rpc-port 12880 --vllm-start-port 9300
     ```
 
-2. Prefill node 1
+=== "Prefill node 1"
 
     ```shell
+
     # change ip to your own
     python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address $node_p1_ip --dp-rpc-port 12880 --vllm-start-port 9300
     ```
 
-3. Decode node 0
+=== "Decode node 0"
 
     ```shell
+
     # change ip to your own
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
     ```
 
-4. Decode node 1
+=== "Decode node 1"
 
     ```shell
+
     # change ip to your own
     python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12778 --vllm-start-port 9300
     ```
 
-### Request Forwarding
+### 5.4 Request Forwarding
 
 To set up request forwarding, run the following script on any machine. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
@@ -685,7 +693,7 @@ python load_balance_proxy_server_example.py \
       9300 9301 9302 9303
 ```
 
-## Functional Verification
+## 6 Functional Verification
 
 Once your server is started, you can query the model with input prompts:
 
@@ -694,19 +702,19 @@ curl -H "Accept: application/json" \
     -H "Content-type: application/json" \
     -X POST \
     -d '{
-        "model": "glm", 
-        "messages": [{ 
-            "role": "user", 
-            "content": "The future of AI is" 
-        }], 
-        "stream": false, 
-        "ignore_eos": false, 
-        "temperature": 0, 
-        "max_tokens": 200 
+        "model": "glm",
+        "messages": [{
+            "role": "user",
+            "content": "The future of AI is"
+        }],
+        "stream": false,
+        "ignore_eos": false,
+        "temperature": 0,
+        "max_tokens": 200
     }' http://<node0_ip>:<port>/v1/chat/completions
 ```
 
-## Accuracy Evaluation
+## 7 Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
 
@@ -718,14 +726,14 @@ Here are two accuracy evaluation methods.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 |----- | ----- | ----- | ----- | -----| ----- |
-| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64G × 16) |
-| MATH500 | - | accuracy | gen | 98.8 | 1 Atlas 800 A3 (64G × 16) |
+| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64GB × 16) |
+| MATH500 | - | accuracy | gen | 98.8 | 1 Atlas 800 A3 (64GB × 16) |
 
 ### Using Language Model Evaluation Harness
 
 Not tested yet.
 
-## Performance
+## 8 Performance Evaluation
 
 ### Using AISBench
 
@@ -767,7 +775,7 @@ vllm bench serve \
 
 After about several minutes, you can get the performance evaluation result.
 
-## Best Practices
+## 9 Performance Tuning
 
 In this chapter, we recommend best practices for three scenarios:
 
@@ -776,9 +784,9 @@ In this chapter, we recommend best practices for three scenarios:
 - High-throughput: For short sequences with high throughput: we also recommend setting `dp2 tp8`
 
 **Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#deployment)** chapter.
+`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Online Service Deployment](#5-online-service-deployment)** chapter.
 
-## FAQ
+## 10 FAQ
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 
