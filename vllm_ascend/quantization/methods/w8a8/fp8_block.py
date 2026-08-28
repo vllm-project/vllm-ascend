@@ -45,8 +45,8 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 from vllm_ascend.utils import FP8_METHOD, is_950, maybe_trans_nz
 
-from .base import AscendLinearScheme, AscendMoEScheme, QuantType
-from .registry import register_scheme
+from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
+from ..registry import register_scheme
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicFusedMoEMethod, AscendW8A8MXFP8DynamicLinearMethod
 
 BLOCK_FP8_WEIGHT_DTYPE = torch.float8_e4m3fn

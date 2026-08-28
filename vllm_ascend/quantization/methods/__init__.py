@@ -42,7 +42,6 @@ from .base import (
     TPWeightSwitchMixin,
     TPWeightSwitchState,
 )
-from .fp8_block import AscendFp8BlockFusedMoEMethod, AscendFp8BlockLinearMethod, resolve_block_scales
 from .kv_cache import AscendFAQuantAttentionMethod
 from .registry import get_scheme_class, register_scheme
 from .w4a4 import (
@@ -59,6 +58,8 @@ from .w4a8 import (
     AscendW4A8MXFPDynamicLinearMethod,
 )
 from .w8a8 import (
+    AscendFp8BlockFusedMoEMethod,
+    AscendFp8BlockLinearMethod,
     AscendW8A8DynamicFusedMoEMethod,
     AscendW8A8DynamicLinearMethod,
     AscendW8A8FP8DynamicFusedMoEMethod,
@@ -67,6 +68,7 @@ from .w8a8 import (
     AscendW8A8MXFP8DSDynamicLinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
     AscendW8A8PDMixLinearMethod,
+    resolve_block_scales,
 )
 from .wna16 import AscendW4A16FusedMoEMethod, AscendW4A16MXFP4FusedMoEMethod, AscendW8A16LinearMethod
 

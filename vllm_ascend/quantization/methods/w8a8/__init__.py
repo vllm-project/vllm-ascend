@@ -16,6 +16,7 @@
 #
 """W8A8 quantization methods for Ascend NPU."""
 
+from .fp8_block import AscendFp8BlockFusedMoEMethod, AscendFp8BlockLinearMethod, resolve_block_scales
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 from .w8a8_mxfp8 import AscendW8A8MXFP8DSDynamicLinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from .w8a8_pdmix import AscendW8A8PDMixLinearMethod
@@ -23,6 +24,8 @@ from .w8a8_static import AscendW8A8LinearMethod
 from .w8a8fp8_dynamic import AscendW8A8FP8DynamicFusedMoEMethod, AscendW8A8FP8DynamicLinearMethod
 
 __all__ = [
+    "AscendFp8BlockFusedMoEMethod",
+    "AscendFp8BlockLinearMethod",
     "AscendW8A8DynamicFusedMoEMethod",
     "AscendW8A8DynamicLinearMethod",
     "AscendW8A8FP8DynamicFusedMoEMethod",
@@ -31,4 +34,5 @@ __all__ = [
     "AscendW8A8MXFP8DSDynamicLinearMethod",
     "AscendW8A8MXFP8DynamicLinearMethod",
     "AscendW8A8PDMixLinearMethod",
+    "resolve_block_scales",
 ]

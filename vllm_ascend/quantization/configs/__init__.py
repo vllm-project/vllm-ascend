@@ -18,10 +18,12 @@
 
 from .compressed_tensors_config import AscendCompressedTensorsConfig
 from .fp8_config import AscendFp8Config
+from .modelopt_mxfp8_config import AscendModelOptMxFp8Config
 from .modelslim_config import AscendModelSlimConfig
 
 __all__ = [
     "AscendCompressedTensorsConfig",
     "AscendFp8Config",
+    "AscendModelOptMxFp8Config",
     "AscendModelSlimConfig",
 ]

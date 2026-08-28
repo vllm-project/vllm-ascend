@@ -16,7 +16,6 @@
 from typing import Optional
 
 import torch
-from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -27,9 +26,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 
-
-def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    return isinstance(layer, (MoERunner, RoutedExperts))
+from vllm_ascend.quantization.utils import is_fused_moe_layer
 
 
 @register_quantization_config("mxfp8")
@@ -50,11 +47,11 @@ class AscendModelOptMxFp8Config(ModelOptMxFp8Config):
         from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
         from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
-        from .method_adapters import (
+        from ..method_adapters import (
             AscendFusedMoEMethod,
             AscendLinearMethod,
         )
-        from .methods.w8a8_mxfp8 import (
+        from ..methods.w8a8.w8a8_mxfp8 import (
             AscendW8A8MXFP8DynamicFusedMoEMethod,
             AscendW8A8MXFP8DynamicLinearMethod,
         )
@@ -64,7 +61,7 @@ class AscendModelOptMxFp8Config(ModelOptMxFp8Config):
                 return UnquantizedEmbeddingMethod()
             if isinstance(layer, LinearBase):
                 return AscendUnquantizedLinearMethod()
-            if _is_fused_moe_layer(layer):
+            if is_fused_moe_layer(layer):
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config, tid2eid)
             return None
 
@@ -80,7 +77,7 @@ class AscendModelOptMxFp8Config(ModelOptMxFp8Config):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             return AscendLinearMethod(AscendW8A8MXFP8DynamicLinearMethod())
 
-        if _is_fused_moe_layer(layer):
+        if is_fused_moe_layer(layer):
             return AscendFusedMoEMethod(
                 AscendW8A8MXFP8DynamicFusedMoEMethod(),
                 layer.moe_config,

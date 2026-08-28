@@ -8,12 +8,13 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_fused_moe_layer, is_layer_skipped
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
 from vllm_ascend.utils import FP8_METHOD
 
 from ..methods import get_scheme_class
+from ..utils import is_fused_moe_layer
 
 # vLLM 0.27.1's is_layer_skipped has no match_mode; newer trees default to exact.
 _IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE = "match_mode" in inspect.signature(is_layer_skipped).parameters
@@ -67,13 +68,13 @@ class AscendFp8Config(Fp8Config):
         from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
         from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
-        from .method_adapters import (
+        from ..method_adapters import (
             AscendFusedMoEMethod,
             AscendLinearMethod,
         )
 
         is_linear = isinstance(layer, LinearBase)
-        is_moe = _is_fused_moe_layer(layer)
+        is_moe = is_fused_moe_layer(layer)
         if not is_linear and not is_moe:
             return None
 

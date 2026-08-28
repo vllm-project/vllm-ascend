@@ -138,7 +138,7 @@ class TestAscendFp8Config(TestBase):
         quantized_prefix = "model.layers.0.mlp.gate_proj"
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=MagicMock(),
             ),
             patch(
@@ -173,7 +173,7 @@ class TestAscendFp8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ) as mock_get_scheme,
             patch(
@@ -197,7 +197,7 @@ class TestAscendFp8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ) as mock_get_scheme,
             patch(
@@ -239,9 +239,9 @@ class TestAscendFp8Config(TestBase):
 
         config = self.build_config()
         with (
-            patch("vllm_ascend.quantization.fp8_config._IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE", False),
-            patch("vllm_ascend.quantization.fp8_config.is_layer_skipped", side_effect=old_is_layer_skipped),
-            patch("vllm_ascend.quantization.fp8_config.get_scheme_class", return_value=MagicMock()),
+            patch("vllm_ascend.quantization.configs.fp8_config._IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE", False),
+            patch("vllm_ascend.quantization.configs.fp8_config.is_layer_skipped", side_effect=old_is_layer_skipped),
+            patch("vllm_ascend.quantization.configs.fp8_config.get_scheme_class", return_value=MagicMock()),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
                 return_value="block-fp8",

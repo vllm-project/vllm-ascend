@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .configs.compressed_tensors_config import AscendCompressedTensorsConfig
     from .configs.fp8_config import AscendFp8Config
-    from .modelopt_mxfp8_config import AscendModelOptMxFp8Config
+    from .configs.modelopt_mxfp8_config import AscendModelOptMxFp8Config
     from .configs.modelslim_config import AscendModelSlimConfig
 
 __all__ = [
@@ -51,7 +51,7 @@ def __getattr__(name: str) -> Any:
 
         return AscendFp8Config
     if name == "AscendModelOptMxFp8Config":
-        from .modelopt_mxfp8_config import AscendModelOptMxFp8Config
+        from .configs.modelopt_mxfp8_config import AscendModelOptMxFp8Config
 
         return AscendModelOptMxFp8Config
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

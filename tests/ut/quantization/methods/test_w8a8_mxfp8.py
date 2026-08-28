@@ -27,11 +27,11 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         vllm_config.quant_config = SimpleNamespace()
         with (
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                 return_value=vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
                 return_value=0,
             ),
         ):
@@ -156,11 +156,11 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         vllm_config.use_v2_model_runner = True
         with (
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                 return_value=vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_ascend_config",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
                 return_value=create_mock_ascend_config(),
             ),
         ):
