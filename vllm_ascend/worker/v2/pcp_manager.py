@@ -61,8 +61,6 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("Ascend MRV2 PCP does not support PP yet.")
         if model_config.is_encoder_decoder:
             raise NotImplementedError("Ascend MRV2 PCP does not support encoder-decoder models yet.")
-        if supports_mm_inputs:
-            raise NotImplementedError("Ascend MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("Ascend MRV2 PCP does not support LoRA yet.")
 
