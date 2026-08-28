@@ -864,7 +864,7 @@ estimated_times:
   tests/ut/attention/a2/test_mla_cp_precision.py: 30
   tests/ut/attention/a2/test_mla_precision.py: 410
   tests/ut/attention/a2/test_mla_v1.py: 60
-  tests/ut/attention/a2/test_sfa_cp_precision.py: 30
+  tests/ut/attention/test_sfa_cp_precision.py: 30
   tests/ut/attention/a2/test_sfa_v1.py: 30
   tests/ut/attention/a2/test_sfa_v1_precision.py: 150
   tests/ut/compilation/a2/test_acl_graph.py: 40
