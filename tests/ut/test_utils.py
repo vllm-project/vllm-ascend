@@ -505,3 +505,47 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_check_gdn_layer_supports_kimi_linear_config_property():
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                text_config=KimiLinearConfig(
+                    linear_attn_config={
+                        "kda_layers": [2],
+                        "full_attn_layers": [1],
+                    }
+                )
+            )
+        )
+    )
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_nested_layer_types():
+    hf_config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["linear_attention"]))
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_qwen3_next_config():
+    from transformers import Qwen3NextConfig
+
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3NextConfig()))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_returns_false_without_linear_attention():
+    from transformers import Qwen3Config
+
+    # Dense Qwen3 configs, including Qwen3-8B, expose only full-attention
+    # layer types and must not be classified as hybrid GDN models.
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3Config()))
+
+    assert utils.check_gdn_layer(vllm_config) is False

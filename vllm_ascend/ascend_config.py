@@ -19,7 +19,7 @@ import dataclasses
 import importlib.util
 import json
 import os
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
 from pydantic_core import ArgsKwargs
@@ -239,7 +239,7 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
-    enable_mc2_hierarchy_comm: bool = False
+    enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     draft_window_size: int | None = None
@@ -251,6 +251,7 @@ class AscendConfig:
     )
     dump_config_path: str | None = None
     c8_enable_reshape_optim: bool = False
+    mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
@@ -325,6 +326,9 @@ class AscendConfig:
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
+        # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
+        if self.enable_mc2_hierarchy_comm:
+            self.mc2_comm_alg = "hierarchy"
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
@@ -499,7 +503,7 @@ class AscendConfig:
             and vc.compilation_config.pass_config.enable_sp
         )
 
-        self._validate_mc2_hierarchy_comm(vc)
+        self._validate_mc2_comm_alg(vc)
 
         # mega_moe_max_tokens range
         if self.mega_moe_max_tokens <= 0:
@@ -530,16 +534,22 @@ class AscendConfig:
         self._validate_sparse_c8_kv_offload_compatibility()
         return self
 
-    def _validate_mc2_hierarchy_comm(self, vllm_config: VllmConfig) -> None:
-        if not self.enable_mc2_hierarchy_comm:
-            return
-
+    def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
         from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
         device_type = get_ascend_device_type()
+
+        if self.mc2_comm_alg == "fullmesh_v2" and device_type != AscendDeviceType.A3:
+            raise NotImplementedError(
+                f"mc2_comm_alg == 'fullmesh_v2' is only supported on A3, but got {device_type.name}."
+            )
+
+        if self.mc2_comm_alg != "hierarchy":
+            return
+
         if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
             raise NotImplementedError(
-                f"enable_mc2_hierarchy_comm is only supported on A2 and A3, but got {device_type.name}."
+                f"mc2_comm_alg == 'hierarchy' is only supported on A2 and A3, but got {device_type.name}."
             )
 
         num_logical_experts = vllm_config.model_config.get_num_experts()
@@ -547,9 +557,16 @@ class AscendConfig:
         num_experts = num_logical_experts + num_redundant_experts
         if num_experts > 512:
             raise ValueError(
-                "enable_mc2_hierarchy_comm supports at most 512 experts, "
+                "mc2_comm_alg == 'hierarchy' supports at most 512 experts, "
                 f"but got {num_experts} experts "
                 f"({num_logical_experts} logical experts + {num_redundant_experts} EPLB redundant experts)."
+            )
+
+        # Fused MC2 and hierarchy communication are mutually exclusive.
+        if self.enable_fused_mc2:
+            raise ValueError(
+                "fused mc2 op cannot be used with hierarchy communication. "
+                "Please set additional_config.enable_fused_mc2 to 0."
             )
 
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
@@ -714,6 +731,15 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+    def get_mc2_comm_alg(self) -> str:
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
+        # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
+        if self.mc2_comm_alg == "fullmesh" and get_ascend_device_type() == AscendDeviceType.A3:
+            return "fullmesh_v1"
+        return self.mc2_comm_alg
 
 
 @config

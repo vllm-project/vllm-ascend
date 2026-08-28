@@ -927,23 +927,23 @@ class TestUpstreamConfigCompatibility(TestBase):
     def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, mock_device_type):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
-            enable_mc2_hierarchy_comm=True,
+            mc2_comm_alg="hierarchy",
         )
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 513))
 
         with self.assertRaisesRegex(ValueError, "supports at most 512 experts"):
-            config._validate_mc2_hierarchy_comm(vllm_config)
+            config._validate_mc2_comm_alg(vllm_config)
 
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
     def test_mc2_hierarchy_comm_rejects_unsupported_device(self, mock_device_type):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
-            enable_mc2_hierarchy_comm=True,
+            mc2_comm_alg="hierarchy",
         )
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 1))
 
         with self.assertRaisesRegex(NotImplementedError, "only supported on A2 and A3"):
-            config._validate_mc2_hierarchy_comm(vllm_config)
+            config._validate_mc2_comm_alg(vllm_config)
 
 
 class TestTopLevelSwitchTypeValidation(TestBase):
