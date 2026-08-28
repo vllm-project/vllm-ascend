@@ -710,8 +710,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
-            # A request may enqueue multiple save batches. Invalidate a
-            # completion left by an earlier batch before tracking the next one.
+            # Invalidate completion from an earlier batch.
             self.finished_requests.discard(req_id)
             self.stored_requests[req_id] += 1
 

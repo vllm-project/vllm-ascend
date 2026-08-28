@@ -1761,12 +1761,6 @@ class KVPoolWorker:
 
         self.current_layer = self.current_layer + 1
 
-    def _requires_current_step_save_fence(self, request: ReqMeta) -> bool:
-        return any(
-            request.save_end_token % self._get_effective_group_block_size(group_id) != 0
-            for group_id in request.kv_cache_group_ids or [0]
-        )
-
     def prepare_save(self, connector_metadata: AscendConnectorMetadata) -> None:
         """Submit key/exists/address preparation before model forward."""
         if self.use_layerwise or self.tp_mismatch:
@@ -1784,7 +1778,11 @@ class KVPoolWorker:
             return
         for request in requests:
             request.skip_null_blocks_by_group = self.group_uses_align_state
-        force_current_step = any(self._requires_current_step_save_fence(request) for request in requests)
+        force_current_step = any(
+            request.save_end_token % self._get_effective_group_block_size(group_id) != 0
+            for request in requests
+            for group_id in request.kv_cache_group_ids or [0]
+        )
         self._prepared_save_batch = self.kv_send_thread.prepare_save_batch(
             requests,
             force_current_step=force_current_step,
@@ -1814,13 +1812,13 @@ class KVPoolWorker:
 
         current_batch = self._prepared_save_batch
         self._prepared_save_batch = None
+        if current_batch is None:
+            return
 
-        if current_batch is not None:
-            current_event = torch.npu.Event()
-            current_event.record()
-            self.kv_send_thread.commit_save_batch(current_batch, current_event)
-
-        if current_batch is not None and current_batch.force_current_step:
+        current_event = torch.npu.Event()
+        current_event.record()
+        self.kv_send_thread.commit_save_batch(current_batch, current_event)
+        if current_batch.force_current_step:
             self.kv_send_thread.wait_for_batch(current_batch)
 
     def retrieve_layer(

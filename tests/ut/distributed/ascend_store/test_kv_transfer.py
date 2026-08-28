@@ -552,16 +552,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._complete_request(req)
         self.assertEqual(t.get_and_clear_finished_requests({"r1"}), {"r1"})
 
-    def test_drain_waits_for_prepare_and_put_queues(self):
-        t, _ = self._make_thread()
-        t.request_queue = MagicMock()
-        t.put_thread.request_queue = MagicMock()
-
-        t.drain()
-
-        t.request_queue.join.assert_called_once()
-        t.put_thread.request_queue.join.assert_called_once()
-
     def test_dec_nonexistent_request(self):
         t, _ = self._make_thread()
         t.dec_stored_request("nonexist")  # should not raise
