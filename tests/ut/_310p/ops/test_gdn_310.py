@@ -38,6 +38,7 @@ def test_ascend_gdn_attention_310_uses_310p_backend():
 
 
 def test_builder310_reuses_common_graph_materialization():
+    assert AscendGDNAttentionMetadataBuilder310.build is AscendGDNAttentionMetadataBuilder.build
     assert (
         AscendGDNAttentionMetadataBuilder310._pad_spec_decode_metadata
         is AscendGDNAttentionMetadataBuilder._pad_spec_decode_metadata

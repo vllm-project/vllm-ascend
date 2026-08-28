@@ -97,6 +97,25 @@ def test_prepare_inputs_propagates_padded_request_count():
     assert padded_count.id == "num_reqs_padded"
 
 
+def test_prepare_attn_propagates_actual_request_count_to_metadata_builder():
+    model_state_path = (
+        Path(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "v2" / "model_states" / "mamba_hybrid.py"
+    )
+    module = ast.parse(model_state_path.read_text(encoding="utf-8"))
+    prepare_attn = next(
+        node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "prepare_attn"
+    )
+    build_call = next(
+        node
+        for node in ast.walk(prepare_attn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_attn_metadata"
+    )
+    keywords = {keyword.arg: keyword.value for keyword in build_call.keywords}
+
+    assert ast.unparse(keywords["num_reqs"]) == "num_reqs"
+    assert ast.unparse(keywords["num_reqs_actual"]) == "input_batch.num_reqs"
+
+
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
     return_value=SimpleNamespace(kv_transfer_config=None),

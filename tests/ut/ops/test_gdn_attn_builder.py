@@ -552,8 +552,9 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
     attn_metadata = builder.build(
         0,
         common_attn_metadata,
-        num_accepted_tokens=torch.tensor([2, 4], dtype=torch.int32),
-        num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([2, 4, 99, 99], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3, -1, -1], dtype=torch.int32),
+        num_reqs_actual=batch_spec.batch_size,
     )
 
     assert torch.equal(
@@ -596,7 +597,11 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
     )
 
-    attn_metadata = builder.build(0, common_attn_metadata)
+    attn_metadata = builder.build(
+        0,
+        common_attn_metadata,
+        num_reqs_actual=batch_spec.batch_size,
+    )
 
     assert torch.equal(
         attn_metadata.non_spec_query_start_loc,
@@ -611,6 +616,7 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
         torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
     )
     assert attn_metadata.num_actual_tokens == 2
+    assert attn_metadata.num_decodes == batch_spec.batch_size
     assert torch.equal(
         attn_metadata.non_spec_state_indices_tensor,
         torch.tensor([0, 1, NULL_BLOCK_ID, NULL_BLOCK_ID], dtype=torch.int32),

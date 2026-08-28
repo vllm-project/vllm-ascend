@@ -30,6 +30,7 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, get_kv_cache_torch_dtype
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -184,6 +185,7 @@ def build_attn_metadata(
     positions: torch.Tensor | None = None,
     attn_state: Any | None = None,
     graph_pad_size: int = -1,
+    num_reqs_actual: int | None = None,
     num_actual_tokens: int | None = None,
     num_input_tokens: int | None = None,
     is_prefilling: torch.Tensor | None = None,
@@ -211,6 +213,8 @@ def build_attn_metadata(
         num_actual_tokens = num_tokens
     if num_input_tokens is None:
         num_input_tokens = num_tokens
+    if num_reqs_actual is None:
+        num_reqs_actual = num_reqs
 
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
@@ -275,6 +279,8 @@ def build_attn_metadata(
                             pcp_context=pcp_context,
                             pcp_cache_group_idx=i,
                         )
+                if isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder):
+                    attn_metadata_extra_kwargs["num_reqs_actual"] = num_reqs_actual
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,

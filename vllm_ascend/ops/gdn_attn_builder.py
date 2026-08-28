@@ -565,8 +565,25 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
+        num_reqs_actual: int | None = None,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
+        # Common metadata follows the padded graph shape. Build request-phase
+        # metadata from the logical batch, then materialize graph-sized buffers.
+        graph_request_count = m.num_reqs
+        if num_reqs_actual is None:
+            num_reqs_actual = graph_request_count
+        elif not 0 <= num_reqs_actual <= graph_request_count:
+            raise ValueError(
+                f"num_reqs_actual ({num_reqs_actual}) must be between 0 and graph_request_count ({graph_request_count})"
+            )
+
+        if num_reqs_actual < graph_request_count:
+            m = m.unpadded(m.num_actual_tokens, num_reqs_actual)
+            if num_accepted_tokens is not None:
+                num_accepted_tokens = num_accepted_tokens[:num_reqs_actual]
+            if num_decode_draft_tokens_cpu is not None:
+                num_decode_draft_tokens_cpu = num_decode_draft_tokens_cpu[:num_reqs_actual]
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
@@ -833,7 +850,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             attn_metadata,
             non_spec_conv1d_cache_indices,
         )
-        graph_request_count = m.num_reqs
         if (
             self.use_full_cuda_graph
             and num_prefills == 0
