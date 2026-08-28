@@ -98,7 +98,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from vllm.logger import init_logger
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
@@ -531,6 +531,7 @@ async def _handle_completions(api: str, request: Request):
             retry_count = 0
             retry = True
             completion_tokens = 0
+            non_stream_buffer = b""
             # Only one await per chunk, minimal logic in loop
             try:
                 while retry:
@@ -543,26 +544,50 @@ async def _handle_completions(api: str, request: Request):
                         max_retries=global_args.max_retries,
                         base_delay=global_args.retry_delay,
                     ):
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
-                            continue
-                        if not chunk_str:
-                            continue
-                        if chunk_str.startswith("data: "):
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            # if chunk is [done], skip it.
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
+                        if not stream_flag:
+                            # Non-streaming: accumulate chunks until we have
+                            # a complete JSON response that can be parsed.
+                            non_stream_buffer += chunk
+                            try:
+                                chunk_str = non_stream_buffer.decode("utf-8").strip()
+                            except UnicodeDecodeError:
+                                continue
+                            if not chunk_str:
+                                continue
+                            if chunk_str.startswith("data: "):
+                                chunk_str = chunk_str[len("data: ") :]
+                            try:
+                                chunk_json = json.loads(chunk_str)
+                            except json.JSONDecodeError:
+                                continue  # Incomplete JSON, keep accumulating
+                            # Complete JSON parsed; reset buffer for potential retry
+                            non_stream_buffer = b""
+                        else:
+                            # Streaming: parse each chunk individually
+                            try:
+                                chunk_str = chunk.decode("utf-8").strip()
+                            except UnicodeDecodeError:
+                                logger.debug("Skipping chunk: %s", chunk)
+                                yield chunk
+                                continue
+                            if not chunk_str:
+                                continue
+                            if chunk_str.startswith("data: "):
+                                chunk_str = chunk_str[len("data: ") :]
+                            try:
+                                chunk_json = json.loads(chunk_str)
+                            except json.JSONDecodeError:
+                                # if chunk is [done], skip it.
+                                logger.debug("Skipping chunk: %s", chunk_str)
+                                yield chunk
+                                continue
+
                         choices = chunk_json.get("choices", [])
                         if not choices:
-                            yield chunk
+                            if not stream_flag:
+                                yield json.dumps(chunk_json).encode("utf-8")
+                            else:
+                                yield chunk
                             continue
 
                         choice = choices[0]
@@ -597,8 +622,10 @@ async def _handle_completions(api: str, request: Request):
                                 choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
-                            chunk = json.dumps(chunk_json).encode("utf-8")
-                        yield chunk
+                        if not stream_flag:
+                            yield json.dumps(chunk_json).encode("utf-8")
+                        else:
+                            yield chunk
             except Exception as e:
                 logger.error(
                     "Error during streaming from decoder %s: %s the aborted request %s "
@@ -613,9 +640,18 @@ async def _handle_completions(api: str, request: Request):
                 await proxy_state.cleanup_request_batch(request_id)
 
         if stream_flag:
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            return StreamingResponse(
+                generate_stream(), media_type="text/event-stream; charset=utf-8"
+            )
         else:
-            return StreamingResponse(generate_stream(), media_type="application/json")
+            # Non-streaming: collect all chunks and return as a single JSON
+            # response with Content-Length, instead of chunked StreamingResponse.
+            full_response = b""
+            async for chunk in generate_stream():
+                full_response += chunk
+            return Response(
+                content=full_response, media_type="application/json"
+            )
     except Exception as e:
         import traceback
 
@@ -664,9 +700,7 @@ async def reset_prefix_cache(request: Request):
         from fastapi.responses import JSONResponse
 
         return JSONResponse(status_code=500, content={"failed": failures})
-    from fastapi.responses import Response as FastAPIResponse
-
-    return FastAPIResponse(status_code=200)
+    return Response(status_code=200)
 
 
 async def dispatch_prefill_batch(
