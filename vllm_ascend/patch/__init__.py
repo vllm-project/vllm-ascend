@@ -1186,3 +1186,31 @@
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
 #
+# ** 34a. File: platform/patch_stop_token_ids_validation.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.sampling_params.SamplingParams.verify`
+#      `vllm.sampling_params.SamplingParams._validate_stop_token_ids`
+#    Why:
+#       Upstream vLLM (before #54196) does not validate stop_token_ids
+#       against the vocabulary. Out-of-vocab stop token ids flow into
+#       all_stop_token_ids and are later used as logits indices on the
+#       device side (min_tokens / EOS masking does logits.index_put_).
+#       On CANN 9.1.x the inserted IndexCheck kernel traps on the OOB index
+#       and the whole engine dies with an unrecoverable vector core exception;
+#       on older CANN the write silently corrupts logits of neighboring
+#       requests in the same batch. A single client request can therefore
+#       crash a production instance (vllm-ascend issue #15200).
+#    How：
+#       Monkey-patch SamplingParams.verify to run a vocabulary-range check on
+#       stop_token_ids (mirroring upstream _validate_logit_bias) and reject
+#       invalid requests with a 400 before they reach the engine. The patch
+#       self-disables once the bundled vLLM already ships
+#       `_validate_stop_token_ids`.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54196 (merged into vLLM main;
+#       not yet in the vLLM commit pinned by vllm-ascend main as of this patch)
+#    Future Plan:
+#       Remove this patch once the vLLM commit pinned by vllm-ascend main
+#       contains vllm#54196; until then the hasattr guard keeps it a no-op
+#       on fixed builds.
+#
