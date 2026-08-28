@@ -513,6 +513,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
+    def set_update_stream(self, update_stream):
+        self.__runnable.set_update_stream(update_stream)
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
@@ -695,6 +697,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.token_indices_to_sample.fill_(0)
 
+        update_params = []
+        for per_layer_metadata in multi_steps_attn_metadata:
+            metadata = next(iter(per_layer_metadata.values()))
+            update_params.append({
+                "actual_seq_lengths": metadata.query_start_loc,
+                "actual_seq_lengths_kv": metadata.seq_lens,
+        })
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
@@ -715,6 +725,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
+            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+                self._runnable.set_update_params(update_params)
+
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -725,9 +738,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 multi_steps_attn_metadata=multi_steps_attn_metadata,
                 num_tokens=num_tokens,
             )
-            forward_context = get_forward_context()
-            if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
 
     def _update_full_graph_params_if_needed(
         self,
@@ -1009,6 +1019,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        update_params = []
+        for per_layer_metadata in multi_steps_attn_metadata:
+            metadata = next(iter(per_layer_metadata.values()))
+            update_params.append({
+                "actual_seq_lengths": metadata.query_start_loc,
+                "actual_seq_lengths_kv": metadata.seq_lens,
+        })
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -1042,11 +1060,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
             if self.enable_enpu:
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+                # self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+                
                 draft_token_ids = run_draft()
             else:
+                if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL: 
+                    self._runnable.set_update_params(update_params)
                 draft_token_ids = run_draft()
-                self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+                # self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):

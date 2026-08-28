@@ -22,6 +22,7 @@ from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.worker.v2.updatable_graph import (
+    SharedSource,
     ContextSource,
     UpdatableGraph,
 )
@@ -120,10 +121,14 @@ class ACLGraphWrapper:
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
         self.update_stream = update_stream
+        self.fia_params: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
 
     def set_update_stream(self, update_stream):
         self.update_stream = update_stream
+
+    def set_update_params(self, fia_params: list[dict[str, Any]]):
+        self.fia_params = fia_params
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -269,7 +274,9 @@ class ACLGraphWrapper:
         # When enable_enpu is on, model_runner orders update vs replay; skip here.
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
         if _EXTRA_CTX.is_draft_model:
-            pass
+            resolved_tasks = entry.aclgraph.resolve_tasks(
+                SharedSource(self.fia_params)
+            )
         else:
             resolved_tasks = entry.aclgraph.resolve_tasks(
                 ContextSource(forward_context.attn_metadata)

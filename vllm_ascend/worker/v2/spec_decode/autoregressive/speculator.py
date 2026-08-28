@@ -32,42 +32,18 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 
-logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward MLA rotary positions for the block.
-
-    MLA reads positions inside build_decode_metadata for cos/sin; the flat
-    super() path doesn't forward them. Must run inside build_attn_metadata_wrapper().
-    TODO:This field is removed when the external cos/sin solution is removed from the MLA.
-    """
-    raw = vllm_speculator.build_attn_metadata  # cache
-
-    def build_attn_metadata(*args, **kwargs):
-        kwargs["positions"] = positions[:pad]
-        kwargs["is_prefilling"] = is_prefilling
-        return raw(*args, **kwargs)
-
-    try:
-        vllm_speculator.build_attn_metadata = build_attn_metadata
-        yield
-    finally:
-        vllm_speculator.build_attn_metadata = raw  # restore
-
 
 class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
-    GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
+    GQA, MLA, and DSA draft decode state share one path. The current MTP path
     uses the draft attention backend recorded by ``set_attn``.
 
     MLA's per-step state lives in ``.decode`` (cloned per step, written via an
     alias), GQA's is top-level. MLA also rebuilds the base (live ``.decode`` is
     None/wrong-batch) and forwards rotary ``positions`` into
-    build_attn_metadata. DSA and SFA manage their draft state in their metadata
-    builders and skip the generic MLA/GQA init and update logic.
+    build_attn_metadata. DSA manages its draft state in its metadata builder
+    and skips the generic MLA/GQA init and update logic.
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device) -> None:
@@ -184,42 +160,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_reqs_padded: int,
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
-        num_tokens_padded: int,
-        seq_lens_cpu_upper_bound: torch.Tensor,
-        step: int,
-        num_query_per_req: int = 1,
-        causal: bool = True,
-    ) -> dict[str, Any] | None:
-        assert self.input_batch is not None
-        with build_draft_attn_metadata_factory(
-            self.input_buffers.positions,
-            num_tokens_padded,
-            torch.from_numpy(self.input_batch.is_prefilling_np),
-        ):
-            attn_metadata = super()._build_draft_attn_metadata(
-                num_reqs,
-                num_reqs_padded,
-                num_tokens_padded,
-                seq_lens_cpu_upper_bound,
-                step,
-                num_query_per_req,
-                causal,
-            )
-        if attn_metadata is not None:
-            # Ascend-specific: force DecodeOnly attention state for the draft model.
-            for metadata in attn_metadata.values():
-                if metadata is None:
-                    continue
-                metadata.attn_state = AscendAttentionState.DecodeOnly
-        return attn_metadata
-
-    def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
-        """Build draft_attn_metadatas for partial-merged draft graph."""
-        attn_metadata = self.model_state.attn_metadata
-        attn_metadata = {
-            name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
-        }
-
         if is_draft_model_prefill:
             metadata = next(
                 metadata

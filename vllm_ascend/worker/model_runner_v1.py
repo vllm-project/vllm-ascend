@@ -3634,7 +3634,7 @@ class NPUModelRunner(GPUModelRunner):
             # The drafter created its own update_stream in its load_model (which
             # runs BEFORE this point), so overwrite it here with the main one.
             if self.drafter is not None:
-                self.drafter.update_stream = self.update_stream
+                self.drafter.set_update_stream(self.update_stream)
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
