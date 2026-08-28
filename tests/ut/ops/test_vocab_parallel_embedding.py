@@ -146,7 +146,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         # Should just pass through without masking
         layer.quant_method.embedding.assert_called_once_with(layer, input_.long())
         self.assertEqual(output.shape, (3, layer.embedding_dim))
-
         mock_reduce_tp1.assert_not_called()
 
     def test_forward_with_tp(self):
@@ -225,6 +224,44 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                     output = layer.forward(input_)
                 self.assertEqual(output.shape, expected_shape)
 
+    def test_disable_tp(self):
+        mock_group = MagicMock()
+        mock_group.world_size = 2
+        mock_group.rank_in_group = 0
+
+        with patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.get_tp_group",
+            return_value=mock_group,
+        ) as mock_get_tp_group:
+            layer = AscendVocabParallelEmbedding(
+                num_embeddings=self.num_embeddings,
+                embedding_dim=self.embedding_dim,
+                org_num_embeddings=self.org_num_embeddings,
+                padding_size=self.padding_size,
+                quant_config=None,
+                prefix="",
+                disable_tp=True,
+            )
+
+        self.assertTrue(layer.disable_tp)
+        self.assertEqual(layer.tp_size, 1)
+        self.assertEqual(layer.tp_rank, 0)
+
+        # disable_tp=True should not depend on the TP communication group.
+        mock_get_tp_group.assert_not_called()
+
+        layer.quant_method.embedding = MagicMock(return_value=torch.randn(3, layer.embedding_dim))
+        input_ = torch.tensor([1, 2, 3])
+
+        with patch(
+            "torch.ops.vllm.maybe_pad_and_reduce",
+            side_effect=lambda x: x,
+        ) as mock_reduce:
+            output = layer.forward(input_)
+
+        mock_reduce.assert_not_called()
+        self.assertEqual(output.shape, (3, layer.embedding_dim))
+
 
 class TestAscendLogitsProcessor(unittest.TestCase):
     def setUp(self):
@@ -295,3 +332,59 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_all_to_all_single.assert_called_once()
         # [N/P, V] after redistribution, then truncated to org_vocab_size.
         self.assertEqual(logits.shape, (1, self.vocab_size))
+
+    def test_disable_tp_lm_head_skips_lmhead_tp_path(self):
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
+
+        lm_head = AscendParallelLMHead(
+            num_embeddings=self.num_embeddings,
+            embedding_dim=self.embedding_dim,
+            prefix="markov_head",
+            disable_tp=True,
+        )
+
+        hidden_states = torch.randn(1, self.embedding_dim)
+
+        with (
+            patch.object(
+                processor,
+                "_get_logits_lmheadtp",
+            ) as mock_lmhead_tp,
+            patch.object(
+                processor,
+                "_get_logits_normal",
+                return_value=torch.randn(1, self.vocab_size),
+            ) as mock_normal,
+        ):
+            processor._get_logits(hidden_states, lm_head)
+
+        mock_lmhead_tp.assert_not_called()
+        mock_normal.assert_called_once()
+
+    def test_disable_tp_lm_head_skips_logits_gather(self):
+        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
+
+        lm_head = AscendParallelLMHead(
+            num_embeddings=self.num_embeddings,
+            embedding_dim=self.embedding_dim,
+            prefix="markov_head",
+            disable_tp=True,
+        )
+
+        lm_head.quant_method = self.mock_quant_method
+
+        self.mock_ascend_config.enable_reduce_sample = False
+
+        hidden_states = torch.randn(1, self.embedding_dim)
+
+        with patch.object(
+            processor,
+            "_gather_logits",
+        ) as mock_gather:
+            processor._get_logits_normal(
+                hidden_states,
+                lm_head,
+                None,
+            )
+
+        mock_gather.assert_not_called()
