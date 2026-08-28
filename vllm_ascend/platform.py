@@ -502,6 +502,7 @@ class NPUPlatform(Platform):
             select_moe_comm_method,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+        from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
         # NOTE(Ronald1995): avoid circular import, cudagraph_runtime_mode is
@@ -518,8 +519,9 @@ class NPUPlatform(Platform):
         # compared to v1, v2's forward context lacks some fields, such as:
         # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
         # prefetch_mlp_enabled, model_instance, is_draft_model.
+        dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
         if not vllm_config.use_v2_model_runner:
-            return {}
+            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
         # is_draft_model will be removed later, so we set it to False temporarily.
         is_draft_model = False
@@ -581,6 +583,7 @@ class NPUPlatform(Platform):
             "in_profile_run": in_profile_run,
             "padded_num_tokens": padded_num_tokens,
             "sinks": sinks,
+            "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
         }
 
 
@@ -867,18 +870,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     """Validate Ascend-specific options.
 
-    Covers the fused-MC2 / hierarchy-communication exclusivity and the scheduler
-    extension policies (enable_balance_scheduling / short_request_first_config /
+    Covers the scheduler extension policies (enable_balance_scheduling / short_request_first_config /
     dyntra_lb_config / recompute_scheduler_enable). Reads from the AscendConfig singleton
     initialized from vllm_config; env fallbacks are handled inside AscendConfig.
     """
-    # Fused MC2 and hierarchy communication are mutually exclusive.
-    if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
-        raise ValueError(
-            "fused mc2 op cannot be used with hierarchy communication. "
-            "Please set additional_config.enable_fused_mc2 to 0."
-        )
-
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
     from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
@@ -1193,6 +1188,9 @@ def _setup_worker_and_scheduler(
     # Select worker class and refresh block size
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
+        additional_config = vllm_config.additional_config or {}
+        if ("enable_flashcomm1" not in additional_config) and (not os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1")):
+            parallel_config.all2all_backend = "flashinfer_all2allv"  # a trikky way to disable SP moe.
         if is_310p():
             parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
         elif ascend_config.xlite_graph_config.enabled:

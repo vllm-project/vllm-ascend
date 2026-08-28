@@ -72,18 +72,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     # for your DeepSeek W8A8 scene, then disable it.
     # DEPRECATED: use additional_config.enable_mlapo instead.
     "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
-    # Whether to enable weight cast format to FRACTAL_NZ.
-    # 0: close nz;
-    # 1: only quant case enable nz;
-    # 2: enable nz as long as possible.
-    # DEPRECATED: use additional_config.weight_nz_mode instead.
-    "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
-    # use fused op transpose_kv_cache_by_block, default is True
-    "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
-        int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
-    ),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),

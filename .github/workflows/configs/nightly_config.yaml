@@ -33,6 +33,9 @@ a2:
       - name: MiniMax-M2.5-w8a8-QuaRot-A2
         os: linux-aarch64-a2b3-8
         config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
+      - name: Qwen3.8-27B-w8a8-A2
+        os: linux-aarch64-a2b3-2
+        config_file_path: Qwen3.8-27B-w8a8-A2.yaml
       - name: rejection-sample
         os: linux-aarch64-a2b3-1
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
@@ -222,6 +225,9 @@ a3:
       - name: Deepseek_R1_W8A8_A3
         os: linux-aarch64-a3-16
         config_file_path: Deepseek_R1_W8A8_A3.yaml
+      - name: Qwen3.8-27B-w8a8-A3
+        os: linux-aarch64-a3-2
+        config_file_path: Qwen3.8-27B-w8a8-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests

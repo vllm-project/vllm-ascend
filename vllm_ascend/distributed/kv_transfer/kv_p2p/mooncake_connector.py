@@ -42,6 +42,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import logger
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -55,7 +56,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
@@ -63,6 +63,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
+    tensor_storage_key,
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import (
@@ -87,6 +88,7 @@ DONE_RECVING_MSG = b"done_recving_msg"
 # number of peers is larger than max_workers. Yield after a small FIFO batch so
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
+KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
 
 class RemotePortInfo(TypedDict):
@@ -506,6 +508,7 @@ class KVCacheRecvingThread(threading.Thread):
         assert vllm_config is not None
         self.vllm_config: VllmConfig = vllm_config
         self.model_config = self.vllm_config.model_config
+        self.mamba_cache_mode = getattr(self.vllm_config.cache_config, "mamba_cache_mode", None)
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config is not None
@@ -900,10 +903,28 @@ class KVCacheRecvingThread(threading.Thread):
                         )
                     )
             else:
-                # When Prefix Caching is enabled on both P and D nodes, num_block should not be forced to match,
-                # as the D-node requires dynamic allocation based on its specific cache hit rate.
-                transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
-                grouped_remote_block_ids = [[remote_group_block_ids[transfer_block_idx]]]
+                # Ascend Hybrid Mamba supports "align" (prefix caching) and
+                # "none" (no prefix caching), but not "all".
+                if self.mamba_cache_mode == "align":
+                    if len(remote_group_block_ids) != 1:
+                        raise RuntimeError(
+                            "Mooncake Mamba transfer requires exactly one normalized remote state block; "
+                            f"request_id={remote_request_id}, group_idx={group_idx}, "
+                            f"remote_block_count={len(remote_group_block_ids)}, "
+                            f"local_block_count={len(local_group_block_ids)}."
+                        )
+                    remote_state_block_id = remote_group_block_ids[0]
+                else:
+                    transfer_block_idx = len(remote_group_block_ids) - self.num_speculative_tokens - 1
+                    if transfer_block_idx < 0:
+                        raise RuntimeError(
+                            "Invalid non-aligned Mamba state block metadata: "
+                            f"request_id={remote_request_id}, group_idx={group_idx}, "
+                            f"remote_block_count={len(remote_group_block_ids)}, "
+                            f"num_speculative_tokens={self.num_speculative_tokens}."
+                        )
+                    remote_state_block_id = remote_group_block_ids[transfer_block_idx]
+                grouped_remote_block_ids = [[remote_state_block_id]]
                 grouped_local_block_ids = [[local_group_block_ids[0]]]
 
             if is_mamba_group:
@@ -1109,7 +1130,7 @@ class KVCacheRecvingThread(threading.Thread):
         if not (need_cat_cache or need_nz_cache):
             return
 
-        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
+        use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
         for group_idx, reformat_block_ids, _, layer_indices in ready_attention_group_reformat_block_ids:
             group_spec = self.kv_group2layeridx[group_idx][0]
             if MooncakeConnectorWorker._group_skip_kv_reformat(group_spec):
@@ -1209,35 +1230,44 @@ class KVCacheRecvingThread(threading.Thread):
         conv_shape = group_spec["shapes"][0]
         conv_dtype_size = group_spec["dtype_sizes"][0]
 
-        linear_key_head_dim = self.vllm_config.model_config.hf_text_config.linear_key_head_dim
-        linear_num_key_heads = self.vllm_config.model_config.hf_text_config.linear_num_key_heads
-        linear_value_head_dim = self.vllm_config.model_config.hf_text_config.linear_value_head_dim
-        linear_num_value_heads = self.vllm_config.model_config.hf_text_config.linear_num_value_heads
-        remote_num_key_heads = linear_num_key_heads // remote_tp_size
-        remote_num_value_heads = linear_num_value_heads // remote_tp_size
-        remote_conv_width = (
-            remote_num_key_heads * 2 * linear_key_head_dim + remote_num_value_heads * linear_value_head_dim
-        )
-        remote_conv_offsets = [
-            0,
-            remote_num_key_heads * linear_key_head_dim,
-            remote_num_key_heads * 2 * linear_key_head_dim,
-        ]
-        remote_conv_sizes = [
-            remote_num_key_heads * linear_key_head_dim,
-            remote_num_key_heads * linear_key_head_dim,
-            remote_num_value_heads * linear_value_head_dim,
-        ]
+        hf_text_config = self.vllm_config.model_config.hf_text_config
+        linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
+        if linear_attn_config is not None:
+            projection_width = linear_attn_config["num_heads"] * linear_attn_config["head_dim"]
+            remote_conv_sizes = [projection_width // remote_tp_size] * 3
+        else:
+            remote_num_key_heads = hf_text_config.linear_num_key_heads // remote_tp_size
+            remote_num_value_heads = hf_text_config.linear_num_value_heads // remote_tp_size
+            remote_conv_sizes = [
+                remote_num_key_heads * hf_text_config.linear_key_head_dim,
+                remote_num_key_heads * hf_text_config.linear_key_head_dim,
+                remote_num_value_heads * hf_text_config.linear_value_head_dim,
+            ]
 
-        for i in range(conv_shape[0]):
+        remote_conv_width = sum(remote_conv_sizes)
+        remote_conv_offsets = [0, remote_conv_sizes[0], sum(remote_conv_sizes[:2])]
+        if is_conv_state_dim_first():
+            state_len = conv_shape[1]
             for remote_conv_offset, remote_conv_size in zip(remote_conv_offsets, remote_conv_sizes):
-                remote_addr_offset = (i * remote_conv_width + remote_conv_offset) * conv_dtype_size
                 local_addr_offset = (
-                    (i * remote_conv_width + remote_conv_offset) * tp_ratio + remote_tp_offset * remote_conv_size
-                ) * conv_dtype_size
+                    (remote_conv_offset * tp_ratio + remote_tp_offset * remote_conv_size) * state_len * conv_dtype_size
+                )
+                remote_addr_offset = remote_conv_offset * state_len * conv_dtype_size
                 src_list.append(local_conv_addr + local_block_id * local_conv_stride + local_addr_offset)
                 dst_list.append(remote_conv_addr + remote_block_id * remote_conv_stride + remote_addr_offset)
-                length_list.append(remote_conv_size * conv_dtype_size)
+                length_list.append(remote_conv_size * state_len * conv_dtype_size)
+        else:
+            state_len = conv_shape[0]
+            for state_idx in range(state_len):
+                for remote_conv_offset, remote_conv_size in zip(remote_conv_offsets, remote_conv_sizes):
+                    remote_addr_offset = (state_idx * remote_conv_width + remote_conv_offset) * conv_dtype_size
+                    local_addr_offset = (
+                        (state_idx * remote_conv_width + remote_conv_offset) * tp_ratio
+                        + remote_tp_offset * remote_conv_size
+                    ) * conv_dtype_size
+                    src_list.append(local_conv_addr + local_block_id * local_conv_stride + local_addr_offset)
+                    dst_list.append(remote_conv_addr + remote_block_id * remote_conv_stride + remote_addr_offset)
+                    length_list.append(remote_conv_size * conv_dtype_size)
 
         src_list.append(
             local_ssm_addr + local_block_id * local_ssm_stride + remote_tp_offset * local_ssm_len // tp_num_need_pulls
@@ -1769,9 +1799,11 @@ class MooncakeConnectorScheduler:
     def _get_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         """Return blocks that contain prompt KV, dropping MTP extra blocks.
 
-        State groups such as Mamba are not context-block aligned with attention
-        KV, so keep them unchanged and only clip attention-like groups here.
-        SWA tail clipping is handled as a separate step after this.
+        In aligned Mamba mode, normalize each state group to the single block
+        containing the final prompt state. This prevents the receiver from
+        inferring a block index from a speculative *token* count. Non-aligned
+        state groups keep their existing behavior. SWA tail clipping is handled
+        as a separate step after this.
         """
         if len(block_ids) == 0:
             return block_ids
@@ -1781,8 +1813,23 @@ class MooncakeConnectorScheduler:
         transfer_block_ids = []
         cp_size = max(1, self.pcp_size * self.dcp_size)
         for blocks, group_info in zip(block_ids, self.group_transfer_info):
-            if group_info.is_state_group:
+            is_aligned_state_group = group_info.is_state_group and (
+                getattr(self.vllm_config.cache_config, "mamba_cache_mode", None) == "align"
+            )
+            if group_info.is_state_group and not is_aligned_state_group:
                 transfer_block_ids.append(blocks)
+            elif is_aligned_state_group:
+                # Mamba state is not CP-sharded like attention KV. Its aligned
+                # block index is derived from the actual (already truncated)
+                # prompt length, without multiplying by the CP size.
+                num_prompt_state_blocks = cdiv(prompt_len, group_info.tokens_per_block)
+                if num_prompt_state_blocks <= 0 or num_prompt_state_blocks > len(blocks):
+                    raise RuntimeError(
+                        "Invalid aligned Mamba state block metadata: "
+                        f"prompt_len={prompt_len}, tokens_per_block={group_info.tokens_per_block}, "
+                        f"required_block_count={num_prompt_state_blocks}, available_block_count={len(blocks)}."
+                    )
+                transfer_block_ids.append(blocks[num_prompt_state_blocks - 1 : num_prompt_state_blocks])
             else:
                 # In context parallelism, each scheduler-visible block id is a
                 # CP-grouped/virtual block shared by all CP ranks. It therefore
@@ -2378,34 +2425,52 @@ class MooncakeConnectorWorker:
             layer_spec = layer_spec.kv_cache_specs[layer_name]
         return layer_spec
 
-    def _get_mamba_conv_padding(self, layer_spec: Any) -> int:
-        if not isinstance(layer_spec, MambaSpec):
-            return 0
-        conv_nbytes = torch.tensor([], dtype=layer_spec.dtypes[0]).element_size()  # type: ignore[misc]
-        conv_shape = torch.Size(layer_spec.shapes[0])
-        return self.num_blocks * conv_shape.numel() * conv_nbytes
+    @staticmethod
+    def _recover_aligned_kv_tensor_base(
+        shared_tensors: list[torch.Tensor],
+        tensor_size: int,
+    ) -> int:
+        """Recover the aligned raw buffer base behind hybrid cache views."""
+        candidates: set[int] = set()
+        for tensor in shared_tensors:
+            storage = tensor.untyped_storage()
+            storage_base = tensor_storage_key(tensor)
+            aligned_base = (
+                (storage_base + KV_CACHE_BUFFER_ALIGNMENT - 1) // KV_CACHE_BUFFER_ALIGNMENT * KV_CACHE_BUFFER_ALIGNMENT
+            )
+            storage_end = storage_base + storage.nbytes()
+            if aligned_base <= tensor.data_ptr() and aligned_base + tensor_size <= storage_end:
+                candidates.add(aligned_base)
+
+        if len(candidates) != 1:
+            raise RuntimeError(
+                "Unable to recover one aligned KV tensor base from hybrid cache views: "
+                f"candidates={sorted(candidates)}, tensor_size={tensor_size}."
+            )
+        return candidates.pop()
 
     def _get_registered_kv_tensor_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
         ptrs: list[int] = []
         lengths: list[int] = []
 
-        conv_padding = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-            shared_addrs: list[int] = []
-            has_mtp = False
+            shared_tensors: list[torch.Tensor] = []
             for layer_name in kv_cache_tensor.shared_by:
-                has_mtp = has_mtp or "mtp" in layer_name
-                layer_spec = self._get_layer_spec(layer_name)
-                conv_padding = max(conv_padding, self._get_mamba_conv_padding(layer_spec))
                 for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
-                    shared_addrs.append(single_kv_cache.data_ptr())
+                    shared_tensors.append(single_kv_cache)
 
-            if not shared_addrs:
+            if not shared_tensors:
                 continue
-            base_addr = min(shared_addrs)
-            if has_mtp:
-                base_addr -= conv_padding
-            assert base_addr % (2 * 1024 * 1024) == 0, f"Tensor start addr {base_addr} is not align with 2M."
+            # Hybrid cache views can begin after Mamba padding, and target and
+            # draft MLA groups can use different padding.  Arithmetic based on
+            # a previous group's padding can yield a wrong but still aligned
+            # address, so always recover the allocation base from storage.
+            base_addr = self._recover_aligned_kv_tensor_base(
+                shared_tensors,
+                kv_cache_tensor.size,
+            )
+            if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
+                raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
             ptrs.append(base_addr)
             lengths.append(kv_cache_tensor.size)
 
@@ -2426,7 +2491,8 @@ class MooncakeConnectorWorker:
             if not shared_addrs:
                 continue
             base_addr = min(shared_addrs)
-            assert base_addr % (2 * 1024 * 1024) == 0, f"Tensor start addr {base_addr} is not align with 2M."
+            if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
+                raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
             ptrs.append(base_addr)
             lengths.append(kv_cache_tensor.size)
 
@@ -3339,6 +3405,18 @@ class MooncakeConnectorWorker:
         prefill_tp_size: int,
     ) -> tuple[list[int], dict[int, list[GroupPull]]]:
         rank_group_pulls: OrderedDict[int, list[GroupPull]] = OrderedDict()
+        has_mamba_group = any(
+            layer_indices and group_spec["kv_cache_spec_type"] == "MambaSpec"
+            for group_spec, layer_indices in self.kv_group2layeridx.values()
+        )
+        mamba_num_group_pulls = 0
+        if has_mamba_group:
+            if prefill_tp_size % self.tp_size != 0:
+                raise ValueError(
+                    f"Hybrid Mamba prefill tp size({prefill_tp_size}) must be divisible by "
+                    f"decode tp size({self.tp_size})."
+                )
+            mamba_num_group_pulls = prefill_tp_size // self.tp_size
 
         def add_group_pull(remote_rank: int, group_pull: GroupPull) -> None:
             rank_group_pulls.setdefault(remote_rank, []).append(group_pull)
@@ -3348,11 +3426,7 @@ class MooncakeConnectorWorker:
                 continue
 
             if group_spec["kv_cache_spec_type"] == "MambaSpec":
-                assert prefill_tp_size % self.tp_size == 0, (
-                    f"Hybrid Mamba prefill tp size({prefill_tp_size}) must be divisible by "
-                    f"decode tp size({self.tp_size})."
-                )
-                num_group_pulls = prefill_tp_size // self.tp_size
+                num_group_pulls = mamba_num_group_pulls
                 for pp_rank in range(self._prefill_pp_size):
                     pp_rank_offset = pp_rank * prefill_tp_size
                     local_tp_offset = self.tp_rank * num_group_pulls
@@ -3371,7 +3445,18 @@ class MooncakeConnectorWorker:
                 continue
 
             num_group_pulls = self._get_attention_group_num_need_pulls(group_spec, prefill_tp_size)
-            chosen_rank_list = self._get_attention_group_remote_rank(req_id, group_spec, prefill_tp_size)
+            num_key_value_heads = self._get_attention_group_num_key_value_heads(group_spec)
+            if has_mamba_group and num_key_value_heads == 1 and num_group_pulls == 1:
+                # Keep a replicated single-head attention cache inside this
+                # D rank's Mamba owner group so only its owner can signal that
+                # all request state has finished transferring.
+                replica_offset = random.Random(string_to_int64_hash(req_id)).randrange(mamba_num_group_pulls)
+                chosen_rank_list = [
+                    pp_rank * prefill_tp_size + self.tp_rank * mamba_num_group_pulls + replica_offset
+                    for pp_rank in range(self._prefill_pp_size)
+                ]
+            else:
+                chosen_rank_list = self._get_attention_group_remote_rank(req_id, group_spec, prefill_tp_size)
             assert len(chosen_rank_list) == num_group_pulls * self._prefill_pp_size, (
                 f"chosen_rank_list({chosen_rank_list}) does not match num_group_pulls({num_group_pulls}) "
                 f"and prefill pp size({self._prefill_pp_size})."
