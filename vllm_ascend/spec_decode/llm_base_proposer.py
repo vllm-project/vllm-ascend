@@ -22,6 +22,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
+from vllm.v1.attention.backend import MultipleOf
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
@@ -481,8 +482,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         # initialized for mamba models
-        self.kernel_block_size = (
+        kernel_block_size = (
             draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
+        )
+        # Some backends advertise a block-size constraint rather than a
+        # concrete integer. Slot-mapping arithmetic needs the constraint's
+        # integer base, matching the model runner's normalization.
+        self.kernel_block_size = (
+            kernel_block_size.base
+            if isinstance(kernel_block_size, MultipleOf)
+            else kernel_block_size
         )
 
         # Sliding-window draft attention adapter.

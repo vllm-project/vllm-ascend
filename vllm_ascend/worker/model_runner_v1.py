@@ -162,7 +162,10 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm_ascend.spec_decode.eagle_proposer import (
+    AscendEagleProposer,
+    AscendQwen4ExpMTPProposer,
+)
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
 )
@@ -3271,9 +3274,24 @@ class NPUModelRunner(GPUModelRunner):
                 # build per-step attention metadata for the active MTP layer.
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
+            if self.speculative_config and isinstance(
+                self.drafter, AscendQwen4ExpMTPProposer
+            ):
+                # Qwen4Exp MTP has attention layers in multiple hybrid-cache
+                # groups. Preserve each group's block table so the drafter can
+                # build metadata against the matching cache group.
+                self.drafter.set_per_group_block_table(
+                    kv_cache_gid, cm.block_table_tensor
+                )
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer 
-                    | AscendDSparkProposer):
+                if isinstance(
+                    self.drafter,
+                    AscendEagleProposer
+                    | AscendQwen4ExpMTPProposer
+                    | AscendDraftModelProposer
+                    | AscendDflashProposer
+                    | AscendDSparkProposer,
+                ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 elif isinstance(self.drafter, AscendExtractHiddenStatesProposer):
@@ -3903,7 +3921,11 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendDSparkProposer | AscendDraftModelProposer,
+                AscendEagleProposer
+                | AscendQwen4ExpMTPProposer
+                | AscendDflashProposer
+                | AscendDSparkProposer
+                | AscendDraftModelProposer,
             )
             if isinstance(self.kernel_block_sizes, list):
                 draft_kernel_block_sizes = [
@@ -5277,7 +5299,10 @@ class NPUModelRunner(GPUModelRunner):
         ):
             assert isinstance(
                 self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
+                AscendEagleProposer
+                | AscendQwen4ExpMTPProposer
+                | AscendDflashProposer
+                | AscendExtractHiddenStatesProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
