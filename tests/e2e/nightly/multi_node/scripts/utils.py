@@ -181,3 +181,16 @@ def resolve_current_node_index(cluster_ips: list[str]) -> int:
         if ip in local_ips:
             return index
     raise RuntimeError("Unable to determine current node index")
+
+
+class ProxyServer:
+    """Lightweight adapter providing url_for() so PD proxy can reuse single-node tools."""
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.url_root = f"http://{host}:{port}"
+
+    def url_for(self, *parts: str) -> str:
+        return self.url_root + "/" + "/".join(parts)
+
