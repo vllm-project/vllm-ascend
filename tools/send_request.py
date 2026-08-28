@@ -8,10 +8,11 @@ _PAD_ALPHABET = string.ascii_letters
 
 def _tokenize_count(server, text: str, use_chat: bool = False) -> int:
     url = server.url_for("tokenize")
-    if use_chat:
-        payload: dict[str, Any] = {"messages": [{"role": "user", "content": text}]}
-    else:
-        payload = {"prompt": text}
+    # if use_chat:
+    #     payload: dict[str, Any] = {"messages": [{"role": "user", "content": text}]}
+    # else:
+    #     payload = {"prompt": text}
+    payload = {"prompt": text}
     r = requests.post(url, json=payload, timeout=60)
     r.raise_for_status()
     body = r.json()
@@ -43,7 +44,8 @@ def _generate_prompt_for_length(server, seed: str, target_tokens: int, use_chat:
     while lo <= hi:
         mid = (lo + hi) // 2
         body = "\n".join([seed] * mid)
-        act = _tokenize_count(server, body, use_chat=use_chat)
+        # act = _tokenize_count(server, body, use_chat=use_chat)
+        act = _tokenize_count(server, body)
         if act <= target_tokens:
             best_k, best_count = mid, act
             lo = mid + 1
@@ -83,8 +85,27 @@ def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None
             raise ValueError(f"prompt dict needs both 'seed' and 'target_tokens', got {raw}")
         prompt, actual = _generate_prompt_for_length(server, seed, target, use_chat=use_chat)
         print(f"[generate_prompt] seed={seed!r} target_tokens={target} actual={actual}")
+        if overhead > 0:
+            actual = raw_count + overhead
+        else:
+            actual = None
         return prompt, actual
     return raw, None
+
+
+def _detect_chat_overhead(server) -> int:
+    probe = "test"
+    try:
+        raw = _tokenize_count(server, probe)
+        url = server.url_for("tokenize")
+        r = requests.post(url, json={"messages": [{"role": "user", "content": probe}]}, timeout=60)
+        r.raise_for_status()
+        body = r.json()
+        with_template = len(body.get("tokens") or body.get("token_ids", []))
+        overhead = with_template - raw
+        return max(overhead, 0)
+    except Exception:
+        return 0
 
 
 def validate_response(response_json: dict, expected: dict | None, max_model_len: int | None = None) -> None:
