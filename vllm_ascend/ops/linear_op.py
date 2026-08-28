@@ -304,8 +304,32 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
         need_all_gather = not (extract_layer_index(self.layer.prefix) == 0 and is_vl_model() and "attn" in self.prefix)
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
-        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+
+        # Quantize the local shard before the all_gather so the collective moves
+        # fp8 + E8M0 scale instead of bf16, roughly halving the column-path comm
+        # volume. Per-token mx-quant is row-independent, so quantizing each shard
+        # and gathering is numerically identical to gathering and then quantizing.
+        # apply() already accepts a pre-quantized (x, scale) tuple and skips its
+        # own quant step.
+        from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+        from vllm_ascend.quantization.methods import AscendW8A8MXFP8DynamicLinearMethod
+
+        prequant_all_gather = (
+            _EXTRA_CTX.flash_comm_v1_enabled
+            and need_all_gather
+            and bias is None
+            and get_ascend_device_type() == AscendDeviceType.A5
+            and isinstance(self.quant_method, AscendLinearMethod)
+            and isinstance(getattr(self.quant_method, "quant_method", None), AscendW8A8MXFP8DynamicLinearMethod)
+        )
+        if prequant_all_gather:
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(input_, dst_type=torch.float8_e4m3fn)
+            quantized_x = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(quantized_x, label=need_all_gather)
+            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale, label=need_all_gather)
+            output_parallel = self.quant_method.apply(self.layer, (quantized_x, pertoken_scale), bias)
+        else:
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, label=need_all_gather)
+            output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
             # All-gather across the partitions.
