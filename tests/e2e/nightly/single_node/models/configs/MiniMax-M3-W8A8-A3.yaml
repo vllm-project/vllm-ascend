@@ -82,4 +82,4 @@ test_cases:
         baseline: 72
         temperature: 1.0
         top_p: 0.95
-        threshold: 3
+        threshold: 2
