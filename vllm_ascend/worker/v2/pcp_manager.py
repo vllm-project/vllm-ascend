@@ -83,6 +83,11 @@ class AscendPCPManager(PCPManager):
                 max_num_tokens=max_num_tokens,
                 device=device,
             )
+            # The upstream PCP manager copies exactly max_num_reqs + 1
+            # offsets into the whole query_start_loc tensor. AscendInputBuffers
+            # normally reserves one additional FIA padding slot, but PCP never
+            # uses that slot; expose the exact upstream-sized view here.
+            self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
 
     @property
     def global_batch(self) -> AscendInputBatch:
