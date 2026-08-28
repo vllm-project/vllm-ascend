@@ -52,6 +52,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
     ExternalCachedBlockPool,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreBatch,
     KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
@@ -332,6 +333,7 @@ class KVPoolWorker:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
         self._transfer_threads_started = False
+        self._prepared_save_batch: KVCacheStoreBatch | None = None
         self.external_slot_release_waiter: Callable[[int], None] | None = None
         # Per-rank GVA cache: maps per-rank store key to its allocated GVA.
         # batch_alloc is non-idempotent (returns MMC_DUPLICATED_OBJECT for an
@@ -1759,25 +1761,67 @@ class KVPoolWorker:
 
         self.current_layer = self.current_layer + 1
 
-    def wait_for_save(self, connector_metadata: AscendConnectorMetadata):
-        current_event = None
-        assert self.kv_send_thread is not None
-        send_thread = self.kv_send_thread
+    def _requires_current_step_save_fence(self, request: ReqMeta) -> bool:
+        return any(
+            request.save_end_token % self._get_effective_group_block_size(group_id) != 0
+            for group_id in request.kv_cache_group_ids or [0]
+        )
 
-        for request in connector_metadata.requests:
-            can_save = request.can_save
-            if can_save is None or not can_save:
-                continue
-            if current_event is None:
-                current_event = torch.npu.Event()
-                current_event.record()
+    def prepare_save(self, connector_metadata: AscendConnectorMetadata) -> None:
+        """Submit key/exists/address preparation before model forward."""
+        if self.use_layerwise or self.tp_mismatch:
+            return
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
+            return
+        if self._prepared_save_batch is not None:
+            raise RuntimeError("AscendStore save batch was prepared twice without a commit")
+        if not isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
+            return
+
+        self.kv_send_thread.raise_if_failed()
+        requests = [request for request in connector_metadata.requests if request.can_save]
+        if not requests:
+            return
+        for request in requests:
             request.skip_null_blocks_by_group = self.group_uses_align_state
-            request.current_event = current_event
-            send_thread.add_stored_request(request.req_id)
-            send_thread.add_request(request)
+        force_current_step = any(self._requires_current_step_save_fence(request) for request in requests)
+        self._prepared_save_batch = self.kv_send_thread.prepare_save_batch(
+            requests,
+            force_current_step=force_current_step,
+        )
 
-        if current_event is not None:
-            send_thread.request_queue.join()
+    def wait_for_save(self, connector_metadata: AscendConnectorMetadata) -> None:
+        if self.tp_mismatch:
+            current_event = None
+            assert self.kv_send_thread is not None
+            for request in connector_metadata.requests:
+                if not request.can_save:
+                    continue
+                if current_event is None:
+                    current_event = torch.npu.Event()
+                    current_event.record()
+                request.skip_null_blocks_by_group = self.group_uses_align_state
+                request.current_event = current_event
+                self.kv_send_thread.add_stored_request(request.req_id)
+                self.kv_send_thread.add_request(request)
+            if current_event is not None:
+                self.kv_send_thread.request_queue.join()
+            return
+        if self.use_layerwise:
+            return
+        if not isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
+            return
+
+        current_batch = self._prepared_save_batch
+        self._prepared_save_batch = None
+
+        if current_batch is not None:
+            current_event = torch.npu.Event()
+            current_event.record()
+            self.kv_send_thread.commit_save_batch(current_batch, current_event)
+
+        if current_batch is not None and current_batch.force_current_step:
+            self.kv_send_thread.wait_for_batch(current_batch)
 
     def retrieve_layer(
         self,
@@ -2114,6 +2158,13 @@ class KVPoolWorker:
             self.tp_rank,
         )
         return done_sending, done_recving
+
+    def wait_for_preempted_saves(self, req_ids: set[str]) -> None:
+        """Fence saves whose source KV blocks are about to be reused."""
+        if not req_ids or not isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
+            return
+        if not req_ids.isdisjoint(self.kv_send_thread.get_stored_requests_snapshot()):
+            self.kv_send_thread.drain()
 
     def ensure_store_initialized(self) -> None:
         ensure_initialized = getattr(self.m_store, "ensure_initialized", None)

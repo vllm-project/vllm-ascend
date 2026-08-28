@@ -6,6 +6,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -36,6 +37,27 @@ def _circular_shift(lst: list, offset: int) -> list:
     if not lst or offset == 0:
         return lst
     return lst[offset:] + lst[:offset]
+
+
+@dataclass
+class PreparedStore:
+    keys: list[str]
+    addrs: list[list[int]]
+    sizes: list[list[int]]
+    stored_events: list[BlockStored] = field(default_factory=list)
+
+
+PreparedRequest = tuple[ReqMeta, list[PreparedStore]]
+
+
+@dataclass
+class KVCacheStoreBatch:
+    requests: list[ReqMeta]
+    force_current_step: bool = False
+    committed: threading.Event = field(default_factory=threading.Event)
+    done: threading.Event = field(default_factory=threading.Event)
+    current_event: Any = None
+    pending_keys: set[str] = field(default_factory=set)
 
 
 class LayerBatchBuilder:
@@ -605,6 +627,27 @@ class KVTransferThread(threading.Thread):
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
 
+class KVCacheStorePutThread(KVTransferThread):
+    def __init__(self, owner: KVCacheStoreSendingThread) -> None:
+        super().__init__(
+            owner.m_store,
+            owner.token_database,
+            owner.block_size,
+            owner.tp_rank,
+            owner.tp_size,
+            owner.dcp_size,
+            name="KVCacheStorePutThread",
+        )
+        self.owner = owner
+
+    def _handle_request(self, request_data: tuple[KVCacheStoreBatch, list[PreparedRequest]]) -> None:
+        batch, prepared_requests = request_data
+        try:
+            self.owner._put_batch(batch, prepared_requests)
+        finally:
+            self.request_queue.task_done()
+
+
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
         self,
@@ -632,9 +675,44 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
+        self.put_thread = KVCacheStorePutThread(self)
+
+    def run(self):
+        self.put_thread.start()
+        self.put_thread.ready_event.wait()
+        super().run()
+
+    def prepare_save_batch(
+        self,
+        requests: list[ReqMeta],
+        force_current_step: bool = False,
+    ) -> KVCacheStoreBatch:
+        batch = KVCacheStoreBatch(requests=requests, force_current_step=force_current_step)
+        for request in requests:
+            self.add_stored_request(request.req_id)
+        self.add_request(batch)  # type: ignore[arg-type]
+        return batch
+
+    @staticmethod
+    def commit_save_batch(batch: KVCacheStoreBatch, current_event: Any) -> None:
+        batch.current_event = current_event
+        batch.committed.set()
+
+    def wait_for_batch(self, batch: KVCacheStoreBatch) -> None:
+        while not batch.done.wait(timeout=1.0):
+            self.raise_if_failed()
+            self.put_thread.raise_if_failed()
+
+    def drain(self) -> None:
+        """Finish all saves submitted before the current model step."""
+        self.request_queue.join()
+        self.put_thread.request_queue.join()
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
+            # A request may enqueue multiple save batches. Invalidate a
+            # completion left by an earlier batch before tracking the next one.
+            self.finished_requests.discard(req_id)
             self.stored_requests[req_id] += 1
 
     def is_stored_request(self, req_id: str) -> bool:
@@ -677,7 +755,29 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.dec_stored_request(req_id)
         self.request_queue.task_done()
 
-    def _handle_request(self, req_meta: ReqMeta):
+    def _handle_request(self, request_data: ReqMeta | KVCacheStoreBatch):
+        if isinstance(request_data, KVCacheStoreBatch):
+            self._handle_save_batch(request_data)
+            return
+        self._handle_legacy_request(request_data)
+
+    def _handle_save_batch(self, batch: KVCacheStoreBatch) -> None:
+        prepared_requests: list[PreparedRequest] = []
+        try:
+            for request in batch.requests:
+                try:
+                    stores = self._prepare_stored_request(request, batch)
+                except Exception:
+                    logger.exception("Failed to prepare KV cache save for request %s", request.req_id)
+                    stores = []
+                prepared_requests.append((request, stores))
+                for store in stores:
+                    batch.pending_keys.update(store.keys)
+            self.put_thread.add_request((batch, prepared_requests))  # type: ignore[arg-type]
+        finally:
+            self.request_queue.task_done()
+
+    def _handle_legacy_request(self, req_meta: ReqMeta):
         if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
             req_id = req_meta.req_id
             try:
@@ -702,23 +802,60 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 tracked_request = req_id in self.stored_requests
             if not tracked_request:
                 return
-            self._handle_stored_request(req_meta)
+            stores = self._prepare_stored_request(req_meta)
+            if req_meta.current_event is not None and stores:
+                req_meta.current_event.synchronize()
+            for store in stores:
+                self.m_store.put(store.keys, store.addrs, store.sizes)
+                if self.enable_kv_event and store.stored_events:
+                    self.update_kv_event(store.stored_events)
         except Exception:
             logger.exception("Failed to store KV cache for request %s", req_id)
         finally:
-            remaining = self.dec_stored_request(req_id) if tracked_request else None
-            if tracked_request and remaining == 0:
-                self.delete_finished_stored_request(req_id)
-                self.set_finished_request(req_id)
-            if req_meta.event_id is not None:
-                with self.completed_events_lock:
-                    self.completed_events[req_meta.event_id] = 1
+            if tracked_request:
+                self._complete_request(req_meta)
             self.request_queue.task_done()
 
-    def _handle_stored_request(self, req_meta: ReqMeta):
+    def _complete_request(self, req_meta: ReqMeta) -> None:
+        remaining = self.dec_stored_request(req_meta.req_id)
+        if remaining == 0:
+            self.delete_finished_stored_request(req_meta.req_id)
+            self.set_finished_request(req_meta.req_id)
+        if req_meta.event_id is not None:
+            with self.completed_events_lock:
+                self.completed_events[req_meta.event_id] = 1
+
+    def _put_batch(self, batch: KVCacheStoreBatch, prepared_requests: list[PreparedRequest]) -> None:
+        batch.committed.wait()
+        try:
+            has_data = any(stores for _, stores in prepared_requests)
+            if batch.current_event is not None and has_data:
+                batch.current_event.synchronize()
+            for _, stores in prepared_requests:
+                for store in stores:
+                    self.m_store.put(store.keys, store.addrs, store.sizes)
+                    if self.enable_kv_event and store.stored_events:
+                        self.update_kv_event(store.stored_events)
+        except Exception as error:
+            logger.exception(
+                "Failed to put AscendStore save batch. type=%s, error=%s",
+                type(error).__name__,
+                error,
+            )
+        finally:
+            for request, _ in prepared_requests:
+                self._complete_request(request)
+            batch.done.set()
+
+    def _prepare_stored_request(
+        self,
+        req_meta: ReqMeta,
+        batch: KVCacheStoreBatch | None = None,
+    ) -> list[PreparedStore]:
+        """Build missing-key store payloads without waiting for model output."""
         token_len = req_meta.token_len_chunk
         req_id = req_meta.req_id
-        current_event = req_meta.current_event
+        prepared_stores: list[PreparedStore] = []
         try:
             store_masks = self.token_database.store_mask(token_len, req_meta.num_prompt_tokens)
         except AssertionError as exc:
@@ -808,6 +945,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if not keys:
                 continue
             exists_states = self.lookup(keys)
+            if batch is not None and batch.pending_keys:
+                exists_states = [
+                    exists or key in batch.pending_keys for key, exists in zip(keys, exists_states, strict=True)
+                ]
             missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
             if not missing_indices:
                 continue
@@ -886,11 +1027,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     sizes,
                     kv_cache_group_id=group_id,
                 )
-            if current_event is not None:
-                current_event.synchronize()
-            self.m_store.put(keys, addrs, sizes)
-            if self.enable_kv_event and stored_events:
-                self.update_kv_event(stored_events)
+            prepared_stores.append(
+                PreparedStore(
+                    keys=keys,
+                    addrs=addrs,
+                    sizes=sizes,
+                    stored_events=stored_events,
+                )
+            )
+        return prepared_stores
 
 
 class KVCacheStoreRecvingThread(KVTransferThread):
