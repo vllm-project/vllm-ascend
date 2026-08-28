@@ -149,6 +149,7 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
+from vllm_ascend.ops.fused_moe.force_eplb import cann_round_robin_enabled
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -4878,8 +4879,33 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
 
+    def _prebuild_force_eplb_topk_tables(self) -> None:
+        if not cann_round_robin_enabled():
+            return
+
+        capture_sizes = {
+            int(size)
+            for size in (self.vllm_config.compilation_config.cudagraph_capture_sizes or [])
+        }
+        cudagraph_dispatcher = getattr(self, "cudagraph_dispatcher", None)
+        if cudagraph_dispatcher is not None:
+            for _, descs in cudagraph_dispatcher.get_capture_descs():
+                capture_sizes.update(int(desc.num_tokens) for desc in descs)
+        if not capture_sizes:
+            capture_sizes.add(int(self.max_num_tokens))
+
+        model = getattr(self, "model", None)
+        if model is None:
+            return
+        sorted_capture_sizes = sorted(capture_sizes)
+        for module in model.modules():
+            fn = getattr(module, "prebuild_force_eplb_topk", None)
+            if fn is not None:
+                fn(sorted_capture_sizes, self.device)
+
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        self._prebuild_force_eplb_topk_tables()
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)
