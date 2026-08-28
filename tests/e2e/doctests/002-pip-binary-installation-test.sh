@@ -28,18 +28,25 @@ function install_system_packages() {
     fi
 }
 
+CACHE_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
+
 function config_pip_mirror() {
-    pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-    pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+    pip config set global.index-url http://${CACHE_HOST}/pypi/simple
+    pip config set global.trusted-host ${CACHE_HOST}
 
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         case "$ID" in
             ubuntu|debian)
-                sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+                if [ -f /etc/apt/sources.list ]; then
+                    sed -Ei 's@(ports|archive).ubuntu.com@'"${CACHE_HOST}"':8081@g' /etc/apt/sources.list
+                fi
                 ;;
             openEuler|centos|rhel|fedora)
-                sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
+                if [ -d /etc/yum.repos.d ]; then
+                    find /etc/yum.repos.d/ -name "*.repo" -exec \
+                        sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://'"${CACHE_HOST}"':8081/\1@g' {} +
+                fi
                 ;;
         esac
     fi
@@ -58,11 +65,14 @@ function install_binary_test() {
     PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version)
     _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
 
-    # Setup extra-index-url for public PyPI mirror, Ascend packages, and PyTorch CPU wheels.
+    # Setup extra-index-url for PyPI variant, Ascend packages, and PyTorch
+    # CPU wheels. Ascend and PyTorch indexes are routed through the
+    # in-cluster cache service to avoid slow external downloads and wheel
+    # corruption on unreliable connections.
     local pip_extra_index_urls=(
         "https://mirrors.huaweicloud.com/repository/pypi/variant"
-        "https://mirrors.huaweicloud.com/ascend/repos/pypi"
-        "https://download.pytorch.org/whl/cpu/"
+        "http://${CACHE_HOST}/ascend/repos/pypi"
+        "http://${CACHE_HOST}/whl/cpu"
     )
     local IFS=" "
     pip config set global.extra-index-url "${pip_extra_index_urls[*]}"

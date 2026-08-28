@@ -1,0 +1,13 @@
+name: Test Liqo 910b
+
+on:
+  push:
+    branches: [test/liqo-sz-lab-runner]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: linux-aarch64-910b-1
+    steps:
+      - run: echo "Hello from 910b runner"
