@@ -53,8 +53,10 @@ class AscendCompressorStateCache(CompressorStateCache):
         super().__init__(state_dim, dtype, compress_ratio, prefix)
         self.compress_ratio = compress_ratio
         self.block_size = block_size
+        self._use_pcp = False
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        self._use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         pads = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][1]
@@ -75,13 +77,13 @@ class AscendCompressorStateCache(CompressorStateCache):
     def get_attn_backend(self):
         # Keep these imports lazy to avoid a model-inspection circular import.
         if self.compress_ratio == 4:
-            from vllm_ascend.attention.dsa_v1 import AscendDSAC4StateBackend
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC4StateBackend, select_dsa_backend
 
-            return AscendDSAC4StateBackend
+            return select_dsa_backend(AscendDSAC4StateBackend, use_pcp=getattr(self, "_use_pcp", False))
         if self.compress_ratio == 128:
-            from vllm_ascend.attention.dsa_v1 import AscendDSAC128StateBackend
+            from vllm_ascend.attention.dsa_v1 import AscendDSAC128StateBackend, select_dsa_backend
 
-            return AscendDSAC128StateBackend
+            return select_dsa_backend(AscendDSAC128StateBackend, use_pcp=getattr(self, "_use_pcp", False))
         raise ValueError(f"Unsupported DeepSeek V4 state-cache compression ratio: {self.compress_ratio}")
 
 

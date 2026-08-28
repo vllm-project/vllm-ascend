@@ -56,15 +56,9 @@ def test_sfa_cp_four_mode_resolution() -> None:
         (True, True): (AscendSFADSADCPMetadataBuilder, AscendSFADSADCPImpl),
     }
     for flags, classes in expected.items():
-        with (
-            patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=flags[0]),
-            patch(
-                "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
-                return_value=flags[1],
-            ),
-        ):
-            assert resolve_sfa_metadata_builder() is classes[0]
-            assert resolve_sfa_impl() is classes[1]
+        with patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=flags[0]):
+            assert resolve_sfa_metadata_builder(dcp_enabled=flags[1]) is classes[0]
+            assert resolve_sfa_impl(dcp_enabled=flags[1]) is classes[1]
 
 
 def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:

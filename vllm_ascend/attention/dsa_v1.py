@@ -21,7 +21,6 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
-    enable_pcp,
     get_or_register_attention_buffer,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -93,17 +92,10 @@ class AscendDSABackend(AttentionBackend):
         from vllm_ascend.utils import enable_dsa_cp
 
         use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
         if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 
             return AscendDSACPMetadataBuilder
-        if use_pcp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
-
-            return AscendDSAPCPMetadataBuilder
         return AscendDSAMetadataBuilder
 
     @staticmethod
@@ -125,22 +117,31 @@ class AscendDSABackend(AttentionBackend):
         from vllm_ascend.utils import enable_dsa_cp
 
         use_dsa_cp = enable_dsa_cp()
-        use_pcp = enable_pcp()
-        if use_dsa_cp and use_pcp:
-            raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
         if use_dsa_cp:
             from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
 
             return AscendDSACPImpl
-        if use_pcp:
-            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
-
-            return AscendDSAPCPImpl
         return AscendDSAImpl
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [2, 4, 8, 16, 32, 64, 128]
+
+
+class AscendDSAPCPBackend(AscendDSABackend):
+    """DSA backend selected when prefill context parallelism is enabled."""
+
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPMetadataBuilder
+
+        return AscendDSAPCPMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[AttentionImplBase[Any]]:
+        from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSAPCPImpl
+
+        return AscendDSAPCPImpl
 
 
 class AscendDSAC4Backend(AscendDSABackend):
@@ -197,6 +198,52 @@ class AscendDSAC128StateBackend(AscendDSABackend):
         if get_ascend_device_type() == AscendDeviceType.A5:
             return [4, 8, 16]
         return [8, 16, 32]
+
+
+class AscendDSAC4PCPBackend(AscendDSAPCPBackend, AscendDSAC4Backend):
+    pass
+
+
+class AscendDSAC128PCPBackend(AscendDSAPCPBackend, AscendDSAC128Backend):
+    pass
+
+
+class AscendDSASWAPCPBackend(AscendDSAPCPBackend, AscendDSASWABackend):
+    pass
+
+
+class AscendDSAC4StatePCPBackend(AscendDSAPCPBackend, AscendDSAC4StateBackend):
+    pass
+
+
+class AscendDSAC128StatePCPBackend(AscendDSAPCPBackend, AscendDSAC128StateBackend):
+    pass
+
+
+_DSA_PCP_BACKENDS: dict[type[AscendDSABackend], type[AscendDSABackend]] = {
+    AscendDSABackend: AscendDSAPCPBackend,
+    AscendDSAC4Backend: AscendDSAC4PCPBackend,
+    AscendDSAC128Backend: AscendDSAC128PCPBackend,
+    AscendDSASWABackend: AscendDSASWAPCPBackend,
+    AscendDSAC4StateBackend: AscendDSAC4StatePCPBackend,
+    AscendDSAC128StateBackend: AscendDSAC128StatePCPBackend,
+}
+
+
+def select_dsa_backend(
+    backend: type[AscendDSABackend],
+    *,
+    use_pcp: bool,
+) -> type[AscendDSABackend]:
+    """Resolve an explicitly attached DSA backend without global config reads."""
+    if not use_pcp:
+        return backend
+
+    from vllm_ascend.utils import enable_dsa_cp
+
+    if enable_dsa_cp():
+        raise ValueError("Legacy DSACP and PCP cannot be enabled at the same time.")
+    return _DSA_PCP_BACKENDS[backend]
 
 
 @dataclass

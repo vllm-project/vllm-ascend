@@ -45,8 +45,6 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
     cache_graph_workspace,
-    enable_dcp,
-    enable_pcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -84,30 +82,10 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        pcp_enabled = enable_pcp()
-        dcp_enabled = enable_dcp()
-        if pcp_enabled and dcp_enabled:
-            raise NotImplementedError("Ascend MRV2 GQA does not support PCP and DCP simultaneously yet.")
-        if pcp_enabled:
-            return AscendAttentionPCPImpl
-        if dcp_enabled:
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
-
-            return AscendAttentionDCPImpl
         return AscendAttentionBackendImpl
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        pcp_enabled = enable_pcp()
-        dcp_enabled = enable_dcp()
-        if pcp_enabled and dcp_enabled:
-            raise NotImplementedError("Ascend MRV2 GQA does not support PCP and DCP simultaneously yet.")
-        if pcp_enabled:
-            return AscendAttentionPCPMetadataBuilder
-        if dcp_enabled:
-            from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
-
-            return AscendAttentionDCPMetadataBuilder
         return AscendAttentionMetadataBuilder
 
     @staticmethod
@@ -151,6 +129,34 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendAttentionPCPBackend(AscendAttentionBackend):
+    """GQA backend selected when prefill context parallelism is enabled."""
+
+    @staticmethod
+    def get_impl_cls() -> type["AscendAttentionPCPImpl"]:
+        return AscendAttentionPCPImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["AscendAttentionPCPMetadataBuilder"]:
+        return AscendAttentionPCPMetadataBuilder
+
+
+class AscendAttentionDCPBackend(AscendAttentionBackend):
+    """GQA backend selected when decode context parallelism is enabled."""
+
+    @staticmethod
+    def get_impl_cls():
+        from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
+
+        return AscendAttentionDCPImpl
+
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
+
+        return AscendAttentionDCPMetadataBuilder
 
 
 class AscendAttentionState(Enum):

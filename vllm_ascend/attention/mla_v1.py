@@ -28,8 +28,6 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
-    enable_dcp,
-    enable_pcp,
     enabling_mlapo,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -92,16 +90,6 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls():
-        dcp_enabled = enable_dcp()
-        pcp_enabled = enable_pcp()
-        if dcp_enabled and pcp_enabled:
-            raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
-        if dcp_enabled:
-            from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
-
-            return AscendMlaDCPMetadataBuilder
-        if pcp_enabled:
-            return AscendMLAPCPMetadataBuilder
         return AscendMLAMetadataBuilder
 
     @staticmethod
@@ -116,21 +104,39 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["MLAAttentionImpl"]:
-        dcp_enabled = enable_dcp()
-        pcp_enabled = enable_pcp()
-        if dcp_enabled and pcp_enabled:
-            raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
-        if dcp_enabled:
-            from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
-
-            return AscendMlaDCPImpl
-        if pcp_enabled:
-            return AscendMLAPCPImpl
         return AscendMLAImpl
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendMLAPCPBackend(AscendMLABackend):
+    """MLA backend selected when prefill context parallelism is enabled."""
+
+    @staticmethod
+    def get_builder_cls():
+        return AscendMLAPCPMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type["MLAAttentionImpl"]:
+        return AscendMLAPCPImpl
+
+
+class AscendMLADCPBackend(AscendMLABackend):
+    """MLA backend selected when decode context parallelism is enabled."""
+
+    @staticmethod
+    def get_builder_cls():
+        from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
+
+        return AscendMlaDCPMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type["MLAAttentionImpl"]:
+        from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
+
+        return AscendMlaDCPImpl
 
 
 @dataclass

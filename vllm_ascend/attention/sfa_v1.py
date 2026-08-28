@@ -115,7 +115,7 @@ class AscendSFABackend(AttentionBackend):
             return AscendSFAKVOffloadMetadataBuilder
         from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_metadata_builder
 
-        return resolve_sfa_metadata_builder()
+        return resolve_sfa_metadata_builder(dcp_enabled=False)
 
     @staticmethod
     def get_kv_cache_shape(
@@ -135,11 +135,35 @@ class AscendSFABackend(AttentionBackend):
             return AscendSFAKVOffloadImpl
         from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_impl
 
-        return resolve_sfa_impl()
+        return resolve_sfa_impl(dcp_enabled=False)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendSFADCPBackend(AscendSFABackend):
+    """SFA backend selected when decode context parallelism is enabled."""
+
+    @staticmethod
+    def get_builder_cls():
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadMetadataBuilder
+
+            return AscendSFAKVOffloadMetadataBuilder
+        from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_metadata_builder
+
+        return resolve_sfa_metadata_builder(dcp_enabled=True)
+
+    @staticmethod
+    def get_impl_cls() -> type["AscendSFAImpl"]:
+        if get_ascend_config().sparse_kv_offload_config.enabled:
+            from vllm_ascend.attention.sfa_kv_offload import AscendSFAKVOffloadImpl
+
+            return AscendSFAKVOffloadImpl
+        from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_impl
+
+        return resolve_sfa_impl(dcp_enabled=True)
 
 
 @dataclass

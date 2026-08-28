@@ -12,10 +12,12 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import (
     AscendMLABackend,
+    AscendMLADCPBackend,
     AscendMLADecodeMetadata,
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
+    AscendMLAPCPBackend,
     AscendMLAPCPImpl,
     AscendMLAPCPMetadata,
     AscendMLAPCPMetadataBuilder,
@@ -28,75 +30,32 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
 class TestAscendMLABackend(TestBase):
-    def setUp(self):
-        self.mock_config = MagicMock()
-
-        mock_parallel_config = MagicMock()
-        mock_parallel_config.prefill_context_parallel_size = 1
-        mock_parallel_config.decode_context_parallel_size = 1
-        self.mock_parallel_config = mock_parallel_config
-
-        self.mock_config.parallel_config = mock_parallel_config
-
-        self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
-        self.utils_patcher.start()
-        self.mla_config_patcher = patch(
-            "vllm_ascend.attention.mla_v1.get_current_vllm_config",
-            return_value=self.mock_config,
-        )
-        self.mla_config_patcher.start()
-
-        from vllm_ascend.attention.utils import enable_dcp
-
-        enable_dcp.cache_clear()
-
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
 
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_get_builder_cls(self, mock_enable_pcp):
-        mock_enable_pcp.return_value = False
+    def test_get_builder_cls(self):
         self.assertEqual(AscendMLABackend.get_builder_cls(), AscendMLAMetadataBuilder)
-        mock_enable_pcp.return_value = True
-        self.assertIs(AscendMLABackend.get_builder_cls(), AscendMLAPCPMetadataBuilder)
+        self.assertIs(AscendMLAPCPBackend.get_builder_cls(), AscendMLAPCPMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
         result = AscendMLABackend.get_kv_cache_shape(2, 4, 8, 128)
         self.assertEqual(result, (2, 4, 8, 128))
 
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_get_impl_cls(self, mock_enable_pcp):
-        mock_enable_pcp.return_value = False
+    def test_get_impl_cls(self):
         self.assertEqual(AscendMLABackend.get_impl_cls(), AscendMLAImpl)
-        mock_enable_pcp.return_value = True
-        self.assertIs(AscendMLABackend.get_impl_cls(), AscendMLAPCPImpl)
+        self.assertIs(AscendMLAPCPBackend.get_impl_cls(), AscendMLAPCPImpl)
 
     def test_get_supported_kernel_block_sizes(self):
         result = AscendMLABackend.get_supported_kernel_block_sizes()
         self.assertEqual(result, [128])
 
-    @patch("vllm_ascend.attention.mla_v1.enable_dcp")
-    def test_get_builder_cls_with_dcp(self, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
-        builder_cls = AscendMLABackend.get_builder_cls()
+    def test_get_builder_cls_with_dcp(self):
+        builder_cls = AscendMLADCPBackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.mla_v1.enable_dcp")
-    def test_get_impl_cls_with_dcp(self, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
-        impl_cls = AscendMLABackend.get_impl_cls()
+    def test_get_impl_cls_with_dcp(self):
+        impl_cls = AscendMLADCPBackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
-
-    @patch("vllm_ascend.attention.mla_v1.enable_dcp")
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_pcp_and_dcp_are_rejected(self, mock_enable_pcp, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
-        mock_enable_pcp.return_value = True
-
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
-            AscendMLABackend.get_builder_cls()
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
-            AscendMLABackend.get_impl_cls()
 
 
 def _make_pcp_metadata(

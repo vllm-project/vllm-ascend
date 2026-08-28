@@ -31,7 +31,6 @@ from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
     enable_dsa_cp_with_o_proj_tp,
-    enable_sfa_dcp_replicated_indexer,
 )
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -1249,10 +1248,9 @@ class AscendSFADSADCPImpl(AscendSFADCPImpl, AscendSFADSACPImpl):
     """Composes DCP collectives around the DSA-CP SFA implementation."""
 
 
-def resolve_sfa_metadata_builder() -> type[AscendSFAMetadataBuilder]:
+def resolve_sfa_metadata_builder(*, dcp_enabled: bool) -> type[AscendSFAMetadataBuilder]:
     """Resolve one SFA metadata builder from the two independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPMetadataBuilder
     if dsa_cp_enabled:
@@ -1262,10 +1260,9 @@ def resolve_sfa_metadata_builder() -> type[AscendSFAMetadataBuilder]:
     return AscendSFAMetadataBuilder
 
 
-def resolve_sfa_impl() -> type[AscendSFAImpl]:
+def resolve_sfa_impl(*, dcp_enabled: bool) -> type[AscendSFAImpl]:
     """Resolve one SFA implementation from the two independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
-    dcp_enabled = enable_sfa_dcp_replicated_indexer()
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPImpl
     if dsa_cp_enabled:

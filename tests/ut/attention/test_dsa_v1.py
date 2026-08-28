@@ -33,7 +33,9 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSALayerMetadata,
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
+    AscendDSAPCPBackend,
     AscendDSAReqMetadata,
+    select_dsa_backend,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -1090,23 +1092,17 @@ def test_prepared_cache_rejects_multistream_before_cache_access():
 
 
 def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
-    with (
-        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
-        patch("vllm_ascend.utils.enable_dsa_cp", return_value=False),
-    ):
-        assert AscendDSABackend.get_builder_cls() is AscendDSAPCPMetadataBuilder
-        assert AscendDSABackend.get_impl_cls() is AscendDSAPCPImpl
+    with patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
+        backend = select_dsa_backend(AscendDSABackend, use_pcp=True)
+        assert backend is AscendDSAPCPBackend
+        assert backend.get_builder_cls() is AscendDSAPCPMetadataBuilder
+        assert backend.get_impl_cls() is AscendDSAPCPImpl
 
     with (
-        patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
         patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        pytest.raises(ValueError, match="cannot be enabled at the same time"),
     ):
-        for get_backend_cls in (
-            AscendDSABackend.get_builder_cls,
-            AscendDSABackend.get_impl_cls,
-        ):
-            with pytest.raises(ValueError, match="cannot be enabled at the same time"):
-                get_backend_cls()
+        select_dsa_backend(AscendDSABackend, use_pcp=True)
 
 
 def test_pcp_metadata_builds_from_manager_global_view():
