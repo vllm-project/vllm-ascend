@@ -26,7 +26,6 @@ from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
-from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -130,7 +129,6 @@ from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
     set_draft_graph_params,
     set_graph_params,
-    update_full_graph_params,
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -2659,31 +2657,8 @@ class NPUModelRunner(GPUModelRunner):
             invalid_req_indices,
         )
 
-    def _update_full_graph_params_if_needed(
-        self,
-        forward_context: ForwardContext,
-        num_tokens_padded: int,
-    ) -> None:
-        if (
-            forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and not forward_context.capturing
-            and not self.use_sparse and not self.use_compress
-        ):
-            if self.enable_enpu:
-                torch.npu.current_stream().synchronize()
-
-            update_full_graph_params(
-                self.attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens_padded,
-                self.vllm_config,
-                self.speculative_config,
-            )
-
     def _model_forward(
         self,
-        num_tokens_padded: int,
         input_ids: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -2701,16 +2676,7 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        run_model = partial(self.model, **model_inputs)
-
-        if self.enable_enpu:
-            # The soft segmentation scenario requires event.record first, then event.wait
-            self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
-            hidden_states = run_model()
-        else:
-            hidden_states = run_model()
-            self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
-
+        hidden_states = self.model(**model_inputs)
         return hidden_states
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -3657,7 +3623,7 @@ class NPUModelRunner(GPUModelRunner):
             self.update_stream = torch.npu.Stream()
 
             if self.drafter is not None:
-                self.drafter.update_stream = self.update_stream
+                self.drafter.set_update_stream(self.update_stream)
 
         with _torch_cuda_wrapper():
             if (
@@ -3669,6 +3635,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.vllm_config,
                     use_eagle=self.use_eagle,
                     enable_enpu=self.enable_enpu,
+                    update_stream=self.update_stream,
                 )
                 drafter = getattr(self, "drafter", None)
                 if drafter is not None and hasattr(drafter, "model"):
@@ -3677,6 +3644,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.vllm_config,
                         use_eagle=self.use_eagle,
                         enable_enpu=self.enable_enpu,
+                        update_stream=self.update_stream,
                     )
             elif cudagraph_mode.has_full_cudagraphs():
                 self.model = ACLGraphWrapper(
@@ -3685,6 +3653,7 @@ class NPUModelRunner(GPUModelRunner):
                     runtime_mode=CUDAGraphMode.FULL,
                     use_eagle=self.use_eagle,
                     enable_enpu=self.enable_enpu,
+                    update_stream=self.update_stream,
                 )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
