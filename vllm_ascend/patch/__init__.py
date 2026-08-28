@@ -90,6 +90,23 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #52865.
 #
+# ** 4. File: platform/patch_deepseek_v4_trailing_system.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tokenizers.deepseek_v4_encoding.render_message`
+#    Why:
+#       The supported vLLM version does not append the assistant transition
+#       after a trailing DeepSeek V4 system message. Generation then starts at
+#       an invalid prompt boundary and can return empty content or raw tags.
+#    How:
+#       Append the existing assistant/thinking transition after a trailing
+#       system message or before an assistant history turn. A system message
+#       followed by a user or latest-reminder message remains unchanged. The
+#       patch is skipped when a behavior probe detects the upstream fix.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/51262
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #51262.
+#
 # ** 2. File: platform/patch_deepseek_v4_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.transformers_utils.model_arch_config_convertor.MODEL_ARCH_CONFIG_CONVERTORS`
