@@ -49,7 +49,7 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
       - "--additional_config"
-      - '{"enable_prefill_mc2": true}'      
+      - '{"enable_prefill_mc2": true, "enable_shared_expert_dp": false}'      
       - "--reasoning-parser"
       - "glm45"
       - "--tool-call-parser"
