@@ -46,14 +46,7 @@ def remap_sparse_indices_fused_kernel(
     count is written to ``chunk_count``, and the chunk's region of ``out``
     is pre-filled with -1 (the gather kernel later overwrites the compacted
     front).
-
-    NOTE: keep the compaction serial. A ``tl.cumsum`` prefix-sum compaction
-    is not reliable on triton-ascend 3.2.0 / CANN 9.1: on a2 it produces
-    nondeterministic garbage values, and on a3 it returns correct
-    single-shot results but deterministically traps the vector core under
-    repeated launches (re-verified 2026-08). Scalar ops are the reliable
-    primitive. Out-of-bounds lanes need no explicit check: their indices
-    load as -1 and fail the ``idx >= 0`` test.
+    
     """
     chunk = tl.program_id(0)
     row = tl.program_id(1)
