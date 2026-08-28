@@ -38,7 +38,7 @@ RUN if [ -n "$APTMIRROR" ]; then \
         sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
     fi && \
     apt-get update -y && \
-    apt-get install -y git vim wget net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
+    apt-get install -y git vim wget curl protobuf-compiler net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
@@ -71,7 +71,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 
 # Install _rust_tool_parser for the Rust frontend.
 RUN cd /vllm-workspace/vllm && \
-    pip install setuptools-rust && \
+    python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
 # Install vllm-ascend

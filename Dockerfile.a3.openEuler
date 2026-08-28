@@ -35,7 +35,7 @@ SHELL ["/bin/bash", "-c"]
 # Install clang (for triton-ascend) and Mooncake
 ARG MOONCAKE_TAG=0.3.11.post1
 RUN yum update -y && \
-    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel jemalloc hiredis-devel clang patch && \
+    yum install -y git vim wget curl protobuf-compiler net-tools gcc gcc-c++ make cmake numactl numactl-devel libibverbs-devel jemalloc hiredis-devel clang patch && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url ${MOONCAKE_INDEX_URL} && \
     rm -rf /var/cache/yum/*
@@ -65,7 +65,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 
 # Install _rust_tool_parser for the Rust frontend.
 RUN cd /vllm-workspace/vllm && \
-    pip install setuptools-rust && \
+    python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
 # Install vllm-ascend

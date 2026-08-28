@@ -34,7 +34,7 @@ RUN if [ -n "$APTMIRROR" ]; then \
         sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
     fi && \
     apt-get update -y && \
-    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 pciutils && \
+    apt-get install -y python3-pip git vim wget curl protobuf-compiler net-tools gcc g++ cmake numactl libnuma-dev libjemalloc2 pciutils && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
@@ -63,7 +63,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 
 # Install _rust_tool_parser for the Rust frontend.
 RUN cd /vllm-workspace/vllm && \
-    pip install setuptools-rust && \
+    python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
 # Install vllm-ascend

@@ -31,7 +31,7 @@ ARG PIP_TRUSTED_HOST=""
 WORKDIR /workspace
 
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch && \
+    yum install -y python3-pip git vim wget protobuf-compiler curl net-tools gcc gcc-c++ make cmake numactl numactl-devel jemalloc patch && \
     rm -rf /var/cache/yum
 
 # Install modelscope (for fast download) and ray (for multinode)
@@ -59,7 +59,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 
 # Install _rust_tool_parser for the Rust frontend.
 RUN cd /vllm-workspace/vllm && \
-    pip install setuptools-rust && \
+    python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
 # Install vllm-ascend
