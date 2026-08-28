@@ -8,11 +8,11 @@ from vllm_ascend.models.gemma4_mm import (
     _patch_gemma4_vision_patch_embedder,
 )
 from vllm_ascend.ops.linear import AscendReplicatedLinear
+from vllm_ascend.quantization.configs.modelslim_config import AscendModelSlimConfig
 from vllm_ascend.quantization.methods import (
     AscendW4A4MXFP4DynamicLinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
-from vllm_ascend.quantization.modelslim_config import AscendModelSlimConfig
 
 
 def test_mxfp4_vit_linear_registers_and_loads_weight_scale():
@@ -35,11 +35,11 @@ def test_mxfp4_vit_linear_registers_and_loads_weight_scale():
 
     with (
         patch(
-            "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+            "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
             return_value=current_config,
         ),
         patch(
-            "vllm_ascend.quantization.methods.w4a4_mxfp4.get_current_vllm_config",
+            "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config",
             return_value=current_config,
         ),
     ):
@@ -97,11 +97,11 @@ def test_mxfp8_vit_linear_uses_mxfp8_quant_method():
 
     with (
         patch(
-            "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
+            "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
             return_value=current_config,
         ),
         patch(
-            "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
+            "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
             return_value=current_config,
         ),
     ):

@@ -31,6 +31,12 @@ from vllm_ascend.quantization.methods import (
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 
+# NOTE: The upstream Gemma4 vision patch embedder may cast pixel_values to the
+# projection weight dtype. For Ascend MXFP4/MXFP8 dynamic quantization, the
+# packed/quantized weight dtype is not the logical activation dtype expected
+# by input_proj. Keep the patch-embedder activation in model_dtype and let the
+# Ascend quantized linear method perform activation quantization internally.
+
 
 def _ascend_gemma4_vision_patch_embedder_forward(
     module,
