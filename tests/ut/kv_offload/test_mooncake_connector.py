@@ -102,6 +102,12 @@ def make_mock_kv_caches() -> dict[str, Any]:
     return {"layer_0": (kv_cache, kv_cache)}
 
 
+def make_mock_kv_cache_tensor(size: int, layer_names: list[str]) -> types.SimpleNamespace:
+    """Build the descriptor renamed by vLLM #51718 for the active lane."""
+    layer_field = "shared_by" if vllm_version_is("0.27.1") else "layers"
+    return types.SimpleNamespace(size=size, **{layer_field: layer_names})
+
+
 def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     metadata: dict[str, Any] = {
         "engine_id": "engine1",
@@ -2745,7 +2751,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.num_blocks = 1579
         worker._layer_specs = {layer_name: MagicMock()}
         worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[types.SimpleNamespace(size=tensor_size, shared_by=[layer_name])]
+            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name])]
         )
 
         self.assertEqual(aligned_tensor.data_ptr() % alignment, 0)
@@ -2766,12 +2772,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[
-                types.SimpleNamespace(
-                    size=tensor_size,
-                    shared_by=[layer_name],
-                )
-            ]
+            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name])]
         )
 
         # Subtracting a stale one-group padding value from this view would
