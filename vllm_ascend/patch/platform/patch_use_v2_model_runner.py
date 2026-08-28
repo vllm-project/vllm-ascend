@@ -7,6 +7,13 @@ from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
 _original_validate_v2_model_runner = VllmConfig._validate_v2_model_runner
 _original_get_unsupported_features = VllmConfig._get_v2_model_runner_unsupported_features
 
+_ASCEND_V1_SUPPORTED_FEATURES = frozenset(
+    {
+        "dspark speculative decoding",
+        "dflash2 drafts",
+    }
+)
+
 
 def _patched_use_v2_model_runner(self) -> bool:
     """Return VLLM_USE_V2_MODEL_RUNNER env directly.
@@ -43,3 +50,21 @@ def _patched_validate_v2_model_runner(self) -> None:
 
 
 VllmConfig._validate_v2_model_runner = _patched_validate_v2_model_runner
+
+
+if hasattr(VllmConfig, "_get_v1_model_runner_unsupported_features"):
+    _original_get_v1_model_runner_unsupported_features = (
+        VllmConfig._get_v1_model_runner_unsupported_features
+    )
+
+    def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:
+        unsupported = _original_get_v1_model_runner_unsupported_features(self)
+        return [
+            feature
+            for feature in unsupported
+            if feature not in _ASCEND_V1_SUPPORTED_FEATURES
+        ]
+
+    VllmConfig._get_v1_model_runner_unsupported_features = (
+        _patched_get_v1_model_runner_unsupported_features
+    )
