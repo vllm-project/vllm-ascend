@@ -148,7 +148,7 @@ benchmarks:
     request_conf: vllm_api_general_chat
     dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
     # Start with a deterministic subset of GPQA's 198 questions for nightly.
-    num_prompts: 32
+    num_prompts: 64
     max_out_len: 65536
     batch_size: 32
     thinking: true
