@@ -1182,6 +1182,11 @@ class A5GDNAdapter:
 
         def fla_fwd_h(raw):
             def call(key, w, u, gate, initial_state, *, chunk_size, cu_seqlens, chunk_indices):
+                # The installed fla_npu ctypes binding always returns v_new and
+                # exposes the state layout as state_v_first instead of the
+                # native op's save_new_value/use_exp2/transpose_state_layout
+                # kwargs. state_v_first=False matches the (K, V) state tail
+                # produced by the native transpose_state_layout=False path.
                 return raw(
                     key,
                     w,
@@ -1191,11 +1196,9 @@ class A5GDNAdapter:
                     initial_state=initial_state,
                     output_final_state=True,
                     chunk_size=chunk_size,
-                    save_new_value=True,
                     cu_seqlens=cu_seqlens,
                     chunk_indices=chunk_indices,
-                    use_exp2=False,
-                    transpose_state_layout=False,
+                    state_v_first=False,
                 )
 
             return call

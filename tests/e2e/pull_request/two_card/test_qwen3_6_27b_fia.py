@@ -22,8 +22,11 @@ from vllm.assets.image import ImageAsset
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
 from vllm_ascend.device.device_config import is_950
 
-MODEL = "Qwen/Qwen3.6-27B"
-
+#MODEL = "Qwen/Qwen3.6-27B"
+MODEL = os.environ.get(
+    "QWEN36_MODEL_PATH",
+    "Qwen/Qwen3.6-27B",
+)
 
 @patch.dict(
     os.environ,
