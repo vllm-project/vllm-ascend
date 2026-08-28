@@ -2176,6 +2176,7 @@ class TestRunMergedDraft(TestBase):
         self.vllm_config.cache_config = MagicMock(spec=CacheConfig)
         self.vllm_config.scheduler_config = MagicMock()
         self.vllm_config.model_config = MagicMock()
+        self.vllm_config.model_config.hf_config = MagicMock(spec=[])
         self.vllm_config.model_config.hf_text_config = MagicMock(spec=[])
         self.vllm_config.model_config.hf_text_config.to_dict = MagicMock(return_value={})
         self.vllm_config.compilation_config = MagicMock()

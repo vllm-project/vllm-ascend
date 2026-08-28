@@ -1401,6 +1401,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             forward_context.attn_metadata = (
                 multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
             )
+            if self.use_compress:
+                # A merged speculative forward reuses one ForwardContext while
+                # each substep has different compressor inputs. Drop the prior
+                # substep's outputs before entering the next model invocation.
+                from vllm_ascend.attention.dsa_v1 import reset_compressor_metadata_cache
+
+                reset_compressor_metadata_cache()
 
             model_kwargs = {
                 "input_ids": model_input_ids,

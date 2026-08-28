@@ -5,29 +5,25 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.forward_context import ForwardContext, override_forward_context
 
-from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
+from vllm_ascend.attention.dsa_v1 import get_or_compute_compressor_metadata
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.models.deepseek_v4.compressor import Compressor
 
 
 @pytest.mark.parametrize(
-    ("owner_cls", "method_name", "compress_ratio"),
-    [
-        (Compressor, "_compute_metadata", 4),
-        (AscendDSACPImpl, "_compute_compressor_metadata", 128),
-    ],
+    "compress_ratio",
+    [4, 128],
 )
 def test_compressor_metadata_uses_physical_storage_geometry(
     monkeypatch,
-    owner_cls,
-    method_name,
     compress_ratio,
 ):
     logical_block_table = torch.tensor([[7, 11]], dtype=torch.int32)
     query_start_loc = torch.tensor([0, 4], dtype=torch.int32)
     start_pos = torch.tensor([508], dtype=torch.int32)
     metadata = SimpleNamespace(
+        cache_group_key="model.layers.0.self_attn.attn",
         full_compress_cos=torch.zeros((8, 1, 1, 64), dtype=torch.bfloat16),
         full_compress_sin=torch.zeros((8, 1, 1, 64), dtype=torch.bfloat16),
         query_start_loc=query_start_loc,
@@ -59,10 +55,14 @@ def test_compressor_metadata_uses_physical_storage_geometry(
         fake_compressor_metadata,
         raising=False,
     )
-    owner = owner_cls.__new__(owner_cls)
-    owner.compress_ratio = compress_ratio
-
-    result = getattr(owner, method_name)(metadata)
+    forward_context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        additional_kwargs={},
+    )
+    with override_forward_context(forward_context):
+        result = get_or_compute_compressor_metadata(metadata, compress_ratio)
 
     assert result is expected
     args = captured["args"]

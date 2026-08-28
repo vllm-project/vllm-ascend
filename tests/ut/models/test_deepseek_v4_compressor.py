@@ -6,13 +6,27 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.forward_context import ForwardContext, override_forward_context
 
+from vllm_ascend.attention.dsa_v1 import (
+    get_or_compute_compressor_metadata,
+    reset_compressor_metadata_cache,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorMetadata,
     AscendCompressorStateCache,
     Compressor,
 )
+
+
+def _make_forward_context() -> ForwardContext:
+    return ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        additional_kwargs={},
+    )
 
 
 class TestCompressorMetadata:
@@ -26,6 +40,7 @@ class TestCompressorMetadata:
         start_pos = torch.tensor([1, 3], dtype=torch.int32)
         block_table = torch.tensor([[0], [1]], dtype=torch.int32)
         metadata = SimpleNamespace(
+            cache_group_key="model.layers.0.self_attn.attn",
             full_compress_cos=full_cos,
             full_compress_sin=full_sin,
             query_start_loc=query_start_loc,
@@ -51,8 +66,9 @@ class TestCompressorMetadata:
                 create=True,
                 return_value=(result_cos, result_sin, slot_mapping),
             ) as metadata_op,
+            override_forward_context(_make_forward_context()),
         ):
-            actual = compressor._compute_metadata(metadata)
+            actual = get_or_compute_compressor_metadata(metadata, compressor.compress_ratio)
 
         assert actual[0] is result_cos
         assert actual[1] is result_sin
@@ -65,6 +81,55 @@ class TestCompressorMetadata:
         assert args[3] is start_pos
         assert args[4] is block_table
         assert args[5:] == (128, 7, 4, 3, 2)
+
+    def test_reuses_by_cache_group_and_resets_between_substeps(self):
+        metadata = SimpleNamespace(
+            cache_group_key="model.layers.0.self_attn.attn",
+            full_compress_cos=torch.zeros((2, 1, 1, 4)),
+            full_compress_sin=torch.zeros((2, 1, 1, 4)),
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            start_pos=torch.tensor([0], dtype=torch.int32),
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            storage_block_size=32,
+            num_compressed_tokens=1,
+            num_actual_reqs=1,
+        )
+        same_group_metadata = SimpleNamespace(**vars(metadata))
+        other_group_metadata = SimpleNamespace(
+            **{
+                **vars(metadata),
+                "cache_group_key": "model.layers.0.self_attn.indexer.k_cache",
+            }
+        )
+        outputs = [(torch.full((1,), value), torch.full((1,), value), torch.full((1,), value)) for value in range(4)]
+
+        with (
+            patch.object(
+                DeviceOperator,
+                "get_dsa_compressor_slot_mapping_format",
+                return_value=0,
+            ),
+            patch.object(
+                torch.ops._C_ascend,
+                "compressor_metadata",
+                create=True,
+                side_effect=outputs,
+            ) as metadata_op,
+        ):
+            with override_forward_context(_make_forward_context()):
+                first = get_or_compute_compressor_metadata(metadata, 4)
+                reused = get_or_compute_compressor_metadata(same_group_metadata, 4)
+                isolated = get_or_compute_compressor_metadata(other_group_metadata, 4)
+                reset_compressor_metadata_cache()
+                next_substep = get_or_compute_compressor_metadata(metadata, 4)
+            with override_forward_context(_make_forward_context()):
+                next_forward = get_or_compute_compressor_metadata(metadata, 4)
+
+        assert first is reused
+        assert isolated is not first
+        assert next_substep is not first
+        assert next_forward is not first
+        assert metadata_op.call_count == 4
 
 
 class TestCompressorForward:
@@ -105,7 +170,6 @@ class TestCompressorForward:
         compressed_kv = torch.ones((1, 1, 4))
         compute_metadata = MagicMock(return_value=(compress_cos, compress_sin, slot_mapping))
         compressor._compute_metadata = compute_metadata
-
         with patch.object(
             torch.ops._C_ascend,
             "compressor",
