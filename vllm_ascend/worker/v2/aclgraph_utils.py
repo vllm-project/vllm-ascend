@@ -60,12 +60,17 @@ def _prepare_pcp_inputs_to_capture(
     """Build graph inputs with the same PCP-local layout used on replay."""
     if vllm_version_is("0.27.1"):
         input_batch = cudagraph_utils.InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+        input_batch = pcp_manager.partition_batch(input_batch)
+        input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
     else:
+        # vLLM #53515 passes PCP-local input buffers into graph capture, so the
+        # dummy batch must not be partitioned a second time. vLLM #53869
+        # supplies the capture-only block tables and PCP slot mappings instead.
         input_batch = cudagraph_utils.InputBatch.make_dummy(
             num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
         )
-    input_batch = pcp_manager.partition_batch(input_batch)
-    input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
+        input_block_tables = _block_tables.get_dummy_block_tables(num_reqs)
+        slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
     attn_metadata = model_state.prepare_attn(
