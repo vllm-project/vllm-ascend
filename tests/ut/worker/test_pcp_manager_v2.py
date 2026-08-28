@@ -118,6 +118,7 @@ def test_pcp_manager_uses_persistent_ascend_input_buffers():
     assert isinstance(manager._input_buffers, AscendInputBuffers)
     assert manager._input_buffers.max_num_reqs == 6
     assert manager._input_buffers.seq_lens_np.shape == (6,)
+    assert manager._input_buffers.query_start_loc.shape == (7,)
     if hasattr(vllm_model_runner.pcp.PCPManager, "input_buffers"):
         assert manager.input_buffers is manager._input_buffers
 
