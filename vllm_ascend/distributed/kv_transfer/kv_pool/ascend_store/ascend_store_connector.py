@@ -244,7 +244,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
         assert self.connector_worker is not None
-        preempted_req_ids = getattr(kv_connector_metadata, "preempted_req_ids", set())
+        preempted_req_ids: set[str] = getattr(kv_connector_metadata, "preempted_req_ids", set())
         self.connector_worker.wait_for_preempted_saves(preempted_req_ids)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
