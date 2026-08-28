@@ -224,11 +224,7 @@ class NPUModelRunner(GPUModelRunner):
         """Copy logical KV blocks across Ascend's kernel-sized cache views."""
         num_blocks = self.kv_cache_config.num_blocks
         block_copy_pairs = [
-            (
-                (copy.src_block_id, copy.dst_block_id)
-                if hasattr(copy, "src_block_id")
-                else tuple(copy)
-            )
+            ((copy.src_block_id, copy.dst_block_id) if hasattr(copy, "src_block_id") else tuple(copy))
             for copy in kv_cache_block_copies
         ]
         cache_tensors = []

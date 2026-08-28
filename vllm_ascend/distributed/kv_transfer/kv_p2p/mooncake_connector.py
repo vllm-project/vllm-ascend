@@ -63,7 +63,6 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
-    tensor_storage_key,
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import (

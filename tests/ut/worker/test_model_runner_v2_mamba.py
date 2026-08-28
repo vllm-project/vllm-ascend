@@ -19,11 +19,11 @@ from vllm_ascend.worker.v2.attn_utils import (
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
 )
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
 def _mamba_spec() -> MambaSpec:
