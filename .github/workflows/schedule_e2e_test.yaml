@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,29 +15,24 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Update estimated test times
+name: Schedule All E2E Tests
 
 on:
-  schedule:
-    - cron: '0 8 */3 * *'  # Every 3 days at 16:00 Beijing (UTC+8)
   workflow_dispatch:
     inputs:
-      filter_npu_type:
-        description: 'Only run tests for this NPU type (e.g. a2, a3, 310p). Leave empty to run all.'
+      vllm_ascend_branch:
+        description: 'Branch, tag, or SHA to test'
         required: false
+        default: 'main'
         type: string
-        default: ''
-      filter_num_npus:
-        description: 'Only run tests with this NPU count (e.g. 1, 2, 4, 8). Leave empty to run all.'
+      update_est_times:
+        description: 'Update estimated times'
         required: false
-        type: string
-        default: ''
-      filter_partition:
-        description: 'Only run this partition (e.g. 1-3). Leave empty to run all.'
-        required: false
-        type: string
-        default: ''
-
+        default: false
+        type: boolean
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
 defaults:
   run:
     shell: bash -el {0}
@@ -47,113 +42,103 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: update-estimated-times-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  select-tests:
-    runs-on: ubuntu-latest
+  select-all-tests:
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
-      test_groups: ${{ steps.scope.outputs.test_groups }}
-      has_tests: ${{ steps.scope.outputs.has_tests }}
-      csrc_cache_target_ids: ${{ steps.scope.outputs.csrc_cache_target_ids }}
-      main_commit: ${{ steps.vllm.outputs.main_commit }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
-      vllm_ascend_ref: ${{ steps.source.outputs.source_ref }}
-      base_sha: ${{ steps.source.outputs.base_sha }}
+      has_tests: ${{ steps.full-scope.outputs.has_tests }}
+      test_groups: ${{ steps.full-scope.outputs.test_groups }}
+      matched_modules: ${{ steps.full-scope.outputs.matched_modules }}
+      csrc_cache_target_ids: ${{ steps.full-scope.outputs.csrc_cache_target_ids }}
+      vllm_ascend_ref: ${{ steps.resolve-refs.outputs.vllm_ascend_ref }}
+      base_sha: ${{ steps.resolve-refs.outputs.base_sha }}
+      base_ref: ${{ steps.resolve-refs.outputs.base_ref }}
+      main_commit: ${{ steps.resolve-refs.outputs.main_commit }}
+      release_tag: ${{ steps.resolve-refs.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v7
         with:
+          ref: >-
+            ${{
+              github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || ''
+            }}
           fetch-depth: 0
 
-      - name: Resolve source snapshot
-        id: source
+      - name: Resolve refs
+        id: resolve-refs
+        env:
+          WD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
         run: |
-          git fetch origin main
-          echo "source_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: pip install regex pyyaml
-
-      - name: Read verified vLLM refs
-        id: vllm
-        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          TARGET_BRANCH="${WD_BRANCH:-$GITHUB_REF_NAME}"
+          git fetch origin "$TARGET_BRANCH"
+          {
+            echo "vllm_ascend_ref=$(git rev-parse HEAD)"
+            echo "base_sha=$(git rev-parse FETCH_HEAD)"
+            echo "base_ref=${TARGET_BRANCH}"
+          } >> "$GITHUB_OUTPUT"
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
-          echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
+            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+            exit 1
+          }
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          {
+            echo "main_commit=${main_commit}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Select all tests
-        id: scope
+        id: full-scope
         run: |
+          pip install regex pyyaml
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           python3 .github/workflows/scripts/select_tests.py \
-            --run-all-modules \
-            --changed-files vllm_ascend/__init__.py
-          # Re-read outputs and strip cpu-only groups (timing data from CPU UTs
-          # is batch-level and skipped by update_estimated_times.py anyway).
-          groups_json="$(grep '^test_groups=' "$GITHUB_OUTPUT" | cut -d= -f2-)"
-          filter=".npu_type != \"cpu\""
-          if [ -n "${{ inputs.filter_npu_type }}" ]; then
-            filter="${filter} and .npu_type == \"${{ inputs.filter_npu_type }}\""
-          fi
-          if [ -n "${{ inputs.filter_num_npus }}" ]; then
-            filter="${filter} and .num_npus == ${{ inputs.filter_num_npus }}"
-          fi
-          if [ -n "${{ inputs.filter_partition }}" ]; then
-            filter="${filter} and .partition == \"${{ inputs.filter_partition }}\""
-          fi
-          filtered="$(echo "$groups_json" | jq -c "[.[] | select(${filter})]")"
-          cache_target_ids="$(echo "$filtered" | jq -c '[.[].csrc_cache_target] | unique')"
-          has_tests="false"
-          if [ "$(echo "$filtered" | jq 'length')" -gt 0 ]; then has_tests="true"; fi
-          sed -i "s|^test_groups=.*|test_groups=${filtered}|" "$GITHUB_OUTPUT"
-          sed -i "s|^has_tests=.*|has_tests=${has_tests}|" "$GITHUB_OUTPUT"
-          sed -i "s|^csrc_cache_target_ids=.*|csrc_cache_target_ids=${cache_target_ids}|" "$GITHUB_OUTPUT"
+            --changed-files vllm_ascend/dummy.py \
+            --run-all-modules
 
   ensure-csrc-cache:
-    needs: select-tests
-    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
+    needs: select-all-tests
+    if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
     uses: ./.github/workflows/_ensure_csrc_cache.yaml
     with:
-      target_ids: ${{ needs.select-tests.outputs.csrc_cache_target_ids }}
-      source_ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
-      base_ref: main
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      target_ids: ${{ needs.select-all-tests.outputs.csrc_cache_target_ids }}
+      source_ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
+      base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
+      base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
 
-  run-tests-main:
-    needs: [select-tests, ensure-csrc-cache]
-    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
+  run-all-tests:
+    needs: [select-all-tests, ensure-csrc-cache]
+    if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.select-all-tests.outputs.main_commit }}
+          - ${{ needs.select-all-tests.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
-      vllm: ${{ needs.select-tests.outputs.main_commit }}
-      ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
-      base_ref: main
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
-      upload_timing: true
-      continue_on_error: true
-
-  run-tests-release:
-    needs: [select-tests, ensure-csrc-cache]
-    if: ${{ needs.select-tests.outputs.has_tests == 'true' }}
-    uses: ./.github/workflows/_selected_tests.yaml
-    with:
-      vllm: ${{ needs.select-tests.outputs.release_tag }}
-      ref: ${{ needs.select-tests.outputs.vllm_ascend_ref }}
-      base_ref: main
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
-      upload_timing: true
-      continue_on_error: true
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
+      base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
+      base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
+      test_groups: ${{ needs.select-all-tests.outputs.test_groups }}
+      upload_timing: ${{ inputs.update_est_times }}
 
   update-estimated-times:
-    needs: [run-tests-main, run-tests-release]
-    if: ${{ !cancelled() }}
+    needs: [run-all-tests]
+    if: ${{ !cancelled() && inputs.update_est_times }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
