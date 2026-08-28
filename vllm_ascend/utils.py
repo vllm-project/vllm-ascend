@@ -39,10 +39,8 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
-    check_ascend_device_type,
     get_ascend_device_type,
     is_310p,
-    is_950,
 )
 
 if TYPE_CHECKING:

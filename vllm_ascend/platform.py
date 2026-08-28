@@ -218,7 +218,7 @@ class NPUPlatform(Platform):
         use_compress = getattr(attn_selector_config, "use_compress", False)
         key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
 
-        if _validate_fa3_backend(key, attn_selector_config):
+        if _validate_fa3_backend(key):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
@@ -341,72 +341,6 @@ class NPUPlatform(Platform):
                 )
 
     @classmethod
-    def _validate_indexer_pp_config(cls, vllm_config: VllmConfig) -> None:
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        if pp_size <= 1:
-            return
-
-        config = getattr(vllm_config.model_config, "hf_text_config", None)
-        if config is None:
-            return
-
-        indexer_types = getattr(config, "indexer_types", None)
-        use_index_cache = getattr(config, "use_index_cache", False)
-        if indexer_types is None and not use_index_cache:
-            return
-
-        num_hidden_layers = getattr(config, "num_hidden_layers", None)
-        if not isinstance(num_hidden_layers, int):
-            return
-
-        from vllm.distributed.utils import get_pp_indices
-
-        for pp_rank in range(pp_size):
-            start_layer, end_layer = get_pp_indices(
-                num_hidden_layers,
-                pp_rank,
-                pp_size,
-            )
-            if start_layer >= end_layer:
-                continue
-
-            if use_index_cache:
-                index_topk_pattern = getattr(config, "index_topk_pattern", None)
-                if index_topk_pattern is None:
-                    index_topk_freq = getattr(config, "index_topk_freq", 1)
-                    index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-                    skip_topk = max(start_layer - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
-                else:
-                    skip_topk = start_layer < len(index_topk_pattern) and index_topk_pattern[start_layer] == "S"
-                if skip_topk:
-                    raise ValueError(
-                        "Index cache dependency crosses a pipeline-parallel stage boundary: "
-                        f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-                        f"but layer {start_layer} skips Top-K computation without a preceding "
-                        "Top-K recomputation in the same PP stage. "
-                        "Cross-PP Top-K index propagation is not supported."
-                    )
-
-            if indexer_types is None:
-                continue
-
-            has_full_indexer = False
-            for layer_id in range(start_layer, end_layer):
-                indexer_type = indexer_types[layer_id] if layer_id < len(indexer_types) else None
-                if isinstance(indexer_type, str):
-                    indexer_type = indexer_type.lower()
-                if indexer_type == "full":
-                    has_full_indexer = True
-                elif indexer_type == "shared" and not has_full_indexer:
-                    raise ValueError(
-                        "IndexShare group crosses a pipeline-parallel stage boundary: "
-                        f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
-                        f"but layer {layer_id} uses a shared Indexer without a preceding "
-                        "full Indexer in the same PP stage. "
-                        "Cross-PP Top-K index propagation is not supported."
-                    )
-
-    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # Lazy import vllm/vllm-ascend to avoid circular import
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
@@ -426,7 +360,7 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
-        cls._validate_indexer_pp_config(vllm_config)
+        _validate_indexer_pp_config(vllm_config)
 
         _validate_draft_decode_context_parallel_config(vllm_config)
         _validate_parallel_config(vllm_config)
@@ -1288,24 +1222,7 @@ def _set_pytorch_npu_alloc_env(vllm_config: VllmConfig) -> None:
         logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
 
-def _disable_expandable_segments() -> None:
-    """Remove the allocator option that conflicts with sleep mode."""
-    npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "")
-    if not npu_alloc_configs:
-        return
-
-    filtered_configs = [
-        config.strip()
-        for config in npu_alloc_configs.split(",")
-        if config.strip() and not config.strip().startswith("expandable_segments:")
-    ]
-    updated_configs = ",".join(filtered_configs)
-    if updated_configs != npu_alloc_configs:
-        os.environ["PYTORCH_NPU_ALLOC_CONF"] = updated_configs
-        logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
-
-
-def _validate_fa3_backend(key, _attn_selector_config):
+def _validate_fa3_backend(key):
     rl_config = get_ascend_config().rl_config
     if not (rl_config.enabled and rl_config.enable_training_consistency):
         logger.info(
@@ -1524,3 +1441,69 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
             f"parallel for GQA draft model "
             f"({decode_context_parallel_size})."
         )
+
+
+def _validate_indexer_pp_config(vllm_config: VllmConfig) -> None:
+    pp_size = vllm_config.parallel_config.pipeline_parallel_size
+    if pp_size <= 1:
+        return
+
+    config = getattr(vllm_config.model_config, "hf_text_config", None)
+    if config is None:
+        return
+
+    indexer_types = getattr(config, "indexer_types", None)
+    use_index_cache = getattr(config, "use_index_cache", False)
+    if indexer_types is None and not use_index_cache:
+        return
+
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    if not isinstance(num_hidden_layers, int):
+        return
+
+    from vllm.distributed.utils import get_pp_indices
+
+    for pp_rank in range(pp_size):
+        start_layer, end_layer = get_pp_indices(
+            num_hidden_layers,
+            pp_rank,
+            pp_size,
+        )
+        if start_layer >= end_layer:
+            continue
+
+        if use_index_cache:
+            index_topk_pattern = getattr(config, "index_topk_pattern", None)
+            if index_topk_pattern is None:
+                index_topk_freq = getattr(config, "index_topk_freq", 1)
+                index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+                skip_topk = max(start_layer - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+            else:
+                skip_topk = start_layer < len(index_topk_pattern) and index_topk_pattern[start_layer] == "S"
+            if skip_topk:
+                raise ValueError(
+                    "Index cache dependency crosses a pipeline-parallel stage boundary: "
+                    f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
+                    f"but layer {start_layer} skips Top-K computation without a preceding "
+                    "Top-K recomputation in the same PP stage. "
+                    "Cross-PP Top-K index propagation is not supported."
+                )
+
+        if indexer_types is None:
+            continue
+
+        has_full_indexer = False
+        for layer_id in range(start_layer, end_layer):
+            indexer_type = indexer_types[layer_id] if layer_id < len(indexer_types) else None
+            if isinstance(indexer_type, str):
+                indexer_type = indexer_type.lower()
+            if indexer_type == "full":
+                has_full_indexer = True
+            elif indexer_type == "shared" and not has_full_indexer:
+                raise ValueError(
+                    "IndexShare group crosses a pipeline-parallel stage boundary: "
+                    f"PP rank {pp_rank}/{pp_size} owns layers [{start_layer}, {end_layer}), "
+                    f"but layer {layer_id} uses a shared Indexer without a preceding "
+                    "full Indexer in the same PP stage. "
+                    "Cross-PP Top-K index propagation is not supported."
+                )

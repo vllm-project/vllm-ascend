@@ -197,9 +197,18 @@ class RlConfig:
             )
         ascend_config.weight_nz_mode = 0
 
-        from vllm_ascend.platform import _disable_expandable_segments
-
-        _disable_expandable_segments()
+        # Remove the allocator option that conflicts with sleep mode.
+        npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "")
+        if npu_alloc_configs:
+            filtered_configs = [
+                alloc_config.strip()
+                for alloc_config in npu_alloc_configs.split(",")
+                if alloc_config.strip() and not alloc_config.strip().startswith("expandable_segments:")
+            ]
+            updated_configs = ",".join(filtered_configs)
+            if updated_configs != npu_alloc_configs:
+                os.environ["PYTORCH_NPU_ALLOC_CONF"] = updated_configs
+                logger.info("Removed expandable_segments from PYTORCH_NPU_ALLOC_CONF: %s", updated_configs)
 
         if self.enable_batch_invariant:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
