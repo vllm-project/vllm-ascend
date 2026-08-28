@@ -68,7 +68,7 @@ Because the weights are large, a single A3 node only supports about 1K context. 
 
 ### 3.3 Verify Multi-node Communication (Optional)
 
-If you want to deploy a multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy a multi-node environment, verify multi-node communication as described in [Verify inter-node connectivity](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
