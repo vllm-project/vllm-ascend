@@ -11,6 +11,7 @@ Random weights cannot validate checkpoint loading, QuaRot or acceptance rates.
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 import requests
@@ -255,8 +256,12 @@ def _write_target(path: Path, *, mtp: bool = False) -> str:
 
 def _write_w4a8_description(path: Path) -> None:
     # Use the released mixed KDA precision: W8A8 q/k/v, floating-point gates;
-    # routed experts use W4A8. No rotation file means this is NOT a QuaRot test.
-    description = {"model.embed_tokens.weight": "FLOAT", "lm_head.weight": "FLOAT", "optional": {}}
+    # routed and shared experts use W4A8. No rotation file means this is NOT a QuaRot test.
+    description: dict[str, Any] = {
+        "model.embed_tokens.weight": "FLOAT",
+        "lm_head.weight": "FLOAT",
+        "optional": {},
+    }
     for layer in range(NUM_LAYERS):
         prefix = f"model.layers.{layer}"
         for projection in ("self_attention_res_proj", "mlp_res_proj"):
@@ -273,7 +278,7 @@ def _write_w4a8_description(path: Path) -> None:
             description[f"{prefix}.self_attn.{projection}.weight"] = "FLOAT"
         mlp_prefix = f"{prefix}.block_sparse_moe.shared_experts" if layer else f"{prefix}.mlp"
         for projection in ("gate_proj", "up_proj", "down_proj"):
-            description[f"{mlp_prefix}.{projection}.weight"] = "W8A8_DYNAMIC"
+            description[f"{mlp_prefix}.{projection}.weight"] = "W4A8_DYNAMIC" if layer else "W8A8_DYNAMIC"
         if layer:
             for projection in ("routed_expert_down_proj", "routed_expert_up_proj"):
                 description[f"{prefix}.block_sparse_moe.{projection}.weight"] = "W8A8_DYNAMIC"
@@ -283,6 +288,7 @@ def _write_w4a8_description(path: Path) -> None:
             for projection in ("w1", "w2", "w3"):
                 description[f"{prefix}.block_sparse_moe.experts.0.{projection}.weight"] = "W4A8_DYNAMIC"
     description = {f"language_model.{key}" if key != "optional" else key: value for key, value in description.items()}
+    description.update(group_size=0, version="1.0.0")
     for layer in range(NUM_VISION_LAYERS):
         for projection in ("mlp.fc0", "mlp.fc1", "wqkv", "wo"):
             description[f"vision_tower.encoder.blocks.{layer}.{projection}.weight"] = "FLOAT"

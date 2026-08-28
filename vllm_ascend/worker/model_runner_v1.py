@@ -4073,6 +4073,29 @@ class NPUModelRunner(GPUModelRunner):
         return kv_cache_spec.head_size, head_size_v
 
     @staticmethod
+    def _uses_mla_mixed_dtype_fa_quant_cache(attn_layer: MLAAttention) -> bool:
+        checker = getattr(attn_layer.impl, "_uses_a3_mla_fa_quant_cache", None)
+        return bool(checker()) if callable(checker) else False
+
+    def _get_mla_mixed_dtype_fa_quant_cache_dtypes(
+        self,
+        layer_name: str,
+        kv_cache_spec: AttentionSpec,
+    ) -> tuple[torch.dtype, torch.dtype] | None:
+        """Return physical dtypes for Kimi-K3's A3 mixed C8/BF16 cache."""
+        if not isinstance(kv_cache_spec, AscendMLAAttentionSpec):
+            return None
+        attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,
+            [layer_name],
+        )
+        attn_layer = attn_layers[layer_name]
+        if isinstance(attn_layer, MLAAttention) and self._uses_mla_mixed_dtype_fa_quant_cache(attn_layer):
+            return attn_layer.impl.dtype, self.model_config.dtype
+        return None
+
+    @staticmethod
     def _align_up(value: int, alignment: int) -> int:
         return (value + alignment - 1) // alignment * alignment
 
@@ -4303,15 +4326,24 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
                         assert k_dim > 0 and v_dim > 0
-                        kv_head_dim_list = [
-                            k_dim,
-                            v_dim,
-                        ]
-                        if not self.use_sparse and enable_fa_quant(self.vllm_config):
+                        mla_fa_quant_dtypes = self._get_mla_mixed_dtype_fa_quant_cache_dtypes(
+                            layer_name,
+                            current_kv_cache_spec,
+                        )
+                        if mla_fa_quant_dtypes is not None:
+                            k_cache_dtype, v_cache_dtype = mla_fa_quant_dtypes
+                            kv_head_dim_list = [
+                                k_dim * get_dtype_size(k_cache_dtype),
+                                v_dim * get_dtype_size(v_cache_dtype),
+                            ]
+                            k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
+                        elif not self.use_sparse and enable_fa_quant(self.vllm_config):
+                            kv_head_dim_list = [k_dim, v_dim]
                             k_tensor_split_factor, v_tensor_split_factor = (
                                 self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
                             )
                         else:
+                            kv_head_dim_list = [k_dim, v_dim]
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
                         k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
@@ -4634,11 +4666,19 @@ class NPUModelRunner(GPUModelRunner):
                                 raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
                             else:
                                 k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                                nope_page_size = int(np.prod(kv_cache_shape[:-1])) * k_dim * get_dtype_size(
-                                    current_kv_cache_spec.dtype
+                                mla_fa_quant_dtypes = self._get_mla_mixed_dtype_fa_quant_cache_dtypes(
+                                    layer_name,
+                                    current_kv_cache_spec,
                                 )
-                                rope_page_size = int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(
-                                    current_kv_cache_spec.dtype
+                                if mla_fa_quant_dtypes is None:
+                                    k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
+                                else:
+                                    k_cache_dtype, v_cache_dtype = mla_fa_quant_dtypes
+                                nope_page_size = (
+                                    int(np.prod(kv_cache_shape[:-1])) * k_dim * get_dtype_size(k_cache_dtype)
+                                )
+                                rope_page_size = (
+                                    int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(v_cache_dtype)
                                 )
                                 conv_block_padding_size = raw_k_tensor.numel() - nope_page_size - rope_page_size
                                 raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
@@ -4682,7 +4722,13 @@ class NPUModelRunner(GPUModelRunner):
                             v_dim,
                         )
                     k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-                    if enable_fa_quant(self.vllm_config):
+                    mla_fa_quant_dtypes = self._get_mla_mixed_dtype_fa_quant_cache_dtypes(
+                        layer_name,
+                        current_kv_cache_spec,
+                    )
+                    if mla_fa_quant_dtypes is not None:
+                        k_cache_dtype, v_cache_dtype = mla_fa_quant_dtypes
+                    elif enable_fa_quant(self.vllm_config):
                         k_cache_dtype, v_cache_dtype = self.vllm_config.quant_config.get_kv_quant_dtype(
                             layer_name, current_kv_cache_spec.dtype, self.model_config
                         )
@@ -5013,7 +5059,19 @@ class NPUModelRunner(GPUModelRunner):
                         store_on_host=self.sparse_kv_offload_enabled,
                     )
                 elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    if getattr(attn_module.impl, "fa_quant_layer", False):
+                    if self._uses_mla_mixed_dtype_fa_quant_cache(attn_module):
+                        dtype, cache_dtype_str = attn_module.impl.dtype, None
+                        dtype_size = get_dtype_size(dtype)
+                        # Latent KV is C8, while the positional cache remains
+                        # in model dtype. Encode the combined byte size in the
+                        # spec's quantized element dtype.
+                        head_size_bytes = (
+                            attn_module.kv_lora_rank * dtype_size
+                            + attn_module.qk_rope_head_dim * get_dtype_size(self.model_config.dtype)
+                        )
+                        assert head_size_bytes % dtype_size == 0
+                        head_size = head_size_bytes // dtype_size
+                    elif getattr(attn_module.impl, "fa_quant_layer", False):
                         head_size = attn_module.head_size + attn_module.qk_rope_head_dim
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
                     else:

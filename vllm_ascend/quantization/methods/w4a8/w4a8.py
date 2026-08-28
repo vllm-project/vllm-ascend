@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 
@@ -29,8 +30,140 @@ from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_expert
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
-from ..base import AscendMoEScheme, QuantType
+from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
 from ..registry import register_scheme
+
+
+class AscendKimiK3W4A8DynamicLinearMethod(AscendLinearScheme):
+    """Kimi K3 per-channel W4A8 shared-expert projection.
+
+    Generic W4A8 linear support was removed because it was deprecated. Kimi K3
+    still stores its shared-expert projections as ModelSlim per-channel W4A8
+    linears, so keep the required loader and grouped-matmul execution scoped to
+    those projections instead of registering a global linear scheme.
+    """
+
+    is_kimi_k3_shared_expert_w4a8 = True
+
+    def __init__(self) -> None:
+        quant_description = get_current_vllm_config().quant_config.quant_description
+        group_size = quant_description.get("group_size", 0)
+        if group_size != 0:
+            raise ValueError("Kimi K3 W4A8 shared experts require per-channel weights (group_size=0).")
+        quant_version = quant_description.get("version", "0")
+        if quant_version != "1.0.0":
+            raise ValueError("Kimi K3 W4A8 shared experts require quantization version 1.0.0.")
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+    def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
+        del params_dtype
+        pack_factor = 2
+        if output_size % pack_factor != 0:
+            raise ValueError(f"Kimi K3 W4A8 output size {output_size} must be divisible by {pack_factor}.")
+        return {
+            "weight": torch.empty(output_size // pack_factor, input_size, dtype=torch.int8),
+            "_packed_dim": 0,
+            "_packed_factor": pack_factor,
+        }
+
+    def get_pergroup_param(
+        self,
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        layer_type: str | None = None,
+    ) -> dict[str, Any]:
+        del input_size
+        scale_bias_width = 16 if layer_type == "row" else 1
+        return {
+            "weight_scale": torch.empty(output_size, 1, dtype=params_dtype),
+            "weight_offset": torch.empty(output_size, 1, dtype=params_dtype),
+            "scale_bias": torch.empty(output_size, scale_bias_width, dtype=torch.float32),
+        }
+
+    def _local_scale_bias(self, layer: torch.nn.Module, tp_rank: int | None = None) -> torch.Tensor:
+        scale_bias = layer.scale_bias
+        if scale_bias.dim() != 2 or scale_bias.shape[1] == 1:
+            return scale_bias.flatten()
+
+        tp_size = getattr(layer, "tp_size", self.tp_size)
+        rank = getattr(layer, "tp_rank", tp_rank if tp_rank is not None else 0)
+        num_offline_shards = scale_bias.shape[1]
+        if tp_size <= 0 or num_offline_shards % tp_size != 0:
+            raise ValueError(
+                f"scale_bias width {num_offline_shards} must be divisible by the projection TP size {tp_size}"
+            )
+        if rank < 0 or rank >= tp_size:
+            raise ValueError(f"tp_rank {rank} exceeds projection TP size {tp_size}")
+
+        shards_per_rank = num_offline_shards // tp_size
+        start = rank * shards_per_rank
+        return scale_bias[:, start : start + shards_per_rank].sum(dim=1)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        bias: torch.Tensor | None = None,
+        tp_rank: int | None = None,
+    ) -> torch.Tensor:
+        if isinstance(x, tuple):
+            quantized_x, pertoken_scale = x
+            input_shape = quantized_x.shape
+            output_dtype = torch.bfloat16
+        else:
+            input_shape = x.shape
+            x_2d = x.reshape(-1, input_shape[-1])
+            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x_2d)
+            output_dtype = x.dtype
+
+        # Build the single-expert token count on device so ACL Graph capture
+        # does not introduce a synchronous host-to-device copy.
+        group_list = torch.full(
+            (1,),
+            quantized_x.shape[0],
+            dtype=torch.int64,
+            device=quantized_x.device,
+        )
+        scale_bias = self._local_scale_bias(layer, tp_rank)
+        output = torch_npu.npu_grouped_matmul(
+            x=[quantized_x],
+            weight=[layer.weight],
+            scale=[layer.weight_scale.reshape(1, 1, -1)],
+            bias=[scale_bias.reshape(1, -1)],
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_list=group_list,
+            group_type=0,
+            group_list_type=1,
+            output_dtype=output_dtype,
+        )[0]
+        if bias is not None:
+            output = output + bias
+        return output.reshape(*input_shape[:-1], output.shape[-1])
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight_scale.data = layer.weight_scale.data.flatten()
+        layer.weight_offset.data = layer.weight_offset.data.flatten()
+
+        # The fused SiTU path needs the floating-point scale, while grouped
+        # matmul expects each FP32 bit pattern stored in an int64 element.
+        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+        scale_np = layer.weight_scale_fp32.contiguous().cpu().numpy()
+        scale_np.dtype = np.uint32
+        layer.weight_scale.data = torch.from_numpy(scale_np.astype(np.int64)).to(layer.weight_scale.device)
+
+        layer.scale_bias.data = self._local_scale_bias(layer).contiguous()
+        if layer.weight.data.shape[-1] % 4 != 0:
+            raise ValueError(
+                "the last dim of Kimi K3 W4A8 shared-expert weight must be divisible by 4, "
+                f"but got shape {layer.weight.data.shape}"
+            )
+        # Model the shared projection as one grouped expert. Preserve the
+        # packed INT4 bytes while converting to WeightNZ, then expose groups of
+        # four bytes as the int32 storage required by grouped matmul.
+        layer.weight.data = maybe_trans_nz(layer.weight.data.unsqueeze(0)).view(torch.int32).contiguous()
 
 
 @register_scheme("W4A8_DYNAMIC", "moe")

@@ -22,6 +22,8 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
+from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendKimiK3W4A8DynamicLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
@@ -654,6 +656,38 @@ class TestQuantPrefixMapper(TestBase):
             ),
             "W4A8_DYNAMIC",
         )
+
+    def test_kimi_k3_modelslim_selects_scoped_w4a8_shared_expert_linear(self):
+        shared_prefix = "language_model.model.layers.1.block_sparse_moe.shared_experts"
+        quant_description = {
+            "group_size": 0,
+            "version": "1.0.0",
+            **{f"{shared_prefix}.{name}.weight": "W4A8_DYNAMIC" for name in ("gate_proj", "up_proj", "down_proj")},
+        }
+        config = AscendModelSlimConfig(quant_description)
+        layer = MagicMock(spec=LinearBase)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.hf_config.model_type = "kimi_k3"
+        mock_vllm_config.quant_config.quant_description = quant_description
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                return_value=mock_vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config",
+                return_value=mock_vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size",
+                return_value=16,
+            ),
+        ):
+            method = config.get_quant_method(layer, f"{shared_prefix}.gate_up_proj")
+
+        self.assertIsInstance(method, AscendLinearMethod)
+        self.assertIsInstance(method.quant_method, AscendKimiK3W4A8DynamicLinearMethod)
 
     def test_kimi_k3_quarot_splits_mixed_kda_projection(self):
         attention_prefix = "language_model.model.layers.0.self_attn"

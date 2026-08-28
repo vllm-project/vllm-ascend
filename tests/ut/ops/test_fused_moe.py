@@ -935,6 +935,58 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     assert situ_kwargs["linear_beta"] == 25.0
 
 
+def test_kimi_k3_w4a8_shared_situ_uses_projection_grouped_matmuls(monkeypatch):
+    quantized_input = torch.ones(2, 4, dtype=torch.int8)
+    input_scale = torch.ones(2)
+    gate_up_out = torch.ones(2, 4, dtype=torch.bfloat16)
+    quantized_situ = torch.ones(2, 2, dtype=torch.int8)
+    situ_scale = torch.ones(2)
+    expected = torch.randn(2, 2, dtype=torch.bfloat16)
+    scoped_scheme = SimpleNamespace(is_kimi_k3_shared_expert_w4a8=True)
+    gate_up_proj = MagicMock(return_value=(gate_up_out, None))
+    gate_up_proj.quant_method = SimpleNamespace(quant_method=scoped_scheme)
+    gate_up_proj.weight_scale = torch.ones(4, dtype=torch.int64)
+    gate_up_proj.weight_scale_fp32 = torch.ones(4)
+    down_proj = MagicMock(return_value=(expected, None))
+    down_proj.quant_method = SimpleNamespace(quant_method=scoped_scheme)
+    down_proj.weight_scale = torch.ones(2, dtype=torch.int64)
+    shared_experts = _make_quantized_situ_shared_experts(QuantType.W4A8, gate_up_proj, down_proj)
+    dequant_situ_quant = MagicMock(return_value=(quantized_situ, situ_scale))
+    npu_quant_matmul = MagicMock()
+
+    monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
+    monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        shared_experts_module.torch_npu,
+        "npu_dynamic_quant",
+        MagicMock(return_value=(quantized_input, input_scale)),
+        raising=False,
+    )
+    monkeypatch.setattr(shared_experts_module.torch_npu, "npu_quant_matmul", npu_quant_matmul)
+    monkeypatch.setattr(
+        shared_experts_module.torch.ops,
+        "_C_ascend",
+        SimpleNamespace(dequant_situ_quant=dequant_situ_quant),
+    )
+
+    output = shared_experts.forward(torch.randn(2, 4, dtype=torch.bfloat16), _make_shared_expert_events())
+
+    assert output is expected
+    gate_args = gate_up_proj.call_args.args[0]
+    down_args = down_proj.call_args.args[0]
+    assert gate_args[0] is quantized_input
+    assert gate_args[1] is input_scale
+    assert down_args[0] is quantized_situ
+    assert down_args[1] is situ_scale
+    situ_kwargs = dequant_situ_quant.call_args.kwargs
+    assert situ_kwargs["x"] is gate_up_out
+    assert situ_kwargs["weight_scale"] is None
+    assert situ_kwargs["activation_scale"] is None
+    npu_quant_matmul.assert_not_called()
+
+
 def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
     quantized_input = torch.ones(2, 4, dtype=torch.float8_e4m3fn)
     input_scale = torch.ones(2, 1)

@@ -41,6 +41,12 @@ from vllm_ascend.utils import (
 SITU_MX_DST_TYPE_E4M3FN = 36
 
 
+def _uses_kimi_k3_shared_expert_w4a8(projection: torch.nn.Module) -> bool:
+    linear_method = getattr(projection, "quant_method", None)
+    scheme = getattr(linear_method, "quant_method", None)
+    return bool(getattr(scheme, "is_kimi_k3_shared_expert_w4a8", False))
+
+
 @dataclass
 class FusedMoEEvents:
     before_routed_experts: torch.npu.Event
@@ -295,7 +301,15 @@ class AscendSharedExperts:
                 and hasattr(self.layer.gate_up_proj, "weight_scale")
                 and hasattr(self.layer.down_proj, "weight_scale")
             )
-            if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            has_kimi_k3_w4a8_shared = all(
+                _uses_kimi_k3_shared_expert_w4a8(projection)
+                for projection in (self.layer.gate_up_proj, self.layer.down_proj)
+            )
+            if (
+                has_quantized_shared_without_lora
+                and self.quant_type in (QuantType.W8A8, QuantType.W4A8)
+                and (not has_kimi_k3_w4a8_shared or self.situ_activation is not None)
+            ):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
@@ -303,22 +317,28 @@ class AscendSharedExperts:
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.after_routed_experts)
-                hidden_states = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self.layer.gate_up_proj.weight,
-                    self.layer.gate_up_proj.weight_scale,
-                    pertoken_scale=None,
-                    bias=None,
-                    output_dtype=torch.int32,
-                )
+                if has_kimi_k3_w4a8_shared:
+                    hidden_states = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+                else:
+                    hidden_states = torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        self.layer.gate_up_proj.weight,
+                        self.layer.gate_up_proj.weight_scale,
+                        pertoken_scale=None,
+                        bias=None,
+                        output_dtype=torch.int32,
+                    )
                 # Execute activation concurrently with gmm2.
 
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 if self.situ_activation is not None:
                     quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
                         x=hidden_states,
-                        weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
-                        activation_scale=pertoken_scale,
+                        # K3's grouped matmul has already dequantized the INT4
+                        # projection output to BF16. Other quantized shared
+                        # experts still enter with INT32 accumulator output.
+                        weight_scale=None if has_kimi_k3_w4a8_shared else self.layer.gate_up_proj.weight_scale_fp32,
+                        activation_scale=None if has_kimi_k3_w4a8_shared else pertoken_scale,
                         bias=None,
                         quant_scale=None,
                         quant_offset=None,
@@ -348,14 +368,17 @@ class AscendSharedExperts:
                         ),
                     )
                 maybe_wait_event(down_projection_ready)
-                shared_out = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self.layer.down_proj.weight,
-                    self.layer.down_proj.weight_scale,
-                    pertoken_scale=swiglu_out_scale,
-                    bias=None,
-                    output_dtype=original_dtype,
-                )
+                if has_kimi_k3_w4a8_shared:
+                    shared_out = self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
+                else:
+                    shared_out = torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        self.layer.down_proj.weight,
+                        self.layer.down_proj.weight_scale,
+                        pertoken_scale=swiglu_out_scale,
+                        bias=None,
+                        output_dtype=original_dtype,
+                    )
             elif has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.

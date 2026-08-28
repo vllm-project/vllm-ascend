@@ -8,7 +8,9 @@ the generic MLA/MoE implementation and the Ascend KDA backend.
 """
 
 import math
+from collections.abc import Iterable
 from copy import copy
+from typing import cast
 
 import torch
 import vllm.envs as envs
@@ -37,6 +39,7 @@ from vllm.model_executor.models.kimi_k25_vit import (
     MoonViT3dPretrainedModel,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
     init_vllm_registered_model,
     make_layers,
@@ -78,7 +81,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
-from vllm_ascend.models.llama_eagle3 import get_rotation_path
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 
 if HAS_TRITON:
@@ -780,20 +782,17 @@ class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
         config,
         *args,
         prefix: str = "",
-        enable_rotation: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(config, *args, prefix=prefix, **kwargs)
-        self.rot_proj: ReplicatedLinear | None = None
-        if enable_rotation:
-            output_size = config.text_hidden_size
-            self.rot_proj = ReplicatedLinear(
-                output_size,
-                output_size,
-                bias=False,
-                quant_config=None,
-                prefix=f"{prefix}.rot_proj",
-            )
+        output_size = config.text_hidden_size
+        self.rot_proj: ReplicatedLinear | None = ReplicatedLinear(
+            output_size,
+            output_size,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.rot_proj",
+        )
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = super().forward(image_features)
@@ -845,7 +844,6 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
                 use_data_parallel=self.use_data_parallel,
                 quant_config=vision_quant_config,
                 prefix=maybe_prefix(prefix, "mm_projector"),
-                enable_rotation=get_rotation_path(vllm_config) is not None,
             )
         if vision_quant_config is not None:
             self.mm_projector = self.mm_projector.to(device=self.device)
@@ -869,3 +867,23 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # ModelSlim checkpoints may carry an explicit projector rotation. It
+        # is independent of the optional global QuaRot file, so keep the layer
+        # available while the streaming loader discovers checkpoint tensors.
+        rot_proj = getattr(self.mm_projector, "rot_proj", None)
+        loader = AutoWeightsLoader(self)
+        rot_proj_weight_names = (
+            {name for name, _ in rot_proj.named_parameters(prefix="mm_projector.rot_proj")}
+            if rot_proj is not None
+            else set()
+        )
+        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if rot_proj is not None and rot_proj_weight_names.isdisjoint(loaded_weights):
+            # Tower placeholders delegate attribute reads to their wrapped
+            # module, while deletion must target the wrapped module itself.
+            target = cast(nn.Module, getattr(self.mm_projector, "module", self.mm_projector))
+            if "rot_proj" in target._modules:
+                del target.rot_proj
+        return loaded_weights
