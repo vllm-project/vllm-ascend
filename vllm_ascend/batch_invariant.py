@@ -74,8 +74,8 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
 
 
 def tensor_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -> torch.Tensor:
-    """Convert Tensor.sum arguments to the patched torch.sum interface."""
-    return torch.sum(x, dim, keepdim)
+    """Convert Tensor.sum arguments to the batch-invariant reduce_sum."""
+    return reduce_sum(x, dim, keepdim)
 
 
 def override_envs_for_invariance():
@@ -129,7 +129,7 @@ def enable_batch_invariant_mode():
         torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
-        # Tensor.sum uses torch.sum so it follows the same reduce_sum path.
+        # Tensor.sum uses the same batch-invariant reduce_sum implementation.
         torch.Tensor.sum = tensor_sum
 
     # register triton implementations if ascendc is not available.
