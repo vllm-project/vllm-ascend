@@ -80,6 +80,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
+    # Whether AscendRMSNorm's residual branch uses the native torch_npu
+    # add_rms_norm kernel when the checkpoint carries no norm bias. The custom
+    # npu_add_rms_norm_bias kernel is only needed for anti-outlier norm biases,
+    # and selecting it otherwise makes the numerical path depend on whether the
+    # custom op library was importable when the graph was traced. Set to 0 to
+    # always use the custom kernel when it is available.
+    "VLLM_ASCEND_NATIVE_ADD_RMS_NORM": lambda: bool(int(os.getenv("VLLM_ASCEND_NATIVE_ADD_RMS_NORM", "1"))),
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
