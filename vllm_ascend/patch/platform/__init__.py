@@ -19,6 +19,7 @@ import os
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_thinking  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_tool_streaming  # noqa
+import vllm_ascend.patch.platform.patch_deepseek_v4_trailing_system  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
