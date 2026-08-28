@@ -23,6 +23,7 @@ class HardwareCapability(Enum):
     DYNAMIC_MX_QUANT_FUSION = auto()
     IRQ_CPU_RESERVATION = auto()
     LORA_CUSTOM_OPS = auto()
+    MC2_FULLMESH_V2_COMM = auto()
     MC2_HIERARCHY_COMM = auto()
     NPUGRAPH_EX = auto()
     RC_DEVICE_DISCOVERY = auto()
@@ -108,6 +109,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.STANDARD_WORKER_PATCHES,
     }
 )
+_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}
 _DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
     {
@@ -131,7 +133,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             device_addressing_mode=DeviceAddressingMode.DUAL_CHIP_CARD,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
-            capabilities=_STANDARD_CAPABILITIES,
+            capabilities=_A3_CAPABILITIES,
         ),
         AscendDeviceType._310P: HardwareProfile(
             _device_type=AscendDeviceType._310P,

@@ -949,6 +949,31 @@ class TestUpstreamConfigCompatibility(TestBase):
         with self.assertRaisesRegex(NotImplementedError, "not supported by the current hardware profile"):
             config._validate_mc2_comm_alg(vllm_config)
 
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_mc2_fullmesh_v2_rejects_unsupported_device(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            mc2_comm_alg="fullmesh_v2",
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "not supported by the current hardware profile"):
+            config._validate_mc2_comm_alg(SimpleNamespace())
+
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_mc2_fullmesh_uses_a3_operator_alias(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            mc2_comm_alg="fullmesh",
+        )
+
+        self.assertEqual(config.get_mc2_comm_alg(), "fullmesh_v1")
+
 
 class TestTopLevelSwitchTypeValidation(TestBase):
     """Verify @config migration gives top-level AscendConfig switches type validation.

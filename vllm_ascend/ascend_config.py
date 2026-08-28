@@ -535,21 +535,18 @@ class AscendConfig:
         return self
 
     def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
-        if self.mc2_comm_alg == "fullmesh_v2":
-            from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-            device_type = get_ascend_device_type()
-            if device_type != AscendDeviceType.A3:
-                raise NotImplementedError(
-                    f"mc2_comm_alg == 'fullmesh_v2' is only supported on A3, but got {device_type.name}."
-                )
+        hardware_profile = get_current_hardware_profile()
+        if self.mc2_comm_alg == "fullmesh_v2" and not hardware_profile.supports(
+            HardwareCapability.MC2_FULLMESH_V2_COMM
+        ):
+            raise NotImplementedError("mc2_comm_alg == 'fullmesh_v2' is not supported by the current hardware profile.")
 
         if self.mc2_comm_alg != "hierarchy":
             return
 
-        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
-
-        if not get_current_hardware_profile().supports(HardwareCapability.MC2_HIERARCHY_COMM):
+        if not hardware_profile.supports(HardwareCapability.MC2_HIERARCHY_COMM):
             raise NotImplementedError("mc2_comm_alg == 'hierarchy' is not supported by the current hardware profile.")
 
         num_logical_experts = vllm_config.model_config.get_num_experts()
@@ -733,11 +730,13 @@ class AscendConfig:
         return
 
     def get_mc2_comm_alg(self) -> str:
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
         # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
-        if self.mc2_comm_alg == "fullmesh" and get_ascend_device_type() == AscendDeviceType.A3:
+        if self.mc2_comm_alg == "fullmesh" and get_current_hardware_profile().supports(
+            HardwareCapability.MC2_FULLMESH_V2_COMM
+        ):
             return "fullmesh_v1"
         return self.mc2_comm_alg
 
