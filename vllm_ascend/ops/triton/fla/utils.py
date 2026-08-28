@@ -138,6 +138,31 @@ def clear_ssm_states(ssm_states: torch.Tensor, has_initial_state: torch.Tensor) 
         ssm_states.stride(0),
         BLOCK_SIZE=block_size,
     )
+# Pre-bound launcher cache: spec-key -> triton CompiledKernel.
+#
+# JITFunction.run() redoes per call: make_backend(target), three driver queries,
+# argument binding, a string cache key (''.join(sig) + str(constexprs)) and a scan of
+# used_global_vals - about 20us of the ~283us host cost of a Triton launch on this
+# stack (measured: full path 31.99us vs pre-bound 11.93us in a warm loop). Calling the
+# CompiledKernel directly skips all of it.
+#
+# Correctness: Triton 3.2 keys its cache on arg type strings plus the attrs descriptor.
+# Probing this kernel over 5 shape variants (T = 3512/1464/127 tokens) yields exactly
+# one specialisation, and the key shows 14 divisibility markers - one per pointer.
+# Because every int arg is in do_not_specialize, ints do not affect the key at all;
+# only pointer dtype and 16-byte alignment do. The guard below therefore covers exactly
+# what Triton would have recomputed.
+_prebound_kernels: dict = {}
+
+
+def _prebound_key(ptrs, constexprs):
+    """Spec key covering exactly what Triton keys on: pointer dtype + 16B alignment."""
+    return (
+        constexprs,
+        tuple((t.dtype, (t.data_ptr() & 15) == 0) for t in ptrs),
+    )
+
+
 def preamble_fusion_enabled() -> bool:
     """Whether the GDN prefill preamble may be fused into one Triton launch.
 
@@ -233,12 +258,50 @@ def gating_gather_clear_l2norm_qk(
     blk_heads, blk_batches = 8, 64
     row_iter = triton.cdiv(triton.cdiv(batch, num_core), blk_batches)
 
-    _gating_gather_clear_l2norm_qk_kernel[(n_gather + 3 * num_core,)](
+    grid0 = n_gather + 3 * num_core
+    ptrs = (ssm_state, state_indices, has_initial_state, initial_state, q2, y_q, k2, y_k,
+            g, beta_out, A_log, a, b, dt_bias)
+    # Only the real constexprs belong in the key; NUM_CHUNKS is a runtime arg in
+    # do_not_specialize, so it does not affect the specialisation.
+    constexprs = (D, mblock, num_core, block_size, blk_heads, blk_batches)
+    key = _prebound_key(ptrs, constexprs)
+    ck = _prebound_kernels.get(key)
+
+    if ck is None:
+        # First call for this spec: go through JITFunction.run so Triton compiles and
+        # caches, then capture the CompiledKernel for subsequent launches.
+        compiled = _gating_gather_clear_l2norm_qk_kernel[(grid0,)](
+            ssm_state, state_indices, has_initial_state, initial_state, inner_size,
+            ssm_state.stride(0), q2, y_q, k2, y_k, eps, T, g, beta_out, A_log, a, b,
+            dt_bias, num_heads, batch, gbeta, threshold, row_iter, n_gather, col_blocks,
+            N=D, MBLOCK=mblock, NUM_CHUNKS=num_sub_blocks, NUM_CORE=num_core,
+            BLOCK_SIZE=block_size, BLK_HEADS=blk_heads, BLK_BATCHES=blk_batches,
+        )
+        # run() returns the CompiledKernel it used, which is safer than guessing from
+        # the cache dict when several specialisations coexist.
+        if (
+            os.environ.get("VLLM_ASCEND_GDN_PREBIND_LAUNCH", "1") == "1"
+            and compiled is not None
+            and hasattr(compiled, "run")
+            and hasattr(compiled, "packed_metadata")
+        ):
+            _prebound_kernels[key] = compiled
+        return g, beta_out, initial_state, y_q.view(q_shape_og), y_k.view(k_shape_og)
+
+    # Pre-bound: mirrors the tail of JITFunction.run without its preamble. Non-constexpr
+    # values in declaration order; launch_metadata and the enter/exit hooks are None
+    # because nothing installs them here.
+    from triton.runtime import driver
+
+    stream = driver.active.get_current_stream(driver.active.get_current_device())
+    # Argument order is the kernel's declaration order with constexprs removed, so
+    # NUM_CHUNKS lands last (it is declared after N/MBLOCK but is not a constexpr).
+    ck.run(
+        grid0, 1, 1, stream, ck.function, ck.packed_metadata, None, None, None,
         ssm_state, state_indices, has_initial_state, initial_state, inner_size,
         ssm_state.stride(0), q2, y_q, k2, y_k, eps, T, g, beta_out, A_log, a, b,
         dt_bias, num_heads, batch, gbeta, threshold, row_iter, n_gather, col_blocks,
-        N=D, MBLOCK=mblock, NUM_CHUNKS=num_sub_blocks, NUM_CORE=num_core,
-        BLOCK_SIZE=block_size, BLK_HEADS=blk_heads, BLK_BATCHES=blk_batches,
+        num_sub_blocks,
     )
     return g, beta_out, initial_state, y_q.view(q_shape_og), y_k.view(k_shape_og)
 
