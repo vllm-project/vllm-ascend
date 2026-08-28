@@ -322,6 +322,21 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
+      - name: Save vllm-ascend csrc cache
+        # Same as vllm-ascend CI's cache pipeline: restore -> (miss) build
+        # -> save, so the next run with the same csrc state hits instead of
+        # recompiling on the NPU runner.  Save only what we compiled here
+        # (a restored cache must not be re-uploaded).
+        if: ${{ steps.env-check.outputs.fresh != 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: runs-on/cache/save@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ steps.env-check.outputs.fresh != 'true' && matrix.image_tag == '9.1.0-310p-ubuntu22.04-py3.12' }}
         run: |
