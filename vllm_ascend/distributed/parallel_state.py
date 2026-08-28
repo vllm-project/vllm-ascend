@@ -3,6 +3,7 @@ from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -16,6 +17,11 @@ _EMBED_TP: GroupCoordinator | None = None
 _P_TP: GroupCoordinator | None = None
 
 _DYNAMIC_EPLB: GroupCoordinator | None = None
+
+# A5 fused Matmul+ReduceScatter scheduling group. Built with
+# hccl_op_expansion_mode=6 so the AICPU comm channel the fused op needs is
+# provisioned; the plain TP group fails channel init for that op.
+_CCU_SCHED: GroupCoordinator | None = None
 
 
 def init_ascend_model_parallel(
@@ -90,6 +96,13 @@ def init_ascend_model_parallel(
         global _DYNAMIC_EPLB
         _DYNAMIC_EPLB = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
+        )
+
+    if get_ascend_device_type() == AscendDeviceType.A5 and global_tp_size > 1:
+        global _CCU_SCHED
+        ccu_sched_group_ranks = [x.tolist() for x in all_ranks.view(-1, global_tp_size)]
+        _CCU_SCHED = init_model_parallel_group(
+            ccu_sched_group_ranks, get_world_group().local_rank, backend, group_name="ccu_sched"
         )
 
     # Initialize fine-grained TP process groups on Ascend for four components:
@@ -173,6 +186,11 @@ def get_dynamic_eplb_group() -> GroupCoordinator:
     return _DYNAMIC_EPLB
 
 
+def get_ccu_sched_group() -> GroupCoordinator:
+    assert _CCU_SCHED is not None, "ccu sched group is not initialized"
+    return _CCU_SCHED
+
+
 def destroy_ascend_model_parallel():
     global _MC2
     if _MC2:
@@ -208,6 +226,11 @@ def destroy_ascend_model_parallel():
     if _DYNAMIC_EPLB:
         _DYNAMIC_EPLB.destroy()
     _DYNAMIC_EPLB = None
+
+    global _CCU_SCHED
+    if _CCU_SCHED:
+        _CCU_SCHED.destroy()
+    _CCU_SCHED = None
 
 
 def get_global_rank(parallel_config: ParallelConfig | None = None) -> int:

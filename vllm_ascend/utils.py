@@ -974,6 +974,16 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
     return torch.npu.stream(target_stream)
 
 
+# hccl_op_expansion_mode=6 (CCU_SCHED) provisions the AICPU comm channel that the
+# fused quant Matmul+ReduceScatter needs; building the group with it is what makes
+# the channel available, so no UB resource table / env var is required.
+_HCCL_OP_EXPANSION_MODE_CCU_SCHED = 6
+
+
+def matmul_reduce_scatter_enable() -> bool:
+    return get_ascend_config().enable_matmul_reduce_scatter
+
+
 def create_hccl_pg_options(group_name: str):
     options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
     hccl_config = get_hccl_config_for_pg_options(group_name) or {}
@@ -1000,6 +1010,7 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     hccl_config_map = {
         "dp": {"hccl_buffer_size": calculate_dp_buffer_size()},
         "dynamic_eplb": {"hccl_buffer_size": _DYNAMIC_EPLB_BUFFER_SIZE},
+        "ccu_sched": {"hccl_op_expansion_mode": _HCCL_OP_EXPANSION_MODE_CCU_SCHED},
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
 

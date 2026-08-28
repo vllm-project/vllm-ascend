@@ -90,6 +90,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
     # `mega_moe` can be used only for moe layer with W8A8/W4A8/bf16(none quant), EP<=64, non-dynamic-eplb.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Whether to fuse Matmul + ReduceScatter on the FlashComm1 row path (A5 only).
+    "VLLM_ASCEND_ENABLE_MATMUL_REDUCE_SCATTER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_REDUCE_SCATTER", "0"))
+    ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
