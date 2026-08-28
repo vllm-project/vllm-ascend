@@ -412,7 +412,7 @@ jobs:
           HOLD_MINUTES: ${{ inputs.hold_minutes }}
         run: |
           python3 - <<'PY'
-          import json, os, shutil, subprocess, sys, tempfile, time
+          import json, os, re, shutil, subprocess, sys, tempfile, time
           import urllib.request
 
           ws = os.environ["GITHUB_WORKSPACE"]
@@ -481,6 +481,67 @@ jobs:
                   results_dir, "0", "tests",
                   "round-" + str(round_no) + "-result.json"), "w"), indent=2)
 
+          # Per-test progress lines run_tests.py writes to stdout; the flow
+          # relays them into the main run's log while the round is pending.
+          # The jobs' own log API is not readable mid-run, so every event is
+          # also pushed to round-<N>-progress.json on the results branch.
+          _RE_STARTED = re.compile(r"\[([^\[\]]+)\] started \(\d+ card")
+          _RE_DONE = re.compile(
+              r"\[([^\[\]]+)\] done: exit=(-?\d+), result=(\S+), "
+              r"bugs=(\d+), flakes=(\d+)")
+
+          def push_progress(round_no, events):
+              try:
+                  pd = tempfile.mkdtemp(prefix="m2m-progress-")
+                  subprocess.run(["git", "init", "-q"], cwd=pd, check=True)
+                  body = json.dumps({"round": round_no,
+                                     "main_run_id": main_run_id,
+                                     "events": events}, indent=2) + "\n"
+                  open(os.path.join(pd, "round-" + str(round_no)
+                                    + "-progress.json"), "w").write(body)
+                  subprocess.run(["git", "add", "-A"], cwd=pd, check=True)
+                  subprocess.run(
+                      ["git", "-c", "user.name=main2main-bot",
+                       "-c", "user.email=main2main-bot@users.noreply.github.com",
+                       "commit", "-q", "-m",
+                       "main2main e2e round " + str(round_no)
+                       + " progress (" + chip + ")"], cwd=pd, check=True)
+                  subprocess.run(
+                      ["git", "push", "-q", "--force", git_url,
+                       "HEAD:refs/heads/" + results_branch],
+                      cwd=pd, check=True, capture_output=True)
+                  shutil.rmtree(pd, ignore_errors=True)
+              except Exception as exc:
+                  log("round " + str(round_no) + ": progress push failed: "
+                      + str(exc))
+
+          def run_tests_streaming(round_no, script):
+              """Run the tests, mirroring stdout and pushing per-test
+              started/done events to the results branch as they happen."""
+              events = []
+              proc = subprocess.Popen(
+                  ["bash", "-c", script], stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT, text=True, bufsize=1)
+              assert proc.stdout is not None
+              for line in proc.stdout:
+                  sys.stdout.write(line)
+                  sys.stdout.flush()
+                  m = _RE_STARTED.search(line)
+                  if m:
+                      events.append({"test": m.group(1), "event": "started"})
+                      push_progress(round_no, events)
+                      continue
+                  m = _RE_DONE.search(line)
+                  if m:
+                      events.append({"test": m.group(1), "event": "done",
+                                     "exit": int(m.group(2)),
+                                     "result": m.group(3),
+                                     "bugs": int(m.group(4)),
+                                     "flakes": int(m.group(5))})
+                      push_progress(round_no, events)
+              proc.wait()
+              return proc.returncode
+
           def serve_round(round_no):
               shutil.rmtree(results_dir, ignore_errors=True)
               tests_dir = os.path.join(results_dir, "0", "tests")
@@ -531,9 +592,9 @@ jobs:
                   '--log-dir "' + results_dir + '" '
                   + ("--pair-aligned-devices " if pair_aligned else "")
                   + '--test-cases ' + quoted_cases + '\n')
-              r = subprocess.run(["bash", "-c", script])
+              rc = run_tests_streaming(round_no, script)
               log("round " + str(round_no)
-                  + ": tests exited " + str(r.returncode))
+                  + ": tests exited " + str(rc))
 
           def push_results(round_no, cmd_sha):
               wt = tempfile.mkdtemp(prefix="m2m-results-")
