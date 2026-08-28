@@ -375,6 +375,7 @@
   base: ops_basic
   source_file_dependencies:
     - vllm_ascend/ops/fused_moe
+    - vllm_ascend/ops/grouped_matmul_situ_quant.py
     - vllm_ascend/ops/mla.py
   tests:
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
