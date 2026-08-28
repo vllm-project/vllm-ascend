@@ -951,7 +951,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             eps=eps,
         )
         if norm_type == 0 and renorm == 1:
-            topk_weights = topk_weights / torch.sum(topk_weights, dim=-1, keepdim=True)
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
         return topk_weights, topk_ids.to(torch.int32), out
 
