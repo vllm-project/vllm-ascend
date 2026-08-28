@@ -378,7 +378,7 @@ jobs:
       - name: Hold runner (prep guard)
         if: ${{ inputs.round == 'prep' }}
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           python3 - <<'PY'
           import json, os, sys, time, urllib.request
@@ -508,7 +508,7 @@ jobs:
 
       - name: Checkout signal branch
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
@@ -531,7 +531,7 @@ jobs:
 
       - name: Rebuild kernels if csrc inputs changed
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
@@ -664,7 +664,7 @@ jobs:
       - name: Hold runner (exec guard)
         if: always()
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           python3 - <<'PY'
           import json, os, sys, time, urllib.request
