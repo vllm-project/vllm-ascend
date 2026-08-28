@@ -903,7 +903,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1280
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/eight_card/test_glm5_2.py: 1360
-  tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 930
+  tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 1360
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 340
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380

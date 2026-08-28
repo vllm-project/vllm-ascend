@@ -324,7 +324,8 @@ class TestAscendModelSlimConfig(TestBase):
             error_msg = str(ctx.exception)
             self.assertIn("config.json", error_msg)
 
-    def test_maybe_update_config_non_directory_raises(self):
+    @patch("vllm_ascend.quantization.utils.get_model_file", return_value=None)
+    def test_maybe_update_config_non_directory_raises(self, _mock_get_model_file):
         config = AscendModelSlimConfig()
 
         with self.assertRaises(ValueError) as ctx:
