@@ -360,7 +360,6 @@ def _complete(client) -> Any:
         prompt="Hello, my name is",
         max_tokens=5,
         temperature=0.0,
-        timeout=10.0,
     )
 
 
