@@ -36,7 +36,13 @@ import torch.distributed as dist
 import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    VllmConfig,
+    get_layers_from_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -560,6 +566,10 @@ class NPUModelRunner(GPUModelRunner):
             ),
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
+        # PLE's ngram context is an ACL-graph input. Keep one backing allocation
+        # for the runner lifetime so graph replay always sees a valid address;
+        # _maybe_add_qwen4_exp_ple_inputs refreshes its contents every step.
+        self._qwen4_exp_ngram_context_buffer: torch.Tensor | None = None
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -2666,14 +2676,19 @@ class NPUModelRunner(GPUModelRunner):
             if self.enable_enpu:
                 torch.npu.current_stream().synchronize()
 
-            update_full_graph_params(
-                self.attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens_padded,
-                self.vllm_config,
-                self.speculative_config,
-            )
+            # Async DP can enter this path through execute_dummy_batch, which
+            # does not inherit the worker's normal current-config context.
+            # Attention backend selection consults that context while updating
+            # FULL graph parameters, so establish it explicitly here.
+            with set_current_vllm_config(self.vllm_config):
+                update_full_graph_params(
+                    self.attn_backend,
+                    self.update_stream,
+                    forward_context,
+                    num_tokens_padded,
+                    self.vllm_config,
+                    self.speculative_config,
+                )
 
     def _model_forward(
         self,
@@ -2728,30 +2743,74 @@ class NPUModelRunner(GPUModelRunner):
             "query_start_loc",
             self.query_start_loc.gpu[: num_reqs_padded + 1],
         )
-        if "ngram_context" in model_kwargs:
-            return
-
         context_len = int(text_config.ngram_size) - 1
-        eos_token_id = int(text_config.eos_token_id)
-        context_cpu = np.full(
-            (num_reqs_padded, context_len),
-            eos_token_id,
-            dtype=np.int32,
-        )
-        if not is_dummy:
-            for req_idx in range(num_reqs):
-                context_end = int(
-                    self.input_batch.num_computed_tokens_cpu[req_idx]
-                )
-                context_start = max(0, context_end - context_len)
-                tokens = self.input_batch.token_ids_cpu[
-                    req_idx, context_start:context_end
-                ]
-                if len(tokens) > 0:
-                    context_cpu[req_idx, -len(tokens) :] = tokens
-        model_kwargs["ngram_context"] = torch.from_numpy(context_cpu).to(
-            self.device
-        )
+        if not 0 < num_reqs_padded <= self.max_num_reqs:
+            raise ValueError(
+                "Qwen4Exp PLE num_reqs_padded must be in "
+                f"[1, {self.max_num_reqs}], got {num_reqs_padded}"
+            )
+
+        runtime_context = model_kwargs.get("ngram_context")
+        if runtime_context is None:
+            eos_token_id = int(text_config.eos_token_id)
+            context_cpu = np.full(
+                (num_reqs_padded, context_len),
+                eos_token_id,
+                dtype=np.int32,
+            )
+            if not is_dummy:
+                for req_idx in range(num_reqs):
+                    context_end = int(
+                        self.input_batch.num_computed_tokens_cpu[req_idx]
+                    )
+                    context_start = max(0, context_end - context_len)
+                    tokens = self.input_batch.token_ids_cpu[
+                        req_idx, context_start:context_end
+                    ]
+                    if len(tokens) > 0:
+                        context_cpu[req_idx, -len(tokens) :] = tokens
+            runtime_context = torch.from_numpy(context_cpu)
+        elif (
+            runtime_context.shape != (num_reqs_padded, context_len)
+            or runtime_context.dtype != torch.int32
+        ):
+            raise ValueError(
+                "Qwen4Exp PLE ngram_context must have shape "
+                f"({num_reqs_padded}, {context_len}) and dtype torch.int32, "
+                f"got shape={tuple(runtime_context.shape)}, "
+                f"dtype={runtime_context.dtype}"
+            )
+
+        buffer = self._qwen4_exp_ngram_context_buffer
+        expected_buffer_shape = (self.max_num_reqs, context_len)
+        if buffer is None:
+            buffer = torch.empty(
+                expected_buffer_shape,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._qwen4_exp_ngram_context_buffer = buffer
+        elif (
+            buffer.shape != expected_buffer_shape
+            or buffer.dtype != torch.int32
+            or buffer.device != self.device
+        ):
+            raise RuntimeError(
+                "Qwen4Exp PLE persistent ngram_context buffer changed "
+                f"unexpectedly: shape={tuple(buffer.shape)}, "
+                f"dtype={buffer.dtype}, device={buffer.device}"
+            )
+
+        static_context = buffer[:num_reqs_padded]
+        if (
+            runtime_context.device != static_context.device
+            or runtime_context.data_ptr() != static_context.data_ptr()
+        ):
+            # Blocking copy is intentional: runtime_context can be a temporary
+            # CPU tensor, while static_context must contain fresh request data
+            # before the captured model graph is replayed.
+            static_context.copy_(runtime_context, non_blocking=False)
+        model_kwargs["ngram_context"] = static_context
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
