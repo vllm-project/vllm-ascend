@@ -48,7 +48,7 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     sys.modules["torch"] = _torch
     sys.modules["torch.distributed"] = _torch.distributed  # type: ignore[attr-defined]
 else:
-    import torch as _torch
+    _torch = importlib.import_module("torch")
 
 if not hasattr(_torch, "npu"):
     _npu = MagicMock()
