@@ -683,9 +683,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         # npu_mla_prolog_v3 depends on CANN 9.1 and is not available in the current community CANN 9.0.
         cann_version = getattr(torch.version, "cann", None)
         if cann_version is not None:
-            from packaging.version import Version
+            # CANN version strings (e.g. "9.2.T530") are not PEP 440 compliant and
+            # cannot be parsed by packaging.version. Compare leading major.minor numerically.
+            import regex as re
 
-            sfa_prolog_v3_supported = Version(cann_version) >= Version("9.1.0")
+            match = re.match(r"(\d+)\.(\d+)", cann_version)
+            sfa_prolog_v3_supported = match is not None and (int(match.group(1)), int(match.group(2))) >= (9, 1)
         else:
             sfa_prolog_v3_supported = False
         self.enable_sfa_prolog_v3 = (
