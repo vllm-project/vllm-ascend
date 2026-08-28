@@ -40,6 +40,10 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.compilation.updatable_graph import (
+    ContextSource,
+    UpdatableGraph,
+)
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -155,54 +159,29 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
             self.model_runner = model_runner
             self.update_stream = self.model_runner.update_stream
-            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-            if super().needs_capture():
-                set_graph_params(self.capture_sizes)
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
             self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
-    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        """Override run_fullgraph to update full graph params in run_fullgraph."""
+    def run_fullgraph(
+            self, desc: BatchExecutionDescriptor
+        ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
+        """Replay a full graph and update its registered tasks."""
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
+        
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        # Resolve every provider before replay so a provider failure cannot
+        # leave the graph blocked on an update event that will never be recorded.
+        resolved_tasks = graph.resolve_tasks(
+            ContextSource(self.model_runner.model_state.attn_metadata)
+        )
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
-
-        # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
-        # calculate num_tokens_across_dp.
-        num_tokens_across_dp = torch.full([self.model_runner.dp_size], num_tokens)
-        # sfa_v1.py:AscendSFABackend.get_impl_cls reaches
-        # sfa_cp.py:resolve_sfa_impl, whose SFA CP selector reads the current
-        # ModelConfig. Publish the target config because set_forward_context()
-        # does not update it.
-        # TODO: Remove this explicit current-config scope once ACL graph replay
-        # passes VllmConfig directly through the graph-update interfaces.
-        with (
-            set_current_vllm_config(self.vllm_config),
-            set_forward_context(
-                self.model_runner.model_state.attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens,
-                cudagraph_runtime_mode=desc.cg_mode,
-                num_tokens_across_dp=num_tokens_across_dp,
-                batch_descriptor=None,  # Full graph model don't need batch_descriptor
-                slot_mapping=None,
-            ),
-        ):
-            forward_context = get_forward_context()
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
-            update_full_graph_params(
-                # FIXME(Ronald1995): support hybrid attn backend
-                attn_backend,
-                self.update_stream,
-                forward_context,
-                num_tokens,
-                self.vllm_config,
-                self.model_runner.speculative_config,
-            )
+        graph.update(self.update_stream, resolved_tasks)
         return ret
 
     def capture(
