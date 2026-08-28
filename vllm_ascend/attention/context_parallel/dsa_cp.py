@@ -131,6 +131,25 @@ class CompressorSPMetadata:
 
 
 @dataclass
+class CompressorSPAsyncGather:
+    """Pending Compressor SP update between its early launch and finalize.
+
+    The C4 launch phase runs the local Compressor and enqueues the async
+    AllGather before the Indexer TopK; this handle keeps every tensor the
+    collective still references alive until the finalize phase waits on it.
+    """
+
+    kv_cache: torch.Tensor
+    plan: CompressorSPMetadata
+    full_slot_mapping: torch.Tensor
+    block_size: int
+    gathered: torch.Tensor
+    gather_input: torch.Tensor
+    gather_work: Any
+    comm_stream: torch.npu.Stream
+
+
+@dataclass
 class AscendDSAReqMetadata:
     """Unified per-request metadata — combines fields formerly split into
     prefill and decode sub-structures.
@@ -1779,36 +1798,19 @@ class AscendDSACPImpl(DSAAttentionImpl):
             cache_mode=1,
         )
 
-    def _try_update_compressor_cache_sp(
+    def _run_local_compressor_sp(
         self,
         *,
         x: torch.Tensor,
-        kv_cache: torch.Tensor,
         state_cache: torch.Tensor,
         req_metadata: AscendDSAReqMetadata,
         state_req_metadata: AscendDSAReqMetadata,
         compressed_sin: torch.Tensor,
         compressed_cos: torch.Tensor,
         coff: int,
-        need_gather_q_kv: bool,
-        full_slot_mapping: torch.Tensor,
-    ) -> bool:
-        if (
-            not need_gather_q_kv
-            or (self.compress_ratio == 4 and coff != 2)
-            or (self.compress_ratio == 128 and coff != 1)
-        ):
-            return False
-
-        plan = req_metadata.compressor_sp
-        if plan is None or not plan.enabled or state_req_metadata.slot_mapping is None:
-            return False
-        row_counts = plan.sp_row_counts_per_rank
-        expected_global = sum(row_counts)
-        expected_local = row_counts[self.tp_rank]
-        if full_slot_mapping.shape[0] < expected_global:
-            return False
-
+        plan: CompressorSPMetadata,
+    ) -> torch.Tensor:
+        """Run this rank's owned-token Compressor and keep only owned rows."""
         local_x = self._select_compressor_sp_rows(x, plan, "token")
         local_sin = self._select_compressor_sp_rows(compressed_sin.view(-1, compressed_sin.shape[-1]), plan, "rope_row")
         local_cos = self._select_compressor_sp_rows(compressed_cos.view(-1, compressed_cos.shape[-1]), plan, "rope_row")
@@ -1835,28 +1837,188 @@ class AscendDSACPImpl(DSAAttentionImpl):
             cache_mode=1,
         )
         local_compressed_kv = self._select_compressor_sp_rows(local_compressed_kv, plan, "output_keep")
+        expected_local = plan.sp_row_counts_per_rank[self.tp_rank]
         if local_compressed_kv.shape[0] != expected_local:
             raise RuntimeError(
                 "Compressor SP output row count violated the prevalidated plan: "
                 f"actual={local_compressed_kv.shape[0]}, expected={expected_local}"
             )
+        return local_compressed_kv
 
-        overlap_output_gather = (
-            self.compress_ratio == 4
-            and self.compressor_sp_hccl_overlap
-            and plan.num_input_tokens >= self.compressor_sp_hccl_overlap_min_tokens
-            and expected_global > 0
-            and not torch.npu.is_current_stream_capturing()
+    def _scatter_compressor_sp_rows(
+        self,
+        kv_cache: torch.Tensor,
+        gathered: torch.Tensor,
+        plan: CompressorSPMetadata,
+        full_slot_mapping: torch.Tensor,
+        block_size: int,
+    ) -> None:
+        """Scatter gathered compressed rows into the paged compressed KV cache."""
+        expected_global = sum(plan.sp_row_counts_per_rank)
+        valid_slot_mapping = full_slot_mapping[:expected_global]
+        direct_global_layout = gathered.shape[0] == expected_global and plan.gather_compact_slice == (
+            0,
+            expected_global,
         )
-        gathered: torch.Tensor | None = None
-        if overlap_output_gather:
-            comm_stream = _compressor_sp_comm_stream()
-            gathered, gather_input, gather_work = self._gather_compressor_sp_rows(
-                local_compressed_kv,
-                row_counts,
-                comm_stream=comm_stream,
+        if direct_global_layout:
+            DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, valid_slot_mapping)
+        elif plan.gather_compact_slice is not None:
+            start, length = plan.gather_compact_slice
+            compact_rows = gathered.narrow(0, start, length)
+            DeviceOperator.dsa_kv_compress_scatter(kv_cache, compact_rows, valid_slot_mapping)
+        elif is_block_offset_slot_mapping(valid_slot_mapping):
+            padded_slot_mapping, self._compressor_sp_slot_buffer = build_padded_destination_for_scatter(
+                valid_slot_mapping,
+                plan.gather_compact_indices,
+                gathered.shape[0],
+                block_size,
+                self._compressor_sp_slot_buffer,
             )
+            DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, padded_slot_mapping)
+        else:
+            # A5 compressor metadata returns flat slot IDs for kv_compress_epilog.
+            # The block-offset invalid destination used above is not part of
+            # that contract, so remove rank padding before scattering.
+            compact_rows = self._select_compressor_sp_rows(gathered, plan, "gather_compact")
+            DeviceOperator.dsa_kv_compress_scatter(kv_cache, compact_rows, valid_slot_mapping)
 
+    def _launch_compressor_cache_sp(
+        self,
+        *,
+        x: torch.Tensor,
+        kv_cache: torch.Tensor,
+        state_cache: torch.Tensor,
+        req_metadata: AscendDSAReqMetadata,
+        state_req_metadata: AscendDSAReqMetadata,
+        compressed_sin: torch.Tensor,
+        compressed_cos: torch.Tensor,
+        coff: int,
+        need_gather_q_kv: bool,
+        full_slot_mapping: torch.Tensor,
+    ) -> CompressorSPAsyncGather | None:
+        """Launch the C4 Compressor SP update before the Indexer TopK.
+
+        Must only be called on C4 layers (``self.compress_ratio == 4``); the
+        caller is responsible for that gate. TopK's causal search length grows
+        with TP rank, so launching the collective after TopK hands that
+        arrival ladder to the HCCL rendezvous. Launched here instead, the
+        shape-balanced local Compressor is the producer, and the subsequent
+        TopK covers the collective rather than only the short C4 replay. The
+        caller must run ``_finalize_compressor_cache_sp`` after TopK.
+
+        Returns ``None`` when the batch is not eligible for the async overlap
+        path; the caller then keeps the original synchronous update position.
+        """
+        plan = req_metadata.compressor_sp
+        if (
+            coff != 2
+            or not need_gather_q_kv
+            or not self.compressor_sp_hccl_overlap
+            or torch.npu.is_current_stream_capturing()
+            or plan is None
+            or not plan.enabled
+            or state_req_metadata.slot_mapping is None
+        ):
+            return None
+        row_counts = plan.sp_row_counts_per_rank
+        expected_global = sum(row_counts)
+        if (
+            expected_global == 0
+            or plan.num_input_tokens < self.compressor_sp_hccl_overlap_min_tokens
+            or full_slot_mapping.shape[0] < expected_global
+        ):
+            return None
+
+        local_compressed_kv = self._run_local_compressor_sp(
+            x=x,
+            state_cache=state_cache,
+            req_metadata=req_metadata,
+            state_req_metadata=state_req_metadata,
+            compressed_sin=compressed_sin,
+            compressed_cos=compressed_cos,
+            coff=coff,
+            plan=plan,
+        )
+        comm_stream = _compressor_sp_comm_stream()
+        gathered, gather_input, gather_work = self._gather_compressor_sp_rows(
+            local_compressed_kv,
+            row_counts,
+            comm_stream=comm_stream,
+        )
+        self._replay_c4_compressor_sp_state(
+            x=x,
+            state_cache=state_cache,
+            state_block_table=state_req_metadata.block_table,
+            compressed_sin=compressed_sin,
+            compressed_cos=compressed_cos,
+            coff=coff,
+            plan=plan,
+        )
+        return CompressorSPAsyncGather(
+            kv_cache=kv_cache,
+            plan=plan,
+            full_slot_mapping=full_slot_mapping,
+            block_size=req_metadata.block_size,
+            gathered=gathered,
+            gather_input=gather_input,
+            gather_work=gather_work,
+            comm_stream=comm_stream,
+        )
+
+    def _finalize_compressor_cache_sp(self, pending: CompressorSPAsyncGather) -> None:
+        """Wait for the early-launched AllGather and scatter it into the cache."""
+        pending.gather_work.wait()
+        torch.npu.current_stream().wait_stream(pending.comm_stream)
+        pending.gather_input = None
+        self._scatter_compressor_sp_rows(
+            pending.kv_cache,
+            pending.gathered,
+            pending.plan,
+            pending.full_slot_mapping,
+            pending.block_size,
+        )
+
+    def _try_update_compressor_cache_sp(
+        self,
+        *,
+        x: torch.Tensor,
+        kv_cache: torch.Tensor,
+        state_cache: torch.Tensor,
+        req_metadata: AscendDSAReqMetadata,
+        state_req_metadata: AscendDSAReqMetadata,
+        compressed_sin: torch.Tensor,
+        compressed_cos: torch.Tensor,
+        coff: int,
+        need_gather_q_kv: bool,
+        full_slot_mapping: torch.Tensor,
+    ) -> bool:
+        if (
+            not need_gather_q_kv
+            or (self.compress_ratio == 4 and coff != 2)
+            or (self.compress_ratio == 128 and coff != 1)
+        ):
+            return False
+
+        plan = req_metadata.compressor_sp
+        if plan is None or not plan.enabled or state_req_metadata.slot_mapping is None:
+            return False
+        row_counts = plan.sp_row_counts_per_rank
+        expected_global = sum(row_counts)
+        if full_slot_mapping.shape[0] < expected_global:
+            return False
+
+        local_compressed_kv = self._run_local_compressor_sp(
+            x=x,
+            state_cache=state_cache,
+            req_metadata=req_metadata,
+            state_req_metadata=state_req_metadata,
+            compressed_sin=compressed_sin,
+            compressed_cos=compressed_cos,
+            coff=coff,
+            plan=plan,
+        )
+
+        gathered: torch.Tensor | None = None
         if self.compress_ratio == 4:
             self._replay_c4_compressor_sp_state(
                 x=x,
@@ -1881,41 +2043,18 @@ class AscendDSACPImpl(DSAAttentionImpl):
         if expected_global == 0:
             return True
 
-        if overlap_output_gather:
-            gather_work.wait()
-            torch.npu.current_stream().wait_stream(comm_stream)
-            del gather_input
-        elif gathered is None:
+        if gathered is None:
             gathered, _, _ = self._gather_compressor_sp_rows(
                 local_compressed_kv,
                 row_counts,
             )
-        valid_slot_mapping = full_slot_mapping[:expected_global]
-        direct_global_layout = gathered.shape[0] == expected_global and plan.gather_compact_slice == (
-            0,
-            expected_global,
+        self._scatter_compressor_sp_rows(
+            kv_cache,
+            gathered,
+            plan,
+            full_slot_mapping,
+            req_metadata.block_size,
         )
-        if direct_global_layout:
-            DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, valid_slot_mapping)
-        elif plan.gather_compact_slice is not None:
-            start, length = plan.gather_compact_slice
-            compact_rows = gathered.narrow(0, start, length)
-            DeviceOperator.dsa_kv_compress_scatter(kv_cache, compact_rows, valid_slot_mapping)
-        elif is_block_offset_slot_mapping(valid_slot_mapping):
-            padded_slot_mapping, self._compressor_sp_slot_buffer = build_padded_destination_for_scatter(
-                valid_slot_mapping,
-                plan.gather_compact_indices,
-                gathered.shape[0],
-                req_metadata.block_size,
-                self._compressor_sp_slot_buffer,
-            )
-            DeviceOperator.dsa_kv_compress_scatter(kv_cache, gathered, padded_slot_mapping)
-        else:
-            # A5 compressor metadata returns flat slot IDs for kv_compress_epilog.
-            # The block-offset invalid destination used above is not part of
-            # that contract, so remove rank padding before scattering.
-            compact_rows = self._select_compressor_sp_rows(gathered, plan, "gather_compact")
-            DeviceOperator.dsa_kv_compress_scatter(kv_cache, compact_rows, valid_slot_mapping)
         return True
 
     def _forward(
@@ -2034,6 +2173,32 @@ class AscendDSACPImpl(DSAAttentionImpl):
             assert compressor_attn_metadata.req_metadata is not None
             assert compressor_kv_state_metadata.req_metadata is not None
 
+            coff = 2 if self.compressor_overlap else 1
+            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
+                compressor_attn_metadata.req_metadata,
+            )
+            # Launch the C4 Compressor SP update before the Indexer work: the
+            # shape-balanced local Compressor then reaches the AllGather at the
+            # same time on every rank, and TopK covers the collective while the
+            # finalize below only waits and scatters. Ineligible batches return
+            # None and keep the original synchronous position after TopK.
+            sp_async_gather = (
+                self._launch_compressor_cache_sp(
+                    x=hidden_states_cache,
+                    kv_cache=compress_kv_cache,
+                    state_cache=state_cache,
+                    req_metadata=compressor_attn_metadata.req_metadata,
+                    state_req_metadata=compressor_kv_state_metadata.req_metadata,
+                    compressed_sin=compress_sin,
+                    compressed_cos=compress_cos,
+                    coff=coff,
+                    need_gather_q_kv=need_gather_q_kv,
+                    full_slot_mapping=compress_slot_mapping,
+                )
+                if self.compress_ratio == 4
+                else None
+            )
+
             if self.compress_ratio == 4:
                 self._update_indexer_cache(
                     x=hidden_states_cache,
@@ -2053,11 +2218,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     qr_pertoken_scale=qr_pertoken_scale_local,
                 )
 
-            coff = 2 if self.compressor_overlap else 1
-            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
-                compressor_attn_metadata.req_metadata,
-            )
-            sp_updated = self._try_update_compressor_cache_sp(
+            if sp_async_gather is not None:
+                self._finalize_compressor_cache_sp(sp_async_gather)
+            elif not self._try_update_compressor_cache_sp(
                 x=hidden_states_cache,
                 kv_cache=compress_kv_cache,
                 state_cache=state_cache,
@@ -2068,8 +2231,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 coff=coff,
                 need_gather_q_kv=need_gather_q_kv,
                 full_slot_mapping=compress_slot_mapping,
-            )
-            if not sp_updated:
+            ):
                 compressed_kv = torch.ops._C_ascend.compressor(
                     hidden_states_cache,
                     self.compressor_wkv.weight,
