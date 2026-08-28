@@ -753,7 +753,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         send_thread = MagicMock(spec=KVCacheStoreSendingThread)
         worker.kv_send_thread = send_thread
 
-        send_thread.get_stored_requests_snapshot.return_value = {"r1": 1}
+        send_thread.get_pending_request_ids.return_value = {"r1"}
         worker.wait_for_preempted_saves({"r2"})
         send_thread.drain.assert_not_called()
 
@@ -808,15 +808,15 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
     def test_get_finished_producer(self):
         worker = self._make_worker(kv_role="kv_producer")
 
-        send_thread = MagicMock()
-        send_thread.get_and_clear_finished_requests.return_value = {"r1"}
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        send_thread.get_pending_request_ids.return_value = {"r2"}
         worker.kv_send_thread = send_thread
 
-        meta = AscendConnectorMetadata(set(), set(), delayed_free_req_ids={"r1"})
-        done_s, done_r = worker.get_finished({"r1"}, meta)
-        self.assertIn("r1", done_s)
+        meta = AscendConnectorMetadata(set(), set(), delayed_free_req_ids={"r1", "r2"})
+        done_s, done_r = worker.get_finished({"r1", "r2"}, meta)
+        self.assertEqual(done_s, {"r1"})
         self.assertEqual(done_r, set())
-        send_thread.get_and_clear_finished_requests.assert_called_once_with({"r1"})
+        send_thread.get_pending_request_ids.assert_called_once()
 
     def test_get_finished_consumer(self):
         worker = self._make_worker(kv_role="kv_consumer")

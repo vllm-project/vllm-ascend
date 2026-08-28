@@ -2126,7 +2126,7 @@ class KVPoolWorker:
         finally:
             send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
 
-    def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+    def get_finished(self, _finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
         if self.kv_send_thread is not None:
             send_thread = self.kv_send_thread
             for req_id in meta.preempted_req_ids:
@@ -2137,9 +2137,9 @@ class KVPoolWorker:
                 self.kv_send_thread.get_and_clear_finished_requests()
                 done_sending = set()
             else:
-                stale_finished_req_ids = finished_req_ids - meta.delayed_free_req_ids
-                self.kv_send_thread.discard_finished_requests(stale_finished_req_ids)
-                done_sending = self.kv_send_thread.get_and_clear_finished_requests(meta.delayed_free_req_ids)
+                assert isinstance(send_thread, KVCacheStoreSendingThread)
+                pending_req_ids = send_thread.get_pending_request_ids()
+                done_sending = meta.delayed_free_req_ids - pending_req_ids
         else:
             done_sending = set()
 
@@ -2161,7 +2161,7 @@ class KVPoolWorker:
         """Fence saves whose source KV blocks are about to be reused."""
         if not req_ids or not isinstance(self.kv_send_thread, KVCacheStoreSendingThread):
             return
-        if not req_ids.isdisjoint(self.kv_send_thread.get_stored_requests_snapshot()):
+        if not req_ids.isdisjoint(self.kv_send_thread.get_pending_request_ids()):
             self.kv_send_thread.drain()
 
     def ensure_store_initialized(self) -> None:

@@ -538,19 +538,18 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.delete_finished_stored_request("r1")
         self.assertNotIn("r1", t.stored_requests)
 
-    def test_new_save_invalidates_earlier_completion(self):
+    def test_pending_request_removed_after_all_saves_complete(self):
         t, _ = self._make_thread()
         req = MagicMock(req_id="r1", event_id=None)
 
         t.add_stored_request("r1")
-        t._complete_request(req)
-        self.assertIn("r1", t.finished_requests)
-
         t.add_stored_request("r1")
-        self.assertEqual(t.get_and_clear_finished_requests({"r1"}), set())
+        t._complete_request(req)
+        self.assertEqual(t.get_pending_request_ids(), {"r1"})
 
         t._complete_request(req)
-        self.assertEqual(t.get_and_clear_finished_requests({"r1"}), {"r1"})
+        self.assertEqual(t.get_pending_request_ids(), set())
+        self.assertEqual(t.get_and_clear_finished_requests(), set())
 
     def test_dec_nonexistent_request(self):
         t, _ = self._make_thread()

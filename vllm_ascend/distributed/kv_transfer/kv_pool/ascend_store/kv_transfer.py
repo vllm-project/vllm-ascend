@@ -710,28 +710,27 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
-            # Invalidate completion from an earlier batch.
-            self.finished_requests.discard(req_id)
             self.stored_requests[req_id] += 1
 
     def is_stored_request(self, req_id: str) -> bool:
         with self.done_task_lock:
             return req_id in self.stored_requests
 
-    def get_stored_request_count(self, req_id: str) -> int | None:
+    def get_pending_request_ids(self) -> set[str]:
         with self.done_task_lock:
-            return self.stored_requests.get(req_id)
-
-    def get_stored_requests_snapshot(self) -> dict[str, int]:
-        with self.done_task_lock:
-            return dict(self.stored_requests)
+            return set(self.stored_requests)
 
     def dec_stored_request(self, req_id: str):
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
-                return self.stored_requests[req_id]
-            return None
+            count = self.stored_requests.get(req_id)
+            if count is None:
+                return None
+            remaining = count - 1
+            if remaining:
+                self.stored_requests[req_id] = remaining
+            else:
+                del self.stored_requests[req_id]
+            return remaining
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -784,10 +783,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             except Exception:
                 logger.exception("Failed to store KV cache for TP-mismatch request %s", req_id)
             finally:
-                remaining = self.get_stored_request_count(req_id)
-                if remaining == 0:
-                    self.delete_finished_stored_request(req_id)
-                    self.set_finished_request(req_id)
                 if req_meta.event_id is not None:
                     with self.completed_events_lock:
                         self.completed_events[req_meta.event_id] = 1
@@ -816,10 +811,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.request_queue.task_done()
 
     def _complete_request(self, req_meta: ReqMeta) -> None:
-        remaining = self.dec_stored_request(req_meta.req_id)
-        if remaining == 0:
-            self.delete_finished_stored_request(req_meta.req_id)
-            self.set_finished_request(req_meta.req_id)
+        self.dec_stored_request(req_meta.req_id)
         if req_meta.event_id is not None:
             with self.completed_events_lock:
                 self.completed_events[req_meta.event_id] = 1
