@@ -956,6 +956,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
             re.compile(r"rotary_emb\.inv_freq"): None,
+            re.compile(r"(?<![\w])embed\.(?!tokens)"): "embed_tokens.",
             re.compile(r"^(?!model)"): "model.",
         },
         orig_to_new_substr={
@@ -964,7 +965,6 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             ".w3.": ".up_proj.",
             "model.head.": "lm_head.",
             "model.lm_head.": "lm_head.",
-            "embed.": "embed_tokens.",
             ".attn.": ".self_attn.",
             ".ffn.": ".mlp.",
             ".ffn_norm.": ".post_attention_layernorm.",
