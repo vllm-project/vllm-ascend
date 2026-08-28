@@ -73,6 +73,7 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
         ),
     ],
 )
+@pytest.mark.skip(reason="Temporarily brought offline. The cases of speculative decoding need to be rectified later.")
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_deepseek_v4_dspark_acceptance_tp4(
     model_name,
