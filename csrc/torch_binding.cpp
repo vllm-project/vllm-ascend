@@ -1936,14 +1936,13 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
     return std::make_tuple(y, scale);
 }
 
-void npu_scatter_nd_update_v2(
+void npu_scatter_nd_update_asc(
     at::Tensor& var,
     const at::Tensor& indices,
     const at::Tensor& update)
 {
-    // construct the output tensor
-    at::IntArrayRef var_stride = var.strides();
-    EXEC_NPU_CMD(aclnnScatterNdUpdateV2, var, indices, update, var_stride);
+    // var supports non-contiguous dim0; stride info is read in the tiling stage
+    EXEC_NPU_CMD(aclnnScatterNdUpdateAsc, var, indices, update);
     return;
 }
 
@@ -3071,11 +3070,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_dequant_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::npu_dequant_swiglu_quant);
 
     ops.def(
-        "npu_scatter_nd_update_v2("
+        "npu_scatter_nd_update_asc("
                 "Tensor(a!) var, Tensor indices, Tensor update"
             ") -> ()"
     );
-    ops.impl("npu_scatter_nd_update_v2", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_v2);
+    ops.impl("npu_scatter_nd_update_asc", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_asc);
 
     // This operator is planned to be integrated into PTA in the near future.
     // Once that happens, the implementation in csrc will be removed.

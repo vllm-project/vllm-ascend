@@ -710,8 +710,8 @@ class BaseDeviceAdaptor:
     def _pa_normalize_kv(t, cache):
         """Normalize key/value to [T, H, D], aligned with cache [B, S, H, D].
 
-        scatter_nd_update_v2 accepts any update shape, but npu_scatter_pa_kv_cache
-        requires key/value in [T, H, D] (or 4D). Dynamic-quant outputs are often
+        npu_scatter_pa_kv_cache requires key/value in [T, H, D] (or 4D).
+        Dynamic-quant outputs are often
         2D [T, D] and scale tensors [T, D, 1, 1]; reshape them against the cache.
         """
         if t.ndim == 4 and t.shape[-1] == 1:
@@ -787,7 +787,7 @@ class BaseDeviceAdaptor:
     @staticmethod
     def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
         """Quantize q and scatter kv into indexer cache.
-        Non-A5: int8 quant + 2x scatter_nd_update_v2 for k_cache and scale_cache."""
+        Non-A5: int8 quant + 2x npu_scatter_pa_kv_cache for k_cache and scale_cache."""
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
         q_scale = q_scale.to(torch.float16)
 
