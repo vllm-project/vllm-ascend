@@ -264,17 +264,15 @@ def _select_a5_moe_comm_method(
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
 ) -> MoECommType:
-    hf_text_config = vllm_config.model_config.hf_text_config
-    num_experts_per_tok = getattr(hf_text_config, "num_experts_per_tok", None)
-    if num_experts_per_tok is None:
-        num_experts_per_tok = getattr(hf_text_config, "top_k_experts", None)
-    if num_experts_per_tok is None:
-        num_experts_per_tok = getattr(hf_text_config, "num_experts_per_token", 1)
-
-    ep_world_size = get_ep_group().world_size
-    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and ep_world_size > 1:
+    num_experts_per_tok = getattr(
+        vllm_config.model_config.hf_text_config,
+        "num_experts_per_tok",
+        getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
+    )
+    world_size = vllm_config.parallel_config.world_size_across_dp
+    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
-    if ep_world_size <= num_experts_per_tok:
+    if world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
     return MoECommType.ALLTOALL
 
