@@ -770,35 +770,6 @@ class BaseDeviceAdaptor:
         return fused_gdn_gating_patch(A_log, a, b, dt_bias)
 
     @staticmethod
-    def split_qkv_rmsnorm_rope(
-        input,
-        q_weight,
-        k_weight,
-        q_hidden_size,
-        kv_hidden_size,
-        head_dim,
-        eps,
-        q_bias,
-        k_bias,
-        cos_sin_cache,
-        positions,
-    ):
-        results = torch.ops.vllm.qkv_rmsnorm_rope(
-            input=input,
-            q_weight=q_weight,
-            k_weight=k_weight,
-            q_hidden_size=q_hidden_size,
-            kv_hidden_size=kv_hidden_size,
-            head_dim=head_dim,
-            eps=eps,
-            q_bias=q_bias,
-            k_bias=k_bias,
-            cos_sin_cache=cos_sin_cache,
-            positions=positions,
-        )
-        return results
-
-    @staticmethod
     def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
         return torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permuted_tokens, sorted_indices=torch.abs(sorted_indices), probs=probs
@@ -1608,35 +1579,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
     @staticmethod
     def fused_gdn_gating(A_log: torch.Tensor, a: torch.Tensor, b: torch.Tensor, dt_bias: torch.Tensor):
         return fused_gdn_gating_patch(A_log, a, b, dt_bias)
-
-    @staticmethod
-    def split_qkv_rmsnorm_rope(
-        input,
-        q_weight,
-        k_weight,
-        q_hidden_size,
-        kv_hidden_size,
-        head_dim,
-        eps,
-        q_bias,
-        k_bias,
-        cos_sin_cache,
-        positions,
-    ):
-        results = torch.ops.vllm.qkv_rmsnorm_rope_simt(
-            input=input,
-            q_weight=q_weight,
-            k_weight=k_weight,
-            q_hidden_size=q_hidden_size,
-            kv_hidden_size=kv_hidden_size,
-            head_dim=head_dim,
-            eps=eps,
-            q_bias=q_bias,
-            k_bias=k_bias,
-            cos_sin_cache=cos_sin_cache,
-            positions=positions,
-        )
-        return results
 
     @staticmethod
     def npu_moe_token_unpermute(permuted_tokens, sorted_indices, probs):
