@@ -182,8 +182,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             next_tokens=SWA_INT_MAX,
         )
         if out is None:
-            fia_kwargs["key"] = fia_kwargs["key"].contiguous()
-            fia_kwargs["value"] = fia_kwargs["value"].contiguous()
             context_layer, _ = torch_npu.npu_fused_infer_attention_score(**fia_kwargs)
             return context_layer
         if workspace is None:
