@@ -255,7 +255,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             return_value=local_attn_state,
         ) as build_attn_state,
     ):
-        result = manager.partition_batch(global_batch)
+        result = manager.partition_batch(global_batch, padded_num_tokens=12)
 
     assert isinstance(result, AscendInputBatch)
     assert result is not global_batch
@@ -270,7 +270,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([3, 5], dtype=np.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 3, 8], dtype=np.int32))
     assert result.num_tokens == 8
-    assert result.num_tokens_after_padding == 10
+    assert result.num_tokens_after_padding == 12
     assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
