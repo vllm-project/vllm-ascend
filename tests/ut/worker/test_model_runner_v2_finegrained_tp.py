@@ -1,4 +1,4 @@
-"""Unit tests for lmhead TP support in the Ascend V2 model runner.
+"""Unit tests for fine-grained TP support in the Ascend V2 model runner.
 
 Pure-mock tests (CPU tensors, no NPU): they lock the runner-side pad/trim
 contract of sample()/_dummy_run and guard the copied dispatch tail with a
@@ -11,12 +11,13 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
-from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner, validate_oproj_tp_graph_step
 
 
 def _make_runner(max_num_reqs=8, decode_query_len=2, vocab=6):
@@ -236,3 +237,103 @@ def test_dummy_run_lmhead_disabled_or_profile_skips_collectives():
         super_dummy.return_value = (None, None)
         runner._dummy_run(4)
     runner.model.compute_logits.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# o_proj TP: graph-step guard (eager fallback would desync the cross-DP
+# all_to_all/reduce_scatter because DP ranks no longer share a token count)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "num_tokens, cudagraph_mode, kwargs",
+    [
+        (10_000, CUDAGraphMode.NONE, dict(oproj_enabled=False)),  # feature off
+        (10_000, CUDAGraphMode.NONE, dict(dp_size=1, oproj_enabled=True)),  # single-member group
+        (10_000, CUDAGraphMode.NONE, dict(dp_size=2, oproj_enabled=True, dummy_run=True)),
+        (10_000, CUDAGraphMode.NONE, dict(dp_size=2, oproj_enabled=True, is_profile=True)),
+        (512, CUDAGraphMode.FULL, dict(dp_size=2, oproj_enabled=True)),  # exactly at capacity
+        (64, CUDAGraphMode.PIECEWISE, dict(dp_size=4, oproj_enabled=True)),
+    ],
+)
+def test_oproj_guard_allows_step(num_tokens, cudagraph_mode, kwargs):
+    validate_oproj_tp_graph_step(num_tokens, cudagraph_mode, 512, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "num_tokens, cudagraph_mode",
+    [
+        (513, CUDAGraphMode.FULL),  # exceeds the largest captured size -> eager fallback
+        (64, CUDAGraphMode.NONE),  # graphs disabled in config -> every step is eager
+    ],
+)
+def test_oproj_guard_raises_outside_captured_graph(num_tokens, cudagraph_mode):
+    with pytest.raises(ValueError, match="o_proj collectives will hang"):
+        validate_oproj_tp_graph_step(
+            num_tokens,
+            cudagraph_mode,
+            512,
+            dp_size=2,
+            oproj_enabled=True,
+            dummy_run=False,
+            is_profile=False,
+        )
+
+
+def test_execute_model_wires_oproj_guard():
+    """The guard must run on every real (non-dummy, non-profile) step with the
+    runner's live dispatch inputs, so an eager fallback fails fast instead of
+    hanging the cross-DP collectives."""
+    runner = _make_runner()
+    runner.ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(profiling_chunk_config=MagicMock()),
+        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=2),
+    )
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL, max_cudagraph_capture_size=512)
+    runner.dp_size = 2
+    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=64)
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.validate_oproj_tp_graph_step") as guard,
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=True),
+        patch.object(NPUModelRunner.__bases__[0], "execute_model") as super_exec,
+        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing"),
+        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing"),
+    ):
+        super_exec.return_value = "output"
+        result = runner.execute_model(scheduler_output, dummy_run=False, is_profile=False)
+
+    assert result == "output"
+    guard.assert_called_once_with(
+        64,
+        CUDAGraphMode.FULL,
+        512,
+        dp_size=2,
+        oproj_enabled=True,
+        dummy_run=False,
+        is_profile=False,
+    )
+
+
+def test_execute_model_skips_guard_when_oproj_disabled():
+    """With o_proj TP off, execute_model must not touch the scheduler fields
+    or runner attributes the guard reads, so steps keep working unchanged."""
+    runner = _make_runner()
+    runner.ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(profiling_chunk_config=MagicMock()),
+        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=0),
+    )
+    scheduler_output = SimpleNamespace()
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.validate_oproj_tp_graph_step") as guard,
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=True),
+        patch.object(NPUModelRunner.__bases__[0], "execute_model", return_value="output") as super_exec,
+        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing"),
+        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing"),
+    ):
+        result = runner.execute_model(scheduler_output, dummy_run=False, is_profile=False)
+
+    assert result == "output"
+    guard.assert_not_called()
+    super_exec.assert_called_once()

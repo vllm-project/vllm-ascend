@@ -96,6 +96,37 @@ def _use_ascend_pcp_manager_for_vllm_0271():
         pcp_module.PCPManager = original_pcp_manager_cls
 
 
+def validate_oproj_tp_graph_step(
+    num_tokens: int,
+    cudagraph_mode: CUDAGraphMode,
+    max_cudagraph_capture_size: int,
+    *,
+    dp_size: int = 1,
+    oproj_enabled: bool = False,
+    dummy_run: bool = False,
+    is_profile: bool = False,
+) -> None:
+    """Reject o_proj TP steps that would run outside a captured graph.
+
+    The o_proj TP group spans DP ranks, and its collectives stay aligned only
+    while every rank forwards the same token count per step; model runner v2
+    guarantees that only under a graph mode, and an eager step would hang the
+    collectives. Single-member groups have no cross-rank exchange; dummy/profile
+    runs are rank-uniform, so all three are exempt.
+    """
+    if dp_size == 1 or not oproj_enabled or dummy_run or is_profile:
+        return
+    if cudagraph_mode == CUDAGraphMode.NONE or num_tokens > max_cudagraph_capture_size:
+        raise ValueError(
+            "oproj TP requires every DP rank to forward the same token count "
+            "per step, which only holds inside a cudagraph "
+            f"(cudagraph_mode={cudagraph_mode}, num_tokens={num_tokens}, "
+            f"max_cudagraph_capture_size={max_cudagraph_capture_size}); keep "
+            "cudagraphs enabled and stay within the captured sizes or the "
+            "cross-DP o_proj collectives will hang"
+        )
+
+
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
@@ -239,6 +270,17 @@ class NPUModelRunner(GPUModelRunner):
             profiling_config,
             scheduler_output,
         )
+
+        if self.ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0:
+            validate_oproj_tp_graph_step(
+                scheduler_output.total_num_scheduled_tokens,
+                self.compilation_config.cudagraph_mode,
+                self.compilation_config.max_cudagraph_capture_size,
+                dp_size=self.dp_size,
+                oproj_enabled=True,
+                dummy_run=dummy_run,
+                is_profile=is_profile,
+            )
 
         if vllm_version_is("0.27.1"):
             output = super().execute_model(

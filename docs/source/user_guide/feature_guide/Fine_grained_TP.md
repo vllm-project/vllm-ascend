@@ -40,6 +40,7 @@ Fine-grained TP is **model-agnostic** and supports all standard dense transforme
 > ⚠️ Note:  
 >
 > - `o_proj` TP is only supported in Graph mode during Decode, because dummy_run in eager mode will not trigger o_proj. It additionally requires `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) below.
+> - `o_proj` TP additionally requires every step to run inside a captured cudagraph: the token-count alignment across DP ranks is guaranteed only by the graph dispatch, so a step whose batch exceeds the largest captured size is rejected with an error instead of falling back to eager (which would hang the cross-DP collectives). Raise `max_cudagraph_capture_size` if larger decode batches are expected.
 > - `mlp` TP supports dense models, or dense layers in MoE models. For example, the first three dense layers of DeepSeek-R1.
 
 ### Configuration Limit
