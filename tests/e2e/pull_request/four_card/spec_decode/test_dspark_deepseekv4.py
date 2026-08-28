@@ -46,7 +46,6 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
 }
 
 
-@pytest.mark.skip(reason="Temporarily brought offline. The cases of speculative decoding need to be rectified later.")
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
