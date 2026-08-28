@@ -106,6 +106,11 @@ def _use_ascend_pcp_manager_for_vllm_0271():
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
+    # vLLM #51718 overlays hybrid Attention/Mamba groups in one standardized
+    # backing allocation. Ascend MRV2 preserves that layout in
+    # allocate_kv_cache_main and exposes contiguous backend-specific views.
+    supports_standardized_shared_kv_backing = True
+
     execute_model_state: ExecuteModelState | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):

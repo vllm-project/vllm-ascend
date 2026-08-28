@@ -20,6 +20,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
 )
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
@@ -82,6 +83,10 @@ def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+
+
+def test_mrv2_advertises_standardized_shared_kv_backing():
+    assert NPUModelRunner.supports_standardized_shared_kv_backing is True
 
 
 def test_prepare_inputs_propagates_padded_request_count():
