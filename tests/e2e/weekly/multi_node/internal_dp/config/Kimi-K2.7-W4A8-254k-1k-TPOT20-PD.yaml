@@ -17,6 +17,11 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "8080"
 
+disaggregated_prefill:
+  enabled: true
+  prefiller_host_index: [0]
+  decoder_host_index: [1]
+
 deployment:
   - envs:
       <<: *env_common
@@ -75,5 +80,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 1
     request_rate: 0
-    baseline: 50.9973
+    baseline: 12.66155
     threshold: 0.97
