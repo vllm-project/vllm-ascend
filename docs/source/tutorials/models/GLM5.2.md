@@ -839,7 +839,7 @@ This section describes the additional configuration for A3 deployments that use 
     The supported MC2 communication mode depends on whether the Expert Parallel (EP) communication domain spans physical nodes:
 
     - If the EP communication domain is contained within a physical node, no change to the existing configuration is required. Fused MC2 remains supported.
-    - If the EP communication domain spans physical nodes, Fused MC2 is not supported. Hierarchical MC2 communication over RoCE is required and must be enabled by adding `"enable_mc2_hierarchy_comm": true` to `--additional-config`.
+    - If the EP communication domain spans physical nodes, Fused MC2 is not supported. Hierarchical MC2 communication over RoCE is required and must be enabled by adding `"mc2_comm_alg": "hierarchy"` to `--additional-config`.
 
 **Example**
 
@@ -855,13 +855,13 @@ For the 1P1D (2+2) scenario, configure the logical SuperPod ID as follows:
 Apply the following Fused MC2 setting on every node:
 
 ```shell
---additional-config '{..., "enable_fused_mc2": 0, "enable_mc2_hierarchy_comm": true}'
+--additional-config '{..., "enable_fused_mc2": 0, "mc2_comm_alg": "hierarchy"}'
 ```
 
-Merge `"enable_mc2_hierarchy_comm": true` into the existing `--additional-config` JSON object. The following pattern uses `...` to represent the existing fields:
+Merge `"mc2_comm_alg": "hierarchy"` into the existing `--additional-config` JSON object. The following pattern uses `...` to represent the existing fields:
 
 ```text
---additional-config '{..., "enable_mc2_hierarchy_comm": true}'
+--additional-config '{..., "mc2_comm_alg": "hierarchy"}'
 ```
 
 #### 5.1.2 Atlas 800 A2

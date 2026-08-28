@@ -146,7 +146,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
         - `--dtype bfloat16` matches the BF16 deployment validated on Atlas A2 products.
         - `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` are recommended when the model weights are downloaded to a local directory in advance.
 
-When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQs](../../faqs.md).
 
 ## 6 Functional Verification
 
@@ -242,7 +242,7 @@ For general parameter tuning, refer to the [Public Performance Tuning Documentat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, see the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section covers model- and hardware-specific guidance.
+For common environment, installation, and general parameter issues, see the [Public FAQs](../../faqs.md). This section covers model- and hardware-specific guidance.
 
 ### The server fails to start with an out-of-memory error
 

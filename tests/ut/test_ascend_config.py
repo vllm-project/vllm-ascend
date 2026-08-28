@@ -433,7 +433,6 @@ class TestAscendConfig(TestBase):
             os.environ,
             {
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
-                "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
                 "VLLM_ASCEND_ENABLE_NZ": "2",
             },
         ):
@@ -441,7 +440,7 @@ class TestAscendConfig(TestBase):
 
         self.assertEqual(ascend_config.enable_fused_mc2, 0)
         self.assertFalse(ascend_config.enable_mlapo)
-        self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
+        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 2)
         mock_info_once.assert_any_call(
             "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False. "
@@ -485,7 +484,6 @@ class TestAscendConfig(TestBase):
             os.environ,
             {
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
-                "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
                 "VLLM_ASCEND_ENABLE_NZ": "2",
             },
         ):
@@ -929,23 +927,23 @@ class TestUpstreamConfigCompatibility(TestBase):
     def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, mock_device_type):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
-            enable_mc2_hierarchy_comm=True,
+            mc2_comm_alg="hierarchy",
         )
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 513))
 
         with self.assertRaisesRegex(ValueError, "supports at most 512 experts"):
-            config._validate_mc2_hierarchy_comm(vllm_config)
+            config._validate_mc2_comm_alg(vllm_config)
 
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
     def test_mc2_hierarchy_comm_rejects_unsupported_device(self, mock_device_type):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
-            enable_mc2_hierarchy_comm=True,
+            mc2_comm_alg="hierarchy",
         )
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 1))
 
         with self.assertRaisesRegex(NotImplementedError, "only supported on A2 and A3"):
-            config._validate_mc2_hierarchy_comm(vllm_config)
+            config._validate_mc2_comm_alg(vllm_config)
 
 
 class TestTopLevelSwitchTypeValidation(TestBase):
