@@ -535,6 +535,8 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         self.event_patcher.start()
         self.stream_patcher.start()
+        self.addCleanup(self.event_patcher.stop)
+        self.addCleanup(self.stream_patcher.stop)
 
         self.layer = MagicMock()
         self.layer.layer_name = "test_layer"
