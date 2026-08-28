@@ -13,6 +13,9 @@ PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "eagle_proposer.py"
 DISPATCHER = ROOT / "vllm_ascend" / "spec_decode" / "__init__.py"
 QSA = ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "qsa.py"
 EAGLE = ROOT / "vllm_ascend" / "spec_decode" / "eagle_proposer.py"
+LOCAL_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "qwen4_exp.py"
+BASE_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "llm_base_proposer.py"
+MODEL_RUNNER = ROOT / "vllm_ascend" / "worker" / "model_runner_v1.py"
 
 
 def _class(path: Path, name: str) -> ast.ClassDef:
@@ -92,3 +95,33 @@ def test_qwen4_exp_mtp_type_is_registered_for_vllm_026() -> None:
     ).read_text()
     assert "qwen4_exp_mtp" in patch
     assert "MTPModelTypes" in patch
+
+
+def test_qwen4_exp_proposer_allocates_full_hc_hidden_buffer() -> None:
+    source = ast.unparse(
+        _method(PROPOSER, "AscendQwen4ExpMTPProposer", "__init__")
+    )
+    assert "qwen_hidden_size = self._get_hidden_size()" in source
+    assert "self.hidden_states = torch.zeros" in source
+
+
+def test_qwen4_exp_proposer_accepts_both_cache_group_forms() -> None:
+    source = ast.unparse(
+        _method(LOCAL_PROPOSER, "Qwen4ExpMTPProposer", "_map_draft_layers_to_groups")
+    )
+    assert "isinstance(group_spec, UniformTypeKVCacheSpecs)" in source
+    assert "spec = group_spec" in source
+
+
+def test_qwen4_exp_runner_forwards_per_group_block_tables() -> None:
+    source = MODEL_RUNNER.read_text()
+    assert "AscendQwen4ExpMTPProposer" in source
+    assert "set_per_group_block_table" in source
+
+
+def test_spec_proposer_normalizes_multiple_of_block_size() -> None:
+    source = ast.unparse(
+        _method(BASE_PROPOSER, "AscendSpecDecodeBaseProposer", "__init__")
+    )
+    assert "isinstance(kernel_block_size, MultipleOf)" in source
+    assert "kernel_block_size.base" in source

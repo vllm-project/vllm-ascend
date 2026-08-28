@@ -152,10 +152,13 @@ class Qwen4ExpMTPProposer(EagleProposer):
             for layer_name in group.layer_names:
                 if layer_name not in self._draft_attn_layer_names:
                     continue
-                assert isinstance(group_spec, UniformTypeKVCacheSpecs), (
-                    "Qwen draft cache owners require packed KV cache groups"
-                )
-                spec = group_spec.kv_cache_specs.get(layer_name)
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    spec = group_spec.kv_cache_specs.get(layer_name)
+                else:
+                    # vLLM 0.26 hybrid KV grouping may emit a direct
+                    # homogeneous KVCacheSpec alongside packed UniformType
+                    # groups. The group spec is then the per-layer spec.
+                    spec = group_spec
                 assert spec is not None, (
                     f"Qwen draft cache group {gid} has no spec for {layer_name}"
                 )

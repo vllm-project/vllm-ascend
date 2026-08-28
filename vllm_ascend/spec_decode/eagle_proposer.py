@@ -18,6 +18,18 @@ class AscendQwen4ExpMTPProposer(Qwen4ExpMTPProposer, AscendSpecDecodeBasePropose
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, runner=None):
         AscendSpecDecodeBaseProposer.__init__(self, vllm_config, device, True, runner=runner)
+
+        # vLLM allocates the base proposer buffer from ModelConfig directly and
+        # no longer calls this proposer's _get_hidden_size() hook. Qwen4Exp MTP
+        # consumes the full HC stream, so replace a single-stream allocation.
+        qwen_hidden_size = self._get_hidden_size()
+        if self.hidden_size != qwen_hidden_size:
+            self.hidden_size = qwen_hidden_size
+            self.hidden_states = torch.zeros(
+                (self.max_num_tokens, self.hidden_size),
+                dtype=self.dtype,
+                device=device,
+            )
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
 
     def _get_hidden_size(self) -> int:
