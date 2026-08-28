@@ -18,7 +18,7 @@
 #
 from inspect import signature
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -27,7 +27,7 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
-from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
+from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -339,6 +339,67 @@ def test_main2main_v2_overrides_accept_new_upstream_keywords() -> None:
     ):
         assert "dp_sync" in signature(speculator_cls.propose).parameters
     assert "pcp_manager" in signature(ModelAclGraphManager.capture).parameters
+
+
+def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
+    """Follow the PCP-local capture contract introduced by vLLM #53515/#53869."""
+    input_batch = object()
+    input_buffers = object()
+    input_block_tables = object()
+    slot_mappings = torch.arange(8)
+    slot_mappings_by_layer = object()
+    attn_metadata = object()
+    block_tables = MagicMock()
+    block_tables.get_dummy_block_tables.return_value = input_block_tables
+    pcp_manager = MagicMock()
+    pcp_manager.get_dummy_slot_mappings.return_value = slot_mappings
+    model_state = MagicMock()
+    model_state.prepare_attn.return_value = attn_metadata
+    kv_cache_config = object()
+
+    with (
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.vllm_version_is",
+            return_value=False,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.InputBatch.make_dummy",
+            return_value=input_batch,
+        ) as make_dummy,
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.build_slot_mappings_by_layer",
+            return_value=slot_mappings_by_layer,
+        ),
+    ):
+        state = _prepare_pcp_inputs_to_capture(
+            num_reqs=2,
+            num_tokens=8,
+            model_state=model_state,
+            input_buffers=input_buffers,
+            _block_tables=block_tables,
+            attn_groups=[],
+            kv_cache_config=kv_cache_config,
+            full_cudagraph=True,
+            max_query_len=4,
+            pcp_manager=pcp_manager,
+        )
+
+    make_dummy.assert_called_once_with(2, 8, input_buffers, max_query_len=4)
+    pcp_manager.partition_batch.assert_not_called()
+    pcp_manager.prepare_attn.assert_not_called()
+    block_tables.get_dummy_block_tables.assert_called_once_with(2)
+    pcp_manager.get_dummy_slot_mappings.assert_called_once_with(8)
+    model_state.prepare_attn.assert_called_once_with(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        [],
+        kv_cache_config,
+        for_capture=True,
+    )
+    assert state.attn_metadata is attn_metadata
+    assert state.slot_mappings is slot_mappings_by_layer
 
 
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
