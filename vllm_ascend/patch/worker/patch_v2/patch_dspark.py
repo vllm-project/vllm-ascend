@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Patch DSpark draft loading for target quantization and supported PP.
+"""Patch DSpark draft loading to inherit the target quant config.
 
 DSpark supports two kinds of drafts:
 
@@ -31,11 +31,6 @@ DSpark supports two kinds of drafts:
 
 The same-checkpoint fix is a general one; a long-term plan exists to contribute
 it upstream to ``load_dspark_model``.
-
-Upstream also rejects DSpark whenever the process belongs to a PP group. Ascend
-only bypasses that loader guard for Spec+PP combinations registered in
-``pp_utils``; the target model still uses the real PP group, while the complete
-draft model remains on the last rank.
 """
 
 from types import SimpleNamespace
@@ -54,7 +49,7 @@ _original_get_draft_quant_config = model_utils.get_draft_quant_config
 _original_load_dspark_model = dspark_utils.load_dspark_model
 
 
-def _load_dspark_model(target_model, vllm_config):
+def _load_dspark_model_with_target_quant(target_model, vllm_config):
     # ``load_dspark_model`` imports ``get_draft_quant_config`` from inside the
     # function body, so overriding the module attribute before the call and
     # restoring it afterwards is enough to redirect it. Only alias it for
@@ -98,5 +93,5 @@ def _load_dspark_model(target_model, vllm_config):
 
 # The speculator binds ``load_dspark_model`` by name at import time, so both
 # the utils module and the speculator module must point at the wrapper.
-dspark_utils.load_dspark_model = _load_dspark_model
-speculator_module.load_dspark_model = _load_dspark_model
+dspark_utils.load_dspark_model = _load_dspark_model_with_target_quant
+speculator_module.load_dspark_model = _load_dspark_model_with_target_quant
