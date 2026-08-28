@@ -413,6 +413,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, re, shutil, subprocess, sys, tempfile, time
+          import glob
           import urllib.request
 
           ws = os.environ["GITHUB_WORKSPACE"]
@@ -572,11 +573,22 @@ jobs:
               # triggering a full kernel rebuild per round.  Runner-side
               # env issues are debugged separately on the runner.
               log("reusing prep-built env (no kernel rebuild)")
+              # Devices appear under their HOST physical id in /dev and
+              # npu-smi (a2: NPU 7, 310p: NPU 14), but acl enumerates them
+              # 0-based inside the container.  Deriving the visible set
+              # here keeps run_tests.py's ASCEND_RT_VISIBLE_DEVICES
+              # assignment within what torch_npu can actually open —
+              # passing the host id left it an empty device set (aclInit
+              # 107001, "Expected value: [0, 0)", 2026-08-28 iteration 2).
+              visible = ",".join(
+                  str(i) for i in range(len(glob.glob(
+                      "/dev/davinci[0-9]*"))))
               script = (
                   'set -uo pipefail\n'
                   'source "' + ws + '/.venv/bin/activate"\n'
                   '. /usr/local/Ascend/ascend-toolkit/set_env.sh\n'
                   'export VLLM_WORKER_MULTIPROC_METHOD=spawn\n'
+                  'export ASCEND_RT_VISIBLE_DEVICES="' + visible + '"\n'
                   'cd "' + ws + '"\n')
               quoted_cases = " ".join('"' + c + '"' for c in cases)
               script += (
