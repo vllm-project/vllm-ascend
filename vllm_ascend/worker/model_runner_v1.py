@@ -4095,6 +4095,12 @@ class NPUModelRunner(GPUModelRunner):
         """
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, ...]] = {}
+        # Packed descriptors are logical views into one physical allocation.
+        # Each descriptor carries the full backing size together with its own
+        # offset and block stride, so allocating once per descriptor would
+        # multiply the actual HBM usage without increasing cache capacity.
+        packed_backing: torch.Tensor | None = None
+        packed_hidden_backing: torch.Tensor | None = None
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
@@ -4136,7 +4142,15 @@ class NPUModelRunner(GPUModelRunner):
                         is_hidden_state_cache_spec(layer_kv_cache_spec.get(ln))
                         for ln in kv_cache_tensor.shared_by
                     )
-                    if self.vllm_config.kv_transfer_config is None:
+                    if kv_cache_tensor.block_stride:
+                        if packed_backing is None:
+                            packed_backing = torch.zeros(
+                                kv_cache_tensor.size,
+                                dtype=torch.int8,
+                                device=self.device,
+                            )
+                        tensor = packed_backing
+                    elif self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                     else:
                         cache_size_aligned = kv_cache_tensor.size + alignment
@@ -4146,7 +4160,15 @@ class NPUModelRunner(GPUModelRunner):
                     if has_mamba and has_hidden:
                         # Allocate separate tensor for HiddenStateCacheSpec layers
                         # so ssm_state writes don't corrupt hidden-states data
-                        if self.vllm_config.kv_transfer_config is None:
+                        if kv_cache_tensor.block_stride:
+                            if packed_hidden_backing is None:
+                                packed_hidden_backing = torch.zeros(
+                                    kv_cache_tensor.size,
+                                    dtype=torch.int8,
+                                    device=self.device,
+                                )
+                            tensor_hs = packed_hidden_backing
+                        elif self.vllm_config.kv_transfer_config is None:
                             tensor_hs = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                         else:
                             cache_size_aligned = kv_cache_tensor.size + alignment
