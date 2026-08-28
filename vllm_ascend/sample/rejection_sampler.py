@@ -31,6 +31,7 @@ from vllm_ascend.ops.triton.v1.reject_sample import (
 )
 from vllm_ascend.sample.penalties import apply_all_penalties
 from vllm_ascend.sample.sampler import apply_top_k_top_p
+from vllm_ascend.utils import is_310p
 from vllm_ascend.worker.v2.sample.rejection_greedy import (
     rejection_greedy_sample_pytorch,
     rejection_greedy_sample_spec_len_1_pytorch,
@@ -59,7 +60,9 @@ class AscendRejectionSampler(RejectionSampler):
             return logits
 
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
-        if not HAS_TRITON:
+        # Triton-Ascend penalty kernels are not supported on 310P. Keep the
+        # vLLM implementation for this device even when Triton is installed.
+        if not HAS_TRITON or is_310p():
             logger.warning_once(
                 "[sample/rejection_sampler] Triton not available, falling back to vLLM default "
                 "penalty implementation in rejection sampler. Rejection sampling performance "
