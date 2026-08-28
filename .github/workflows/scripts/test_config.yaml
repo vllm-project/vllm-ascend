@@ -882,6 +882,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 560
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 420
   tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 260
+  tests/e2e/pull_request/two_card/model_runner_v2/test_mamba_hybrid.py: 220
   tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 370
   tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 570
   tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 470
