@@ -100,6 +100,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         initial_state: torch.Tensor,
         cu_seqlens: torch.Tensor,
         scale: float,
+        actual_seq_lengths: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused prefill path using ``torch_npu.npu_chunk_gated_delta_rule``.
 
@@ -132,8 +133,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         initial_state = initial_state.to(torch.bfloat16).contiguous()
 
         # actual_seq_lengths is per-batch sequence length [N] (per the interface
-        # doc), derived from the cumulative query_start_loc.
-        actual_seq_lengths = torch.diff(cu_seqlens).to(torch.int32)
+        # doc), derived from the cumulative query_start_loc. The builder precomputes
+        # it once per step; deriving it here costs one redundant launch per layer.
+        if actual_seq_lengths is None:
+            actual_seq_lengths = torch.diff(cu_seqlens).to(torch.int32)
 
         o, final_state = torch_npu.npu_chunk_gated_delta_rule(
             q,
@@ -529,6 +532,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         initial_state=initial_state,
                         cu_seqlens=prefill_query_start_loc,
                         scale=key_non_spec.shape[-1] ** -0.5,
+                        actual_seq_lengths=attn_metadata.non_spec_prefill_metadata.chunk.actual_seq_lengths,
                     )
                 )
                 ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
