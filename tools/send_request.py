@@ -112,9 +112,7 @@ def resolve_prompt(server, raw, use_chat: bool = False) -> tuple[str, int | None
         else:
             actual = None
 
-        print(
-            f"seed={seed!r} target_tokens={target} overhead={overhead} raw={raw_count} actual={actual}"
-        )
+        print(f"seed={seed!r} target_tokens={target} overhead={overhead} raw={raw_count} actual={actual}")
         return prompt, actual
     return raw, None
 
