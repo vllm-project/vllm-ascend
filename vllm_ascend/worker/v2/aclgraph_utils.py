@@ -57,12 +57,9 @@ def _prepare_pcp_inputs_to_capture(
     pcp_manager: Any,
 ) -> cudagraph_utils.AttentionState:
     """Build graph inputs with the same PCP-local layout used on replay."""
-    if vllm_version_is("0.27.1"):
-        input_batch = cudagraph_utils.InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
-    else:
-        input_batch = cudagraph_utils.InputBatch.make_dummy(
-            num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
-        )
+    input_batch = cudagraph_utils.InputBatch.make_dummy(
+        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+    )
     input_batch = pcp_manager.partition_batch(input_batch)
     input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
