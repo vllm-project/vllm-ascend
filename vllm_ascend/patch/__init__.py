@@ -1064,6 +1064,19 @@
 #       No, this enables the Ascend MRV2 implementation.
 #    Future Plan:
 #       Remove when vLLM natively transports draft tokens through PP.
+#   2. `sync_spec_pp_num_computed_tokens_cpu`
+#    Why:
+#       With MTP the reverted `num_computed_tokens` of a rejection only exists
+#       on the device, so `seq_lens_cpu` has to come from the D2H copy. Non-last
+#       PP ranks hold no speculator and would otherwise fall back to the
+#       scheduler value, and requests inside a non-final prefill chunk are not
+#       sampled at all and must not wait on the copy event.
+#    How:
+#       Pick the authoritative source per request when speculative PP is on.
+#    Related PR (if no, explain why):
+#       No, this belongs to the Ascend MRV2 speculative PP implementation.
+#    Future Plan:
+#       Remove when vLLM natively transports draft tokens through PP.
 #
 # ** 28. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

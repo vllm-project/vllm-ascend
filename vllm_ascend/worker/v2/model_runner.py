@@ -811,7 +811,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # Skip D2H copy without MTP: num_computed_tokens_cpu is synced
         # from num_computed_tokens_np in _update_seq_lens_cpu instead.
-        if self.speculator is not None:
+        # Non-last PP ranks run MTP without holding a speculator, so the copy
+        # is selected by use_spec_pp there.
+        if self.speculator is not None or self.use_spec_pp:
             self._copy_num_computed_tokens_to_cpu()
 
     def _copy_num_computed_tokens_to_cpu(self):
@@ -837,7 +839,16 @@ class NPUModelRunner(GPUModelRunner):
 
         # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
         # Without MTP, num_computed_tokens_np is already correct from update_requests.
-        if self.speculator is not None:
+        if self.use_spec_pp:
+            # Same requirement on every PP rank, but non-last ranks have no
+            # speculator and requests inside a non-final prefill chunk keep the
+            # scheduler value.
+            from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
+                sync_spec_pp_num_computed_tokens_cpu,
+            )
+
+            sync_spec_pp_num_computed_tokens_cpu(self, scheduler_output)
+        elif self.speculator is not None:
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
