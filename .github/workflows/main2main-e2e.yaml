@@ -30,10 +30,11 @@
 #   under $GITHUB_WORKSPACE, then enters a resident command loop: it polls
 #   the signal branch, and every new commit there (pushed by the flow,
 #   carrying the accumulated patch + test_groups.json + command.json with
-#   the round number) is served IN PLACE — checkout, optional csrc
-#   rebuild, run_tests.py with the chip's tests, results pushed to the
-#   per-chip results branch.  No cache re-fetch, no reinstall, no new job
-#   per round.
+#   the round number) is served IN PLACE — checkout (swaps the adapted
+#   python code; kernels and the vllm checkout stay exactly as prepared),
+#   run_tests.py with the chip's tests, results pushed to the per-chip
+#   results branch.  No cache re-fetch, no reinstall, no kernel rebuild,
+#   no new job per round.
 # - the flow waits for each round's results on the results branches
 #   (main2main-e2e round layout under round-<N>/) and pushes the next
 #   round's command when it needs one;
@@ -393,7 +394,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           CHIP: ${{ matrix.chip }}
-          RUNNER_LABEL: ${{ matrix.runner }}
           PAIR_ALIGNED: ${{ matrix.pair_aligned }}
           SIGNAL_BRANCH: ${{ inputs.signal_branch }}
           SIGNAL_REPO: ${{ inputs.signal_repo || github.repository }}
@@ -404,12 +404,11 @@ jobs:
           HOLD_MINUTES: ${{ inputs.hold_minutes }}
         run: |
           python3 - <<'PY'
-          import json, os, re, shutil, subprocess, sys, tempfile, time
+          import json, os, shutil, subprocess, sys, tempfile, time
           import urllib.request
 
           ws = os.environ["GITHUB_WORKSPACE"]
           chip = os.environ["CHIP"]
-          runner = os.environ["RUNNER_LABEL"]
           pair_aligned = os.environ.get("PAIR_ALIGNED") == "true"
           repo = os.environ["GITHUB_REPOSITORY"]
           signal_branch = os.environ["SIGNAL_BRANCH"]
@@ -495,64 +494,15 @@ jobs:
               if not cases:
                   write_empty_result(round_no)
                   return
-              # Kernels: rebuild only when the signal commit changed csrc
-              # inputs vs the base_sha frozen in the .ready marker (the
-              # commit the env was actually built on — never the moving
-              # branch tip).  A failed rebuild must NOT fall through to the
-              # tests: they would run against the previous round's kernels
-              # and pass on stale code.
-              base_sha = ""
-              try:
-                  for line in open(os.path.join(ws, ".ready")):
-                      if line.startswith("base_sha="):
-                          base_sha = line.split("=", 1)[1].strip()
-                          break
-              except OSError:
-                  pass
-              if base_sha:
-                  changed = git("diff", "--name-only", base_sha, "HEAD",
-                                "--", "csrc", "setup.py", "CMakeLists.txt",
-                                "cmake").stdout.strip()
-              else:
-                  changed = "csrc"  # unknown build base - rebuild defensively
-              if changed:
-                  m = re.search(r"(\d+)$", runner)
-                  max_jobs = (int(m.group(1)) if m else 1) * 23
-                  log("csrc inputs changed - rebuilding kernels (MAX_JOBS="
-                      + str(max_jobs) + ")")
-                  build = subprocess.run(["bash", "-c",
-                      'set -uo pipefail\n'
-                      'source "' + ws + '/.venv/bin/activate"\n'
-                      '. /usr/local/Ascend/ascend-toolkit/set_env.sh\n'
-                      'export MAX_JOBS=' + str(max_jobs) + '\n'
-                      'cd "' + ws + '"\n'
-                      'uv pip install -e . --no-build-isolation\n'])
-                  if build.returncode != 0:
-                      log("kernel rebuild FAILED (" + str(build.returncode)
-                          + ") - reporting a failed round without tests")
-                      suite = {}
-                      for item in expected:
-                          suite[item["test"]] = {
-                              "cards_required": item["cards_required"],
-                              "run_suite_exit_code": 1,
-                              "ci_result": "failed",
-                              "summary_error": "kernel rebuild failed "
-                                               "before tests ran",
-                              "code_bugs_count": 0,
-                              "env_flakes_count": 0,
-                              "failed_test_files_count": 0,
-                              "failed_test_cases_count": 1,
-                              "not_run": True}
-                      json.dump({"can_commit": False,
-                                 "ci_result": "failed",
-                                 "suite_results": suite, "rounds": [],
-                                 "elapsed_s": 0.0},
-                                open(os.path.join(
-                                    tests_dir, "round-" + str(round_no)
-                                    + "-result.json"), "w"), indent=2)
-                      return
-              else:
-                  log("csrc unchanged - reusing built kernels")
+              # Rounds only swap the adapted python code (the in-place
+              # checkout above); the prep-built env — kernels, venv, and
+              # the vllm checkout at the run's fixed commit — is reused
+              # untouched.  A mid-run reinstall/rebuild is explicitly not
+              # wanted here: a base_sha diff spans different repo histories
+              # (prep repo vs signal fork) and always looked "changed",
+              # triggering a full kernel rebuild per round.  Runner-side
+              # env issues are debugged separately on the runner.
+              log("reusing prep-built env (no kernel rebuild)")
               script = (
                   'set -uo pipefail\n'
                   'source "' + ws + '/.venv/bin/activate"\n'
