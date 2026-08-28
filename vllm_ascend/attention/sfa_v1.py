@@ -7,7 +7,7 @@ import scipy  # type: ignore
 import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -23,6 +23,7 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.indexer_sync import synchronize_long_indexer_if_needed
 from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
     SFA_QSFA_TILE_SIZE,
@@ -1649,6 +1650,15 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sin=sin,
                 actual_seq_lengths_query=actual_seq_lengths_query,
                 actual_seq_lengths_key=actual_seq_lengths_key,
+            )
+            # The indexer result has to be visible before the layers that skip
+            # the indexer read it back from the shared cache.
+            synchronize_long_indexer_if_needed(
+                seq_len=int(attn_metadata.seq_lens_cpu.max()),
+                num_query_tokens=attn_metadata.num_actual_tokens,
+                pp_world_size=get_pp_group().world_size,
+                use_index_cache=self.use_index_cache,
+                synchronize=torch.npu.synchronize,
             )
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
