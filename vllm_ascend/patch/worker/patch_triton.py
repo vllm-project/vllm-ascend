@@ -55,7 +55,7 @@ def _npu_causal_conv1d_fn(*args, metadata=None, **kwargs):
 _cc1d.causal_conv1d_update = _npu_causal_conv1d_update
 _cc1d.causal_conv1d_fn = _npu_causal_conv1d_fn
 try:
-    import vllm.models.glm5next.nvidia.kda as _glm_kda
+    import vllm.models.glm5next.nvidia.kda as _glm_kda  # type: ignore[import-not-found]
 
     _glm_kda.causal_conv1d_update = _npu_causal_conv1d_update
     _glm_kda.causal_conv1d_fn = _npu_causal_conv1d_fn
@@ -115,7 +115,7 @@ try:
 
     for _m in list(_sys.modules.values()):
         if getattr(_m, "fused_q_kv_rmsnorm", None) not in (None, _npu_fused_q_kv_rmsnorm):
-            _m.fused_q_kv_rmsnorm = _npu_fused_q_kv_rmsnorm
+            _m.fused_q_kv_rmsnorm = _npu_fused_q_kv_rmsnorm  # type: ignore[attr-defined]
 except ImportError:
     pass
 
@@ -321,7 +321,7 @@ except ImportError:
 # request, which aborts ACL graph capture. The upstream NPU Triton kernel has
 # no host sync and accepts the spec-decode kwargs the fallback had to drop.
 try:
-    from vllm_ascend.ops.triton.mamba.causal_conv1d import (
+    from vllm_ascend.ops.triton.mamba.causal_conv1d import (  # type: ignore[attr-defined]
         causal_conv1d_update_npu as _cc1d_update_npu,
     )
 
@@ -347,7 +347,7 @@ try:
 
     import torch as _t_ms
     import vllm.model_executor.layers.mamba.ops.gather_initial_states as _gis_mod
-    import vllm.model_executor.layers.mamba.ops.scatter_states as _scs_mod
+    import vllm.model_executor.layers.mamba.ops.scatter_states as _scs_mod  # type: ignore[import-not-found]
 
     def _npu_gather_initial_states(state, indices, has_initial_state):
         idx = indices.to(_t_ms.int64) * has_initial_state.to(_t_ms.int64)
@@ -362,8 +362,8 @@ try:
     _scs_mod.scatter_states = _npu_scatter_states
     for _m in list(_sys_ms.modules.values()):
         if getattr(_m, "gather_initial_states", None) not in (None, _npu_gather_initial_states):
-            _m.gather_initial_states = _npu_gather_initial_states
+            _m.gather_initial_states = _npu_gather_initial_states  # type: ignore[attr-defined]
         if getattr(_m, "scatter_states", None) not in (None, _npu_scatter_states):
-            _m.scatter_states = _npu_scatter_states
+            _m.scatter_states = _npu_scatter_states  # type: ignore[attr-defined]
 except ImportError:
     pass

@@ -547,7 +547,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 for _, layer_module in self.model.model.layers.items():
                     shared_head = getattr(layer_module, "shared_head", None)
                     draft_head = getattr(shared_head, "head", None)
-                    if draft_head is not None and draft_head.weight.shape == target_lm_head.weight.shape:
+                    if (
+                        shared_head is not None
+                        and draft_head is not None
+                        and draft_head.weight.shape == target_lm_head.weight.shape
+                    ):
                         shared_head.head = target_lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:

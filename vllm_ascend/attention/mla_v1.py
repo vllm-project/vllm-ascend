@@ -1437,6 +1437,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool):
         # GLM MLA-NoPE: qk_rope_head_dim==0. KvRmsNormRopeCache rejects empty cos.
         B, N, S, _ = kv_no_split.shape
+        assert self.kv_a_layernorm is not None
         k_nope = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
         k_nope = k_nope.view(B, N, S, self.kv_lora_rank)
         k_pe = k_nope.new_empty(B, N, S, 0)
