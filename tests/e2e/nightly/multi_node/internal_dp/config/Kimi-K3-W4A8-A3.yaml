@@ -142,15 +142,17 @@ deployment:
         --tool-call-parser kimi_k3
 
 benchmarks:
-  acc_gsm8k:
+  acc_gpqa:
     case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k-lite
+    dataset_path: vllm-ascend/gpqa
     request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 4096
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    # Start with a deterministic subset of GPQA's 198 questions for nightly.
+    num_prompts: 32
+    max_out_len: 65536
     batch_size: 32
-    baseline: 95
-    threshold: 10
+    thinking: true
+    # Add a baseline and threshold after repeated A3 CI calibration runs.
 
   perf_16k_prefix0:
     case_type: performance
