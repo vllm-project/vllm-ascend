@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # mypy: ignore-errors
-"""Worker side of the Qwen3.5-VL image-preprocessing offload: rescale+normalize.
+"""Worker side of the Qwen3.5-VL image-preprocessing offload.
 
-The front-end patch disables the CPU rescale/normalize stages, so
-``pixel_values`` arrives as raw [0, 255] laid out (num_patches, C*tps*ps*ps);
-this re-applies HF's ``(x * rescale_factor - mean) / std`` on the NPU.
+The front-end hands over flat raw uint8 images plus the original (H, W), so this
+does resize, patchify and rescale+normalize on the NPU. Video keeps the CPU
+patchify path; only its rescale+normalize move to the device.
 
 Both stages fold into one affine op (mean/rescale, std/rescale); when mean and
 std are uniform across channels (the Qwen3.5 default) that affine is scalar and
@@ -59,6 +59,7 @@ def _ensure_img_pp_cfg(self):
     self.channel = vision_config.in_channels
     self.patch_size = vision_config.patch_size
     self.temporal_patch_size = vision_config.temporal_patch_size
+    self.merge_size = vision_config.spatial_merge_size
     image_processor = (MULTIMODAL_REGISTRY.create_processor(
         self.model_config).info.get_hf_processor().image_processor)
     self.rescale_factor = image_processor.rescale_factor
@@ -74,6 +75,64 @@ def _ensure_img_pp_cfg(self):
     self._img_pp_ready = True
 
 
+def _patchify_on_device(self, image):
+    # (C, rh, rw) -> (gh*gw, C*tps*ps*ps), matching HF's patch layout.
+    channel, resized_h, resized_w = image.shape
+    ps, ms, tps = self.patch_size, self.merge_size, self.temporal_patch_size
+    grid_h, grid_w = resized_h // ps, resized_w // ps
+    x = image.reshape(channel, grid_h // ms, ms, ps, grid_w // ms, ms, ps)
+    x = x.permute(1, 4, 2, 5, 0, 3, 6)
+    # A still image is replicated across the temporal patch dimension.
+    x = x.unsqueeze(5).expand(-1, -1, -1, -1, -1, tps, -1, -1)
+    return x.reshape(grid_h * grid_w, channel * tps * ps * ps)
+
+
+def _resize_and_patchify(self, image_input, grid_thw):
+    """Flat raw uint8 -> per-image resize -> patchify -> concat patches."""
+    flat = image_input["pixel_values"].to(self.visual.device)
+    image_hw = image_input["image_hw"]
+    channel, ps = self.channel, self.patch_size
+    hw_list = image_hw.tolist() if hasattr(image_hw, "tolist") else image_hw
+    chunks = flat.split([channel * h * w for h, w in hw_list])
+    patches = []
+    for chunk, (height, width), thw in zip(chunks, hw_list, grid_thw.tolist()):
+        _, grid_h, grid_w = thw
+        image = chunk.reshape(1, channel, height, width).float()
+        # bicubic + antialias reproduces HF/PIL resize (cosine sim 0.999996).
+        image = torch.nn.functional.interpolate(image,
+                                                size=[grid_h * ps, grid_w * ps],
+                                                mode="bicubic",
+                                                align_corners=False,
+                                                antialias=True)
+        # Images stay in raw [0, 255] here; rescale+normalize is applied once
+        # to the concatenated patches below.
+        image = image.clamp(0, 255).round().squeeze(0)
+        patches.append(self._patchify_on_device(image))
+    return torch.cat(patches, dim=0)
+
+
+def _ascend_parse_image_input(self, **kwargs):
+    pixel_values = kwargs.pop("pixel_values", None)
+    image_embeds = kwargs.pop("image_embeds", None)
+    image_grid_thw = kwargs.pop("image_grid_thw", None)
+    if pixel_values is None and image_embeds is None:
+        return None
+    if pixel_values is not None:
+        # Returned as a plain dict so image_hw can ride along; the typed
+        # upstream TypedDicts have no field for it.
+        return {
+            "type": "pixel_values",
+            "pixel_values": pixel_values,
+            "image_grid_thw": image_grid_thw,
+            "image_hw": kwargs.pop("image_hw", None),
+        }
+    return {
+        "type": "image_embeds",
+        "image_embeds": image_embeds,
+        "image_grid_thw": image_grid_thw,
+    }
+
+
 def _ascend_process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
     self._ensure_img_pp_cfg()
     grid_thw = image_input["image_grid_thw"]
@@ -82,8 +141,11 @@ def _ascend_process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
     if image_input["type"] == "image_embeds":
         image_embeds = image_input["image_embeds"].type(self.visual.dtype)
     else:
-        pixel_values = self._rescale_and_normalize(
-            image_input["pixel_values"].type(self.visual.dtype))
+        patches = self._resize_and_patchify(image_input, grid_thw)
+        # Affine stays in float32 on the raw [0, 255] patches; casting to the
+        # vision dtype first would lose mantissa bits on the multiply.
+        pixel_values = self._rescale_and_normalize(patches).type(
+            self.visual.dtype)
         if self.use_data_parallel:
             return run_dp_sharded_mrope_vision_model(self.visual,
                                                      pixel_values,
@@ -120,5 +182,8 @@ def _ascend_process_video_input(self, video_input) -> tuple[torch.Tensor, ...]:
 
 Qwen3_5ForConditionalGeneration._ensure_img_pp_cfg = _ensure_img_pp_cfg
 Qwen3_5ForConditionalGeneration._rescale_and_normalize = _rescale_and_normalize
+Qwen3_5ForConditionalGeneration._patchify_on_device = _patchify_on_device
+Qwen3_5ForConditionalGeneration._resize_and_patchify = _resize_and_patchify
+Qwen3_5ForConditionalGeneration._parse_and_validate_image_input = _ascend_parse_image_input
 Qwen3_5ForConditionalGeneration._process_image_input = _ascend_process_image_input
 Qwen3_5ForConditionalGeneration._process_video_input = _ascend_process_video_input
