@@ -11,6 +11,7 @@ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import (
     WorkerSentinel as GPUWorkerSentinel,
 )
+from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.ascend_config import get_ascend_config
@@ -18,6 +19,7 @@ from vllm_ascend.distributed.eplb.state import refresh_model_routing_tables
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.worker.sentinel.eplb_redistribute import (
     build_local_reload_plan,
+    build_orig_to_dense_rank_table,
     check_redundancy_sufficient,
     compute_dead_ep_ranks,
     densify_routing_table_physical_ids,
@@ -65,11 +67,8 @@ class WorkerSentinel(GPUWorkerSentinel):
     """
 
     def __init__(self, worker: "Worker", device: torch.device):
-        self.worker = worker
         self.device = device
-        self.dp_rank = worker.parallel_config.data_parallel_rank
-        self.dp_size = worker.parallel_config.data_parallel_size
-        self.data_parallel_master_ip = worker.parallel_config.data_parallel_master_ip
+        self.worker = worker
         # Set once a device-touching method faults, to keep this worker off the
         # device until FT recovery rebuilds the groups.
         self.worker_faulted = False
@@ -175,10 +174,10 @@ class WorkerSentinel(GPUWorkerSentinel):
         l2p = eplb_model_state.logical_to_physical_map
         lrc = eplb_model_state.logical_replica_count
         num_logical = lrc.shape[1]
-        ep_world_size = get_mc2_group().world_size
+        ep_world_size = get_ep_group().world_size
         num_local_experts = p2l.shape[1] // ep_world_size
         # The original EP rank; never rewritten by scale-down.
-        ep_rank = get_mc2_group().rank_in_group
+        ep_rank = get_ep_group().rank_in_group
 
         p2l_before = p2l.cpu().clone()
         mark_dead_expert_slots_inplace(p2l, dead_ep_ranks, num_local_experts)
@@ -189,8 +188,12 @@ class WorkerSentinel(GPUWorkerSentinel):
         refresh_model_routing_tables(eplb_model_state)
 
         # The MC2 kernels consume the routing tables in the densified id space;
-        # renumber the kernel-facing values in place after the refresh.
-        orig_to_dense_rank = get_ep_all2all_manager().to_densified_rank_table()
+        # renumber the kernel-facing values in place after the refresh. The
+        # dead set is cumulative (accumulated across recovery rounds), so
+        # derive it from the manager's mask rather than this round's ranks.
+        active_mask = get_ep_all2all_manager().query_active_mask()
+        dead_ranks = {rank for rank, is_dead in enumerate(active_mask.tolist()) if is_dead}
+        orig_to_dense_rank = build_orig_to_dense_rank_table(ep_world_size, dead_ranks)
         for layer in eplb_model_state.model.moe_layers:
             routing_table = getattr(getattr(layer, "eplb_state", None), "expert_replica_routing_table", None)
             if routing_table is not None:

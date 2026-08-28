@@ -19,12 +19,6 @@ import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
 
-# elastic_info tensor layout consumed by the MC2 dispatch/combine operators:
-# [is_scaling_down, dense ep world size, shared_expert_rank_num,
-#  num_physical_experts] + table1(orig->dense, -1 for dead) + table2(dense->orig).
-_ELASTIC_INFO_HEADER_SIZE = 4
-_ELASTIC_INFO_RANK_TABLE_NUM = 2
-
 
 class _NpuAll2AllManager:
     """All2All-manager adapter for MC2 fault tolerance.
@@ -52,7 +46,10 @@ class _NpuAll2AllManager:
         self._dead: set[int] = set()
         self._num_physical_experts: int = 0
 
-        size = _ELASTIC_INFO_HEADER_SIZE + _ELASTIC_INFO_RANK_TABLE_NUM * ep_world_size
+        # elastic_info layout: [is_scaling_down, dense ep world size,
+        #  shared_expert_rank_num, num_physical_experts] + table1(orig->dense)
+        #  + table2(dense->orig).
+        size = 4 + 2 * ep_world_size
         self._elastic_info_host = torch.zeros(size, dtype=torch.int32)
         if device is None:
             device = torch.device("npu", torch.npu.current_device())
@@ -105,34 +102,21 @@ class _NpuAll2AllManager:
         self._num_physical_experts = num_physical_experts
         self._rebuild_elastic_info()
 
-    def to_densified_rank_table(self) -> torch.Tensor:
-        """Convert the scale-down view (original EP ranks + dead set) into the
-        kernel's view: original EP rank -> densified rank (-1 = dead)."""
-        table = torch.full((self._ep_world_size,), -1, dtype=torch.int32)
-        alive = sorted(set(range(self._ep_world_size)) - self._dead)
-        for dense_rank, orig_rank in enumerate(alive):
-            table[orig_rank] = dense_rank
-        return table
-
     def _rebuild_elastic_info(self) -> None:
         """Rebuild elastic_info from the dead set into the existing device
         tensor (never reallocates, so captured graphs stay valid)."""
-        if not self._dead or self._num_physical_experts <= 0:
-            # flag=0 -> normal dispatch; transient until redistribution sets
-            # the new expert width (no forward runs in between).
-            self._elastic_info_host.zero_()
-        else:
-            world_size = self._ep_world_size
-            alive = sorted(set(range(world_size)) - self._dead)
-            table1 = torch.full((world_size,), -1, dtype=torch.int32)
-            table1[alive] = torch.arange(len(alive), dtype=torch.int32)
-            table2 = torch.full((world_size,), -1, dtype=torch.int32)
-            table2[: len(alive)] = torch.tensor(alive, dtype=torch.int32)
-            self._elastic_info_host.copy_(
-                torch.cat(
-                    [torch.tensor([1, len(alive), 0, self._num_physical_experts], dtype=torch.int32), table1, table2]
-                )
+
+        world_size = self._ep_world_size
+        alive = sorted(set(range(world_size)) - self._dead)
+        table1 = torch.full((world_size,), -1, dtype=torch.int32)
+        table1[alive] = torch.arange(len(alive), dtype=torch.int32)
+        table2 = torch.full((world_size,), -1, dtype=torch.int32)
+        table2[: len(alive)] = torch.tensor(alive, dtype=torch.int32)
+        self._elastic_info_host.copy_(
+            torch.cat(
+                [torch.tensor([1, len(alive), 0, self._num_physical_experts], dtype=torch.int32), table1, table2]
             )
+        )
         self._elastic_info.copy_(self._elastic_info_host, non_blocking=True)
 
 
