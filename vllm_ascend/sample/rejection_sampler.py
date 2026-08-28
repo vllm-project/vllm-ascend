@@ -61,11 +61,20 @@ class AscendRejectionSampler(RejectionSampler):
         # vLLM implementation for this device even when Triton is installed.
         if not HAS_TRITON or is_310p():
             logger.warning_once(
-                "[sample/rejection_sampler] Triton not available, falling back to vLLM default "
+                "[sample/rejection_sampler] Triton unavailable or unsupported on "
+                "310P, falling back to vLLM default "
                 "penalty implementation in rejection sampler. Rejection sampling performance "
                 "may be degraded on NPU. "
             )
-            return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
+            assert sampling_metadata.prompt_token_ids is not None
+            repeated_sampling_metadata = replace(
+                sampling_metadata,
+                prompt_token_ids=sampling_metadata.prompt_token_ids[repeat_indices],
+                presence_penalties=sampling_metadata.presence_penalties[repeat_indices],
+                frequency_penalties=sampling_metadata.frequency_penalties[repeat_indices],
+                repetition_penalties=sampling_metadata.repetition_penalties[repeat_indices],
+            )
+            return Sampler.apply_penalties(logits, repeated_sampling_metadata, output_token_ids)
 
         assert sampling_metadata.prompt_token_ids is not None
         prompt_token_ids = sampling_metadata.prompt_token_ids[repeat_indices]
