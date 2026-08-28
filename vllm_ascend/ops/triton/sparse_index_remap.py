@@ -46,7 +46,6 @@ def remap_sparse_indices_fused_kernel(
     count is written to ``chunk_count``, and the chunk's region of ``out``
     is pre-filled with -1 (the gather kernel later overwrites the compacted
     front).
-    
     """
     chunk = tl.program_id(0)
     row = tl.program_id(1)
