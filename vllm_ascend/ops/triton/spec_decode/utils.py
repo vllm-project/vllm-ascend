@@ -177,6 +177,128 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         block_start += block_start_step
 
 
+@triton.jit
+def copy_and_expand_dspark_inputs_kernel_by_request(
+    next_token_ids_ptr,
+    target_positions_ptr,
+    context_slot_mapping_ptr,
+    out_input_ids_ptr,
+    out_context_positions_ptr,
+    out_query_positions_ptr,
+    out_context_slot_mapping_ptr,
+    out_query_slot_mapping_ptr,
+    out_token_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    num_rejected_tokens_ptr,
+    error_ptr,
+    parallel_drafting_token_id,
+    block_size,
+    num_query_per_req,
+    num_speculative_tokens,
+    total_input_tokens,
+    batch_size,
+    HAS_NUM_REJECTED: tl.constexpr = False,
+    SAMPLE_FROM_ANCHOR: tl.constexpr = False,
+    TILE_SIZE: tl.constexpr = 256,
+):
+    """Copy context in parallel and expand each request independently.
+
+    Keeping query metadata request-local avoids cross-request gathers for
+    ``valid_ctx_end`` and position ids. Invalid metadata produces safe
+    sentinels and records the one-based request index in ``error_ptr`` so the
+    caller can fail asynchronously before RoPE consumes an invalid address.
+    """
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+
+    block_start = pid * TILE_SIZE
+    block_start_step = num_programs * TILE_SIZE
+    while block_start < total_input_tokens:
+        offsets = block_start + tl.arange(0, TILE_SIZE)
+        mask = offsets < total_input_tokens
+        positions = tl.load(target_positions_ptr + offsets, mask=mask)
+        slots = tl.load(context_slot_mapping_ptr + offsets, mask=mask)
+        tl.store(out_context_positions_ptr + offsets, positions, mask=mask)
+        tl.store(out_context_slot_mapping_ptr + offsets, slots, mask=mask)
+        block_start += block_start_step
+
+    req_idx = pid
+    while req_idx < batch_size:
+        ctx_start = tl.load(query_start_loc_ptr + req_idx)
+        ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
+        num_ctx = ctx_end - ctx_start
+        if HAS_NUM_REJECTED:
+            num_rejected = tl.load(num_rejected_tokens_ptr + req_idx)
+        else:
+            num_rejected = 0
+
+        seq_len = tl.load(seq_lens_ptr + req_idx)
+        valid_ctx_end = ctx_end - num_rejected
+        metadata_valid = (
+            (ctx_start >= 0)
+            & (ctx_start < ctx_end)
+            & (ctx_end <= total_input_tokens)
+            & (num_rejected >= 0)
+            & (num_rejected < num_ctx)
+            & (seq_len >= num_rejected)
+        )
+        tl.atomic_max(error_ptr, tl.where(metadata_valid, 0, req_idx + 1))
+
+        last_pos = tl.load(
+            target_positions_ptr + valid_ctx_end - 1,
+            mask=metadata_valid,
+            other=-1,
+        )
+        effective_seq_len = seq_len - num_rejected
+
+        for q_idx in range(0, num_query_per_req):
+            query_out_idx = req_idx * num_query_per_req + q_idx
+            query_pos = last_pos + 1 + q_idx
+            query_pos_valid = metadata_valid & (query_pos >= 0)
+            tl.atomic_max(error_ptr, tl.where(query_pos_valid, 0, req_idx + 1))
+            tl.store(
+                out_query_positions_ptr + query_out_idx,
+                tl.where(query_pos_valid, query_pos, 0),
+            )
+
+            query_cache_pos = effective_seq_len + q_idx
+            block_num_q = query_cache_pos // block_size
+            block_valid = (
+                metadata_valid
+                & (query_cache_pos >= 0)
+                & (block_num_q >= 0)
+                & (block_num_q < block_table_stride)
+            )
+            tl.atomic_max(error_ptr, tl.where(block_valid, 0, req_idx + 1))
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_num_q,
+                mask=block_valid,
+                other=0,
+            ).to(tl.int64)
+            slot_q = block_id_q * block_size + (query_cache_pos % block_size)
+            tl.store(
+                out_query_slot_mapping_ptr + query_out_idx,
+                tl.where(block_valid, slot_q, -1),
+            )
+
+            bonus_token = tl.load(next_token_ids_ptr + req_idx)
+            input_id = tl.where(q_idx == 0, bonus_token, parallel_drafting_token_id)
+            tl.store(out_input_ids_ptr + query_out_idx, input_id)
+
+            if SAMPLE_FROM_ANCHOR:
+                sample_out_idx = req_idx * num_speculative_tokens + q_idx
+                tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
+            else:
+                if q_idx > 0:
+                    sample_out_idx = req_idx * num_speculative_tokens + q_idx - 1
+                    tl.store(out_token_indices_ptr + sample_out_idx, query_out_idx)
+
+        req_idx += num_programs
+
+
 @triton.jit(do_not_specialize=["num_reqs"])
 def dflash2_greedy_selector_walk_kernel(
     scores_ptr,

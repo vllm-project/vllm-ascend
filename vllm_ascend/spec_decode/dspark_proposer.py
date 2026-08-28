@@ -6,6 +6,7 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
@@ -13,9 +14,21 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
+from vllm_ascend.ops.triton.spec_decode.utils import (
+    copy_and_expand_dspark_inputs_kernel_by_request as copy_and_expand_dflash_and_dspark_inputs_kernel,
+)
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
+from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+_DSPARK_CONTEXT_TILE_SIZE = 256
+
+
+def _compute_dspark_num_programs(num_context_tokens: int, batch_size: int) -> int:
+    """Cover context tiles while reserving request-local query programs."""
+    init_device_properties_triton()
+    context_programs = triton.cdiv(num_context_tokens, _DSPARK_CONTEXT_TILE_SIZE)
+    return min(max(context_programs, batch_size, 1), get_vectorcore_num())
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -86,6 +99,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=torch.int32,
             device=device,
         )
+        self._copy_expand_error = torch.zeros(1, dtype=torch.int32, device=device)
 
         # TODO simplify these comments
         # block_table / slot_mapping bookkeeping (10 dicts below). v1 self-
@@ -253,6 +267,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=torch.int32,
             device=self.device,
         )
+        self._copy_expand_error.zero_()
+        grid = (_compute_dspark_num_programs(self._dflash_num_context, batch_size),)
 
         # Query block: reuse the DFlash inputs kernel logic (host-side ref)
         # per kv-cache-group to fill positions / input_ids / query slot_mapping
@@ -264,9 +280,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             if gid_block_table is None:
                 continue
             kv_block_size = int(attn_group.kv_cache_spec.block_size)
-            copy_and_expand_dflash_and_dspark_inputs_kernel[
-                (_compute_num_programs(self._dflash_num_context, num_query_total),)
-            ](
+            copy_and_expand_dflash_and_dspark_inputs_kernel[grid](
                 # Inputs
                 next_token_ids_ptr=next_token_ids,
                 target_positions_ptr=target_positions,
@@ -285,6 +299,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 query_start_loc_ptr=cad.query_start_loc,
                 seq_lens_ptr=cad.seq_lens,
                 num_rejected_tokens_ptr=num_rejected_tokens_gpu,
+                error_ptr=self._copy_expand_error,
                 # Scalars
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
                 block_size=kv_block_size,
@@ -295,6 +310,10 @@ class AscendDSparkProposer(AscendDflashProposer):
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
             )
+        torch._assert_async(
+            self._copy_expand_error == 0,
+            "Invalid DSpark input metadata: request-local context, rejected-token, position, or block-table bounds failed.",
+        )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
             self._per_group_context_slot_mapping_buffers[gidx] for gidx in self._layer_group_idx
