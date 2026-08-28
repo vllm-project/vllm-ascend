@@ -120,6 +120,22 @@ def test_validate_config_rejects_full_graph_for_non_sparse_mla():
         AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
 
+def test_pcp_manager_uses_persistent_ascend_input_buffers():
+    manager = AscendPCPManager(
+        pcp_world_size=2,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        max_num_reqs=3,
+        max_num_tokens=16,
+    )
+
+    assert isinstance(manager._input_buffers, AscendInputBuffers)
+    assert manager._input_buffers.max_num_reqs == 6
+    assert manager._input_buffers.seq_lens_np.shape == (6,)
+    if hasattr(vllm_model_runner.pcp.PCPManager, "input_buffers"):
+        assert manager.input_buffers is manager._input_buffers
+
+
 def _make_local_pcp_batch():
     """Build a local batch in the shape returned by the community PCP manager."""
     input_buffers = AscendInputBuffers(
