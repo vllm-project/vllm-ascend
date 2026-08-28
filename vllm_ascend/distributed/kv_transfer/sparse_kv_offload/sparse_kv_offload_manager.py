@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
@@ -1152,6 +1153,8 @@ def init_sparse_kv_offload_manager(
 ):
     global _SPARSE_KV_OFFLOAD_MANAGER
     if _SPARSE_KV_OFFLOAD_MANAGER is None:
+        if get_ascend_device_type() != AscendDeviceType.A3:
+            raise RuntimeError("Sparse KV offload is only supported on Atlas A3.")
         _SPARSE_KV_OFFLOAD_MANAGER = SparseKVOffloadManager(
             vllm_config,
             kv_cache_config,

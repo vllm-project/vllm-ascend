@@ -12,6 +12,17 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     get_sparse_kv_offload_cpu_pool_size_bytes,
     plan_sparse_kv_offload_memory,
 )
+from vllm_ascend.utils import AscendDeviceType
+
+
+class TestSparseKVOffloadInitialization(unittest.TestCase):
+    def test_non_a3_is_rejected(self):
+        with (
+            patch.object(manager_module, "_SPARSE_KV_OFFLOAD_MANAGER", None),
+            patch.object(manager_module, "get_ascend_device_type", return_value=AscendDeviceType.A2),
+            self.assertRaisesRegex(RuntimeError, "only supported on Atlas A3"),
+        ):
+            manager_module.init_sparse_kv_offload_manager(None, None, None)
 
 
 class _FakeKVCacheSpec:

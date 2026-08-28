@@ -94,8 +94,6 @@ endif()
 
 # Sparse KV cache offloading is currently supported on Atlas A3 only.
 if(SOC_VERSION MATCHES "ascend910_93.*")
-  list(APPEND VLLM_ASCEND_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kv_transfer/sparse_kv_offload.cpp)
   find_package(OpenMP REQUIRED)
 endif()
 
@@ -117,6 +115,7 @@ set(
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 if(SOC_VERSION MATCHES "ascend910_93.*")
+  target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD)
   target_link_libraries(vllm_ascend_C PRIVATE OpenMP::OpenMP_CXX)
 endif()
 

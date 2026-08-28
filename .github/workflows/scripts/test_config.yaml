@@ -170,6 +170,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 70
   tests/e2e/pull_request/two_card/test_activation.py: 50
   tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py: 60
+  tests/e2e/pull_request/two_card/test_sparse_kv_offload.py: 60
   tests/e2e/pull_request/one_card/test_w4a4_flatquant.py: 40
   tests/e2e/pull_request/one_card/test_w4a4_laos_dynamic.py: 40
   tests/e2e/pull_request/one_card/test_w8a16.py: 40
