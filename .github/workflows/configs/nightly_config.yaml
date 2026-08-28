@@ -177,9 +177,6 @@ a3:
       - name: MiniMax-M3-BF16-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: MiniMax-M3-BF16-A3.yaml
-      - name: MiniMax-M3-W8A8-A3
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: MiniMax-M3-W8A8-A3.yaml
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
