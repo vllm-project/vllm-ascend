@@ -1897,14 +1897,6 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        logger.info(
-            "model forward dispatch: total=%d requests=%s pp_rank=%d tp_rank=%d dcp_rank=%d",
-            num_scheduled_tokens,
-            scheduler_output.num_scheduled_tokens,
-            get_pp_group().rank_in_group,
-            self.tp_rank,
-            self.dcp_rank,
-        )
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Fix up prev_req_id_to_index for requests that were discarded
