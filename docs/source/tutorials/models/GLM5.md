@@ -137,7 +137,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```shell
     # The version of transformers needs to be upgraded to 5.2.0.
@@ -209,7 +209,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```shell
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -269,7 +269,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
 === "A3 series"
 
@@ -1372,7 +1372,7 @@ For environment variable descriptions and constraints, refer to [envs.py](https:
 
 ## 10 FAQ
 
-- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
 - **Q: How to solve ValueError: Tokenizer class TokenizersBackend does not exist or is not currently imported?**
 
