@@ -136,14 +136,15 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         # Mock get_ascend_config()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.mc2_comm_alg = ""
+        mock_ascend_config.get_mc2_comm_alg = MagicMock()
+        mock_ascend_config.get_mc2_comm_alg.return_value = ""
         mock_ascend_config.eplb_config = MagicMock()
         mock_ascend_config.eplb_config.dynamic_eplb = False
         mock_ascend_config.combine_quant_mode = 0
         self.ascend_config_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_config", return_value=mock_ascend_config
         )
-        self.ascend_config_patch.start()
+        self.mock_ascend_config = self.ascend_config_patch.start()
         self.ascend_config_utils_patch = patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config)
         self.ascend_config_utils_patch.start()
         # Keep a handle so individual tests can set combine_quant_mode.
@@ -205,6 +206,8 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertNotIn("x_active_mask", kwargs)
 
     def test_get_dispatch_mc2_kwargs_without_skip_allreduce_keeps_mc2_mask(self):
+        self.mock_skip_allreduce.return_value = False
+        dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
@@ -218,7 +221,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             mc2_mask=mc2_mask,
         )
 
-        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+        kwargs = dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
         self.assertEqual(kwargs["global_bs"], 0)
         self.assertIs(kwargs["x_active_mask"], mc2_mask)
