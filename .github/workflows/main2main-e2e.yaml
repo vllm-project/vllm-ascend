@@ -548,7 +548,11 @@ jobs:
                              "command_sha": cmd_sha},
                             open(os.path.join(dst, "round-meta.json"), "w"),
                             indent=2)
-                  git("add", "-A", "round-" + str(round_no), cwd=wt)
+                  # -f: the repo's .gitignore excludes *.log, which would
+                  # silently drop every per-test log from the results
+                  # branch (observed 2026-08-28 round 1: summaries pushed,
+                  # all logs missing).
+                  git("add", "-A", "-f", "round-" + str(round_no), cwd=wt)
                   git("-c", "user.name=main2main-bot",
                       "-c", "user.email=main2main-bot@users.noreply.github.com",
                       "commit", "-m",
