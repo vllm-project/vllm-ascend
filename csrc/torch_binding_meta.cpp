@@ -1916,6 +1916,53 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_meta(
+    const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale,
+    const std::optional<at::Tensor> &weight_assist_matrix, const std::optional<at::Tensor> &bias,
+    const at::Tensor &x_scale, const std::optional<at::Tensor> &smooth_scale, const at::Tensor &group_list,
+    int64_t dequant_mode, int64_t dequant_dtype, int64_t quant_mode, int64_t group_list_type,
+    const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
+{
+    constexpr int64_t MX_BLOCK_SPAN = 64;
+    constexpr int64_t MX_SCALE_ALIGN = 2;
+    auto m = x.sym_size(0);
+    auto n = weight_scale.sym_size(weight_scale.dim() - 2);
+    c10::SymDimVector output_shape = {m, n / 2};
+    c10::SymDimVector scale_shape = {
+        m, (n / 2 + MX_BLOCK_SPAN - 1) / MX_BLOCK_SPAN, MX_SCALE_ALIGN};
+    (void)weight;
+    (void)weight_assist_matrix;
+    (void)bias;
+    (void)x_scale;
+    (void)smooth_scale;
+    (void)group_list;
+    (void)dequant_mode;
+    (void)dequant_dtype;
+    (void)quant_mode;
+    (void)group_list_type;
+    (void)tuning_config;
+    (void)beta;
+    (void)linear_beta;
+    return {at::empty_symint(output_shape, x.options().dtype(at::kFloat8_e4m3fn)),
+            at::empty_symint(scale_shape, x.options().dtype(at::kFloat8_e8m0fnu))};
+}
+
+std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_list_meta(
+    const at::Tensor &x, const std::vector<at::Tensor> &weight, const std::vector<at::Tensor> &weight_scale,
+    const std::optional<std::vector<at::Tensor>> &weight_assist_matrix, const std::optional<at::Tensor> &bias,
+    const at::Tensor &x_scale, const std::optional<at::Tensor> &smooth_scale, const at::Tensor &group_list,
+    int64_t dequant_mode, int64_t dequant_dtype, int64_t quant_mode, int64_t group_list_type,
+    const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
+{
+    (void)weight_assist_matrix;
+    return grouped_matmul_situ_quant_meta(
+        x, weight[0], weight_scale[0], std::nullopt, bias, x_scale,
+        smooth_scale, group_list, dequant_mode, dequant_dtype, quant_mode,
+        group_list_type, tuning_config, beta, linear_beta);
+}
+#endif
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1953,6 +2000,13 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("attn_res_fwd", &vllm_ascend::meta::attn_res_fwd_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+    ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
+    ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+    ops.impl("grouped_matmul_situ_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
+    ops.impl("grouped_matmul_situ_quant_weight_nz.list",
+             &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+#endif
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
