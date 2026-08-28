@@ -1166,3 +1166,28 @@
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
 #
+# ** 35. File: platform/patch_qwen3_5_vl_preprocess.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLMultiModalProcessor._call_hf_processor`
+#    Why:
+#       For Qwen3.5-VL the CPU rescale+normalize stages run in the front-end
+#       process, saturating the CPU and slowing down the engine loop.
+#    How：
+#       Inject do_rescale=False/do_normalize=False so raw uint8 reaches the
+#       worker, which re-applies both on the NPU. Gated to qwen3.5 by model_type.
+#    Future Plan:
+#       Remove once vLLM preprocesses multimodal inputs on device natively.
+#
+# ** 36. File: worker/patch_qwen3_5_vl_preprocess.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_5.Qwen3_5ForConditionalGeneration._process_image_input`
+#   2. `vllm.model_executor.models.qwen3_5.Qwen3_5ForConditionalGeneration._process_video_input`
+#    Why:
+#       The platform patch above disables the CPU rescale/normalize, so pixel
+#       values arrive raw and must be scaled on device before the vision tower.
+#    How：
+#       Apply the fused rescale+normalize affine on the NPU for both the image
+#       and the video path (video kwargs derive from the same mm_kwargs).
+#    Future Plan:
+#       Remove together with the platform patch above.
+#

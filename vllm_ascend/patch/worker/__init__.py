@@ -71,3 +71,4 @@ import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+import vllm_ascend.patch.worker.patch_qwen3_5_vl_preprocess  # noqa
