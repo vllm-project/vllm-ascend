@@ -364,7 +364,7 @@ class ChunkedTokenDatabase:
         self._key_prefix_cache: dict[tuple[int, str, str], str] = {}
         self.cache_coordinator: Any | None = None
 
-    def _get_key_prefix(
+    def get_key_prefix(
         self,
         kv_cache_group_id: int,
         cache_role: str = "kv",
@@ -514,6 +514,38 @@ class ChunkedTokenDatabase:
             size_list.append(size)
         return addr_list, size_list, block_id
 
+    def prepare_values(
+        self,
+        starts: Sequence[int],
+        ends: Sequence[int],
+        block_ids: Sequence[int],
+        kv_cache_group_id: int = 0,
+        cache_role: str = "kv",
+    ) -> tuple[list[list[int]], list[list[int]]]:
+        """Prepare transfer addresses and sizes for a batch of cache blocks."""
+        if not (len(starts) == len(ends) == len(block_ids)):
+            raise ValueError("starts, ends and block_ids must have the same length")
+        if len(block_ids) == 0:
+            return [], []
+
+        group_addrs, group_block_len, group_block_stride = self._get_group_buffers(kv_cache_group_id, cache_role)
+        if not group_block_len:
+            return ([[] for _ in block_ids], [[] for _ in block_ids])
+
+        entry_indices = np.arange(len(group_addrs)) % len(group_block_len)
+        base_addrs = np.asarray(group_addrs, dtype=np.int64)
+        block_lens = np.asarray(group_block_len, dtype=np.int64)[entry_indices]
+        block_strides = (
+            np.asarray(group_block_stride, dtype=np.int64)[entry_indices] if group_block_stride else block_lens
+        )
+        block_ids_array = np.asarray(block_ids, dtype=np.int64)
+        token_spans = np.asarray(ends, dtype=np.int64) - np.asarray(starts, dtype=np.int64)
+        group_block_size = self.get_block_size(kv_cache_group_id)
+
+        addrs = base_addrs[None, :] + block_ids_array[:, None] * block_strides[None, :]
+        sizes = token_spans[:, None] * block_lens[None, :] // group_block_size
+        return addrs.tolist(), sizes.tolist()
+
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)
         block_idx = start // group_block_size
@@ -560,12 +592,14 @@ class ChunkedTokenDatabase:
         num_logical_blocks = min(len(grouped_hashes), cdiv(token_len, logical_block_size)) if token_len > 0 else 0
         block_id_offset = max(num_logical_blocks - len(block_ids), 0) if block_ids is not None else 0
         candidate_index = 0
+        first_chunk_id = min(cdiv(mask_num, logical_block_size), num_logical_blocks) if mask_num > 0 else 0
+        shard = (
+            (shard_rank, shard_size) if shard_rank is not None and shard_size is not None and shard_size > 1 else None
+        )
 
-        for chunk_id in range(num_logical_blocks):
+        for chunk_id in range(first_chunk_id, num_logical_blocks):
             start_idx = chunk_id * logical_block_size
             end_idx = min(start_idx + logical_block_size, token_len)
-            if start_idx < mask_num:
-                continue
             if end_idx <= start_idx:
                 continue
             if chunk_filter is not None and not chunk_filter(start_idx):
@@ -578,12 +612,7 @@ class ChunkedTokenDatabase:
                 block_id = block_ids[block_idx]
                 if skip_null_blocks and block_id <= 0:
                     continue
-            shard_allows = (
-                shard_rank is None
-                or shard_size is None
-                or shard_size <= 1
-                or candidate_index % shard_size == shard_rank
-            )
+            shard_allows = shard is None or candidate_index % shard[1] == shard[0]
             candidate_index += 1
             if not shard_allows:
                 continue
@@ -627,7 +656,28 @@ class ChunkedTokenDatabase:
         chunk_filter: Callable[[int], bool] | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str]]:
         """Yield cache key strings directly without materializing PoolKey objects."""
-        prefix = self._get_key_prefix(kv_cache_group_id)
+        if not block_hashes:
+            return
+        prefix = self.get_key_prefix(kv_cache_group_id)
+        hash_to_str = str if isinstance(block_hashes[0], str) else bytes.hex
+        for start, end, hash_val in self.process_token_hashes(
+            token_len,
+            block_hashes,
+            mask_num,
+            kv_cache_group_id,
+            chunk_filter,
+        ):
+            yield start, end, prefix + hash_to_str(hash_val), hash_val
+
+    def process_token_hashes(
+        self,
+        token_len: int,
+        block_hashes: BlockHashList | list[str],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        chunk_filter: Callable[[int], bool] | None = None,
+    ) -> Iterable[tuple[int, int, BlockHash | str]]:
+        """Yield filtered chunks without constructing serialized cache keys."""
         for start, end, hash_val, _ in self._iter_token_chunks(
             token_len,
             block_hashes,
@@ -635,7 +685,7 @@ class ChunkedTokenDatabase:
             kv_cache_group_id,
             chunk_filter=chunk_filter,
         ):
-            yield start, end, prefix + block_hash_to_str(hash_val), hash_val
+            yield start, end, hash_val
 
     def process_token_key_strings_with_block_ids(
         self,
@@ -650,7 +700,10 @@ class ChunkedTokenDatabase:
         shard_size: int | None = None,
     ) -> Iterable[tuple[int, int, str, BlockHash | str, int]]:
         """Yield cache key strings and resolved block ids without PoolKey allocation."""
-        prefix = self._get_key_prefix(kv_cache_group_id)
+        if not block_hashes:
+            return
+        prefix = self.get_key_prefix(kv_cache_group_id)
+        hash_to_str = str if isinstance(block_hashes[0], str) else bytes.hex
         for start, end, hash_val, block_id in self._iter_token_chunks(
             token_len,
             block_hashes,
@@ -663,7 +716,7 @@ class ChunkedTokenDatabase:
             shard_size=shard_size,
         ):
             assert block_id is not None
-            yield start, end, prefix + block_hash_to_str(hash_val), hash_val, block_id
+            yield start, end, prefix + hash_to_str(hash_val), hash_val, block_id
 
     def decode_adaptor_prefill_pp(self, key, addr, size, kv_cache_group_id: int = 0, cache_role: str = "kv"):
         if self.partitions is None or len(self.partitions) == 1:
