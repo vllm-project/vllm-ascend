@@ -1,8 +1,10 @@
 import pytest
 import torch
-from vllm.triton_utils import triton
 
-from vllm_ascend.worker.v2.sample.penalties import _bincount_kernel
+from vllm_ascend.worker.v2.sample.penalties import bincount
+
+VOCAB_SIZE = 151936
+MAX_NUM_REQS = 64
 
 
 def torch_bincount(
@@ -36,70 +38,50 @@ def torch_bincount(
             output_bin_counts[req_idx, token] += 1
 
 
-@pytest.mark.skip(reason="atomic_or operator hangs in current npu_ir version")
-def test_bincount_kernel():
-    """
-    Compute the prompt binary mask and token bincount using the Triton kernel.
-
-    Args:
-        expanded_idx_mapping: Tensor containing the indices of requests to process.
-        all_token_ids: Batch of input token IDs for all requests.
-        prompt_len: Tensor storing the prompt length for each request.
-        prefill_len: Tensor storing the prefill length for each request.
-        prompt_bin_mask: Output binary mask tensor to mark prompt tokens.
-        output_bin_counts: Output tensor to store token frequency counts.
-        max_prefill_len: Maximum prefill length to limit kernel processing.
-    """
-
+@pytest.mark.parametrize(
+    "num_reqs, prompt_tokens, output_tokens",
+    [
+        # Single short request: the common case when one request is admitted.
+        (1, 8, 4),
+        # Prompt spanning several BLOCK_SIZE=1024 blocks.
+        (1, 4096, 16),
+        # Several requests admitted in the same step.
+        (4, 2048, 32),
+        # No generated tokens yet, so output_bin_counts must stay all zero.
+        (2, 1024, 0),
+    ],
+)
+def test_bincount(num_reqs, prompt_tokens, output_tokens):
+    """The packed prompt bitmask and the output token counts must match torch."""
     torch.manual_seed(42)
 
-    expanded_idx_mapping = torch.tensor([63], dtype=torch.int32).npu()
+    max_model_len = prompt_tokens + output_tokens + 1
+    expanded_idx_mapping = torch.arange(num_reqs, dtype=torch.int32).npu()
     all_token_ids = torch.randint(
         low=0,
-        high=10,
-        size=(64, 40960),
+        high=VOCAB_SIZE,
+        size=(MAX_NUM_REQS, max_model_len),
         dtype=torch.int32,
     ).npu()
 
-    prompt_len = torch.randint(
-        low=0,
-        high=10,
-        size=(64,),
-        dtype=torch.int32,
-    ).npu()
+    prompt_len = torch.full((MAX_NUM_REQS,), prompt_tokens, dtype=torch.int32).npu()
+    prefill_len = torch.full((MAX_NUM_REQS,), prompt_tokens + output_tokens, dtype=torch.int32).npu()
 
-    prefill_len = torch.randint(
-        low=0,
-        high=10,
-        size=(64,),
-        dtype=torch.int32,
-    ).npu()
+    num_words = (VOCAB_SIZE + 31) // 32
+    prompt_bin_mask = torch.zeros(size=(MAX_NUM_REQS, num_words), dtype=torch.int32).npu()
+    output_bin_counts = torch.zeros(size=(MAX_NUM_REQS, VOCAB_SIZE), dtype=torch.int32).npu()
 
-    prompt_bin_mask = torch.zeros(size=(64, 4748), dtype=torch.int32).npu()
-    output_bin_counts = torch.zeros(size=(64, 151936), dtype=torch.int32).npu()
+    ref_prompt_bin_mask = torch.zeros(size=(MAX_NUM_REQS, num_words), dtype=torch.int32).npu()
+    ref_output_bin_counts = torch.zeros(size=(MAX_NUM_REQS, VOCAB_SIZE), dtype=torch.int32).npu()
 
-    ref_prompt_bin_mask = torch.zeros(size=(64, 4748), dtype=torch.int32).npu()
-    ref_output_bin_counts = torch.zeros(size=(64, 151936), dtype=torch.int32).npu()
-
-    max_prefill_len = 10
-
-    prompt_bin_mask[expanded_idx_mapping] = 0
-    output_bin_counts[expanded_idx_mapping] = 0
-    num_tokens = expanded_idx_mapping.shape[0]
-    BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
-
-    _bincount_kernel[(num_tokens, num_blocks)](
+    bincount(
         expanded_idx_mapping,
         all_token_ids,
-        all_token_ids.stride(0),
         prompt_len,
         prefill_len,
         prompt_bin_mask,
-        prompt_bin_mask.stride(0),
         output_bin_counts,
-        output_bin_counts.stride(0),
-        BLOCK_SIZE=BLOCK_SIZE,
+        prompt_tokens + output_tokens,
     )
 
     torch_bincount(
@@ -113,13 +95,11 @@ def test_bincount_kernel():
 
     # ========== Verify results ==========
     assert torch.equal(prompt_bin_mask, ref_prompt_bin_mask), (
-        f"prompt_bin_mask triton output differs from torch reference.\n"
-        f"Max diff: {torch.max(torch.abs(prompt_bin_mask - ref_prompt_bin_mask))}\n"
-        f"Mean diff: {torch.mean(torch.abs(prompt_bin_mask - ref_prompt_bin_mask))}"
+        "prompt_bin_mask triton output differs from torch reference at "
+        f"rows {torch.nonzero((prompt_bin_mask != ref_prompt_bin_mask).any(dim=1)).flatten().tolist()[:8]}"
     )
 
     assert torch.equal(output_bin_counts, ref_output_bin_counts), (
-        f"output_bin_counts triton output differs from torch reference.\n"
-        f"Max diff: {torch.max(torch.abs(output_bin_counts - ref_output_bin_counts))}\n"
-        f"Mean diff: {torch.mean(torch.abs(output_bin_counts - ref_output_bin_counts))}"
+        "output_bin_counts triton output differs from torch reference at "
+        f"rows {torch.nonzero((output_bin_counts != ref_output_bin_counts).any(dim=1)).flatten().tolist()[:8]}"
     )
