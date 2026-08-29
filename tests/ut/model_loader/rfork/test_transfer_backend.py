@@ -14,6 +14,8 @@
 # limitations under the License.
 #
 
+import gc
+import weakref
 from types import SimpleNamespace
 
 import torch
@@ -87,14 +89,18 @@ def test_recv_from_source_refreshes_registered_shape_after_reshape(monkeypatch):
     assert backend.rfork_transfer_engine_weights_shape_dict["weight"] == (1, 2, 3)
 
 
-def test_recv_from_source_reuses_registered_transferable_tensors(monkeypatch):
+def test_recv_from_source_retains_registered_transferable_tensor_owners(monkeypatch):
     tensor = torch.arange(6).reshape(2, 3)
+    tensor_ref = weakref.ref(tensor)
+    tensor_numel = tensor.numel()
+    tensor_element_size = tensor.element_size()
     backend = RForkTransferBackend.__new__(RForkTransferBackend)
     backend.rfork_transfer_engine = SimpleNamespace(
         batch_transfer_sync_read=lambda *args: SimpleNamespace(is_error=lambda: False)
     )
     backend.rfork_transfer_engine_weights_shape_dict = {"weight": (2, 3)}
-    backend._registered_transferable_tensors = [("weight", tensor)]
+    registered_tensors = [("weight", tensor)]
+    backend._registered_transferable_tensors = registered_tensors
 
     def fail_if_rescanned(model, processed_layout):
         raise AssertionError("recv_from_source should reuse the registered tensor cache")
@@ -105,13 +111,52 @@ def test_recv_from_source_reuses_registered_transferable_tensors(monkeypatch):
         "get_remote_instance_transfer_engine_info",
         lambda *args: (
             "seed-session",
-            {"weight": [1, tensor.numel(), tensor.element_size(), [2, 3]]},
+            {"weight": [1, tensor_numel, tensor_element_size, [2, 3]]},
             None,
         ),
     )
 
     assert backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key", True)
+    assert backend._registered_transferable_tensors is registered_tensors
+    del registered_tensors
+    del tensor
+    gc.collect()
+    assert tensor_ref() is not None
+
+
+def test_recv_from_source_keeps_registered_tensors_when_seed_metadata_is_unavailable(monkeypatch):
+    tensor = torch.arange(6).reshape(2, 3)
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = SimpleNamespace()
+    registered_tensors = [("weight", tensor)]
+    backend._registered_transferable_tensors = registered_tensors
+
+    monkeypatch.setattr(
+        transfer_backend,
+        "get_remote_instance_transfer_engine_info",
+        lambda *args: (None, None, None),
+    )
+
+    assert not backend.recv_from_source(object(), "127.0.0.1", 8000, "seed-key", True)
+    assert backend._registered_transferable_tensors is registered_tensors
+
+
+def test_unregister_memory_region_releases_registered_tensor_owners():
+    tensor = torch.arange(6).reshape(2, 3)
+    backend = RForkTransferBackend.__new__(RForkTransferBackend)
+    backend.rfork_transfer_engine = SimpleNamespace(
+        batch_unregister_memory=lambda *args: SimpleNamespace(is_error=lambda: False)
+    )
+    backend.rfork_transfer_engine_weights_info_dict = {"weight": (tensor.data_ptr(), tensor.numel(), 1)}
+    backend.rfork_transfer_engine_weights_shape_dict = {"weight": tuple(tensor.shape)}
+    backend.registered_weight_blocks = [(tensor.data_ptr(), tensor.numel() * tensor.element_size())]
+    backend._registered_transferable_tensors = [("weight", tensor)]
+
+    assert backend.unregister_memory_region()
     assert backend._registered_transferable_tensors is None
+    assert backend.rfork_transfer_engine_weights_info_dict is None
+    assert backend.rfork_transfer_engine_weights_shape_dict is None
+    assert backend.registered_weight_blocks == []
 
 
 def test_transferable_tensor_scan_depends_on_runtime_layout(monkeypatch):

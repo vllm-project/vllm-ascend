@@ -444,60 +444,56 @@ class RForkTransferBackend:
             local_seed_key,
         )
         if seed_session_id is None or seed_weight_info is None:
-            self._registered_transferable_tensors = None
             logger.error("Cannot get transfer engine session or weight info.")
             return False
 
         transferable_tensors = getattr(self, "_registered_transferable_tensors", None)
         if transferable_tensors is None:
             transferable_tensors = list(_iter_transferable_tensors(model, processed_layout))
+        # Keep tensor owners alive until unregister_memory_region()
 
         seed_ptr_list = []
         client_ptr_list = []
         client_len_list = []
         weight_names = []
         reshape_events: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
-        try:
-            for name, tensor in transferable_tensors:
-                weight_info = seed_weight_info.get(name, None)
-                if weight_info is None:
-                    logger.error("Cannot find weight info for %s.", name)
-                    return False
+        for name, tensor in transferable_tensors:
+            weight_info = seed_weight_info.get(name, None)
+            if weight_info is None:
+                logger.error("Cannot find weight info for %s.", name)
+                return False
 
-                parsed_weight_info = _parse_weight_info(weight_info)
-                if parsed_weight_info is None:
-                    logger.error("Invalid weight info for %s: %s", name, weight_info)
-                    return False
+            parsed_weight_info = _parse_weight_info(weight_info)
+            if parsed_weight_info is None:
+                logger.error("Invalid weight info for %s: %s", name, weight_info)
+                return False
 
-                seed_ptr, seed_len, seed_size, seed_shape = parsed_weight_info
-                if seed_shape is None and isinstance(seed_weight_shapes, dict):
-                    seed_shape = _normalize_weight_shape(seed_weight_shapes.get(name))
-                if seed_len != tensor.numel() or seed_size != tensor.element_size():
-                    logger.error(
-                        "Weight info mismatch for %s, expected (%s, %s), got (%s, %s)",
-                        name,
-                        seed_len,
-                        seed_size,
-                        tensor.numel(),
-                        tensor.element_size(),
-                    )
-                    return False
-
-                if not _reshape_tensor_to_seed_shape(name, tensor, seed_shape, reshape_events):
-                    return False
-                _update_registered_weight_shape(
-                    self.rfork_transfer_engine_weights_shape_dict,
+            seed_ptr, seed_len, seed_size, seed_shape = parsed_weight_info
+            if seed_shape is None and isinstance(seed_weight_shapes, dict):
+                seed_shape = _normalize_weight_shape(seed_weight_shapes.get(name))
+            if seed_len != tensor.numel() or seed_size != tensor.element_size():
+                logger.error(
+                    "Weight info mismatch for %s, expected (%s, %s), got (%s, %s)",
                     name,
-                    tensor,
+                    seed_len,
+                    seed_size,
+                    tensor.numel(),
+                    tensor.element_size(),
                 )
+                return False
 
-                seed_ptr_list.append(seed_ptr)
-                client_ptr_list.append(tensor.data_ptr())
-                client_len_list.append(tensor.numel() * tensor.element_size())
-                weight_names.append(name)
-        finally:
-            self._registered_transferable_tensors = None
-        transferable_tensors = None
+            if not _reshape_tensor_to_seed_shape(name, tensor, seed_shape, reshape_events):
+                return False
+            _update_registered_weight_shape(
+                self.rfork_transfer_engine_weights_shape_dict,
+                name,
+                tensor,
+            )
+
+            seed_ptr_list.append(seed_ptr)
+            client_ptr_list.append(tensor.data_ptr())
+            client_len_list.append(tensor.numel() * tensor.element_size())
+            weight_names.append(name)
 
         if reshape_events:
             sample_events = ", ".join(
