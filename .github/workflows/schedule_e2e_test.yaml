@@ -149,13 +149,16 @@ jobs:
   #     base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
   #     test_groups: ${{ needs.select-all-tests.outputs.test_groups }}
   #     upload_timing: ${{ inputs.update_est_times }}
-
+  
   setup-vars:
     name: Resolve daily test matrix
     runs-on: linux-aarch64-a2b3-0
     outputs:
       a2_image: ${{ steps.export.outputs.a2_image }}
       a3_image: ${{ steps.export.outputs.a3_image }}
+      a2_pr_e2e: ${{ steps.set-matrix.outputs.a2_pr_e2e }}
+      a3_pr_e2e_two_card: ${{ steps.set-matrix.outputs.a3_pr_e2e_two_card }}
+      a3_pr_e2e_four_card: ${{ steps.set-matrix.outputs.a3_pr_e2e_four_card }}
       a2_nightly_hf: ${{ steps.set-matrix.outputs.a2_nightly_hf }}
       a3_nightly_hf: ${{ steps.set-matrix.outputs.a3_nightly_hf }}
     steps:
@@ -184,30 +187,6 @@ jobs:
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
-  verify-image:
-    name: Verify nightly-ci image (build gate)
-    needs: [setup-vars]
-    runs-on: linux-aarch64-a2b3-1
-    timeout-minutes: 10
-    container:
-      image: ${{ needs.setup-vars.outputs.a2_image }}
-    steps:
-      - name: Smoke import vllm-ascend and vllm
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
-          python3 -c "import vllm_ascend, vllm; print('import OK ->', vllm_ascend.__file__)"
-      - name: Verify custom ops loadable
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
-          python3 -c "import vllm_ascend.vllm_ascend_C; print('custom ops OK -> vllm_ascend_C loaded')"
-      - name: Report image build provenance
-        run: |
-          echo "Image: ${{ needs.setup-vars.outputs.a2_image }}"
-          echo "=== vllm-ascend ==="
-          (cd /vllm-workspace/vllm-ascend && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
-          echo "=== vllm ==="
-          (cd /vllm-workspace/vllm && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
-          
   a2-nightly-hf:
     name: A2 nightly high-freq
     needs: [setup-vars, verify-image]
@@ -243,6 +222,30 @@ jobs:
       vllm_ascend_branch: main
       timeout_minutes: '45'
       
+  verify-image:
+    name: Verify nightly-ci image (build gate)
+    needs: [setup-vars]
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 10
+    container:
+      image: ${{ needs.setup-vars.outputs.a2_image }}
+    steps:
+      - name: Smoke import vllm-ascend and vllm
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          python3 -c "import vllm_ascend, vllm; print('import OK ->', vllm_ascend.__file__)"
+      - name: Verify custom ops loadable
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          python3 -c "import vllm_ascend.vllm_ascend_C; print('custom ops OK -> vllm_ascend_C loaded')"
+      - name: Report image build provenance
+        run: |
+          echo "Image: ${{ needs.setup-vars.outputs.a2_image }}"
+          echo "=== vllm-ascend ==="
+          (cd /vllm-workspace/vllm-ascend && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
+          echo "=== vllm ==="
+          (cd /vllm-workspace/vllm && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
+
   # update-estimated-times:
   #   needs: [run-all-tests]
   #   if: ${{ !cancelled() && inputs.update_est_times }}
