@@ -151,6 +151,7 @@ def build_fused_experts_input(
     swiglu_alpha: float | None = 1.0,
     swiglu_beta: float | None = 0.0,
     lora_context=None,
+    combine_topk_weights_dtype: torch.dtype | None = None,
 ) -> MoEFusedExpertsInput:
     if swiglu_limit is None:
         swiglu_limit = 0.0
@@ -206,6 +207,7 @@ def build_fused_experts_input(
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
         lora_context=lora_context,
+        combine_topk_weights_dtype=combine_topk_weights_dtype,
     )
 
 
@@ -220,6 +222,7 @@ def build_token_dispatch_input(
         topk_ids=fused_experts_input.topk_ids if topk_ids is None else topk_ids,
         routing=fused_experts_input.routing,
         quant=fused_experts_input.quant,
+        combine_topk_weights_dtype=fused_experts_input.combine_topk_weights_dtype,
     )
 
 

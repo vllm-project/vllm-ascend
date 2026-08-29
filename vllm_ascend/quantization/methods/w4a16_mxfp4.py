@@ -173,13 +173,12 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
-        topk_weights = topk_weights.to(x.dtype)
-
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
+                combine_topk_weights_dtype=x.dtype,
                 topk_ids=topk_ids,
                 w1=getattr(
                     layer,

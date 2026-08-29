@@ -77,6 +77,9 @@ class MoEFusedExpertsInput:
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
     lora_context: Any = None
+    # Optional legacy dtype conversion deferred until the token-combine
+    # boundary. None preserves the selector-produced routing-weight dtype.
+    combine_topk_weights_dtype: torch.dtype | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +91,7 @@ class MoETokenDispatchInput:
     topk_ids: torch.Tensor
     routing: MoERoutingParams
     quant: MoEQuantParams
+    combine_topk_weights_dtype: torch.dtype | None = None
 
 
 # dispatch carry-over state consumed by combine
@@ -109,6 +113,7 @@ class MoEAllGatherCombineMetadata:
     topk_weights: torch.Tensor
     expanded_row_idx: torch.Tensor
     restore_shape: torch.Size
+    combine_topk_weights_dtype: torch.dtype | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +125,7 @@ class MoEAllToAllCombineMetadata:
     reversed_global_input_permutation_mapping: torch.Tensor | None
     hidden_shape: torch.Size
     hidden_shape_before_permute: torch.Size
+    combine_topk_weights_dtype: torch.dtype | None = None
 
 
 @dataclass(frozen=True, slots=True)
