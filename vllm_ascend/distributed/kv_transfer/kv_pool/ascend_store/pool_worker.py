@@ -52,6 +52,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     LayerwiseReuseLayout,
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
+    get_layerwise_base_layers,
     get_layerwise_kv_cache_specs,
     get_layerwise_physical_layer_index,
 )
@@ -196,6 +197,10 @@ class KVPoolWorker:
     def _init_key_head_config(self, model_config, parallel_config) -> None:
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
+        self.base_layer_start = 0
+        self.base_layer_end = self.num_layers
+        if self.use_gva_layerwise:
+            self.base_layer_start, self.base_layer_end = model_config.get_layers_start_end_indices(parallel_config)
 
         if self.use_mla:
             self.num_kv_head = 1
@@ -346,15 +351,17 @@ class KVPoolWorker:
         self._allocated_gvas: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
-        # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
+        # Build mapping: local execution layer ->
+        # [(group_id, layer_idx_in_group), ...]
         # layer_idx_in_group is the index of the physical layer within the
         # group (not the index in layer_names). Multiple cache names at the
         # same physical layer are treated as entries of one layer.
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
+        local_layer_by_physical: dict[int, int] = {}
 
         if self.kv_cache_config is not None:
-            base_layers = getattr(
+            total_base_layers = getattr(
                 self.hf_config,
                 "num_hidden_layers",
                 self.num_layers,
@@ -365,7 +372,12 @@ class KVPoolWorker:
                 for layer_name in group_spec.layer_names
             }
             if physical_layers:
-                effective_num_layers = max(self.num_layers, max(physical_layers) + 1)
+                # Example: global physical layers [2, 3, 4] map to
+                # PP-local execution layers [0, 1, 2].
+                local_layer_by_physical = {
+                    physical_layer: local_layer for local_layer, physical_layer in enumerate(sorted(physical_layers))
+                }
+                effective_num_layers = max(self.num_layers, len(physical_layers))
                 if effective_num_layers != self.num_layers:
                     logger.info(
                         "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
@@ -374,19 +386,23 @@ class KVPoolWorker:
                     )
                     self.num_layers = effective_num_layers
             if self.use_gva_layerwise:
-                self._layerwise_reuse_layout = build_layerwise_reuse_layout(
-                    get_layerwise_kv_cache_specs(self.kv_cache_config),
-                    base_layers,
-                    self._extra_config,
-                )
+                layer_specs = get_layerwise_kv_cache_specs(self.kv_cache_config)
+                expected_base_layers = set(range(self.base_layer_start, self.base_layer_end))
+                actual_base_layers = get_layerwise_base_layers(physical_layers, total_base_layers)
+                if actual_base_layers == expected_base_layers:
+                    reuse_layout = build_layerwise_reuse_layout(
+                        layer_specs,
+                        total_base_layers,
+                        self._extra_config,
+                    )
+                    if reuse_layout.has_layer_reuse:
+                        self._layerwise_reuse_layout = reuse_layout
 
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 physical_layers = set()
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
-                    if physical_layer >= self.num_layers:
-                        continue
                     physical_layers.add(physical_layer)
                 phys_to_layer_idx = {
                     physical_layer: layer_index for layer_index, physical_layer in enumerate(sorted(physical_layers))
@@ -394,7 +410,8 @@ class KVPoolWorker:
 
                 # Add one entry per unique physical layer (no duplicates)
                 for physical_layer, layer_idx_in_group in phys_to_layer_idx.items():
-                    existing = self.physical_layer_to_group_layers.setdefault(physical_layer, [])
+                    local_layer = local_layer_by_physical[physical_layer]
+                    existing = self.physical_layer_to_group_layers.setdefault(local_layer, [])
                     entry = (group_id, layer_idx_in_group)
                     if entry not in existing:
                         existing.append(entry)
@@ -421,10 +438,11 @@ class KVPoolWorker:
                     self.num_layers,
                     self._extra_config,
                 )
-                self.layerwise_offload = cache_layout.has_layer_reuse
-                self.independent_layers = cache_layout.independent_layers
-                self.prefetch_layer_map = cache_layout.prefetch_layer_map
                 self.num_prefetch_layers = cache_layout.num_prefetch_layers
+                if self.kv_cache_config is None:
+                    self.layerwise_offload = cache_layout.has_layer_reuse
+                    self.independent_layers = cache_layout.independent_layers
+                    self.prefetch_layer_map = cache_layout.prefetch_layer_map
             else:
                 self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
                 self.independent_layers = self._layerwise_reuse_layout.independent_layers
@@ -651,12 +669,12 @@ class KVPoolWorker:
             return cache.storage().data_ptr()
 
     def _extract_physical_layer_index(self, layer_name: str) -> int:
-        base_layers = getattr(
+        total_base_layers = getattr(
             self.hf_config,
             "num_hidden_layers",
             self.num_layers,
         )
-        return get_layerwise_physical_layer_index(layer_name, base_layers)
+        return get_layerwise_physical_layer_index(layer_name, total_base_layers)
 
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
         group_addrs: list[int] = []
@@ -665,8 +683,6 @@ class KVPoolWorker:
         layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= self.num_layers and self.num_kv_cache_groups > 1:
-                continue
             layer_names_by_physical.setdefault(phys, []).append(layer_name)
 
         layer_cache_entry_offsets = [0]

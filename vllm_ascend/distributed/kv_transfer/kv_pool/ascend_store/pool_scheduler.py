@@ -30,7 +30,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_gva_layerwise_config,
+    get_layerwise_base_layers,
     get_layerwise_kv_cache_specs,
+    get_layerwise_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -188,22 +190,29 @@ class KVPoolScheduler:
             self.put_step = self.tp_size // self.num_kv_head
         else:
             self.put_step = 1
-        self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        local_base_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.num_layers = local_base_layers
         self.layerwise_offload = False
         if self.use_gva_layerwise:
+            base_layer_start, base_layer_end = model_config.get_layers_start_end_indices(vllm_config.parallel_config)
+            expected_base_layers = set(range(base_layer_start, base_layer_end))
             extra_config = get_gva_layerwise_config(vllm_config.kv_transfer_config)
             if kv_cache_config is not None and extra_config is not None:
-                reuse_layout = build_layerwise_reuse_layout(
-                    get_layerwise_kv_cache_specs(kv_cache_config),
-                    self.num_layers,
-                    extra_config,
-                )
-                if reuse_layout.layer_cache_specs:
-                    self.num_layers = max(
-                        self.num_layers,
-                        max(reuse_layout.layer_cache_specs) + 1,
+                layer_specs = get_layerwise_kv_cache_specs(kv_cache_config)
+                total_base_layers = model_config.get_total_num_hidden_layers()
+                physical_layers = {
+                    get_layerwise_physical_layer_index(layer_name, total_base_layers) for layer_name in layer_specs
+                }
+                if physical_layers:
+                    self.num_layers = max(self.num_layers, len(physical_layers))
+                actual_base_layers = get_layerwise_base_layers(physical_layers, total_base_layers)
+                if actual_base_layers == expected_base_layers:
+                    reuse_layout = build_layerwise_reuse_layout(
+                        layer_specs,
+                        total_base_layers,
+                        extra_config,
                     )
-                self.layerwise_offload = reuse_layout.has_layer_reuse
+                    self.layerwise_offload = reuse_layout.has_layer_reuse
             else:
                 self.layerwise_offload = build_layerwise_cache_layout(
                     self.num_layers,

@@ -49,7 +49,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
@@ -59,6 +59,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
@@ -70,6 +71,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
     get_gva_layerwise_config,
+    get_layerwise_base_layers,
     get_layerwise_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
@@ -81,6 +83,7 @@ from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_sp,
+    is_hidden_state_cache_spec,
     register_ascend_customop,
     setup_ascend_local_comm_res,
 )
@@ -606,13 +609,30 @@ class NPUWorker(WorkerBase):
                 layout = build_layerwise_cache_layout(num_layers, extra_config)
                 num_buffer_assignments = len(layout.storage_indices)
                 factor = num_layers / num_buffer_assignments if layout.has_layer_reuse else 1.0
+                if factor != 1.0:
+                    self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
             else:
-                num_layers, num_buffer_assignments, factor = memory_info
+                (
+                    num_layers,
+                    num_buffer_assignments,
+                    logical_page_bytes,
+                    physical_page_bytes,
+                    alignment_reserve_bytes,
+                ) = memory_info
+                if physical_page_bytes:
+                    payload_budget = max(
+                        0,
+                        self.available_kv_cache_memory_bytes - alignment_reserve_bytes,
+                    )
+                    num_blocks = payload_budget // physical_page_bytes
+                    self.available_kv_cache_memory_bytes = num_blocks * logical_page_bytes
+                    factor = logical_page_bytes / physical_page_bytes
+                else:
+                    factor = 1.0
             if factor != 1.0:
-                self.available_kv_cache_memory_bytes = int(self.available_kv_cache_memory_bytes * factor)
                 logger.info(
-                    "Layerwise KV cache reuse maps %d layers onto %d buffer assignments; "
-                    "scale logical KV budget by %.3f.",
+                    "Layerwise KV cache reuse maps %d layers onto %d component lanes; "
+                    "logical/physical page ratio %.3f.",
                     num_layers,
                     num_buffer_assignments,
                     factor,
@@ -951,33 +971,56 @@ class NPUWorker(WorkerBase):
         self,
         kv_cache_spec: dict[str, KVCacheSpec],
         extra_config: dict[str, Any],
-    ) -> tuple[int, int, float]:
+    ) -> tuple[int, int, int, int, int]:
         if not kv_cache_spec:
-            return 0, 0, 1.0
-        base_layers = self.model_config.get_num_layers(self.parallel_config)
-        physical_layers = {get_layerwise_physical_layer_index(layer_name, base_layers) for layer_name in kv_cache_spec}
+            return 0, 0, 0, 0, 0
+        total_base_layers = self.model_config.get_total_num_hidden_layers()
+        physical_layers = {
+            get_layerwise_physical_layer_index(layer_name, total_base_layers) for layer_name in kv_cache_spec
+        }
         num_layers = len(physical_layers)
-        if num_layers < base_layers:
-            return num_layers, num_layers, 1.0
+        base_layer_start, base_layer_end = self.model_config.get_layers_start_end_indices(self.parallel_config)
+        expected_base_layers = set(range(base_layer_start, base_layer_end))
+        actual_base_layers = get_layerwise_base_layers(physical_layers, total_base_layers)
+        if actual_base_layers != expected_base_layers:
+            return num_layers, num_layers, 0, 0, 0
         reuse_layout = build_layerwise_reuse_layout(
             kv_cache_spec,
-            base_layers,
+            total_base_layers,
             extra_config,
         )
         if not reuse_layout.has_layer_reuse:
-            return num_layers, num_layers, 1.0
-        num_buffer_assignments = len(reuse_layout.buffer_slots)
+            return num_layers, num_layers, 0, 0, 0
+        num_buffer_assignments = len(reuse_layout.component_lanes)
 
         logical_page_bytes = sum(spec.page_size_bytes for spec in kv_cache_spec.values())
-        physical_page_bytes = 0
-        for slot in reuse_layout.buffer_slots:
-            physical_page_bytes += reuse_layout.layer_cache_specs[slot[0]].main.spec.page_size_bytes
-            for layer in slot:
-                indexer = reuse_layout.layer_cache_specs[layer].indexer
-                if indexer is not None:
-                    physical_page_bytes += indexer.spec.page_size_bytes
-                    break
-        return num_layers, num_buffer_assignments, logical_page_bytes / physical_page_bytes
+        physical_page_bytes = sum(
+            max(component.size_bytes for component in components)
+            for components in reuse_layout.component_lanes.values()
+        )
+
+        alignment_reserve_bytes = 0
+        for components in reuse_layout.component_lanes.values():
+            alignment = max(component.alignment for component in components)
+            num_raw_allocations = max(
+                2
+                if isinstance(kv_cache_spec[component.layer_name], AttentionSpec)
+                and not isinstance(kv_cache_spec[component.layer_name], AscendSFAIndexerCacheSpec)
+                and not getattr(kv_cache_spec[component.layer_name], "cache_sparse_sfa_c8", False)
+                and getattr(kv_cache_spec[component.layer_name], "compress_ratio", 1) == 1
+                and "cache_only_layers" not in component.layer_name
+                and not is_hidden_state_cache_spec(kv_cache_spec[component.layer_name])
+                else 1
+                for component in components
+            )
+            alignment_reserve_bytes += alignment * num_raw_allocations
+        return (
+            num_layers,
+            num_buffer_assignments,
+            logical_page_bytes,
+            physical_page_bytes,
+            alignment_reserve_bytes,
+        )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
