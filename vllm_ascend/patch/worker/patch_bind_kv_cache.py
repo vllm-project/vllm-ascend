@@ -42,9 +42,18 @@ def bind_kv_cache(
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
-    # Bind kv_caches to forward context
+    # Bind kv_caches to forward context. Dispatch to each layer's own
+    # `bind_kv_cache` override so subclasses that unpack the raw allocation
+    # keep working (e.g. Mamba layers split it into conv/ssm state views).
+    # MLA layers are the exception: Ascend MLA backends expect the cache as a
+    # (key_cache, value_cache) tuple of 4-D views, which the aliasing
+    # allocator already produces, so skip the upstream squeeze-to-3D bind.
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        layer = forward_context[layer_name]
+        if isinstance(kv_cache, tuple) and not isinstance(kv_cache, torch.Tensor):
+            layer.kv_cache = kv_cache
+        else:
+            layer.bind_kv_cache(kv_cache)
 
 
 utils.bind_kv_cache = bind_kv_cache
