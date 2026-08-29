@@ -12,7 +12,7 @@ if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl, DSACPMetadata
-from vllm_ascend.quantization.tp_weight_switch import (
+from vllm_ascend.weight_switch import (
     TPWeightGatherSpec,
     TPWeightSwitchMixin,
 )

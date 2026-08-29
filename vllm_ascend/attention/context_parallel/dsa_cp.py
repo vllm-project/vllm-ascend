@@ -43,7 +43,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin, TPWeightSwitchState
+from vllm_ascend.weight_switch import TPWeightSwitchMixin, TPWeightSwitchState
 from vllm_ascend.utils import (
     enable_dsa_cp_with_o_proj_tp,
     olora_tp_enable,
