@@ -105,6 +105,19 @@ def config_deprecated_logging():
     warnings_logger.propagate = False
 
 
+def fa3_installed() -> bool:
+    """Whether flash-attention-npu is installed.
+
+    FA3 is the default decode attention path (eager + FULL graphs) whenever
+    the package is present; prefill always stays on CANN FIA.
+    """
+    try:
+        from vllm_ascend.attention.fa3_adapter import HAS_FLASH_ATTN_NPU
+        return HAS_FLASH_ATTN_NPU
+    except ImportError:
+        return False
+
+
 def prune_capture_sizes_for_950(vllm_config):
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not original_sizes:
@@ -546,12 +559,13 @@ class NPUPlatform(Platform):
         # A plain FULL graph is one mixed CANN family serving both prefill and
         # decode; FA3 decode graphs need their own uniform decode-only family
         # (the FA3 kernel bakes the cu_seqlens_q layout into its tiling), and
-        # the two families cannot coexist in one process. With FA3 decode
-        # graphs enabled, downgrade FULL to FULL_AND_PIECEWISE: decode replays
-        # FA3 FULL graphs while prefill runs PIECEWISE CANN graphs.
+        # the two families cannot coexist in one process. FA3 is the default
+        # decode path when flash-attention-npu is installed, so downgrade FULL
+        # to FULL_AND_PIECEWISE: decode replays FA3 FULL graphs while prefill
+        # runs PIECEWISE CANN graphs.
         if (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-            and os.environ.get("VLLM_ASCEND_FA3_DECODE_GRAPH") == "1"
+            and fa3_installed()
         ):
             logger.info(
                 "FA3: downgrading cudagraph_mode FULL -> FULL_AND_PIECEWISE "
