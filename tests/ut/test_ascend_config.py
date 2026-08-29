@@ -995,11 +995,14 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
     @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
+    def test_fused_mc2_mode_1_keeps_switch_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
+        # enable_fused_mc2=1 rolls MegaMoe back to dispatch_ffn_combine and
+        # forces _MEGA_MOE_SUPPORTED=False, so derive_and_validate does not
+        # zero the switch even when the model config cannot use MegaMoe.
         vc = VllmConfig()
         vc.additional_config = {"enable_fused_mc2": 1}
 
-        self.assertEqual(init_ascend_config(vc).enable_fused_mc2, 0)
+        self.assertEqual(init_ascend_config(vc).enable_fused_mc2, 1)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
