@@ -33,13 +33,51 @@ It is recommended to download the model weight to the shared directory of multip
 
     ```
 
+
 === "A3 series"
 
-    Start the docker image on each of your nodes.
+    Start the docker image on each node.
 
     ```shell
 
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export NAME=vllm-ascend
+
+    # Run the container using the defined variables
+    # Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci8 \
+    --device /dev/davinci9 \
+    --device /dev/davinci10 \
+    --device /dev/davinci11 \
+    --device /dev/davinci12 \
+    --device /dev/davinci13 \
+    --device /dev/davinci14 \
+    --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
     ```
+
 
 
 ## 5 Online Service Deployment
@@ -54,6 +92,29 @@ Run the following script to execute online inference.
 
 ```shell
 
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=1024
+export OMP_NUM_THREADS=1
+export TASK_QUEUE_ENABLE=1
+
+vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A5 \
+  --host 0.0.0.0 \
+  --port 8011 \
+  --data-parallel-size 8 \
+  --tensor-parallel-size 1 \
+  --enable-expert-parallel \
+  --seed 1024 \
+  --quantization ascend \
+  --served-model-name glm \
+  --max-num-seqs 128 \
+  --max-model-len 132096 \
+  --async-scheduling \
+  --enable-prefix-caching \
+  --max-num-batched-tokens 8192 \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.90 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 Key Parameter Descriptions:
@@ -76,7 +137,45 @@ Only the key parameters specific to this model/scenario are described below. `ma
 Run the following script to execute online inference.
 
 ```shell
+#!/bin/sh
 
+source /usr/local/Ascend/cann-9.1.0/opp/vendors/custom_transformer/bin/set_env.bash
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export OMP_NUM_THREADS=1
+export TASK_QUEUE_ENABLE=1
+echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+sysctl -w vm.swappiness=0
+sysctl -w kernel.numa_balancing=0
+sysctl kernel.sched_migration_cost_ns=50000
+
+vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-V1   \
+  --host 0.0.0.0 \
+  --port 8900 \
+  --max-model-len 133120  \
+  --data-parallel-size 1 \
+  --tensor-parallel-size 16 \
+  --enable-expert-parallel \
+  --seed 1024 \
+  --served-model-name glm \
+  --safetensors-load-strategy prefetch \
+  --max-num-seqs 128 \
+  --max-num-batched-tokens 8192 \
+  --trust-remote-code \
+  --quantization ascend \
+  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+  --gpu-memory-utilization 0.85 \
+  --speculative-config '{"num_speculative_tokens": 2, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
+  --profiler-config \
+'{"profiler": "torch",
+"torch_profiler_dir": "/home/w00896881/profiling/0829",
+"torch_profiler_with_stack": true}' \
+  --enable-prefix-caching \
+  --async-scheduling \
+  --api-server-count 1
 ```
 
 Key Parameter Descriptions:
