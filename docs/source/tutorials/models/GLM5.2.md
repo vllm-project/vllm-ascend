@@ -839,7 +839,7 @@ This section describes the additional configuration for A3 deployments that use 
     The supported MC2 communication mode depends on whether the Expert Parallel (EP) communication domain spans physical nodes:
 
     - If the EP communication domain is contained within a physical node, no change to the existing configuration is required. Fused MC2 remains supported.
-    - If the EP communication domain spans physical nodes, Fused MC2 is not supported. Hierarchical MC2 communication over RoCE is required and must be enabled by adding `"enable_mc2_hierarchy_comm": true` to `--additional-config`.
+    - If the EP communication domain spans physical nodes, Fused MC2 is not supported. Hierarchical MC2 communication over RoCE is required and must be enabled by adding `"mc2_comm_alg": "hierarchy"` to `--additional-config`.
 
 **Example**
 
@@ -855,13 +855,13 @@ For the 1P1D (2+2) scenario, configure the logical SuperPod ID as follows:
 Apply the following Fused MC2 setting on every node:
 
 ```shell
---additional-config '{..., "enable_fused_mc2": 0, "enable_mc2_hierarchy_comm": true}'
+--additional-config '{..., "enable_fused_mc2": 0, "mc2_comm_alg": "hierarchy"}'
 ```
 
-Merge `"enable_mc2_hierarchy_comm": true` into the existing `--additional-config` JSON object. The following pattern uses `...` to represent the existing fields:
+Merge `"mc2_comm_alg": "hierarchy"` into the existing `--additional-config` JSON object. The following pattern uses `...` to represent the existing fields:
 
 ```text
---additional-config '{..., "enable_mc2_hierarchy_comm": true}'
+--additional-config '{..., "mc2_comm_alg": "hierarchy"}'
 ```
 
 #### 5.1.2 Atlas 800 A2
@@ -1279,7 +1279,6 @@ The 1M context scenarios are validated on Atlas 800 A3 only; the A2 series is no
 Recommended command:
 
 ```shell
-export VLLM_ASCEND_ENABLE_NZ=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
@@ -1308,7 +1307,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 16 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}' \
-  --additional-config '{"enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true}' \
+  --additional-config '{"enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1319,7 +1318,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 
 **1M-specific environment variables:**
 
-- `VLLM_ASCEND_ENABLE_NZ=1`: Enables NZ format memory layout for the C8 quantized tensors, required for the 1M context deployment.
+- `additional_config.weight_nz_mode=1`: Enables NZ format memory layout for the C8 quantized tensors, required for the 1M context deployment.
 - `VLLM_WORKER_MULTIPROC_METHOD=spawn`: Uses the spawn start method for multi-process workers (required in this scenario).
 
 **1M-specific vllm serve parameters:**
@@ -1345,7 +1344,6 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_ENABLE_NZ=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
@@ -1378,7 +1376,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true}' \
+  --additional-config '{"enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1411,7 +1409,6 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 
-export VLLM_ASCEND_ENABLE_NZ=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
@@ -1445,7 +1442,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --enforce-eager \
-  --additional-config '{"enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \
@@ -1484,7 +1481,6 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_ENABLE_NZ=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=20
@@ -1518,7 +1514,7 @@ vllm serve <MODEL_PATH> \
   --decode-context-parallel-size 8 \
   --cp-kv-cache-interleave-size 128 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true},"multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}' \
+  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true},"multistream_overlap_shared_expert": true,"enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true,"weight_nz_mode":1}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --quantization ascend \
   --enable-expert-parallel \

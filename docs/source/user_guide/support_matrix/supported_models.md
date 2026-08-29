@@ -133,6 +133,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3.6-35B-A3B                     | 🔵      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  | 🔵 | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 262144 | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
     | Qwen3-Omni-30B-A3B-Thinking         | 🔵      |      |      | A2/A3              |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
     | Kimi-K2.5/Kimi-K2.6                 | 🔵      |      |      | A2/A3              |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
+    | Kimi-K3                             | 🔵      | W4A8; DSpark; FULL_DECODE_ONLY |      | A3 |  |  | ✅ |  | ✅ |  | ✅ |  | ✅ | ✅ |  |  | ✅ |  | [Kimi-K3](../../tutorials/models/Kimi-K3.md) |
     | MiniMax-M3                          | 🔵      | Text, image, video, and ViT DP | ✅ | A2/A3 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 1M | [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) |
     | Cohere Transcribe                  | 🔵      | 2B Conformer encoder-decoder ASR, 14 languages (03-2026 & arabic-07-2026) | ✅ | A2/A3 | ❌ |  |  | ❌ | ❌ |  | 🟡 |  |  |  | ❌ | 🟡 | 🟡 |  | [Cohere-Transcribe](../../tutorials/models/Cohere-Transcribe.md) |
 

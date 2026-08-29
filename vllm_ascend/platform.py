@@ -502,6 +502,7 @@ class NPUPlatform(Platform):
             select_moe_comm_method,
         )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+        from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
         # NOTE(Ronald1995): avoid circular import, cudagraph_runtime_mode is
@@ -518,8 +519,9 @@ class NPUPlatform(Platform):
         # compared to v1, v2's forward context lacks some fields, such as:
         # is_first_layer, prefetch_mlp_gate_up_proj, prefetch_mlp_gate_down_proj,
         # prefetch_mlp_enabled, model_instance, is_draft_model.
+        dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg(vllm_config)
         if not vllm_config.use_v2_model_runner:
-            return {}
+            return {"dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg}
 
         # is_draft_model will be removed later, so we set it to False temporarily.
         is_draft_model = False
@@ -581,6 +583,7 @@ class NPUPlatform(Platform):
             "in_profile_run": in_profile_run,
             "padded_num_tokens": padded_num_tokens,
             "sinks": sinks,
+            "dynamic_mx_quant_scale_alg": dynamic_mx_quant_scale_alg,
         }
 
 
@@ -842,19 +845,22 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.use_async:
+            if upstream_eplb_config.communicator not in (None, "torch_gloo"):
                 raise ValueError(
-                    "Async EPLB is not supported by Model Runner V2 on Ascend yet; set eplb_config.use_async to false."
+                    "Async EPLB on Ascend requires the torch_gloo communicator "
+                    f"(CPU staging), but got {upstream_eplb_config.communicator!r}. "
+                    "Set eplb_config.communicator to 'torch_gloo'."
                 )
-            if upstream_eplb_config.communicator not in (None, "torch_nccl", "torch_gloo"):
-                raise ValueError(
-                    "Do not set eplb_config.communicator on Ascend; "
-                    "torch.distributed over HCCL is selected automatically."
+            if not upstream_eplb_config.use_async:
+                logger.warning(
+                    "Synchronous EPLB is not supported on Ascend; "
+                    "parameter=eplb_config.use_async, value=False, "
+                    "action: forcing asynchronous EPLB."
                 )
-            # ParallelConfig chooses torch_gloo as its generic synchronous
-            # default before this platform hook runs. Ascend maps torch_nccl
-            # to torch.distributed over the HCCL device process group.
-            upstream_eplb_config.communicator = "torch_nccl"
+                upstream_eplb_config.use_async = True
+                upstream_eplb_config.communicator = "torch_gloo"
+            if vllm_config.parallel_config.enable_elastic_ep:
+                raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
     elif "load_collection_phase" in eplb_config:
         raise ValueError(
             "additional_config.eplb_config.load_collection_phase is only supported by "
@@ -867,18 +873,10 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
 def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     """Validate Ascend-specific options.
 
-    Covers the fused-MC2 / hierarchy-communication exclusivity and the scheduler
-    extension policies (enable_balance_scheduling / short_request_first_config /
+    Covers the scheduler extension policies (enable_balance_scheduling / short_request_first_config /
     dyntra_lb_config / recompute_scheduler_enable). Reads from the AscendConfig singleton
     initialized from vllm_config; env fallbacks are handled inside AscendConfig.
     """
-    # Fused MC2 and hierarchy communication are mutually exclusive.
-    if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
-        raise ValueError(
-            "fused mc2 op cannot be used with hierarchy communication. "
-            "Please set additional_config.enable_fused_mc2 to 0."
-        )
-
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
     from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 

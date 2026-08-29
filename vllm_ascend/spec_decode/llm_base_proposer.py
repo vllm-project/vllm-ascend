@@ -26,6 +26,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -65,6 +66,16 @@ from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
+
+_HIDDEN_STATE_DRAFTER_TYPES = (
+    Eagle3LlamaForCausalLM,
+    DFlashQwen3ForCausalLM,
+    Qwen3DSparkForCausalLM,
+    K3DSparkForCausalLM,
+    Eagle3VwnLlamaForCausalLM,
+    Eagle3DeepseekV2ForCausalLM,
+    DSparkDeepseekV4ForCausalLM,
+)
 
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
@@ -115,7 +126,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return config.image_token_id
         if model_name == "PixtralForConditionalGeneration":
             return config.vision_config.image_token_id
-        if model_name == "KimiK25ForConditionalGeneration":
+        if model_name in {
+            "KimiK25ForConditionalGeneration",
+            "KimiK3ForConditionalGeneration",
+            "AscendKimiK3ForConditionalGeneration",
+        }:
             return config.media_placeholder_token_id
         return config.image_token_index
 
@@ -311,6 +326,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         with self.maybe_eager_context:
             self.model = self._get_model()
 
+        if self.supports_mm_inputs:
+            # Match upstream: a multimodal target can use a text-only drafter.
+            try:
+                dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
+                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
+            except (NotImplementedError, AttributeError, TypeError):
+                logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
+                self.supports_mm_inputs: bool = False
+
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
@@ -362,7 +386,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # share embed_tokens with the target model if needed
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_topk_indices(target_language_model)
-        self._maybe_share_lm_head(model)
+        self._maybe_share_lm_head(target_language_model)
 
         if (
             self.parallel_drafting
@@ -484,17 +508,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             else:
                 logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
+                target_lm_head = None
                 if hasattr(model, "lm_head"):
-                    self.model.lm_head = model.lm_head
+                    target_lm_head = model.lm_head
                 elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
-                    self.model.lm_head = model.get_language_model().lm_head
-                else:
+                    target_lm_head = model.get_language_model().lm_head
+                if target_lm_head is None:
                     logger.warning(
                         "[spec_decode/base] Target model has no accessible lm_head"
                         " for sharing. Draft model will use its own lm_head."
                         " This may cause incorrect logits if the draft lm_head"
                         " is not trained."
                     )
+                else:
+                    self.model.lm_head = target_lm_head
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
@@ -793,18 +820,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model = self.model
             if isinstance(model, BreakableACLGraphWrapper):
                 model = model.unwrap()
-            assert isinstance(
-                model,
-                (
-                    Eagle3LlamaForCausalLM,
-                    DFlashQwen3ForCausalLM,
-                    Qwen3DSparkForCausalLM,
-                    Eagle3VwnLlamaForCausalLM,
-                    Eagle3DeepseekV2ForCausalLM,
-                    DSparkDeepseekV4ForCausalLM,
-                ),
-            )
-            target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
+            assert isinstance(model, _HIDDEN_STATE_DRAFTER_TYPES)
+            target_hidden_states = model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
@@ -878,6 +895,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             if self.method == "dflash":
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+            elif self.method == "dspark":
+                # DSpark already rewrote both device and host sequence lengths
+                # in set_inputs_first_pass. Preserve those values while
+                # extending only the padded tail for full-graph replay.
+                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+                if common_attn_metadata.seq_lens_cpu is not None:
+                    common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
+                        common_attn_metadata.seq_lens_cpu, num_reqs_padded
+                    )
+                if common_attn_metadata._seq_lens_cpu is not None:
+                    common_attn_metadata._seq_lens_cpu = self._adjust_tensor(
+                        common_attn_metadata._seq_lens_cpu, num_reqs_padded
+                    )
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
