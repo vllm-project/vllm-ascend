@@ -81,6 +81,7 @@ class _DSparkProposerTestBase:
         hf_config: SimpleNamespace | None = None,
         draft_attn_causal: bool | None = None,
         draft_sample_method: str = "greedy",
+        use_cuda_graph: bool = False,
     ):
         device = torch.device("cpu")
         vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace(), draft_sample_method)
@@ -99,6 +100,7 @@ class _DSparkProposerTestBase:
             proposer.dtype = torch.float32
             proposer.device = device
             proposer.hidden_size = _HIDDEN_SIZE
+            proposer.use_cuda_graph = use_cuda_graph
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
             proposer.model = (
@@ -339,11 +341,71 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
             hf_config=hf_config,
             draft_sample_method=draft_sample_method,
         )
-        expected_max_query_tokens = _MAX_BATCH_SIZE * expected_num_query_per_req
+        expected_max_query_tokens = _MAX_BATCH_SIZE * (1 + _NUM_SPECULATIVE_TOKENS)
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
         assert proposer._dspark_draft_buffer.shape == (_MAX_BATCH_SIZE, 1 + _NUM_SPECULATIVE_TOKENS)
+
+    def test_static_config_preserves_parent_graph_mode(self):
+        proposer = self._make_proposer(
+            max_num_tokens=64,
+            num_reqs=2,
+            block_size=5,
+            use_cuda_graph=True,
+        )
+
+        assert proposer.use_cuda_graph is True
+
+    def test_block_table_buffer_keeps_graph_padding_rows(self):
+        proposer = self._make_proposer(
+            max_num_tokens=128,
+            num_reqs=16,
+            block_size=5,
+        )
+        block_table = torch.arange(8 * 4, dtype=torch.int32).reshape(8, 4)
+        slot_mapping = torch.arange(40, dtype=torch.int32)
+
+        proposer.set_per_group_attn_metadata(0, block_table, slot_mapping)
+
+        buffer = proposer._per_group_block_table_buffers[0]
+        assert buffer.shape == (16, 4)
+        assert torch.equal(buffer[:8], block_table)
+        assert torch.count_nonzero(buffer[8:]) == 0
+
+
+@pytest.mark.parametrize(
+    ("query_width", "real_num_reqs", "graph_num_reqs", "num_input_tokens", "expected"),
+    [
+        (7, 1, 2, 16, [0, 7, 14, 16]),
+        (5, 2, 8, 48, [0, 5, 10, 15, 20, 25, 30, 35, 40, 48]),
+    ],
+)
+def test_pad_query_start_loc_matches_graph_capture_layout(
+    query_width,
+    real_num_reqs,
+    graph_num_reqs,
+    num_input_tokens,
+    expected,
+):
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+    proposer.num_query_per_req = query_width
+    query_start_loc = SimpleNamespace(
+        np=np.zeros(graph_num_reqs + 2, dtype=np.int32),
+        copy_to_gpu=MagicMock(),
+    )
+    query_start_loc.np[: real_num_reqs + 1] = np.arange(real_num_reqs + 1) * query_width
+
+    num_metadata_reqs = proposer.pad_query_start_loc_for_graph(
+        query_start_loc,
+        num_input_tokens,
+        real_num_reqs,
+        graph_num_reqs,
+    )
+
+    assert num_metadata_reqs == len(expected) - 1
+    assert query_start_loc.np[: len(expected)].tolist() == expected
+    query_start_loc.copy_to_gpu.assert_called_once_with()
 
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
