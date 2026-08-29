@@ -1,8 +1,13 @@
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from vllm import SamplingParams
+from vllm.v1.metrics.reader import Counter
 
-from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
+
+ACCEPTANCE_LENGTH_RTOL = 0.08
 
 PROMPTS_SHORT = [
     "Hello, my name is",
@@ -10,6 +15,97 @@ PROMPTS_SHORT = [
     "The capital of France is",
     "The future of AI is",
 ]
+
+SPEC_DECODE_PROMPTS = (
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+    "Explain why the sky appears blue during the day.",
+    "Write a short poem about a quiet winter morning.",
+    "Describe how photosynthesis works in simple terms.",
+    "What is 17 multiplied by 23? Show the calculation.",
+    "Summarize the main causes of the Industrial Revolution.",
+    "Give three practical tips for learning a new language.",
+    "Translate 'Knowledge is power' into French.",
+    "Compare renewable energy with fossil fuels.",
+    "Create a Python function that reverses a string.",
+    "Why do leaves change color in autumn?",
+    "Tell a short story about an astronaut visiting Mars.",
+    "Explain the difference between weather and climate.",
+    "List the first ten prime numbers.",
+    "How does a computer store information in binary?",
+    "Suggest a healthy breakfast using common ingredients.",
+    "What are the benefits of regular physical exercise?",
+    "Explain how vaccines help the immune system fight diseases.",
+    "Write a concise introduction to quantum computing.",
+    "What steps are involved in the water cycle?",
+    "Describe the role of bees in an ecosystem.",
+    "Calculate the area of a circle with a radius of 6 centimeters.",
+    "Give an example of a metaphor and explain its meaning.",
+    "Summarize the basic principles of supply and demand.",
+    "How do satellites remain in orbit around Earth?",
+    "Write a polite email requesting a project deadline extension.",
+    "Explain the difference between RAM and permanent storage.",
+    "Name five major oceans and one fact about each.",
+    "What causes ocean tides?",
+    "Design a simple weekly study schedule for a college student.",
+    "Explain why regular software backups are important.",
+    "Describe the process by which a caterpillar becomes a butterfly.",
+    "What is the Pythagorean theorem and when is it useful?",
+    "Provide three ways to reduce household energy consumption.",
+    "Write a short dialogue between a customer and a librarian.",
+    "Explain how encryption protects information sent over the internet.",
+    "Compare a democracy with a constitutional monarchy.",
+)
+
+
+def _run_speculative_decoding(
+    model_name: str,
+    speculative_config: dict[str, object],
+    expected_acceptance_length: float,
+    runner_kwargs: dict[str, Any],
+    example_prompts: Sequence[str] = SPEC_DECODE_PROMPTS,
+    max_tokens: int = 1024,
+    acceptance_length_rtol: float = ACCEPTANCE_LENGTH_RTOL,
+) -> float:
+    prompts = list(example_prompts)
+    with VllmRunner(
+        model_name,
+        enable_expert_parallel=True,
+        disable_log_stats=False,
+        max_num_seqs=len(prompts),
+        speculative_config=speculative_config,
+        **runner_kwargs,
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(prompts, max_tokens=max_tokens)
+        metrics = vllm_model.model.get_metrics()
+
+    assert len(outputs) == len(prompts)
+    assert all(output_ids and output_text for output_ids, output_text in outputs)
+
+    num_drafts = 0
+    num_accepted_tokens = 0
+    for metric in metrics:
+        if metric.name == "vllm:spec_decode_num_drafts":
+            assert isinstance(metric, Counter)
+            num_drafts += metric.value
+        elif metric.name == "vllm:spec_decode_num_accepted_tokens":
+            assert isinstance(metric, Counter)
+            num_accepted_tokens += metric.value
+
+    assert num_drafts > 0, "Speculative decoding did not generate any draft tokens"
+    acceptance_length = 1 + num_accepted_tokens / num_drafts
+    relative_error = abs(acceptance_length - expected_acceptance_length) / expected_acceptance_length
+    assert relative_error <= acceptance_length_rtol, (
+        f"acceptance_length {acceptance_length:.3f} does not match expected "
+        f"{expected_acceptance_length:.3f} within {acceptance_length_rtol:.0%} "
+        f"relative tolerance (num_drafts={num_drafts}, num_accepted_tokens={num_accepted_tokens})"
+    )
+
+    cleanup_dist_env_and_memory()
+    return acceptance_length
+
 
 # NOTE: Randomly fill the prompt with the requested amount for
 # the specified capture shape to prevent accuracy issues caused by padding
