@@ -27,6 +27,7 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
     PreprocessType,
+    _int32_mlapo_slots,
     _int64_kv_slots,
     custom_kv_rmsnorm_rope,
 )
@@ -600,6 +601,21 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
 class TestAscendSFAKPathFusion(TestBase):
     """K-path fusions: per-step int64 slot conversion and indexer weight reuse."""
+
+    def test_int32_mlapo_slots_passthrough_for_int32_input(self):
+        slots = torch.arange(4, dtype=torch.int32)
+        metadata = SimpleNamespace()
+
+        self.assertIs(_int32_mlapo_slots(slots, metadata), slots)
+
+    def test_int32_mlapo_slots_converts_and_caches_per_metadata(self):
+        slots = torch.arange(4, dtype=torch.int64)
+        metadata = SimpleNamespace()
+
+        converted = _int32_mlapo_slots(slots, metadata)
+        self.assertEqual(converted.dtype, torch.int32)
+        self.assertTrue(torch.equal(converted, slots.to(torch.int32)))
+        self.assertIs(_int32_mlapo_slots(slots, metadata), converted)
 
     def test_int64_kv_slots_passthrough_for_int64_input(self):
         slots = torch.arange(4, dtype=torch.int64)
