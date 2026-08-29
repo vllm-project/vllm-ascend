@@ -590,6 +590,27 @@ def _allocate_kv_cache(
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
 
+    # vLLM #51718 changed every KVCacheTensor to describe a view into one
+    # common backing allocation. Hybrid groups overlay that backing from byte
+    # zero because a block ID belongs to only one group at a time. Allocate it
+    # once here; allocating tensor.size for every descriptor duplicates the
+    # full cache pool and can OOM before the second tensor is initialized.
+    hybrid_backing: torch.Tensor | None = None
+    if use_hybrid_layout and not vllm_version_is("0.27.1"):
+        tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
+        if len(tensor_sizes) != 1:
+            raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
+        tensor_size = tensor_sizes.pop()
+        if vllm_config.kv_transfer_config is None:
+            hybrid_backing = torch.zeros(tensor_size, dtype=torch.int8, device=device)
+        else:
+            hybrid_backing = torch.zeros(
+                tensor_size + alignment,
+                dtype=torch.int8,
+                device=device,
+            )
+            hybrid_backing = _align_memory(hybrid_backing, alignment)[:tensor_size]
+
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
         if not shared_names:
@@ -612,6 +633,28 @@ def _allocate_kv_cache(
 
         example_layer_name = shared_names[0]
         example_spec = layer_kv_cache_spec[example_layer_name]
+
+        if hybrid_backing is not None:
+            for layer_idx, layer_name in enumerate(shared_names):
+                layer_spec = layer_kv_cache_spec[layer_name]
+                layer_size = kv_cache_config.num_blocks * layer_spec.page_size_bytes
+                if (
+                    kv_cache_tensor.layer_stride != layer_size
+                    or kv_cache_tensor.block_stride != layer_spec.page_size_bytes
+                ):
+                    raise ValueError(
+                        "Ascend hybrid KV cache requires contiguous per-layer "
+                        f"views, but {layer_name} has layer_stride="
+                        f"{kv_cache_tensor.layer_stride}, block_stride="
+                        f"{kv_cache_tensor.block_stride}, page_size="
+                        f"{layer_spec.page_size_bytes}."
+                    )
+                start = kv_cache_tensor.offset + layer_idx * kv_cache_tensor.layer_stride
+                end = start + layer_size
+                if end > hybrid_backing.numel():
+                    raise ValueError(f"Hybrid KV cache view for {layer_name} exceeds the backing allocation.")
+                kv_cache_raw_tensors[layer_name] = hybrid_backing[start:end]
+            continue
 
         # Use one raw allocation for Mamba and hybrid caches. The reshape step
         # creates the V1-compatible contiguous state views and overlaps
