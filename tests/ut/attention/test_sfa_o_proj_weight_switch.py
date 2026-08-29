@@ -106,7 +106,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
         impl._apply_o_proj_full_weight = MagicMock(side_effect=_apply_with_full_weight)
 
-        impl.enable_dsa_cp_with_o_proj_tp = True
+        impl.enable_dsa_cp_full_o_proj = True
         gathered_output = torch.cat((torch.ones(2, 3), torch.full((2, 3), 2.0)))
         tp_group = SimpleNamespace(all_gather=MagicMock(return_value=gathered_output))
         with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
@@ -160,7 +160,7 @@ class TestAscendSFAOProjWeightSwitch(TestBase):
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
-        impl.enable_dsa_cp_with_o_proj_tp = True
+        impl.enable_dsa_cp_full_o_proj = True
         impl.enable_sp = False
         impl.has_indexer = False
         impl.skip_topk = True

@@ -18,11 +18,6 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPMetadataBuilderMixin,
     get_dcp_local_seq_lens,
 )
-from vllm_ascend.weight_switch.o_proj import (
-    OProjWeightSwitchHandle,
-    OProjWeightSwitchLayer,
-    OProjWeightSwitchMixin,
-)
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
@@ -37,10 +32,12 @@ from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
     WeightSwitchMixin,
 )
+from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
-    enable_dsa_cp_with_o_proj_tp,
+    enable_dsa_cp_full_o_proj,
+    enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_replicated_indexer,
     vllm_version_is,
 )
@@ -63,12 +60,16 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     """
 
     o_proj_full_pools: dict[Any, torch.Tensor] = {}
+    o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
         self._initialize_o_proj_weight_switch(
             WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input")
         )
+        if not self.enable_pcp_o_proj_weight_sharding:
+            return
         self.o_proj_weight_load_partition = WeightLoadPartition.from_nested_groups(
             get_tp_group(),
             get_pcp_group(),
@@ -84,23 +85,9 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         result = super().process_weights_after_loading(act_dtype)
-        self._enable_o_proj_weight_switch()
+        if self.enable_pcp_o_proj_weight_sharding:
+            self._enable_o_proj_full_weight_switch()
         return result
-
-    def _enable_o_proj_weight_switch(self) -> None:
-        self._enable_o_proj_full_weight_switch()
-
-    def _get_o_proj_weight_switch_layers(self) -> tuple[OProjWeightSwitchLayer, ...]:
-        return (
-            OProjWeightSwitchLayer(
-                name="o_proj",
-                layer=self.o_proj,
-                pool_key_suffix=("sfa_pcp_o_proj",),
-            ),
-        )
-
-    def _after_o_proj_weight_switch_enabled(self, handles: dict[str, OProjWeightSwitchHandle]) -> None:
-        self.o_proj_weight_state = handles["o_proj"].state
 
     def _get_parallel_forward_context(
         self,
@@ -421,16 +408,17 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     """SFA implementation for DSA-CP token sharding in the TP group."""
 
     o_proj_full_pools: dict[Any, torch.Tensor] = {}
+    o_proj_weight_switch_pool_key = "sfa_o_proj"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.local_num_heads = self.num_heads * self.tp_size
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+        self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj()
         self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_tp_group()))
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         result = super().process_weights_after_loading(act_dtype)
-        if self.enable_dsa_cp_with_o_proj_tp:
+        if self.enable_dsa_cp_full_o_proj:
             self._enable_o_proj_full_weight_switch()
         return result
 
@@ -469,7 +457,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
         gather_full_o_proj = (
             self.tp_size > 1
-            and self.enable_dsa_cp_with_o_proj_tp
+            and self.enable_dsa_cp_full_o_proj
             and attn_metadata.attn_state
             not in {
                 AscendAttentionState.DecodeOnly,
@@ -600,23 +588,8 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                 )
         return k_pe, k_nope, k_li
 
-    def _get_o_proj_weight_switch_layers(self) -> tuple[OProjWeightSwitchLayer, ...]:
-        return (
-            OProjWeightSwitchLayer(
-                name="o_proj",
-                layer=self.o_proj,
-                pool_key_suffix=("sfa_o_proj",),
-            ),
-        )
-
-    def _after_o_proj_weight_switch_enabled(self, handles: dict[str, OProjWeightSwitchHandle]) -> None:
-        self.o_proj_weight_state = handles["o_proj"].state
-
-    def _get_o_proj_linear_method(self) -> WeightSwitchMixin:
-        return self._get_o_proj_weight_switch_method()
-
     def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
-        return self._get_o_proj_linear_method().apply(self.o_proj, attn_output)
+        return self._get_o_proj_weight_switch_method().apply(self.o_proj, attn_output)
 
     def _finalize_o_proj(
         self,
@@ -624,7 +597,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         output,
         gather_full_o_proj,
     ):
-        if not self.enable_dsa_cp_with_o_proj_tp:
+        if not self.enable_dsa_cp_full_o_proj:
             return super()._finalize_o_proj(
                 attn_output,
                 output,

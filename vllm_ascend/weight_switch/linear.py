@@ -111,11 +111,6 @@ class WeightSwitchGatherPart:
     gather_output: torch.Tensor
     full_tensor: torch.Tensor
 
-    @property
-    def tp_tensor(self) -> torch.Tensor:
-        """Compatibility alias for TP-only callers not yet migrated."""
-        return self.local_tensor
-
 
 @dataclass
 class WeightSwitchRepeatPart:
@@ -124,11 +119,6 @@ class WeightSwitchRepeatPart:
     spec: WeightSwitchRepeatSpec
     local_tensor: torch.Tensor
     full_tensor: torch.Tensor
-
-    @property
-    def tp_tensor(self) -> torch.Tensor:
-        """Compatibility alias for TP-only callers not yet migrated."""
-        return self.local_tensor
 
 
 @dataclass
@@ -191,11 +181,6 @@ class WeightSwitchMixin:
     weight_switch_output_repeat_specs: ClassVar[tuple[WeightSwitchRepeatSpec, ...]] = ()
     supports_weight_switch: ClassVar[bool] = False
 
-    @property
-    def supports_tp_weight_switch(self) -> bool:
-        """Compatibility view used by TP-only backends awaiting migration."""
-        return self.supports_weight_switch
-
     def _get_weight_switch_specs(
         self,
         layer: torch.nn.Module,
@@ -236,15 +221,11 @@ class WeightSwitchMixin:
             )
 
         if shard_axis == "input":
-            gather_specs = self.weight_switch_gather_specs or getattr(self, "tp_weight_gather_specs", ())
-            repeat_specs = self.weight_switch_repeat_specs or getattr(self, "tp_weight_repeat_specs", ())
+            gather_specs = self.weight_switch_gather_specs
+            repeat_specs = self.weight_switch_repeat_specs
         else:
-            gather_specs = self.weight_switch_output_gather_specs or getattr(
-                self, "tp_weight_output_gather_specs", ()
-            )
-            repeat_specs = self.weight_switch_output_repeat_specs or getattr(
-                self, "tp_weight_output_repeat_specs", ()
-            )
+            gather_specs = self.weight_switch_output_gather_specs
+            repeat_specs = self.weight_switch_output_repeat_specs
         return gather_specs, repeat_specs, shard_axis
 
     @staticmethod
@@ -266,17 +247,6 @@ class WeightSwitchMixin:
         shard = tensor.narrow(dim, rank * shard_size, shard_size)
         return shard.contiguous() if contiguous else shard
 
-    @staticmethod
-    def split_tensor_for_tp(
-        tensor: torch.Tensor,
-        tp_size: int,
-        tp_rank: int,
-        dim: int = 0,
-        contiguous: bool = True,
-    ) -> torch.Tensor:
-        """Compatibility wrapper for TP-only callers."""
-        return WeightSwitchMixin.split_tensor_for_parallel(tensor, tp_size, tp_rank, dim, contiguous)
-
     def prepare_layer_for_parallel_weight_load(
         self,
         layer: torch.nn.Module,
@@ -291,7 +261,7 @@ class WeightSwitchMixin:
         before selecting the PCP-local shard.  The layer's forward TP metadata
         is intentionally not modified.
         """
-        if not self.supports_weight_switch and not self.supports_tp_weight_switch:
+        if not self.supports_weight_switch:
             raise RuntimeError(f"{type(self).__name__} does not support weight switching.")
 
         original_width = getattr(layer, "input_size_per_partition", None)
@@ -423,7 +393,7 @@ class WeightSwitchMixin:
         clone_local_tensors: bool = False,
     ) -> WeightSwitchState:
         """Allocate local/full aliases and buffers for one compatible linear layer."""
-        if not self.supports_weight_switch and not self.supports_tp_weight_switch:
+        if not self.supports_weight_switch:
             raise RuntimeError(f"{type(self).__name__} does not support weight switching.")
 
         gather_specs, repeat_specs, shard_axis = self._get_weight_switch_specs(layer, config)
@@ -512,25 +482,6 @@ class WeightSwitchMixin:
 
         return state
 
-    def enable_tp_weight_switch(
-        self,
-        layer: torch.nn.Module,
-        tp_size: int,
-        *,
-        pool: dict[Any, torch.Tensor] | None = None,
-        pool_key_prefix: Any | None = None,
-        clone_tp_tensors: bool = False,
-    ) -> WeightSwitchState:
-        """Compatibility wrapper preserving the existing DSA-CP call contract."""
-        config = WeightSwitchConfig(group=None, world_size=tp_size, rank=0)
-        return self.enable_weight_switch(
-            layer,
-            config,
-            pool=pool,
-            pool_key_prefix=pool_key_prefix,
-            clone_local_tensors=clone_tp_tensors,
-        )
-
     def all_gather_weight(
         self,
         state: WeightSwitchState,
@@ -553,17 +504,6 @@ class WeightSwitchMixin:
             if handle is not None:
                 state.handles.append(handle)
 
-    def all_gather_tp_weight(
-        self,
-        state: WeightSwitchState,
-        group: Any,
-        *,
-        async_op: bool = True,
-    ) -> None:
-        """Compatibility wrapper preserving the existing DSA-CP call contract."""
-        config = WeightSwitchConfig(group=group, world_size=1, rank=0)
-        self.all_gather_weight(state, config, async_op=async_op)
-
     @staticmethod
     def wait_weight_all_gather(state: WeightSwitchState) -> None:
         try:
@@ -571,11 +511,6 @@ class WeightSwitchMixin:
                 handle.wait()
         finally:
             state.handles.clear()
-
-    @staticmethod
-    def wait_tp_weight_all_gather(state: WeightSwitchState) -> None:
-        """Compatibility wrapper preserving the existing DSA-CP call contract."""
-        WeightSwitchMixin.wait_weight_all_gather(state)
 
     def switch_weight(
         self,
@@ -593,13 +528,3 @@ class WeightSwitchMixin:
             target = repeat_part.full_tensor if use_full_weight else repeat_part.local_tensor
             with torch.no_grad():
                 getattr(layer, attr_name).set_(target)
-
-    def switch_tp_weight(
-        self,
-        layer: torch.nn.Module,
-        state: WeightSwitchState,
-        *,
-        use_full_weight: bool,
-    ) -> None:
-        """Compatibility wrapper preserving the existing DSA-CP call contract."""
-        self.switch_weight(layer, state, use_full_weight=use_full_weight)

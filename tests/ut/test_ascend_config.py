@@ -1063,12 +1063,14 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc = VllmConfig()
         vc.additional_config = {
             "enable_dsa_cp": "false",
+            "enable_pcp_o_proj_weight_sharding": "true",
             "draft_window_size": "4096",
         }
 
         config = init_ascend_config(vc)
 
         self.assertFalse(config.enable_dsa_cp)
+        self.assertTrue(config.enable_pcp_o_proj_weight_sharding)
         self.assertEqual(config.draft_window_size, 4096)
 
     @_clean_up
