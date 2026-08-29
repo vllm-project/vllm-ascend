@@ -25,12 +25,28 @@ VLLM_BASE_BRANCH = "main"
 
 
 def _git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(root), *args],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    command = ["git", "-C", str(root), *args]
+    try:
+        return subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        details = [
+            f"Git command failed with exit code {error.returncode}:",
+            subprocess.list2cmdline(command),
+        ]
+        stdout = (error.stdout or "").strip()
+        stderr = (error.stderr or "").strip()
+        if stdout:
+            details.extend(("stdout:", stdout))
+        if stderr:
+            details.extend(("stderr:", stderr))
+        if not stdout and not stderr:
+            details.append("The Git command produced no output.")
+        raise RuntimeError("\n".join(details)) from None
 
 
 def resolve_vllm_range(
