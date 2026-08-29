@@ -3246,17 +3246,22 @@ class NPUModelRunner(GPUModelRunner):
                 GDNAttentionMetadataBuilder,
             )
             if is_gdn_noop:
-                assert num_reqs_padded is not None
-                # An idle DP dummy has a real tensor shape for model and
-                # collective execution, but no GDN tokens. Keep both captured
-                # recurrent branches inert instead of advancing cached state.
+                # Dummy-run callers coalesce this; fall back to the unpadded
+                # batch size instead of asserting in the execute path.
+                gdn_num_reqs = (
+                    num_reqs if num_reqs_padded is None else num_reqs_padded
+                )
+                # Idle DP dummy: keep captured GDN tensor ranks for graph
+                # replay/collectives. num_actual_tokens=0 is the kernel no-op
+                # (ops slice mixed_qkv[:0]); query_start_loc is a zero-filled
+                # prefix sized to the graph, not a real token schedule.
                 common_attn_metadata = replace(
                     common_attn_metadata,
                     query_start_loc=self.gdn_query_start_loc.gpu[
-                        : num_reqs_padded + 1
+                        : gdn_num_reqs + 1
                     ],
                     query_start_loc_cpu=self.gdn_query_start_loc.cpu[
-                        : num_reqs_padded + 1
+                        : gdn_num_reqs + 1
                     ],
                     num_actual_tokens=0,
                     max_query_len=0,
