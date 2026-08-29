@@ -658,6 +658,17 @@ class AscendConfig:
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
 
+        # batch-sharded sampling (Model Runner V2) shards the sampler inputs
+        # per TP rank, while lmhead TP overrides NPUModelRunner.sample with a
+        # whole-group LM-head collective path; the two are mutually exclusive.
+        if vc.parallel_config.enable_batch_sharded_sampling:
+            if self.finegrained_tp_config.lmhead_tensor_parallel_size > 0:
+                raise ValueError(
+                    "enable_batch_sharded_sampling is incompatible with "
+                    "finegrained_tp_config.lmhead_tensor_parallel_size. "
+                    "Please disable one of them."
+                )
+
         # mix_placement mutex
         self._check_mix_placement()
 
