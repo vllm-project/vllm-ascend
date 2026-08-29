@@ -1086,7 +1086,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             self.assertEqual(worker.layer_load_tasks[layer_id], [load_marker])
 
     def test_build_shared_save_data_marks_last_actual_task(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_threads import (
             KVCacheStoreLayerSendingThread,
         )
 

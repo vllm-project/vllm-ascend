@@ -34,6 +34,13 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol import (
     GVASession,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_threads import (
+    GVALayerwiseThreadContext,
+    KVCacheStoreLayerRecvingThread,
+    KVCacheStoreLayerSendingThread,
+    create_gva_recving_thread,
+    create_gva_sending_thread,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
@@ -41,12 +48,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
-    KVCacheStoreLayerRecvingThread,
-    KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
     KVTransferThread,
-    LayerBatchBuilder,
     _circular_shift,
     record_failed_blocks,
 )
@@ -451,22 +455,6 @@ class KVPoolWorker:
             {k: v for k, v in list(self.physical_layer_to_group_layers.items())[:3]},
         )
 
-    def _build_group_layer_builders(self) -> list[LayerBatchBuilder]:
-        builders = []
-        for group_id in range(self.num_kv_cache_groups):
-            group_num_layers = self.group_num_layers.get(group_id, self.num_layers)
-            group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
-            group_page_size = sum(group_block_len) if group_block_len else self.page_size_bytes
-            builders.append(
-                LayerBatchBuilder(
-                    self.token_database,
-                    group_page_size,
-                    group_num_layers,
-                    group_id=group_id,
-                )
-            )
-        return builders
-
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> None:
         self.external_slot_release_waiter = waiter
 
@@ -480,24 +468,31 @@ class KVPoolWorker:
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
             can_save = self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
-            if self.use_gva_layerwise and can_save:
-                ready_event_sending = threading.Event()
-                self.kv_send_thread = KVCacheStoreLayerSendingThread(
-                    self.m_store,
-                    self.token_database,
-                    self.block_size,
-                    self.tp_rank,
-                    self.tp_size,
-                    self.dcp_size,
-                    self.page_size_bytes,
-                    ready_event_sending,
-                    self.num_layers,
-                    self.layer_save_finished_events,
-                    self.sync_save_events,
-                    self.layerwise_max_transfer_blocks,
-                    self.layerwise_max_transfer_bytes,
-                    group_builders=self._build_group_layer_builders(),
+            gva_ctx: GVALayerwiseThreadContext | None = (
+                GVALayerwiseThreadContext(
+                    m_store=self.m_store,
+                    token_database=self.token_database,
+                    block_size=self.block_size,
+                    tp_rank=self.tp_rank,
+                    tp_size=self.tp_size,
+                    dcp_size=self.dcp_size,
+                    page_size_bytes=self.page_size_bytes,
+                    num_layers=self.num_layers,
+                    layer_save_finished_events=self.layer_save_finished_events,
+                    sync_save_events=self.sync_save_events,
+                    max_transfer_blocks=self.layerwise_max_transfer_blocks,
+                    max_transfer_bytes=self.layerwise_max_transfer_bytes,
+                    num_kv_cache_groups=self.num_kv_cache_groups,
+                    group_num_layers=self.group_num_layers,
+                    group_block_len=self.group_block_len,
                 )
+                if self.use_gva_layerwise
+                else None
+            )
+            if self.use_gva_layerwise and can_save:
+                assert gva_ctx is not None
+                ready_event_sending = threading.Event()
+                self.kv_send_thread = create_gva_sending_thread(gva_ctx, ready_event_sending)
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
             elif can_save:
@@ -519,24 +514,13 @@ class KVPoolWorker:
                 ready_event_sending.wait()
             ready_event = threading.Event()
             if self.use_gva_layerwise:
-                self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
-                    self.m_store,
-                    self.token_database,
-                    self.block_size,
-                    self.tp_rank,
-                    self.tp_size,
-                    self.dcp_size,
-                    self.page_size_bytes,
+                assert gva_ctx is not None
+                self.kv_recv_thread = create_gva_recving_thread(
+                    gva_ctx,
                     ready_event,
                     self.get_event,
                     self.layer_load_finished_events,
-                    self.layer_save_finished_events,
-                    self.sync_save_events,
-                    self.num_layers,
-                    self.h2d_stagger_us,
-                    self.layerwise_max_transfer_blocks,
-                    self.layerwise_max_transfer_bytes,
-                    group_builders=self._build_group_layer_builders(),
+                    h2d_stagger_us=self.h2d_stagger_us,
                     external_slot_release_waiter=self.external_slot_release_waiter,
                     save_failure_checker=(
                         self.kv_send_thread.raise_if_failed if self.kv_send_thread is not None else None
