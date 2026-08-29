@@ -1,8 +1,11 @@
-# GLM-5.2
+# GLM-5.2/5.3
 
 ## 1 Introduction
 
 [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
+
+[GLM-5.3](https://huggingface.co/zai-org/GLM-5.3) uses the same base model as GLM-5.2 — every gain comes from post-training. Compared with GLM-5.2, it is much better at complex coding and long-horizon tasks.
+
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -18,6 +21,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `GLM-5.2-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
 - `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+- `GLM-5.3-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-w8a8c8).
+
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -199,9 +204,9 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 ##### 5.1.1.2 Multi-Node Co-Located Deployment
 
-**GLM-5.2-w8a8c8 (198K context, dual-node co-located):**
+**GLM-5.2-w8a8c8 / GLM-5.3-w8a8c8 (198K context, dual-node co-located):**
 
-`GLM-5.2-w8a8c8` can be deployed on 2 Atlas 800 A3 (128GB × 8) for the 198K high-throughput scenario (`DP8 TP4`, 4 DP ranks per node).
+`GLM-5.2-w8a8c8` and `GLM-5.3-w8a8c8` can be deployed on 2 Atlas 800 A3 (128GB × 8) for the 198K high-throughput scenario (`DP8 TP4`, 4 DP ranks per node).
 
 Run the following scripts on two nodes respectively.
 
@@ -231,7 +236,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.x-w8a8c8 \
     --host 0.0.0.0 \
     --port 8077 \
     --api-server-count 1 \
@@ -287,7 +292,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.x-w8a8c8 \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -1235,9 +1240,9 @@ DCP and Sparse Flash Attention C8 (`enable_sparse_sfa_c8`, also referred to as `
 
 #### 5.2.1 Dual-Node Co-Located 1M Deployment
 
-**GLM-5.2-w8a8c8 (1M context, dual-node co-located):**
+**GLM-5.2-w8a8c8 / GLM-5.3-w8a8c8 (1M context, dual-node co-located):**
 
-`GLM-5.2-w8a8c8` 1M co-located deployment on 2 Atlas 800 A3 (128GB × 8) (`DP8 TP4`, 4 DP ranks per node, decode context parallelism 4).
+`GLM-5.2-w8a8c8` and `GLM-5.3-w8a8c8` 1M co-located deployment on 2 Atlas 800 A3 (128GB × 8) (`DP8 TP4`, 4 DP ranks per node, decode context parallelism 4).
 
 Run the following scripts on two nodes respectively.
 
