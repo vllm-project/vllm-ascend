@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import contextlib
 import logging
 import math
 import sys
@@ -4901,7 +4902,10 @@ class NPUModelRunner(GPUModelRunner):
                         # Indexer/tail pages do not evenly divide the MLA page.
                         # Ascend indexes KV by block stride, so opt in to padding.
                         if isinstance(spec, AttentionSpec):
-                            spec = replace(spec, indexes_kv_by_block_stride=True)
+                            # Upstream MLAAttentionSpec does not carry the
+                            # Ascend-only block-stride flag; skip it there.
+                            with contextlib.suppress(TypeError):
+                                spec = replace(spec, indexes_kv_by_block_stride=True)
                         kv_cache_spec[layer_name] = spec
                     continue
                 # TODO: This mirrors upstream's separated KV/indexer specs for
