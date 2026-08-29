@@ -239,34 +239,107 @@ def test_init_with_invalid_config(monkeypatch):
     assert loader.output_prefix is None
 
 
-def test_remove_new_static_forward_context_keys_preserves_baseline(monkeypatch):
-    class DummyCompilationConfig:
-        def __init__(self):
-            self.static_forward_context = {}
+def test_fallback_cleanup_context_releases_references_and_restores_state(monkeypatch):
+    from vllm.model_executor.layers import rotary_embedding
 
-    class ConfigWithCompilation:
-        def __init__(self):
-            self.compilation_config = DummyCompilationConfig()
+    from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
-    passed_config = ConfigWithCompilation()
-    current_config = ConfigWithCompilation()
-    target_layer = object()
-    draft_layer = object()
-    passed_config.compilation_config.static_forward_context["target.layer"] = target_layer
-    current_config.compilation_config.static_forward_context["current.target"] = target_layer
+    class FakeCompileWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cleanup_calls = 0
+
+        def cleanup(self):
+            self.cleanup_calls += 1
+
+    target_layer = nn.Module()
+    draft_layer = nn.Module()
+    stale_layer = nn.Module()
+    compile_wrapper = FakeCompileWrapper()
+    failed_model = nn.Module()
+    failed_model.add_module("stale", stale_layer)
+    failed_model.add_module("draft", draft_layer)
+    failed_model.add_module("compiled", compile_wrapper)
+    shared_moe_layers = [target_layer]
+    eplb_layers = [target_layer]
+    passed_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"target.layer": target_layer, "stale.layer": stale_layer},
+            static_all_moe_layers=shared_moe_layers,
+        )
+    )
+    current_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"current.target": target_layer},
+            static_all_moe_layers=shared_moe_layers,
+        )
+    )
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.get_current_vllm_config_or_none",
         lambda: current_config,
     )
+    target_key = ("target", 1)
+    draft_key = ("draft", 2)
+    target_rope = object()
+    rope_cache = {target_key: target_rope}
+    monkeypatch.setattr(rotary_embedding, "_ROPE_DICT", rope_cache)
+    monkeypatch.setattr(VllmEplbAdaptor, "_registered_moe_layers", eplb_layers)
+    monkeypatch.setattr(
+        "vllm.compilation.wrapper.TorchCompileWithNoGuardsWrapper",
+        FakeCompileWrapper,
+    )
+    monkeypatch.setattr(
+        ModelNetLoaderElastic,
+        "_get_npu_memory_usage",
+        staticmethod(lambda device_type: (100, 200)),
+    )
 
-    snapshots = ModelNetLoaderElastic._snapshot_static_forward_context_keys(passed_config)
+    cleanup_context = ModelNetLoaderElastic._create_fallback_cleanup_context(passed_config, "npu")
     passed_config.compilation_config.static_forward_context["draft.layer"] = draft_layer
     current_config.compilation_config.static_forward_context["current.draft"] = draft_layer
+    shared_moe_layers.append(draft_layer)
+    eplb_layers.append(draft_layer)
+    rope_cache[draft_key] = object()
 
-    ModelNetLoaderElastic._remove_new_static_forward_context_keys(passed_config, snapshots)
+    failed_model_ref = ModelNetLoaderElastic._release_failed_model_references(
+        failed_model, passed_config, cleanup_context
+    )
 
     assert passed_config.compilation_config.static_forward_context == {"target.layer": target_layer}
     assert current_config.compilation_config.static_forward_context == {"current.target": target_layer}
+    assert shared_moe_layers == [target_layer]
+    assert eplb_layers == [target_layer]
+    assert rope_cache == {target_key: target_rope}
+    assert cleanup_context.memory_baseline == (100, 200)
+    assert failed_model_ref() is failed_model
+    assert compile_wrapper.cleanup_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("memory_usage", "expected_attempts"),
+    [
+        ([(300, 400), (100, 150)], 1),
+        ([(300, 400), (250, 300), (250, 300), (100, 150)], 2),
+    ],
+)
+@patch("vllm_ascend.model_loader.netloader.netloader.torch.npu.empty_cache")
+@patch("vllm_ascend.model_loader.netloader.netloader.gc.collect")
+def test_reclaim_failed_model_memory_attempts(
+    mock_gc,
+    mock_empty_cache,
+    memory_usage,
+    expected_attempts,
+):
+    with patch.object(
+        ModelNetLoaderElastic,
+        "_get_npu_memory_usage",
+        side_effect=memory_usage,
+    ) as mock_memory_usage:
+        ModelNetLoaderElastic._reclaim_failed_model_memory("npu", (100, 200))
+
+    assert mock_gc.call_count == expected_attempts
+    assert mock_empty_cache.call_count == expected_attempts
+    assert mock_memory_usage.call_count == expected_attempts * 2
 
 
 def test_pre_transfer_weight_processing_unwraps_and_restores_quant_methods():
@@ -352,14 +425,10 @@ def test_target_elastic_failure_sets_fallback_flag(mock_logger, monkeypatch):
         "revert_to_default",
         lambda self, *args, **kwargs: (dummy_model, False),
     )
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic._snapshot_static_forward_context_keys",
-        lambda *args, **kwargs: {},
-    )
-    monkeypatch.setattr(
-        "vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic._remove_new_static_forward_context_keys",
-        lambda *args, **kwargs: None,
-    )
+    cleanup_context = object()
+    monkeypatch.setattr(ModelNetLoaderElastic, "_create_fallback_cleanup_context", lambda *args: cleanup_context)
+    monkeypatch.setattr(ModelNetLoaderElastic, "_release_failed_model_references", lambda *args: lambda: None)
+    monkeypatch.setattr(ModelNetLoaderElastic, "_reclaim_failed_model_memory", lambda *args: None)
     _install_elastic_server(monkeypatch)
 
     extra = {
