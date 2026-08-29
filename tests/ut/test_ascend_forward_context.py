@@ -15,6 +15,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_reserved_mc2_mask", None)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
@@ -249,6 +250,26 @@ def test_is_decode_only_node_false_without_recompute_scheduler(monkeypatch):
     )
 
     assert afc._is_decode_only_node(vllm_config) is False
+
+
+@pytest.mark.parametrize(
+    ("max_num_batched_tokens", "expected_mask_tokens"),
+    [(80, 80), (90, 96)],
+)
+def test_set_mc2_mask_aligns_capacity_to_tp(
+    monkeypatch,
+    max_num_batched_tokens,
+    expected_mask_tokens,
+):
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=8,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
+
+    afc.set_mc2_mask(vllm_config, device="cpu")
+
+    assert afc.get_mc2_mask().shape == (expected_mask_tokens,)
 
 
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
