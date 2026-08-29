@@ -302,8 +302,8 @@ def _get_reusable_shrink_buffer(
 
     DSA executes q, kv, and o projections on different streams, so each
     projection name owns a separate buffer. Equal projections share the same
-    buffer across transformer layers. Shrink overwrites active rows and expand
-    skips negative adapter indices, so clearing the buffer is unnecessary.
+    buffer across transformer layers. The returned tensor is scratch storage;
+    callers of additive shrink kernels must clear its active view before use.
     """
 
     state = context.shrink_buffer
@@ -370,6 +370,9 @@ def prepare_dsa_lora(
             num_rows=x_2d.shape[0],
             rank=local_rank,
         )
+        # GroupGEMM shrink adds to the supplied output. Its dispatch predicate
+        # is a live ACLGraph input, so clear the active view unconditionally.
+        buffers.zero_()
         context.punica_wrapper.add_shrink(
             buffers,
             x_2d,
@@ -387,6 +390,8 @@ def prepare_dsa_lora(
         num_rows=x_2d.shape[0],
         rank=context.lora_a_stacked[0].shape[-2],
     )
+    # See the fully-sharded path above: add_shrink may be additive.
+    reusable_buffer.zero_()
     buffers = tuple(reusable_buffer[slice_idx] for slice_idx in range(len(context.lora_a_stacked)))
     context.punica_wrapper.add_shrink(
         buffers,
