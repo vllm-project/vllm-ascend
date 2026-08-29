@@ -594,7 +594,6 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
-      continue_on_error: true
 
   run-selected-tests-upstream:
     needs:
@@ -613,10 +612,7 @@ jobs:
       }}
     name: run-selected-tests-upstream (vllm@${{ matrix.vllm_version_short }})
     strategy:
-      fail-fast: false
       matrix:
-        # TEMP(main2main): run only the upgraded main lane while collecting
-        # all failures. Restore the release lane before merging this PR.
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
         vllm_version_short:
@@ -643,10 +639,7 @@ jobs:
       }}
     name: run-selected-tests-a5 (vllm@${{ matrix.vllm_version_short }})
     strategy:
-      fail-fast: false
       matrix:
-        # TEMP(main2main): run only the upgraded main lane while collecting
-        # all failures. Restore the release lane before merging this PR.
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
         vllm_version_short:
@@ -657,7 +650,6 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
-      continue_on_error: true
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
