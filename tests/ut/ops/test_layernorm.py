@@ -64,6 +64,25 @@ def test_RMSNorm_forward(
         assert torch.allclose(out_x, expected_out_x)
 
 
+def test_RMSNorm_supports_quant_config_without_quant_description(default_vllm_config):
+    default_vllm_config.quant_config = object()
+
+    layer = RMSNorm(hidden_size=8, eps=1e-05)
+
+    assert layer.bias is None
+
+
+def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
+    quant_config = MagicMock()
+    quant_config.quant_description = {"model.layers.0.input_layernorm.bias": "W8A8"}
+    default_vllm_config.quant_config = quant_config
+
+    layer = RMSNorm(hidden_size=8, eps=1e-05)
+
+    assert layer.bias is not None
+    assert not layer.bias.requires_grad
+
+
 @pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
 @pytest.mark.parametrize("residual", [None, torch.randn(4, 8, dtype=torch.float16)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
