@@ -14,7 +14,15 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Collect new or moved tests from a merged PR and write them as extra-yaml paths."""
+"""Collect new or moved tests from a merged PR and write them as extra-yaml paths.
+
+Use GitHub's three-dot PR diff (``pr-base...pr-head``), the same range as the
+Files changed tab: ``git diff $(git merge-base BASE HEAD) HEAD``.
+
+Do not two-dot-diff a merge/squash commit against ``pull_request.base.sha``.
+That SHA can lag behind ``main``, so ``git diff stale-base merge-commit``
+includes every test that landed on ``main`` while the PR was open.
+"""
 
 from __future__ import annotations
 
@@ -153,12 +161,25 @@ def _git_show(ref: str, path: str) -> str | None:
     return result.stdout
 
 
-def _merge_base(base: str) -> str:
-    result = _git_run(["git", "merge-base", "HEAD", base], check=True)
+def _rev_parse(ref: str) -> str:
+    result = _git_run(["git", "rev-parse", "--verify", ref], check=True)
     return result.stdout.strip()
 
 
-def _git_name_status(base: str) -> NameStatus:
+def resolve_pr_diff_refs(pr_base: str, pr_head: str) -> tuple[str, str]:
+    """Return ``(old_ref, new_ref)`` for GitHub's three-dot PR diff.
+
+    ``old_ref`` is ``merge-base(pr_base, pr_head)`` and ``new_ref`` is the PR
+    head. This matches ``git diff pr-base...pr-head`` / the Files changed tab,
+    even when ``pr_base`` is a stale ``main`` SHA.
+    """
+    base = _rev_parse(pr_base)
+    head = _rev_parse(pr_head)
+    merge_base = _git_run(["git", "merge-base", base, head], check=True)
+    return merge_base.stdout.strip(), head
+
+
+def _git_name_status(old: str, new: str) -> NameStatus:
     result = _git_run(
         [
             "git",
@@ -166,7 +187,7 @@ def _git_name_status(base: str) -> NameStatus:
             "--name-status",
             "--find-renames",
             "--diff-filter=ACMR",
-            base,
+            f"{old}...{new}",
             "--",
             "tests/e2e/pull_request",
             "tests/ut",
@@ -207,25 +228,28 @@ def write_new_tests_yaml(
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def collect_required_changes(base: str) -> list[tuple[str, str]]:
-    def read_head(path: str) -> str:
-        file_path = Path(path)
-        if not file_path.is_file():
-            return ""
-        return file_path.read_text(encoding="utf-8")
-
+def collect_required_changes(old_ref: str, new_ref: str) -> list[tuple[str, str]]:
     return collect_from_changes(
-        _git_name_status(base),
-        read_head=read_head,
-        read_old=lambda path: _git_show(base, path),
+        _git_name_status(old_ref, new_ref),
+        read_head=lambda path: _git_show(new_ref, path) or "",
+        read_old=lambda path: _git_show(old_ref, path),
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Write new or moved tests from a merged PR to a YAML file.",
+        description="Write new or moved tests from a merged PR's GitHub three-dot diff.",
     )
-    parser.add_argument("--diff-base", required=True, help="Git ref to diff against")
+    parser.add_argument(
+        "--pr-base",
+        required=True,
+        help="PR base SHA (github.event.pull_request.base.sha)",
+    )
+    parser.add_argument(
+        "--pr-head",
+        required=True,
+        help="PR head ref (refs/pull/<n>/head), not the merge/squash commit",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -236,9 +260,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--merge-sha", default="", help="Merge commit SHA for the YAML header")
     args = parser.parse_args(argv)
 
-    diff_base = _merge_base(args.diff_base)
-    print(f"Collecting test changes from merge-base {diff_base} to HEAD")
-    required = collect_required_changes(diff_base)
+    old_ref, new_ref = resolve_pr_diff_refs(args.pr_base, args.pr_head)
+    print(f"Collecting GitHub three-dot PR diff {args.pr_base}...{args.pr_head}")
+    print(f"Resolved range {old_ref}..{new_ref}")
+    required = collect_required_changes(old_ref, new_ref)
     if not required:
         print("No new or moved tests detected")
         if args.output.exists():

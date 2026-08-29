@@ -55,28 +55,37 @@ jobs:
       OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
       OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
     steps:
-      - name: Checkout merge commit
+      - name: Checkout repository
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 0
 
-      - name: Resolve merged commit
-        run: |
-          set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git checkout "${{ github.event.pull_request.merge_commit_sha }}"
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
       - name: Collect new or moved tests
         id: collect
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # GitHub keeps refs/pull/<n>/head on the base repo. Three-dot
+          # PR_BASE...PR_HEAD is the Files changed tab, even if PR_BASE is stale.
+          git fetch origin "pull/${PR_NUMBER}/head" --no-tags
+          PR_HEAD=$(git rev-parse FETCH_HEAD)
+          echo "pr-number=${PR_NUMBER}"
+          echo "pr-base=${PR_BASE}"
+          echo "pr-head=${PR_HEAD}"
+          echo "merge=${MERGE_SHA}"
           python3 .github/workflows/scripts/collect_merged_new_tests.py \
-            --diff-base "${BASE_SHA}" \
+            --pr-base "${PR_BASE}" \
+            --pr-head "${PR_HEAD}" \
             --output merged_new_tests.yaml \
             --pr-number "${PR_NUMBER}" \
             --merge-sha "${MERGE_SHA}"
@@ -95,7 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
-          pip install pyyaml --quiet
+          python3 -m pip install pyyaml --quiet
           http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
           if [ "${http_code}" = "200" ] && [ -s extra_recommended_tests.yaml ]; then
             echo "Downloaded existing extra_recommended_tests.yaml from OBS"
@@ -128,7 +137,7 @@ jobs:
             echo "::error::OBS credentials are missing"
             exit 1
           fi
-          pip install esdk-obs-python --quiet
+          python3 -m pip install esdk-obs-python --quiet
           python3 - <<'EOF'
           import os
           from obs import ObsClient
