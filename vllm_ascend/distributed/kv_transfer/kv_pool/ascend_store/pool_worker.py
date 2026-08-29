@@ -934,7 +934,8 @@ class KVPoolWorker:
                     ret,
                 )
                 if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
+                    with self._invalid_block_ids_lock:
+                        self._invalid_block_ids.update(missing_block_ids)
                 elif missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
@@ -949,7 +950,8 @@ class KVPoolWorker:
                     [1] * len(block_id_list_c),
                 )
                 if len(request.block_ids_by_group) == 1:
-                    self._invalid_block_ids.update(missing_block_ids)
+                    with self._invalid_block_ids_lock:
+                        self._invalid_block_ids.update(missing_block_ids)
                 elif missing_block_ids:
                     logger.error(
                         "KV load failed for hybrid request %s. "
