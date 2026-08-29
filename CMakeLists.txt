@@ -56,18 +56,7 @@ ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
 )
-
-set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
-)
-
-if(SOC_VERSION MATCHES "ascend950")
-    message(STATUS "A5 hardware detected: disabling MLAPO operators")
-    list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
-endif()
-
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
     message(STATUS "Hardware ${SOC_VERSION} detected: skip vllm_ascend_kernels compile")
 else()

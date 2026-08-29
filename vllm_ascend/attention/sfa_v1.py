@@ -371,6 +371,22 @@ def _int64_kv_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
     return cached[1]
 
 
+def _int32_mlapo_slots(slots: torch.Tensor, attn_metadata: M) -> torch.Tensor:
+    """Convert the MLAPO slot mapping to int32 once per scheduling step.
+
+    The MlaPreprocess device kernel reads slot mappings as int32, while some
+    parallel layouts can provide int64 slots. Cache the converted tensor on
+    the metadata object so all layers share one Cast kernel.
+    """
+    if slots.dtype == torch.int32:
+        return slots
+    cached = getattr(attn_metadata, "mlapo_slots_i32", None)
+    if cached is None or cached[0] is not slots:
+        cached = (slots, slots.to(torch.int32))
+        attn_metadata.mlapo_slots_i32 = cached  # type: ignore[attr-defined]
+    return cached[1]
+
+
 @dataclass
 class SFAForwardContext:
     """Parallel-layout inputs consumed by the shared SFA forward template."""
@@ -1715,7 +1731,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                     kv_cache=kv_cache,
                     cos=cos,
                     sin=sin,
-                    slot_mapping=slot_mapping_sfa,
+                    slot_mapping=_int32_mlapo_slots(slot_mapping_sfa, attn_metadata),
                     num_input_tokens=num_input_tokens,
                 )
         # native

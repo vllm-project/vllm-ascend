@@ -10,8 +10,8 @@
 // See LICENSE in the root of the software repository for the full text of the License.
 //
 
-#ifndef MLAPREPROCESS_TILING_H
-#define MLAPREPROCESS_TILING_H
+#ifndef MLA_PREPROCESS_TILING_DATA_H
+#define MLA_PREPROCESS_TILING_DATA_H
 
 #include <cstdint>
 
@@ -116,4 +116,4 @@ struct MlaTilingData {
     uint64_t kvCacheRopeStride0{0};
 };
 
-#endif  // MLAPREPROCESS_TILING_H
+#endif  // MLA_PREPROCESS_TILING_DATA_H

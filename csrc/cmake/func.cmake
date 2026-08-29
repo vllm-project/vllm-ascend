@@ -82,6 +82,7 @@ function(op_add_subdirectory OP_LIST OP_DIR_LIST)
         )
         if(BUILD_OPEN_PROJECT AND (NOT BUILD_OPS_RTY_KERNEL))
             file(GLOB CANNDEV_OPS_HOST_CMAKE_FILES
+                "${CMAKE_CURRENT_SOURCE_DIR}/mla_preprocess/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/posembedding/**/op_host/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/moe/**/op_host/CMakeLists.txt"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ffn/**/op_host/CMakeLists.txt"

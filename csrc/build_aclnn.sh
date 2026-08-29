@@ -139,6 +139,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
+        "mla_preprocess"
         "fused_sparse_attention_overlap"
     )
 
@@ -197,6 +198,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
+        "mla_preprocess"
         "fused_sparse_attention_overlap"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
