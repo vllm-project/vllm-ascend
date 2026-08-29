@@ -242,10 +242,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Preserve the strided Q/K/V views split from the fused projection;
+        # recurrent KDA consumes their independent token/head strides.
         return torch.ops._C_ascend.recurrent_kda(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
+            q,
+            k,
+            v,
             raw_gate.contiguous(),
             beta.contiguous(),
             recurrent_state,
