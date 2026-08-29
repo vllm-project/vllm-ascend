@@ -181,6 +181,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
     set_ascend_forward_context,
     set_mc2_mask,
     set_mc2_tokens_capacity,
+    _EXTRA_CTX,
 )
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
@@ -2945,6 +2946,10 @@ class NPUModelRunner(GPUModelRunner):
             )
             hidden_states = run_model()
         else:
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+                if not is_draft_eagle:
+                    torch.npu.current_stream().synchronize()
             hidden_states = run_model()
             self._update_full_graph_params_if_needed(
                 forward_context, num_tokens_padded, positions
