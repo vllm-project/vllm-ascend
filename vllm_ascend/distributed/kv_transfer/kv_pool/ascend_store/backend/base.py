@@ -35,6 +35,10 @@ class GVALayerwiseCapable(ABC):
     def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
         pass
 
+    @abstractmethod
+    def batch_copy(self, gvas: list[int], addrs: list[int], sizes: list[int], direction: int) -> int:
+        pass
+
 
 class Backend(ABC):
     store: Any | None = None

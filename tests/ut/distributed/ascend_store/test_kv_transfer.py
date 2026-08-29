@@ -25,7 +25,6 @@ import numpy as np
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
-    Backend,
     GVALayerwiseCapable,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -49,11 +48,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVTransferThread,
     LayerBatchBuilder,
 )
-
-
-class _DualSpecStore(Backend, GVALayerwiseCapable):
-    """Concrete double-inheritance stand-in so MagicMock spec passes the
-    isinstance asserts on the GVA layer transfer threads."""
 
 
 class FakeStore:
@@ -228,8 +222,8 @@ class TestKVTransferThread(unittest.TestCase):
 
 class TestGVALayerTransferFailures(unittest.TestCase):
     def _make_sending_thread(self):
-        store = MagicMock(spec=_DualSpecStore)
-        store.store.batch_copy.return_value = 0
+        store = MagicMock(spec=GVALayerwiseCapable)
+        store.batch_copy.return_value = 0
         store.batch_write_finish.return_value = [0]
         builder = MagicMock()
         builder.build_addrs.return_value = LayerBatchReqMeta(
@@ -292,8 +286,8 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
     def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
-        store = MagicMock(spec=_DualSpecStore)
-        store.store.batch_copy.return_value = 0
+        store = MagicMock(spec=GVALayerwiseCapable)
+        store.batch_copy.return_value = 0
         load_finished = [threading.Event(), threading.Event()]
         save_finished = [threading.Event(), threading.Event()]
         sync_events = [MagicMock(), MagicMock()]

@@ -14,10 +14,7 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
-    Backend,
-    GVALayerwiseCapable,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend, GVALayerwiseCapable
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -453,7 +450,7 @@ class KVTransferThread(threading.Thread):
         if max_transfer_addrs <= 0:
             max_transfer_addrs = len(gvas)
 
-        assert self.m_store.store is not None
+        assert isinstance(self.m_store, GVALayerwiseCapable)
         for start in range(0, len(gvas), max_transfer_addrs):
             end = start + max_transfer_addrs
             split_gvas, split_addrs, split_sizes = self._split_transfer_packets(
@@ -468,7 +465,7 @@ class KVTransferThread(threading.Thread):
                 split_gvas.tolist(),
                 split_sizes.tolist(),
             )
-            res = self.m_store.store.batch_copy(
+            res = self.m_store.batch_copy(
                 split_gvas.tolist(),
                 split_addrs.tolist(),
                 split_sizes.tolist(),

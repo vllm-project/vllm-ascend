@@ -772,6 +772,13 @@ class TestMemcacheBackendMethods(unittest.TestCase):
 
         self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
 
+    def test_batch_copy_forwards_to_store(self):
+        b = self._make_backend()
+        b.store.batch_copy.return_value = 0
+
+        self.assertEqual(b.batch_copy([1, 2], [100, 200], [16, 16], 0), 0)
+        b.store.batch_copy.assert_called_once_with([1, 2], [100, 200], [16, 16], 0)
+
     def test_get(self):
         b = self._make_backend()
         b.store.batch_get_into_layers.return_value = [0]

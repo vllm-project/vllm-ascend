@@ -180,6 +180,10 @@ class MemcacheBackend(Backend, GVALayerwiseCapable):
             return [0] * len(keys)
         return finish(keys, results)
 
+    def batch_copy(self, gvas: list[int], addrs: list[int], sizes: list[int], direction: int) -> int:
+        assert self.store is not None
+        return self.store.batch_copy(gvas, addrs, sizes, direction)
+
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
             logger.error(
