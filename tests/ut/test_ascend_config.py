@@ -41,6 +41,7 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
+import vllm_ascend.ascend_config as _ascend_config
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
@@ -995,11 +996,26 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
     @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
+    def test_fused_mc2_rolls_back_for_unsupported_megamoe_config(
+        self, mock_fix, mock_megamoe_supported
+    ):
+        # After the megamoe op rollback (#15267), enable_fused_mc2=1 no longer
+        # routes through the megamoe op: _validate_user_input_ranges forces
+        # _MEGA_MOE_SUPPORTED=False and falls back to dispatch_ffn_combine.
+        # Hence an unsupported-megamoe config no longer disables
+        # enable_fused_mc2; it stays 1.
+        # TODO: restore the "set to 0" expectation once the rollback is removed
+        # (when megamoe is ready).
         vc = VllmConfig()
         vc.additional_config = {"enable_fused_mc2": 1}
 
-        self.assertEqual(init_ascend_config(vc).enable_fused_mc2, 0)
+        config = init_ascend_config(vc)
+        self.assertEqual(config.enable_fused_mc2, 1)
+        # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
+        # routes to dispatch_ffn_combine instead of mega_moe — this switch is
+        # read at every op-selection point (routed_experts.py, w8a8_dynamic.py,
+        # ascend_forward_context.py, moe_comm_method.py).
+        self.assertFalse(_ascend_config._MEGA_MOE_SUPPORTED)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
