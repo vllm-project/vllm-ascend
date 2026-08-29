@@ -2,6 +2,7 @@
 import copy
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from functools import partial
 from typing import Any, cast
 
@@ -292,6 +293,36 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_vocab_size = draft_model.config.draft_vocab_size
         if draft_vocab_size == target_vocab_size:
             draft_model.draft_id_to_target_id = None
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        draft_vllm_config = super()._create_draft_vllm_config()
+        cache_config = self.vllm_config.cache_config
+        model_type = getattr(
+            self.vllm_config.model_config.hf_text_config,
+            "model_type",
+            "",
+        )
+        use_minimax_m3_mixed_cache = (
+            self.method == "eagle3"
+            and model_type in ("minimax_m3", "minimax_m3_vl")
+            and str(cache_config.cache_dtype) in ("fp8", "fp8_e4m3")
+            and bool(cache_config.kv_cache_dtype_skip_layers)
+            and getattr(self.speculative_config, "kv_cache_dtype", None) is None
+        )
+        if use_minimax_m3_mixed_cache:
+            # MiniMax-M3 uses FP8 only for its sparse MSA/index caches. The
+            # EAGLE3 draft is regular GQA and must keep the model dtype; its
+            # layer indices follow the target layers and therefore do not
+            # match the target's skip-layer list.
+            draft_vllm_config = replace(
+                draft_vllm_config,
+                cache_config=replace(
+                    draft_vllm_config.cache_config,
+                    cache_dtype="auto",
+                ),
+            )
+            logger.info("Using the model dtype for the MiniMax-M3 EAGLE3 draft KV cache.")
+        return draft_vllm_config
 
     def _get_model(self) -> nn.Module:
         """
