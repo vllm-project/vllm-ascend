@@ -389,6 +389,30 @@ def test_sampler_rejects_random_sampling_parameters() -> None:
         sampler.add_request(1, 4, SamplingParams(temperature=1))
 
 
+@pytest.mark.parametrize(
+    ("sampling_kwargs", "message"),
+    [
+        ({"top_p": 0.9}, "top_p"),
+        ({"top_k": 10}, "top_k"),
+        ({"min_p": 0.1}, "min_p"),
+        ({"repetition_penalty": 1.1}, "repetition_penalty"),
+        ({"presence_penalty": 0.1}, "presence/frequency penalty"),
+        ({"frequency_penalty": 0.1}, "presence/frequency penalty"),
+        (
+            {"presence_penalty": 0.1, "frequency_penalty": 0.1},
+            "presence/frequency penalty",
+        ),
+        ({"logprobs": 1}, "logprobs"),
+        ({"prompt_logprobs": 1}, "logprobs"),
+        ({"logit_bias": {1: 0.1}}, "logits processors"),
+    ],
+)
+def test_sampler_rejects_unsupported_sampling_parameters(sampling_kwargs, message) -> None:
+    sampler = Ascend310PSampler()
+    with pytest.raises(NotImplementedError, match=message):
+        sampler.add_request(0, 4, SamplingParams(temperature=0, **sampling_kwargs))
+
+
 def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[4],
