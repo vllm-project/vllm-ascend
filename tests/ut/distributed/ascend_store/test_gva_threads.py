@@ -24,6 +24,7 @@ import numpy as np
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
     GVALayerwiseCapable,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_threads import (
@@ -46,6 +47,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     SharedBlockData,
 )
 # isort: on
+
+
+class _DualSpecStore(Backend, GVALayerwiseCapable):
+    """Concrete double-inheritance stand-in so MagicMock spec passes the
+    isinstance asserts in _GVALayerTransferThreadBase."""
 
 
 class FakeTokenDatabase(ChunkedTokenDatabase):
@@ -91,7 +97,7 @@ class TestLayerBatchBuilderOffsets(unittest.TestCase):
 
 class TestGVALayerTransferFailures(unittest.TestCase):
     def _make_sending_thread(self):
-        store = MagicMock(spec=GVALayerwiseCapable)
+        store = MagicMock(spec=_DualSpecStore)
         store.batch_copy.return_value = 0
         store.batch_write_finish.return_value = [0]
         builder = MagicMock()
@@ -155,7 +161,7 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
     def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
-        store = MagicMock(spec=GVALayerwiseCapable)
+        store = MagicMock(spec=_DualSpecStore)
         store.batch_copy.return_value = 0
         load_finished = [threading.Event(), threading.Event()]
         save_finished = [threading.Event(), threading.Event()]
@@ -415,7 +421,7 @@ class TestLoadPathEndToEndProbe(unittest.TestCase):
 
         # Stage 2 (layout + transfer): the factory-built receiving thread
         # moves those GVAs through LayerBatchBuilder into batch_copy.
-        store = MagicMock(spec=GVALayerwiseCapable)
+        store = MagicMock(spec=_DualSpecStore)
         store.batch_copy.return_value = 0
         database = _LoadPathProbeDatabase()
         ctx = GVALayerwiseThreadContext(
@@ -487,7 +493,7 @@ class TestFactoryParameterMapping(unittest.TestCase):
         )
 
     def test_sending_factory_maps_all_parameters(self):
-        store = MagicMock(spec=GVALayerwiseCapable)
+        store = MagicMock(spec=_DualSpecStore)
         database = FakeTokenDatabase()
         ctx = self._make_ctx(store, database)
         ready_event = threading.Event()
@@ -511,7 +517,7 @@ class TestFactoryParameterMapping(unittest.TestCase):
         self.assertIs(thread.layer_batch_builder, thread.group_builders[0])
 
     def test_recving_factory_maps_all_parameters(self):
-        store = MagicMock(spec=GVALayerwiseCapable)
+        store = MagicMock(spec=_DualSpecStore)
         database = FakeTokenDatabase()
         ctx = self._make_ctx(store, database)
         ready_event = threading.Event()
@@ -553,7 +559,7 @@ class TestFactoryParameterMapping(unittest.TestCase):
     def test_send_and_recv_builders_are_independent(self):
         # LayerBatchBuilder owns reusable numpy buffers; the send and recv
         # threads must never share builder instances.
-        store = MagicMock(spec=GVALayerwiseCapable)
+        store = MagicMock(spec=_DualSpecStore)
         ctx = self._make_ctx(store, FakeTokenDatabase())
 
         send = create_gva_sending_thread(ctx, threading.Event())

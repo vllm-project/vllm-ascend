@@ -46,6 +46,7 @@ import torch
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
     GVALayerwiseCapable,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
@@ -344,6 +345,9 @@ class _GVALayerTransferThreadBase(KVTransferThread):
         max_transfer_blocks: int = 0,
         max_transfer_bytes: int = 0,
     ):
+        # GVA threads only ever run on backends that are both a full Backend
+        # and GVALayerwiseCapable (today: MemcacheBackend).
+        assert isinstance(m_store, Backend)
         super().__init__(
             m_store,
             token_database,
@@ -356,6 +360,11 @@ class _GVALayerTransferThreadBase(KVTransferThread):
         )
         self.max_transfer_blocks = max_transfer_blocks
         self.max_transfer_bytes = max_transfer_bytes
+
+    @property
+    def _gva_store(self) -> GVALayerwiseCapable:
+        assert isinstance(self.m_store, GVALayerwiseCapable)
+        return self.m_store
 
     @staticmethod
     def _split_transfer_packets(
@@ -418,7 +427,7 @@ class _GVALayerTransferThreadBase(KVTransferThread):
         if max_transfer_addrs <= 0:
             max_transfer_addrs = len(gvas)
 
-        assert isinstance(self.m_store, GVALayerwiseCapable)
+        gva_store = self._gva_store
         for start in range(0, len(gvas), max_transfer_addrs):
             end = start + max_transfer_addrs
             split_gvas, split_addrs, split_sizes = self._split_transfer_packets(
@@ -433,7 +442,7 @@ class _GVALayerTransferThreadBase(KVTransferThread):
                 split_gvas.tolist(),
                 split_sizes.tolist(),
             )
-            res = self.m_store.batch_copy(
+            res = gva_store.batch_copy(
                 split_gvas.tolist(),
                 split_addrs.tolist(),
                 split_sizes.tolist(),
@@ -554,7 +563,7 @@ class KVCacheStoreLayerSendingThread(_GVALayerTransferThreadBase):
             if write_finish_keys:
                 finish_keys = list(dict.fromkeys(write_finish_keys))
                 results = [self.write_results.pop(key) for key in finish_keys]
-                finish_results = self.m_store.batch_write_finish(finish_keys, results)
+                finish_results = self._gva_store.batch_write_finish(finish_keys, results)
                 if len(finish_results) != len(finish_keys) or any(result != 0 for result in finish_results):
                     raise RuntimeError(
                         f"Layerwise save batch_write_finish failed: "
@@ -755,7 +764,7 @@ class KVCacheStoreLayerRecvingThread(_GVALayerTransferThreadBase):
 
         if layer_id == self.final_layer_id and all_load_keys:
             unique_load_keys = list(dict.fromkeys(all_load_keys))
-            self.m_store.batch_remove_lease(unique_load_keys)
+            self._gva_store.batch_remove_lease(unique_load_keys)
             logger.debug(
                 "[KVPOOL] load_thread released %d leases after final layer %d",
                 len(unique_load_keys),
