@@ -302,18 +302,9 @@ a3:
       - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
         os: linux-aarch64-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
-      - name: Deepseek_R1_W8A8_Reasoning_output_A3
+      - name: Qwen3-0.6B-static-kernel
         os: linux-aarch64-a3-16
-        config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
-      - name: Qwen3_32b_W8A8_wl_A3
-        os: linux-aarch64-a3-16
-        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
-      - name: Qwen3-0.6B
-        os: linux-aarch64-a3-16
-        config_file_path: Qwen3-0.6B.yaml
-      - name: Qwq_32b_A3
-        os: linux-aarch64-a3-16
-        config_file_path: Qwq_32b_A3.yaml
+        config_file_path: Qwen3-0.6B-static-kernel.yaml
       - name: Qwen3.6-35B-A3B-w8a8-A3-accuracy
         os: linux-aarch64-a3-2
         config_file_path: Qwen3.6-35B-A3B-w8a8-A3-accuracy.yaml

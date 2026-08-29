@@ -3,7 +3,7 @@
 # ==========================================
 
 test_cases:
-  - name: "Qwen3-0.6B"
+  - name: "Qwen3-0.6B-static-kernel"
     model: "Qwen/Qwen3-0.6B"
     envs:
       TASK_QUEUE_ENABLE: "1"
