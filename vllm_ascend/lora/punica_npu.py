@@ -5,6 +5,7 @@ from collections.abc import Callable
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 
@@ -24,9 +25,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.lora_config = kwargs.get("lora_config")
         hardware_profile = get_current_hardware_profile()
         supports_custom_lora_ops = hardware_profile.supports(HardwareCapability.LORA_CUSTOM_OPS)
-        if not supports_custom_lora_ops or (
-            self.lora_config is not None and self.lora_config.max_lora_rank >= 128
-        ):
+        if not supports_custom_lora_ops or (self.lora_config is not None and self.lora_config.max_lora_rank >= 128):
             from vllm.lora.ops.torch_ops import (
                 bgmv_expand,
                 bgmv_expand_slice,
