@@ -22,7 +22,6 @@ from unittest.mock import patch
 
 from vllm.config import KVTransferConfig, VllmConfig
 
-import vllm_ascend.ascend_config as _ascend_config
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
