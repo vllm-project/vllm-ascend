@@ -47,7 +47,7 @@ env:
 
 jobs:
   resolve-source:
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       source_repository: ${{ steps.source.outputs.source_repository }}
       source_ref: ${{ steps.source.outputs.source_ref }}
