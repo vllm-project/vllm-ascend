@@ -3055,7 +3055,8 @@ class NPUModelRunner(GPUModelRunner):
                 # An idle DP dummy has a real tensor shape for model and
                 # collective execution, but no GDN tokens. Keep both captured
                 # recurrent branches inert instead of advancing cached state.
-                common_attn_metadata = common_attn_metadata.replace(
+                common_attn_metadata = replace(
+                    common_attn_metadata,
                     query_start_loc=self.gdn_query_start_loc.gpu[
                         : num_reqs_padded + 1
                     ],
