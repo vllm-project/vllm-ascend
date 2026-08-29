@@ -12,7 +12,6 @@ env_common: &env_common
   OMP_NUM_THREADS: 1
   TASK_QUEUE_ENABLE: 1
   HCCL_BUFFSIZE: 512
-  VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_USE_MODELSCOPE: true
   SERVER_PORT: 8080
 
@@ -45,6 +44,8 @@ deployment:
         --mm-processor-cache-gb 0
         --mm-encoder-tp-mode data
 
+      --additional-config '{"enable_mlapo":true}'
+
   - 
     envs:
       <<: *env_common
@@ -73,6 +74,8 @@ deployment:
         --speculative-config '{"method":"eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens":3}'
         --mm-processor-cache-gb 0
         --mm-encoder-tp-mode data
+
+      --additional-config '{"enable_mlapo":true}'
 
 benchmarks:
   perf:

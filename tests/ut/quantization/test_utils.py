@@ -9,7 +9,7 @@ from vllm.config import KVTransferConfig
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import FAKQUANT_CONFIG, W8A8_CONFIG
 from vllm_ascend.quantization import AscendCompressedTensorsConfig
-from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME, AscendModelSlimConfig
+from vllm_ascend.quantization.configs.modelslim_config import MODELSLIM_CONFIG_FILENAME, AscendModelSlimConfig
 from vllm_ascend.quantization.utils import (
     detect_quantization_method,
     enable_fa_quant,

@@ -195,6 +195,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/core
+    - vllm_ascend/ec_manager
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
@@ -936,7 +937,6 @@ estimated_times:
   tests/ut/attention/a2/test_mla_cp_precision.py: 30
   tests/ut/attention/a2/test_mla_precision.py: 190
   tests/ut/attention/a2/test_mla_v1.py: 60
-  tests/ut/attention/a2/test_sfa_cp_precision.py: 30
   tests/ut/attention/a2/test_sfa_v1.py: 30
   tests/ut/attention/a2/test_sfa_v1_precision.py: 120
   tests/ut/compilation/a2/test_acl_graph.py: 40

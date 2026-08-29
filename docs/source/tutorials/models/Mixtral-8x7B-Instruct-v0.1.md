@@ -76,13 +76,12 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 ```
 
 ``` bash
 
-vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" \
+vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" --additional-config '{"enable_mlapo":true}' \
   --tensor-parallel-size 4 \
   --max-model-len 4096 \
   --dtype bfloat16 \

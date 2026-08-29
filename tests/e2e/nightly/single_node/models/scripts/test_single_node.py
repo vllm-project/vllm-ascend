@@ -346,10 +346,12 @@ _PORT_ENV_KEYS = {"SERVER_PORT", "ENCODE_PORT", "PD_PORT", "PROXY_PORT"}
 
 _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-    "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
 }
 
-_FEATURE_CONFIGS: dict[str, str] = {"enable_fused_mc2": "fused_mc2"}
+_FEATURE_CONFIGS: dict[str, str] = {
+    "enable_fused_mc2": "fused_mc2",
+    "enable_mlapo": "mlapo",
+}
 
 _PERF_METRIC_RENAME: dict[str, str] = {
     "Benchmark Duration": "Benchmark_Duration(BD)",
