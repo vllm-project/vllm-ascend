@@ -25,25 +25,26 @@ if "torch_npu._inductor" not in sys.modules:
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
 from vllm_ascend.attention.sfa_v1 import PreprocessType, SFAForwardContext
-from vllm_ascend.quantization.tp_weight_switch import (
-    TPWeightGatherSpec,
-    TPWeightSwitchMixin,
+from vllm_ascend.weight_switch import (
+    WeightSwitchConfig,
+    WeightSwitchGatherSpec,
+    WeightSwitchMixin,
 )
 
 
-class _OProjLinearMethod(TPWeightSwitchMixin):
-    supports_tp_weight_switch = True
-    tp_weight_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+class _OProjLinearMethod(WeightSwitchMixin):
+    supports_weight_switch = True
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
 
 
-class _UnsupportedOProjLinearMethod(TPWeightSwitchMixin):
+class _UnsupportedOProjLinearMethod(WeightSwitchMixin):
     pass
 
 
-class TestAscendSFAOProjTPParams(TestBase):
+class TestAscendSFAOProjWeightSwitch(TestBase):
     class _OProj(torch.nn.Module):
         def __init__(self, linear_method):
             super().__init__()
@@ -62,8 +63,13 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
         impl.tp_size = 2
         impl.o_proj = self._OProj(linear_method or _OProjLinearMethod())
-        impl._o_proj_tp_weight_switch_enabled = False
-        impl.o_proj_tp_weight_state = None
+        impl._o_proj_weight_switch_enabled = False
+        impl.o_proj_weight_state = None
+        impl.o_proj_weight_switch_config = WeightSwitchConfig(
+            group=object(),
+            world_size=2,
+            rank=0,
+        )
         return impl
 
     def test_enable_o_proj_switch_uses_mixin_state_and_is_idempotent(self):
@@ -71,23 +77,23 @@ class TestAscendSFAOProjTPParams(TestBase):
         original_weight_ptr = impl.o_proj.weight.data_ptr()
         original_scale_ptr = impl.o_proj.weight_scale.data_ptr()
 
-        impl._enable_o_proj_tp_full_weight_switch()
+        impl._enable_o_proj_full_weight_switch()
 
-        state = impl.o_proj_tp_weight_state
-        self.assertTrue(impl._o_proj_tp_weight_switch_enabled)
-        self.assertEqual(state.gather_parts["weight"].tp_tensor.data_ptr(), original_weight_ptr)
-        self.assertEqual(state.gather_parts["weight_scale"].tp_tensor.data_ptr(), original_scale_ptr)
+        state = impl.o_proj_weight_state
+        self.assertTrue(impl._o_proj_weight_switch_enabled)
+        self.assertEqual(state.gather_parts["weight"].local_tensor.data_ptr(), original_weight_ptr)
+        self.assertEqual(state.gather_parts["weight_scale"].local_tensor.data_ptr(), original_scale_ptr)
         self.assertEqual(state.gather_parts["weight"].full_tensor.shape, (8, 3))
         self.assertEqual(state.gather_parts["weight_scale"].full_tensor.shape, (4, 3))
         self.assertEqual(len(AscendSFADSACPImpl.o_proj_full_pools), 2)
 
-        impl._enable_o_proj_tp_full_weight_switch()
-        self.assertIs(impl.o_proj_tp_weight_state, state)
+        impl._enable_o_proj_full_weight_switch()
+        self.assertIs(impl.o_proj_weight_state, state)
 
-    def test_o_proj_full_weight_forward_restores_tp_storage(self):
+    def test_o_proj_full_weight_forward_restores_local_storage(self):
         impl = self._make_impl()
-        impl._enable_o_proj_tp_full_weight_switch()
-        state = impl.o_proj_tp_weight_state
+        impl._enable_o_proj_full_weight_switch()
+        state = impl.o_proj_weight_state
         original_weight_ptr = impl.o_proj.weight.data_ptr()
         original_scale_ptr = impl.o_proj.weight_scale.data_ptr()
         full_weight_ptr = state.gather_parts["weight"].full_tensor.data_ptr()
@@ -149,8 +155,8 @@ class TestAscendSFAOProjTPParams(TestBase):
     def test_enable_o_proj_switch_rejects_unsupported_method(self):
         impl = self._make_impl(_UnsupportedOProjLinearMethod())
 
-        with self.assertRaisesRegex(RuntimeError, "TP weight-switch capable"):
-            impl._enable_o_proj_tp_full_weight_switch()
+        with self.assertRaisesRegex(RuntimeError, "weight-switch capable"):
+            impl._enable_o_proj_full_weight_switch()
 
     def test_no_indexer_full_o_proj_still_opens_gate_and_saves_layer(self):
         impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)

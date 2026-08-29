@@ -13,7 +13,7 @@ if "torch_npu._inductor" not in sys.modules:
 
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl, DSACPMetadata
 from vllm_ascend.device.hardware_profile import HardwareCapability
-from vllm_ascend.quantization.tp_weight_switch import (
+from vllm_ascend.weight_switch import (
     TPWeightGatherSpec,
     TPWeightSwitchMixin,
 )
