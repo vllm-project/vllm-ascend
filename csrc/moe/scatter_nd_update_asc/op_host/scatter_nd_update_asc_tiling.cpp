@@ -251,8 +251,8 @@ ge::graphStatus ScatterNdUpdateAscTiling::DoOpTiling()
     blockNum_ = (c_ + blockFactor_ - 1) / blockFactor_;
     blockFactorTail_ = c_ - (blockNum_ - 1) * blockFactor_;
 
-    // ub_factor condtion
-    // ub only constains update
+    // ub_factor condition
+    // ub only contains update
     ubFactor_ = ubSize_ / DB_CONST / bAlign_ / varDtypeSize_;
     OPS_ERR_IF(
     (ubFactor_ < 1),
