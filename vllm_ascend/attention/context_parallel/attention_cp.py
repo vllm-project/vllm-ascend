@@ -124,10 +124,7 @@ class AscendAttentionDCPMetadataBuilder(
         dcp_metadata = self._require_dcp_metadata(common_attn_metadata)
         dcp_query_lens = dcp_metadata.query_lens_cpu
         if dcp_query_lens is not None:
-            query_lens = dcp_query_lens[: num_decodes + num_prefills].to(
-                device=query_lens.device, 
-                dtype=query_lens.dtype
-            )
+            query_lens = dcp_query_lens[: num_decodes + num_prefills]
         prefill_metadata = None
         if num_prefills > 0:
             prefill_query_lens = query_lens[num_decodes:]
