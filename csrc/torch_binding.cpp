@@ -1903,7 +1903,11 @@ at::Tensor npu_sparse_attention_score_prefill(
                                        "than 0, but shape[", i, "] is ", query.size(i));
     }
 
-    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
+    at::ScalarType out_dtype = query.scalar_type();
+    if (query.scalar_type() == at::kFloat8_e4m3fn) {
+        out_dtype = at::kBFloat16;
+    }
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(out_dtype));
 
     EXEC_NPU_CMD(
         aclnnMinimaxSparseAttentionSplitKv,
@@ -2688,7 +2692,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
         "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
         "int num_key_value_heads=1, float scale_value=1.0, "
-        "int block_size=128, int top_k=16, int inner_precise=0) -> Tensor"
+        "int block_size=128, int top_k=16, int inner_precise=0, "
+        "ScalarType? attention_out_dtype=None) -> Tensor"
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);

@@ -81,6 +81,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -115,6 +116,32 @@ from vllm_ascend.worker.v2.pp_utils import (
 from vllm_ascend.worker.v2.pp_utils import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+_FP8_E4M3_MAX = 448.0
+
+
+def _resolve_layer_kv_cache_dtype(
+    cache_config: CacheConfig | None,
+    prefix: str,
+) -> str:
+    """Resolve the per-layer KV dtype using vLLM's skip-layer semantics."""
+    if cache_config is None:
+        return "auto"
+
+    kv_cache_dtype = cache_config.cache_dtype
+    skip_layers = getattr(cache_config, "kv_cache_dtype_skip_layers", None)
+    if skip_layers and str(extract_layer_index(prefix)) in skip_layers:
+        kv_cache_dtype = "auto"
+    return kv_cache_dtype
+
+
+def _cast_for_cache(tensor: torch.Tensor, cache: torch.Tensor) -> torch.Tensor:
+    """Cast fixed-scale MiniMax-M3 KV values to the physical cache dtype."""
+    if tensor.dtype == cache.dtype:
+        return tensor
+    if cache.dtype == torch.float8_e4m3fn:
+        tensor = tensor.clamp(min=-_FP8_E4M3_MAX, max=_FP8_E4M3_MAX)
+    return tensor.to(cache.dtype)
 
 
 def _scatter_index_cache(
@@ -260,7 +287,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         vllm_config = get_current_vllm_config()
         self.layer_name = f"{prefix}.attn"
-        self.kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "auto"
+        self.kv_cache_dtype = _resolve_layer_kv_cache_dtype(cache_config, prefix)
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
         self.attn_backend = AscendMiniMaxM3SparseBackend
         self.impl = AscendMiniMaxM3SparseImpl(
@@ -285,6 +312,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             init_blocks=sparse_cfg.get("sparse_init_block", 0),
             local_blocks=sparse_cfg.get("sparse_local_block", 0),
             cache_config=cache_config,
+            kv_cache_dtype=self.kv_cache_dtype,
+            kv_cache_torch_dtype=self.kv_cache_torch_dtype,
         )
 
         compilation_config = vllm_config.compilation_config
@@ -326,6 +355,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         num_tokens = main_meta.num_actual_tokens
         k_insert = key[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
         v_insert = value[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
+        k_insert = _cast_for_cache(k_insert, key_cache)
+        v_insert = _cast_for_cache(v_insert, value_cache)
         DeviceOperator.reshape_and_cache(
             k_insert,
             v_insert,
@@ -393,7 +424,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             )
 
         index_q, index_k = self._index_qk_norm(index_q, index_k)
-        index_q, index_k = self.rotary_emb(positions, index_q, index_k)
+        if self.indexer.index_cache.dtype == torch.float8_e4m3fn:
+            index_q, index_k = self.rotary_emb(
+                positions,
+                index_q,
+                index_k,
+                out_dtype=torch.float8_e4m3fn,
+            )
+        else:
+            index_q, index_k = self.rotary_emb(positions, index_q, index_k)
 
         return q, k, v, index_q, index_k
 
