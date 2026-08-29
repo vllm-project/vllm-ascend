@@ -277,6 +277,14 @@
     - tests/ut/kv_offload
     - tests/e2e/pull_request/one_card/test_cpu_offloading.py
 
+# Load Balance Proxy
+- name: load_balance_proxy
+  optional: false
+  source_file_dependencies:
+    - examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+  tests:
+    - tests/ut/proxy
+
 # Lora
 - name: lora
   optional: false
