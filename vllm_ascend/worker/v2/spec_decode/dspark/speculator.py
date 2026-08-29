@@ -26,7 +26,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
-from vllm_ascend.models.llama_eagle3 import (
+from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
 )

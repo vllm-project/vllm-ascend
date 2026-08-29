@@ -78,7 +78,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
-from vllm_ascend.models.llama_eagle3 import get_rotation_path
+from vllm_ascend.utils import get_rotation_path
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 
 if HAS_TRITON:

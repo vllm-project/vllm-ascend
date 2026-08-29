@@ -36,10 +36,10 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiMLAAttention,
 )
-from vllm_ascend.models.llama_eagle3 import (
+from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
+from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
-    load_quarot_target_layer,
 )
 from vllm_ascend.models.qwen3_dspark import (
     TARGET_EMBED_WEIGHT_NAMES,

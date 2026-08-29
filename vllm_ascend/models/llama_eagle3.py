@@ -10,6 +10,10 @@ from safetensors.torch import load_file
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm_ascend.utils import (
+    get_rotation_matrix,
+    get_rotation_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,33 +30,6 @@ def get_embedding_tensor(directory_path):
                 if "embed" in key.lower():
                     return tensor
     return None
-
-
-def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
-    quant_config = vllm_config.quant_config
-    if quant_config is None:
-        return None
-    target_model_path = vllm_config.model_config.model
-    try:
-        quant_description = quant_config.quant_description
-        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
-    except KeyError:
-        return None
-    return Path(target_model_path) / rotation_relative_path
-
-
-def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
-    """Load the global rotation matrix."""
-    try:
-        safetensor_data = load_file(rotation_path)
-        Q = safetensor_data["global_rotation"]
-        return Q
-    except Exception as e:
-        logger.error(
-            "Failed to load rotation weight from '%s'. If you want to use quarot model with eagle3, take a check.",
-            rotation_path,
-        )
-        raise e
 
 
 def _find_safetensors_weight(
