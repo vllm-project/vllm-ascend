@@ -29,7 +29,6 @@ from vllm_ascend.lora.fused_moe import (
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 from vllm_ascend.lora.utils import (
     AscendFusedMoE3DWithLoRA,
-    AscendFusedMoEWithLoRA,
     AscendMergedColumnParallelLinearWithLoRA,
     AscendMergedQKVParallelLinearWithLoRA,
     _PackedLoRAAWeightsMixin,
