@@ -25,7 +25,10 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import (
+    NPUModelRunner,
+    _mark_dsv4_c4_main_cache_for_offload,
+)
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):
@@ -73,6 +76,53 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
 
         self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
 
+
+class TestDeepSeekV4KVOffloadSpecRouting(unittest.TestCase):
+    @staticmethod
+    def _spec(compress_ratio: int, model_version: str = "deepseek_v4"):
+        return AscendMLAAttentionSpec(
+            block_size=512,
+            num_kv_heads=1,
+            head_size=256,
+            dtype=torch.bfloat16,
+            model_version=model_version,
+            compress_ratio=compress_ratio,
+        )
+
+    def test_marks_only_c4_main_attention_cache(self):
+        c4 = self._spec(4)
+        marked = _mark_dsv4_c4_main_cache_for_offload(
+            "model.layers.2.self_attn.attn",
+            c4,
+            True,
+        )
+
+        self.assertTrue(marked.store_on_host)
+        self.assertFalse(c4.store_on_host)
+
+    def test_keeps_other_dsv4_cache_components_on_device(self):
+        cases = (
+            ("model.layers.2.self_attn.attn", self._spec(128)),
+            ("model.layers.2.self_attn.indexer.k_cache", self._spec(4)),
+            ("model.layers.2.self_attn.compressor.state_cache", self._spec(4)),
+            ("model.layers.2.self_attn.attn", self._spec(4, "deepseek_v3")),
+        )
+
+        for layer_name, spec in cases:
+            with self.subTest(layer_name=layer_name, ratio=spec.compress_ratio):
+                routed = _mark_dsv4_c4_main_cache_for_offload(layer_name, spec, True)
+                self.assertIs(routed, spec)
+                self.assertFalse(routed.store_on_host)
+
+    def test_disabled_offload_does_not_rewrite_spec(self):
+        spec = self._spec(4)
+        routed = _mark_dsv4_c4_main_cache_for_offload(
+            "model.layers.2.self_attn.attn",
+            spec,
+            False,
+        )
+
+        self.assertIs(routed, spec)
 
 class TestAcceptedTokenSnapshot(unittest.TestCase):
     def _build_runner(self):

@@ -158,18 +158,6 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         invalid_cases = (
             ({"device.0": specs["device.0"]}, "at least one host"),
             ({"host.0": specs["host.0"]}, "at least one device"),
-            (
-                {
-                    **specs,
-                    "device.1": _FakeKVCacheSpec(
-                        page_size_bytes=512,
-                        max_blocks_per_request=100,
-                        store_on_host=False,
-                        block_size=64,
-                    ),
-                },
-                "one shared block size",
-            ),
         )
 
         for invalid_specs, message in invalid_cases:
@@ -181,6 +169,25 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                     dram_limit_bytes=alignment_reserve + 1000 * 2048,
                     keep_device_kv_cache=False,
                 )
+
+    def test_memory_plan_supports_hybrid_block_sizes(self):
+        specs, vllm_config, alignment_reserve = _make_memory_plan_inputs()
+        specs["host.0"].block_size = 512
+        specs["host.1"].block_size = 512
+        specs["device.0"].block_size = 64
+
+        budget = plan_sparse_kv_offload_memory(
+            kv_cache_spec=specs,
+            vllm_config=vllm_config,
+            available_device_memory_bytes=1000 * 512,
+            dram_limit_bytes=alignment_reserve + 1000 * 2048,
+            keep_device_kv_cache=False,
+        )
+
+        self.assertEqual(budget.npu_limit_blocks, 1000)
+        self.assertEqual(budget.dram_limit_blocks, 1000)
+        self.assertEqual(budget.workload_limit_blocks, 201)
+        self.assertEqual(budget.final_num_blocks, 201)
 
     def test_cpu_pool_size_includes_per_layer_alignment_reserve(self):
         specs, _, alignment_reserve = _make_memory_plan_inputs()
