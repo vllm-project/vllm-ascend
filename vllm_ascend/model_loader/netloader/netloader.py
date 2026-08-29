@@ -54,6 +54,14 @@ class _FallbackCleanupContext:
     memory_baseline: tuple[int, int] | None
 
 
+@dataclass
+class _FallbackReclaimResult:
+    attempts: int
+    before: tuple[int, int] | None
+    after: tuple[int, int] | None
+    reached_baseline: bool
+
+
 @contextmanager
 def pre_transfer_weight_processing(model: nn.Module):
     """Unwrap MoE shared-expert validation during pre-transfer process_weights."""
@@ -289,8 +297,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
     ) -> None:
         """Remove new keys and any registrations owned by the failed model."""
         stale_modules = set(failed_model.modules()) if failed_model is not None else set()
-        removed_contexts = []
-        for source, static_forward_context in ModelNetLoaderElastic._iter_static_forward_contexts(vllm_config):
+        for _, static_forward_context in ModelNetLoaderElastic._iter_static_forward_contexts(vllm_config):
             keep_keys = snapshots.get(id(static_forward_context), set())
             new_keys = [
                 key
@@ -299,14 +306,6 @@ class ModelNetLoaderElastic(BaseModelLoader):
             ]
             for key in new_keys:
                 del static_forward_context[key]
-            if new_keys:
-                removed_contexts.append(f"{source}:{len(new_keys)}")
-
-        if removed_contexts:
-            logger.info(
-                "Removed new static_forward_context keys before fallback: %s",
-                removed_contexts,
-            )
 
     @staticmethod
     def _snapshot_static_all_moe_layers(
@@ -322,14 +321,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
     @staticmethod
     def _restore_static_all_moe_layers(snapshots: dict[int, tuple[list[Any], list[Any]]]) -> None:
-        restored = []
         for static_all_moe_layers, baseline_layers in snapshots.values():
-            removed_count = max(0, len(static_all_moe_layers) - len(baseline_layers))
             static_all_moe_layers[:] = baseline_layers
-            if removed_count:
-                restored.append(removed_count)
-        if restored:
-            logger.info("Removed new static_all_moe_layers entries before fallback: %s", restored)
 
     @staticmethod
     def _snapshot_rope_cache() -> dict[Any, Any] | None:
@@ -349,11 +342,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
             from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
             if isinstance(_ROPE_DICT, dict):
-                removed_count = len([key for key in _ROPE_DICT if key not in snapshot])
                 _ROPE_DICT.clear()
                 _ROPE_DICT.update(snapshot)
-                if removed_count:
-                    logger.info("Removed new _ROPE_DICT entries before fallback: %s", removed_count)
         except Exception as exc:
             logger.debug("Netloader fallback: skip restoring _ROPE_DICT: %s", exc)
 
@@ -363,13 +353,9 @@ class ModelNetLoaderElastic(BaseModelLoader):
         try:
             from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 
-            cleaned = 0
             for module in model.modules():
                 if isinstance(module, TorchCompileWithNoGuardsWrapper):
                     module.cleanup()
-                    cleaned += 1
-            if cleaned:
-                logger.info("Removed compilation bytecode hooks before fallback: %s", cleaned)
         except Exception as exc:
             logger.warning("Netloader fallback: failed to remove compilation bytecode hooks: %s", exc)
 
@@ -421,36 +407,25 @@ class ModelNetLoaderElastic(BaseModelLoader):
     def _reclaim_failed_model_memory(
         device_type: str,
         memory_baseline: tuple[int, int] | None,
-    ) -> None:
+    ) -> _FallbackReclaimResult:
         if device_type != "npu":
             gc.collect()
             if device_type == "cuda":
-                logger.info("Empty CUDA cache")
                 torch.cuda.empty_cache()
-            return
+            return _FallbackReclaimResult(1, None, None, False)
 
         baseline_allocated = memory_baseline[0] if memory_baseline is not None else None
+        before = ModelNetLoaderElastic._get_npu_memory_usage(device_type)
+        after = None
+        reached_baseline = False
         for attempt in range(1, MAX_FALLBACK_MEMORY_RECLAIM_ATTEMPTS + 1):
-            before = ModelNetLoaderElastic._get_npu_memory_usage(device_type)
-            collected = gc.collect()
+            gc.collect()
             torch.npu.empty_cache()
             after = ModelNetLoaderElastic._get_npu_memory_usage(device_type)
             reached_baseline = baseline_allocated is not None and after is not None and after[0] <= baseline_allocated
-            logger.info(
-                "[netloader_client] stage=fallback_memory_reclaim attempt=%s collected=%s "
-                "baseline_allocated_mib=%s before_allocated_mib=%s before_reserved_mib=%s "
-                "after_allocated_mib=%s after_reserved_mib=%s reached_baseline=%s",
-                attempt,
-                collected,
-                f"{baseline_allocated / BYTES_PER_MIB:.2f}" if baseline_allocated is not None else "unknown",
-                f"{before[0] / BYTES_PER_MIB:.2f}" if before is not None else "unknown",
-                f"{before[1] / BYTES_PER_MIB:.2f}" if before is not None else "unknown",
-                f"{after[0] / BYTES_PER_MIB:.2f}" if after is not None else "unknown",
-                f"{after[1] / BYTES_PER_MIB:.2f}" if after is not None else "unknown",
-                reached_baseline,
-            )
             if reached_baseline:
                 break
+        return _FallbackReclaimResult(attempt, before, after, reached_baseline)
 
     def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
         """
@@ -525,27 +500,24 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 with target_device:
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
                 elastic_model = model
+                fallback_reason = "elastic load failed"
 
                 if load_int8_cache == "no":
                     try:
                         with pre_transfer_weight_processing(model):
                             process_weights_after_loading(model, model_config, torch.device(device_config.device))
                         synchronize_npu(device_config.device_type)
+                        manifest_build_start = time.perf_counter()
                         manifest_count = cache_processed_layout_transfer_manifest(model)
                         logger.info(
-                            "Netloader client pre-recv process_weights done, rank: %s, manifest=%s",
+                            "Netloader manifest build time: %s, rank: %s, manifest=%s",
+                            time.perf_counter() - manifest_build_start,
                             device_id,
                             manifest_count,
                         )
                     except Exception as exc:
-                        logger.warning(
-                            "Netloader pre-recv process_weights failed, rank: %s, fallback to DefaultModelLoader: %s",
-                            device_id,
-                            exc,
-                        )
+                        fallback_reason = f"pre-recv preparation failed: {exc}"
                         model = None
-                start_elastic_load = time.perf_counter()
-
                 # Narrowed by has_valid_source above.
                 assert self.source is not None
                 sources: list[dict] = self.source
@@ -565,7 +537,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         if isinstance(s, dict) and "device_id" in s
                     ]
                     if any(int(addr.rsplit(":", 1)[1]) > 65535 for s in sources for addr in s.get("sources", [])):
-                        logger.warning("Skip draft elastic load: source port exceeds 65535")
+                        fallback_reason = "draft source port exceeds 65535"
                         model = None
 
                 if model is not None:
@@ -579,15 +551,14 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         group_name="netloader_draft" if is_draft else "netloader",
                         int8_cache=load_int8_cache,
                     )
-                logger.info(
-                    "Elastic load time: %s, rank: %s",
-                    time.perf_counter() - start_elastic_load,
-                    device_id,
-                )
                 need_process_weights_after_loading = load_int8_cache != "no"
 
                 if model is None:
-                    logger.warning("Netloader elastic loading fails, use load format DefaultModelLoader")
+                    logger.warning(
+                        "Netloader load failed, fallback to DefaultModelLoader, rank=%s, reason=%s",
+                        device_id,
+                        fallback_reason,
+                    )
 
                     if hasattr(vllm_config, "quant_config"):
                         vllm_config.quant_config = _quant_config
@@ -599,15 +570,33 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         fallback_cleanup_context,
                     )
                     elastic_model = None
-                    self._reclaim_failed_model_memory(
+                    reclaim_result = self._reclaim_failed_model_memory(
                         device_config.device_type,
                         fallback_cleanup_context.memory_baseline,
                     )
+                    baseline_allocated = (
+                        fallback_cleanup_context.memory_baseline[0]
+                        if fallback_cleanup_context.memory_baseline is not None
+                        else None
+                    )
                     logger.info(
-                        "[netloader_client] stage=fallback_reference_cleanup "
-                        "model_released=%s remaining_eplb_layers=%s",
+                        "[netloader_client] stage=fallback_cleanup rank=%s attempts=%s model_released=%s "
+                        "baseline_allocated_mib=%s before_allocated_mib=%s after_allocated_mib=%s "
+                        "after_reserved_mib=%s reached_baseline=%s",
+                        device_id,
+                        reclaim_result.attempts,
                         elastic_model_ref() is None,
-                        len(fallback_cleanup_context.eplb_layers),
+                        f"{baseline_allocated / BYTES_PER_MIB:.2f}" if baseline_allocated is not None else "unknown",
+                        f"{reclaim_result.before[0] / BYTES_PER_MIB:.2f}"
+                        if reclaim_result.before is not None
+                        else "unknown",
+                        f"{reclaim_result.after[0] / BYTES_PER_MIB:.2f}"
+                        if reclaim_result.after is not None
+                        else "unknown",
+                        f"{reclaim_result.after[1] / BYTES_PER_MIB:.2f}"
+                        if reclaim_result.after is not None
+                        else "unknown",
+                        reclaim_result.reached_baseline,
                     )
 
                     if not is_draft:

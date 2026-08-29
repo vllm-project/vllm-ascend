@@ -319,7 +319,7 @@ def test_fallback_cleanup_context_releases_references_and_restores_state(monkeyp
     ("memory_usage", "expected_attempts"),
     [
         ([(300, 400), (100, 150)], 1),
-        ([(300, 400), (250, 300), (250, 300), (100, 150)], 2),
+        ([(300, 400), (250, 300), (100, 150)], 2),
     ],
 )
 @patch("vllm_ascend.model_loader.netloader.netloader.torch.npu.empty_cache")
@@ -335,11 +335,13 @@ def test_reclaim_failed_model_memory_attempts(
         "_get_npu_memory_usage",
         side_effect=memory_usage,
     ) as mock_memory_usage:
-        ModelNetLoaderElastic._reclaim_failed_model_memory("npu", (100, 200))
+        result = ModelNetLoaderElastic._reclaim_failed_model_memory("npu", (100, 200))
 
+    assert result.attempts == expected_attempts
+    assert result.reached_baseline is True
     assert mock_gc.call_count == expected_attempts
     assert mock_empty_cache.call_count == expected_attempts
-    assert mock_memory_usage.call_count == expected_attempts * 2
+    assert mock_memory_usage.call_count == expected_attempts + 1
 
 
 def test_pre_transfer_weight_processing_unwraps_and_restores_quant_methods():
@@ -413,6 +415,7 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
     result = make_loader_with_config(extra).load_model(DummyVllmConfig(), DummyModelConfig())
     assert isinstance(result, nn.Module)
     assert (tmp_path / "output_0.txt").exists()
+    assert any("Netloader manifest build time" in call.args[0] for call in mock_logger.info.call_args_list)
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
@@ -425,10 +428,11 @@ def test_target_elastic_failure_sets_fallback_flag(mock_logger, monkeypatch):
         "revert_to_default",
         lambda self, *args, **kwargs: (dummy_model, False),
     )
-    cleanup_context = object()
+    cleanup_context = SimpleNamespace(memory_baseline=None)
+    reclaim_result = SimpleNamespace(attempts=1, before=None, after=None, reached_baseline=False)
     monkeypatch.setattr(ModelNetLoaderElastic, "_create_fallback_cleanup_context", lambda *args: cleanup_context)
     monkeypatch.setattr(ModelNetLoaderElastic, "_release_failed_model_references", lambda *args: lambda: None)
-    monkeypatch.setattr(ModelNetLoaderElastic, "_reclaim_failed_model_memory", lambda *args: None)
+    monkeypatch.setattr(ModelNetLoaderElastic, "_reclaim_failed_model_memory", lambda *args: reclaim_result)
     _install_elastic_server(monkeypatch)
 
     extra = {
@@ -441,6 +445,9 @@ def test_target_elastic_failure_sets_fallback_flag(mock_logger, monkeypatch):
     loader.load_model(DummyVllmConfig(), DummyModelConfig())
 
     assert ModelNetLoaderElastic._target_elastic_fallback is True
+    log_formats = [call.args[0] for call in mock_logger.method_calls]
+    assert any("Netloader load failed" in message for message in log_formats)
+    assert any("stage=fallback_cleanup" in message for message in log_formats)
     ModelNetLoaderElastic._target_elastic_fallback = False
 
 
