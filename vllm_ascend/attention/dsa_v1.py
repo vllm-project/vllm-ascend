@@ -49,6 +49,7 @@ from vllm_ascend.utils import (
     olora_tp_enable,
     oproj_tp_enable,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -1668,6 +1669,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION)
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
