@@ -1774,7 +1774,25 @@ class AscendMLAImpl(MLAAttentionImpl):
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
+            import os as _os
+
+            if (
+                _os.environ.get("GLM53_FIA_REF") == "1"
+                and any(q_len > 1 for q_len in actual_seq_lengths)
+            ):
+                attn_output = _reference_mla_decode_attention(
+                    q_nope,
+                    k_nope,
+                    decode_meta.block_table,
+                    block_size,
+                    decode_meta.seq_lens_list,
+                    actual_seq_lengths,
+                    self.scale,
+                )
+            else:
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                    q_nope, k_nope, k_nope, **common_kwargs
+                )
 
         if self.head_padding > 0:
             attn_output = attn_output[: self.num_heads]
@@ -2158,6 +2176,49 @@ class AscendMLAPCPImpl(AscendMLAImpl):
 # step would allocate hundreds of MB per call. It is read-only zeros, so one
 # buffer per shape is shared across all layers.
 _MLA_NOPE_ZERO_ROPE: dict = {}
+
+
+def _reference_mla_decode_attention(
+    q_nope: torch.Tensor,
+    k_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    seq_lens_list: list[int],
+    actual_seq_lengths: list[int],
+    scale: float,
+) -> torch.Tensor:
+    """Hand-rolled MLA decode attention (spec-verify debug reference).
+
+    Mirrors the FIA TND_NTD contract: q [T, H, D], output [H, T, D]. Query i
+    of a sequence attends KV[0 : kv_len - qlen + i + 1] (causal within the
+    verify window). NoPE models contribute no rope score, so the nope dot
+    product is the full score.
+    """
+    num_heads = k_cache.shape[1]
+    outs = []
+    tok = 0
+    for s, qlen in enumerate(actual_seq_lengths):
+        if qlen <= 0:
+            continue
+        kv_len = int(seq_lens_list[s]) if s < len(seq_lens_list) else 0
+        if kv_len <= 0:
+            outs.append(q_nope.new_zeros(num_heads, qlen, q_nope.shape[-1]))
+            tok += qlen
+            continue
+        block_ids = block_table[:, s].tolist()
+        keys = torch.cat(
+            [k_cache[int(b), :, :block_size, :] for b in block_ids if int(b) >= 0],
+            dim=1,
+        )[:, :kv_len, :]
+        q = q_nope[tok : tok + qlen].float()
+        for i in range(qlen):
+            visible = keys[:, : kv_len - qlen + i + 1, :].float()
+            att = torch.einsum("hd,htd->ht", q[i], visible) * scale
+            p = torch.softmax(att, dim=-1)
+            o = torch.einsum("ht,htd->hd", p, visible)
+            outs.append(o.to(q_nope.dtype))
+        tok += qlen
+    return torch.stack(outs, dim=1)
 
 
 def _mla_nope_zero_rope(ref: torch.Tensor, rope_dim: int) -> torch.Tensor:

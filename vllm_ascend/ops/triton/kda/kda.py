@@ -155,6 +155,75 @@ def fused_recurrent_kda(
     if sigmoid_beta:
         beta = beta.float().sigmoid()
 
+    if num_accepted_tokens is not None and cu_seqlens is not None:
+        # The kernel's IS_SPEC_DECODING branch mis-addresses state slots for
+        # later sequences (state written as NaN / AI-core faults at larger
+        # shapes). Its plain-decode branch is correct, so decompose the verify
+        # step: run each accepted prefix token as its own single-token step on
+        # the per-sequence state slot, then report the outputs at the verify
+        # token positions.
+        n_seqs = len(cu_seqlens) - 1
+        acc = num_accepted_tokens.tolist() if num_accepted_tokens.dim() == 1 else num_accepted_tokens[:, 0].tolist()
+        idx_2d = ssm_state_indices if ssm_state_indices.dim() == 2 else ssm_state_indices.unsqueeze(-1)
+        o_full = torch.zeros(
+            q.shape[0], q.shape[1], q.shape[2], v.shape[-1], dtype=v.dtype, device=q.device
+        )
+        for i in range(n_seqs):
+            bos_i, eos_i = int(cu_seqlens[i]), int(cu_seqlens[i + 1])
+            n_tok = eos_i - bos_i
+            n_acc = int(acc[i])
+            if n_tok <= 0 or n_acc <= 0:
+                continue
+            slot = idx_2d[i, :1]  # single-token step reads column i_t=0
+            n_acc = min(n_acc, n_tok)
+            # Phase 1 — accepted prefix: outputs + committed final state.
+            for t in range(n_acc):
+                pos = bos_i + t
+                o_step, _ = fused_recurrent_kda_fwd(
+                    q=q[:, pos : pos + 1].contiguous(),
+                    k=k[:, pos : pos + 1].contiguous(),
+                    v=v[:, pos : pos + 1].contiguous(),
+                    g=g[:, pos : pos + 1].contiguous(),
+                    beta=beta[:, pos : pos + 1].contiguous(),
+                    scale=scale,
+                    initial_state=initial_state,
+                    inplace_final_state=inplace_final_state,
+                    cu_seqlens=torch.tensor([0, 1], dtype=cu_seqlens.dtype, device=cu_seqlens.device),
+                    ssm_state_indices=slot,
+                    num_accepted_tokens=None,
+                    use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                )
+                o_full[:, pos] = o_step[:, 0]
+            # Phase 2 — remaining verify tokens (rejected positions) still
+            # need outputs for the verify forward; the state they leave is
+            # overwritten by nothing because the last accepted step already
+            # committed the correct state. Run them AFTER so the committed
+            # state is what survives only if we restore it; capture it first.
+            if n_tok > n_acc:
+                committed = initial_state[
+                    int(slot[0].item())
+                ].clone()
+                for t in range(n_acc, n_tok):
+                    pos = bos_i + t
+                    o_step, _ = fused_recurrent_kda_fwd(
+                        q=q[:, pos : pos + 1].contiguous(),
+                        k=k[:, pos : pos + 1].contiguous(),
+                        v=v[:, pos : pos + 1].contiguous(),
+                        g=g[:, pos : pos + 1].contiguous(),
+                        beta=beta[:, pos : pos + 1].contiguous(),
+                        scale=scale,
+                        initial_state=initial_state,
+                        inplace_final_state=inplace_final_state,
+                        cu_seqlens=torch.tensor([0, 1], dtype=cu_seqlens.dtype, device=cu_seqlens.device),
+                        ssm_state_indices=slot,
+                        num_accepted_tokens=None,
+                        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+                    )
+                    o_full[:, pos] = o_step[:, 0]
+                # Restore the state committed at the accepted boundary.
+                initial_state[int(slot[0].item())] = committed
+        return o_full, initial_state
+
     o, final_state = fused_recurrent_kda_fwd(
         q=q.contiguous(),
         k=k.contiguous(),
