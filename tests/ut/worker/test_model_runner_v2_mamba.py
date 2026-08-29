@@ -27,16 +27,23 @@ from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
 )
 
 
-def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0) -> KVCacheTensor:
+def _make_kv_cache_tensor(
+    size: int,
+    layer_names: list[str],
+    page_size: int = 0,
+    *,
+    layer_stride: int | None = None,
+    offset: int = 0,
+) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
     if vllm_version_is("0.27.1"):
         return KVCacheTensor(size=size, shared_by=layer_names)
     return KVCacheTensor(
         size=size,
         layers=layer_names,
-        layer_stride=page_size,
+        layer_stride=page_size if layer_stride is None else layer_stride,
         block_stride=page_size,
-        offset=0,
+        offset=offset,
     )
 
 
@@ -182,10 +189,20 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
         kv_cache_tensors=[
-            _make_kv_cache_tensor(40, ["full_attn", "linear_attn"], 20),
-            # Hybrid models can have an attention-only slot (for example an
-            # MTP layer). It must still use the common single-tensor layout.
-            _make_kv_cache_tensor(40, ["mtp_attn"], 20),
+            _make_kv_cache_tensor(
+                80,
+                ["full_attn", "mtp_attn"],
+                20,
+                layer_stride=40,
+            ),
+            # Every descriptor aliases the same backing. The Mamba group starts
+            # at byte zero and overlays the first attention-layer region.
+            _make_kv_cache_tensor(
+                80,
+                ["linear_attn"],
+                20,
+                layer_stride=40,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -205,8 +222,15 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     )
     raw_cache = raw_caches["linear_attn"]
     assert isinstance(raw_cache, torch.Tensor)
-    assert raw_caches["full_attn"] is raw_cache
-    assert isinstance(raw_caches["mtp_attn"], torch.Tensor)
+    full_attn_raw = raw_caches["full_attn"]
+    mtp_attn_raw = raw_caches["mtp_attn"]
+    assert isinstance(full_attn_raw, torch.Tensor)
+    assert isinstance(mtp_attn_raw, torch.Tensor)
+    assert full_attn_raw.data_ptr() == raw_cache.data_ptr()
+    backing_ptr = raw_cache.untyped_storage().data_ptr()
+    assert full_attn_raw.untyped_storage().data_ptr() == backing_ptr
+    assert mtp_attn_raw.untyped_storage().data_ptr() == backing_ptr
+    assert mtp_attn_raw.data_ptr() - backing_ptr == 40
 
     backend = MagicMock()
     backend.get_kv_cache_shape.return_value = (2, 2, 4, 1, 1)
@@ -247,6 +271,8 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert value_cache.is_contiguous()
     assert mtp_key_cache.shape == key_cache.shape
     assert mtp_value_cache.shape == value_cache.shape
+    assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
+    assert mtp_value_cache.data_ptr() - value_cache.data_ptr() == 40
 
 
 @patch(
