@@ -359,6 +359,40 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
                     expected,
                 )
 
+    def test_use_gva_layerwise_derived_in_init(self):
+        """Regression test: the connector must derive use_gva_layerwise in
+        __init__ (a #14465-era cleanup deleted the derivation while
+        set_external_slot_release_waiter still read the attribute, so plain
+        connector construction crashed with AttributeError).
+        """
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        cases = [
+            ({"use_layerwise": True, "backend": "memcache"}, True),
+            ({"use_layerwise": True, "backend": "Memcache"}, True),
+            ({"use_layerwise": True}, False),  # default backend mooncake
+            ({"use_layerwise": True, "backend": "mooncake"}, False),
+            ({}, False),
+        ]
+        for extra_config, expected in cases:
+            with (
+                self.subTest(extra_config=extra_config),
+                patch.object(self.connector_mod, "KVPoolWorker") as _mock_worker_cls,
+                patch.object(self.connector_mod, "LookupKeyServer") as _mock_lookup_cls,
+            ):
+                config = MagicMock()
+                config.kv_transfer_config.kv_role = "kv_producer"
+                config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+                config.kv_transfer_config.kv_connector_extra_config = extra_config
+                config.parallel_config.rank = 0
+
+                connector = self.connector_mod.AscendStoreConnector(
+                    vllm_config=config,
+                    role=KVConnectorRole.WORKER,
+                    kv_cache_config=None,
+                )
+                self.assertIs(connector.use_gva_layerwise, expected)
+
     def test_layerwise_worker_paths(self):
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 

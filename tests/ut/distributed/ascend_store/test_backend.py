@@ -23,6 +23,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    _BACKEND_CAPABILITIES,
+    backend_map,
+    backend_supports,
+    use_gva_layerwise,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     DEFAULT_TENANT_ID,
@@ -49,6 +55,39 @@ class TestBackendABC(unittest.TestCase):
     def test_cannot_instantiate(self):
         with self.assertRaises(TypeError):
             Backend(MagicMock())  # type: ignore[abstract]
+
+
+# =========================================================================
+# Backend capability registry
+# =========================================================================
+class TestBackendCapabilities(unittest.TestCase):
+    def test_use_gva_layerwise_truth_table(self):
+        cases = [
+            (True, "memcache", True),
+            (False, "memcache", False),
+            (True, "mooncake", False),
+            (True, "yuanrong", False),
+            (True, "unknown", False),
+            (True, "Memcache", False),
+        ]
+        for use_layerwise, backend_name, expected in cases:
+            with self.subTest(use_layerwise=use_layerwise, backend_name=backend_name):
+                self.assertEqual(use_gva_layerwise(use_layerwise, backend_name), expected)
+
+    def test_backend_supports(self):
+        self.assertTrue(backend_supports("memcache", "gva_layerwise"))
+        self.assertFalse(backend_supports("mooncake", "gva_layerwise"))
+        self.assertFalse(backend_supports("yuanrong", "gva_layerwise"))
+        self.assertFalse(backend_supports("memcache", "nonexistent_capability"))
+        self.assertFalse(backend_supports("unknown", "gva_layerwise"))
+
+    def test_every_registered_backend_has_capabilities_entry(self):
+        # Every backend in backend_map must have an explicit capabilities
+        # entry so that adding a new backend without updating the registry
+        # is caught here instead of silently degrading to "no capabilities".
+        for backend_name in backend_map:
+            with self.subTest(backend_name=backend_name):
+                self.assertIn(backend_name, _BACKEND_CAPABILITIES)
 
 
 def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
