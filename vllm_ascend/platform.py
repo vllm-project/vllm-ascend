@@ -83,12 +83,19 @@ def _import_fla_npu_before_custom_opp() -> None:
     """
     import os
 
-    if os.environ.get("VLLM_ASCEND_GDN_BACKEND", "auto").strip().lower() == "native":
+    backend = os.environ.get("VLLM_ASCEND_GDN_BACKEND", "auto").strip().lower()
+    operator_overrides = os.environ.get("VLLM_ASCEND_GDN_OP_BACKENDS", "")
+    fla_override_requested = any(
+        entry.count("=") == 1
+        and entry.split("=", 1)[1].strip().lower() == "fla_npu"
+        for entry in operator_overrides.split(",")
+    )
+    if backend == "native" and not fla_override_requested:
         return
     try:
-        from vllm_ascend.device.device_config import is_950
+        from vllm_ascend.device.device_config import is_fla_gdn_supported
 
-        if not is_950():
+        if not is_fla_gdn_supported():
             return
     except Exception:
         return

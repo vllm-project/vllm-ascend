@@ -8,14 +8,112 @@ from vllm.platforms import PlatformEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
 
-from tests.ut.base import TestBase
+from tests.ut.base import PytestBase, TestBase
 from vllm_ascend.ascend_forward_context import MoECommType, override_mrv2_in_profile_run
-from vllm_ascend.platform import NPUPlatform, _setup_compile_backend, _validate_eplb_config
+from vllm_ascend.platform import (
+    NPUPlatform,
+    _import_fla_npu_before_custom_opp,
+    _setup_compile_backend,
+    _validate_eplb_config,
+)
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
 )
+
+
+class TestFlaGDNPreload(PytestBase):
+    @pytest.mark.parametrize(
+        "device_type",
+        [AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType.A5],
+    )
+    @pytest.mark.parametrize("backend", ["auto", "fla_npu"])
+    def test_runs_on_all_supported_accelerators(
+        self, monkeypatch, device_type, backend
+    ):
+        """Catch regressions that restrict FLA OPP preload to A5."""
+        imported_modules = []
+        monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", backend)
+        monkeypatch.setattr(
+            "vllm_ascend.device.device_config.get_ascend_device_type",
+            lambda: device_type,
+        )
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda module_name: imported_modules.append(module_name),
+        )
+
+        _import_fla_npu_before_custom_opp()
+
+        assert imported_modules == ["fla_npu.ops.ascendc"]
+
+    def test_honors_fla_operator_override(self, monkeypatch):
+        """Preload FLA when an operator override opts in from native mode."""
+        imported_modules = []
+        monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "native")
+        monkeypatch.setenv(
+            "VLLM_ASCEND_GDN_OP_BACKENDS",
+            "gdn_core_fwd=fla_npu",
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.device.device_config.get_ascend_device_type",
+            lambda: AscendDeviceType.A2,
+        )
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda module_name: imported_modules.append(module_name),
+        )
+
+        _import_fla_npu_before_custom_opp()
+
+        assert imported_modules == ["fla_npu.ops.ascendc"]
+
+    @pytest.mark.parametrize(
+        ("device_type", "backend"),
+        [
+            (AscendDeviceType._310P, "auto"),
+            (AscendDeviceType.A2, "native"),
+        ],
+    )
+    def test_skips_ineligible_configurations(
+        self, monkeypatch, device_type, backend
+    ):
+        imported_modules = []
+        monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", backend)
+        monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
+        monkeypatch.setattr(
+            "vllm_ascend.device.device_config.get_ascend_device_type",
+            lambda: device_type,
+        )
+        monkeypatch.setattr(
+            "importlib.import_module",
+            lambda module_name: imported_modules.append(module_name),
+        )
+
+        _import_fla_npu_before_custom_opp()
+
+        assert imported_modules == []
+
+    def test_import_kernels_preloads_before_custom_opp_bootstrap(self, monkeypatch):
+        from vllm_ascend import platform
+
+        events = []
+        monkeypatch.setattr(platform, "_CUSTOM_OP_REGISTERED", False)
+        monkeypatch.setattr(
+            platform,
+            "_import_fla_npu_before_custom_opp",
+            lambda: events.append("fla_npu"),
+        )
+        monkeypatch.setattr(
+            platform,
+            "bootstrap_custom_op_env",
+            lambda: events.append("custom_opp"),
+        )
+
+        NPUPlatform.import_kernels()
+
+        assert events == ["fla_npu", "custom_opp"]
 
 
 class TestNPUPlatform(TestBase):
