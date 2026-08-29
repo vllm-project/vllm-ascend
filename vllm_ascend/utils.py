@@ -986,6 +986,7 @@ def get_hccl_config_for_pg_options(group_name: str) -> dict | None:
     # FIXME: Current mc2 operators only perform communication space partitioning
     # based on HCCL_BUFFSIZE configuration. Using pg_options with mc2 group would
     # result in memory misalignment problems.
+    # For mc2/mc2_draft group
     if group_name and "mc2" in group_name:
         return None
     hccl_config_map = {
