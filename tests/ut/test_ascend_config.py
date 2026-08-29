@@ -103,7 +103,7 @@ class TestAscendConfig(TestBase):
     def _make_model_config(
         total_num_attention_heads: int = 32,
         total_num_kv_heads: int = 8,
-        is_deepseek_mla: bool = False,
+        is_deepseek_mla: bool = True,
     ):
         return SimpleNamespace(
             is_deepseek_mla=is_deepseek_mla,
