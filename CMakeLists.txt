@@ -58,11 +58,13 @@ set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/op_kernel/grouped_matmul_situ_quant_kernel.cpp
 )
 
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/op_kernel/grouped_matmul_situ_quant_kernel.cpp
 )
 
 if(SOC_VERSION MATCHES "ascend950")
@@ -76,6 +78,12 @@ if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
 else()
     ascendc_library(vllm_ascend_kernels SHARED
         ${VLLM_ASCEND_CUSTOM_OP}
+    )
+    # CANN experiment headers pulled in transitively by AscendC adv_api includes
+    ascendc_include_directories(vllm_ascend_kernels PRIVATE
+        ${ASCEND_CANN_PACKAGE_PATH}/include
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
+        ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/msprof
     )
 endif()
 
@@ -200,5 +208,22 @@ target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGI
 if(SOC_VERSION MATCHES "ascend310p.*|ascend950")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 else()
-  install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
+  # Direct pybind exposure of the fused GMSQ operator: torch.vllm_ascendC.*
+  # (no dispatcher registration; see csrc/gmsq_situ_quant/vllm_ascendC_binding.cpp)
+  pybind11_add_module(vllm_ascendC
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/grouped_matmul_situ_quant.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant/vllm_ascendC_binding.cpp
+  )
+  target_include_directories(vllm_ascendC PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gmsq_situ_quant)
+  target_link_directories(vllm_ascendC PRIVATE
+    ${TORCH_LIBRARY_DIRS}
+    ${TORCH_NPU_PATH}/lib/
+    ${ASCEND_HOME_PATH}/lib64
+  )
+  target_link_libraries(vllm_ascendC PUBLIC
+    vllm_ascend_kernels
+    ${VLLM_ASCEND_C_COMMON_LIBS}
+  )
+  target_link_options(vllm_ascendC PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/custom_transformer/op_api/lib")
+  install(TARGETS vllm_ascend_C vllm_ascendC vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 endif()
