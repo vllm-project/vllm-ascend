@@ -44,8 +44,6 @@ def test_310p_non_rc_memory_does_not_charge_other_instance() -> None:
     with (
         patch("vllm_ascend._310p.worker_310p.is_rc_device", return_value=False),
         patch("vllm_ascend._310p.worker_310p.memory_profiling", return_value=context),
-        patch("vllm_ascend._310p.worker_310p.torch.npu.mem_get_info", return_value=(32 * GiB_bytes, 64 * GiB_bytes)),
-        patch("vllm_ascend._310p.worker_310p.torch.npu.memory_reserved", return_value=0),
     ):
         result = worker.determine_available_memory()
 
