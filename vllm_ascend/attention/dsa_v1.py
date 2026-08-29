@@ -2074,7 +2074,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.compress_ratio > 1:
             compressor_prefill_metadata = _require_prefill_metadata(compressor_attn_metadata)
             compressor_state_prefill_metadata = _require_prefill_metadata(compressor_kv_state_metadata)
-            if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4:
+            if self.multistream_dsv4_dsa_overlap:
 
                 def compressor_tail_fn() -> CompressorForwardOutput:
                     assert compressor_prefill_metadata is not None
@@ -2400,7 +2400,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.compress_ratio > 1:
             compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
             compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
-            if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4:
+            if self.multistream_dsv4_dsa_overlap:
 
                 def compressor_tail_fn() -> CompressorForwardOutput:
                     assert compressor_decode_metadata is not None
