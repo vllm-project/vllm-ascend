@@ -281,6 +281,9 @@ class TestNPUPlatform(TestBase):
         ):
             _validate_eplb_config(vllm_config)
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
+        # torch_npu's Kineto client is bound to its registering thread, so the
+        # profiler lifecycle must not be dispatched to a worker thread.
+        self.assertTrue(NPUPlatform.profiler_needs_client_thread)
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 
     def test_get_recompute_scheduler_cls(self):

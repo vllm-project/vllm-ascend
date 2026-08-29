@@ -89,6 +89,9 @@ class NPUPlatform(Platform):
         "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES",
     ]
     dispatch_key: str = "PrivateUse1"
+    # torch_npu's Kineto client is bound to the thread that registered it, so
+    # the profiler lifecycle must not be dispatched to a worker thread.
+    profiler_needs_client_thread: bool = True
 
     supported_quantization: list[str] = [
         ASCEND_QUANTIZATION_METHOD,
