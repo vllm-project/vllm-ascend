@@ -109,6 +109,7 @@ class MoEAllGatherCombineMetadata:
     topk_weights: torch.Tensor
     expanded_row_idx: torch.Tensor
     restore_shape: torch.Size
+    is_mxfp: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +121,7 @@ class MoEAllToAllCombineMetadata:
     reversed_global_input_permutation_mapping: torch.Tensor | None
     hidden_shape: torch.Size
     hidden_shape_before_permute: torch.Size
+    is_mxfp: bool = False
 
 
 @dataclass(frozen=True, slots=True)
