@@ -119,7 +119,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
-        self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
         self.mc2_comm_alg = get_ascend_config().get_mc2_comm_alg()
@@ -145,11 +144,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # When allreduce is skipped, tokens may differ per rank:
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
-
-        if not self.enable_dispatch_v2 and self.mc2_comm_alg == "hierarchy":
-            raise RuntimeError(
-                "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
-            )
 
     def refresh_hccl_group(self) -> None:
         """Refresh MC2 communicator metadata after HCCL groups are recreated."""
@@ -237,11 +231,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         token_dispatch_input: MoETokenDispatchInput,
     ):
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
-        output = (
-            torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
-            if self.enable_dispatch_v2
-            else torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
-        )
+        output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
         # comm_stream.wait_stream(torch.npu.current_stream())
         (
             expand_x,
@@ -315,12 +305,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "expand_scales": expand_scales,
             "comm_quant_mode": quant_mode,
             "comm_alg": self.mc2_comm_alg,
+            "assist_info_for_combine": assist_info_for_combine,
         }
-
-        if self.enable_dispatch_v2:
-            stage3_kwargs["assist_info_for_combine"] = assist_info_for_combine
-        else:
-            stage3_kwargs["expand_idx"] = assist_info_for_combine
 
         if self.need_extra_args:
             stage3_kwargs.update(
@@ -339,11 +325,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
 
         kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states, combine_metadata)
-        combined_output = (
-            torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2)
-            if self.enable_dispatch_v2
-            else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
-        )
+        combined_output = torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2)
 
         return combined_output
 

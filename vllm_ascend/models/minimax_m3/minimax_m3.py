@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only MiniMaxM3 model."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableSequence, Sequence
 from itertools import islice
 from typing import Any
 
@@ -32,8 +32,15 @@ import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import (
+    get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
@@ -65,6 +72,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
+    MixtureOfExperts,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -573,12 +581,27 @@ class MiniMaxM3MoE(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.n_shared_experts = getattr(config, "n_shared_experts", None)
+        self.n_shared_experts = getattr(config, "n_shared_experts", 0) or 0
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts = config.num_local_experts
+
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+        self.n_logical_experts = self.n_routed_experts
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = self.physical_expert_start + self.n_local_physical_experts
 
         if self.tp_size > config.num_local_experts:
             raise ValueError(
@@ -617,6 +640,7 @@ class MiniMaxM3MoE(nn.Module):
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.num_local_experts,
+            gate=self.gate,
             top_k=config.num_experts_per_tok,
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
@@ -632,7 +656,14 @@ class MiniMaxM3MoE(nn.Module):
             router_logits_dtype=self.gate.out_dtype,
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=True,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
         )
+
+        # Ascend dispatch uses this metadata to size the global physical
+        # expert space. The upstream V2 EPLB factory only updates moe_config.
+        self.experts.global_redundant_expert_num = self.n_redundant_experts
+        self.experts.moe_config.global_redundant_expert_num = self.n_redundant_experts
 
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
@@ -643,9 +674,18 @@ class MiniMaxM3MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+        if self.experts.is_internal_router:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=hidden_states,
+            )
+        else:
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -762,6 +802,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         model_config: ModelConfig,
+        parallel_config: ParallelConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
     ) -> None:
@@ -819,6 +860,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
                 quant_config=quant_config,
+                parallel_config=parallel_config,
                 prefix=f"{prefix}.block_sparse_moe",
             )
         else:
@@ -895,6 +937,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 config,
                 prefix,
                 model_config=model_config,
+                parallel_config=vllm_config.parallel_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
             ),
@@ -1139,7 +1182,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         return loaded_params
 
 
-class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
+class MiniMaxM3SparseForCausalLM(
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle3,
+    MixtureOfExperts,
+):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "indexer_proj": ["index_q_proj", "index_k_proj"],
@@ -1175,6 +1224,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
             self.lm_head = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        self._set_moe_parameters()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -1196,6 +1246,56 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEa
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         return hidden_states
+
+    def _set_moe_parameters(self) -> None:
+        self.expert_weights: MutableSequence[Sequence[torch.Tensor]] = []
+        self.num_expert_groups = 1
+        self.moe_layers = []
+        self.moe_mlp_layers: list[MiniMaxM3MoE] = []
+
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            assert isinstance(layer, MiniMaxM3DecoderLayer)
+            if layer.is_layer_sparse:
+                example_moe = layer.block_sparse_moe
+                self.moe_mlp_layers.append(example_moe)
+                self.moe_layers.append(example_moe.experts)
+
+        self.num_moe_layers = len(self.moe_layers)
+        if example_moe is None:
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+            moe.experts.global_redundant_expert_num = self.num_redundant_experts
+            moe.experts.moe_config.global_redundant_expert_num = self.num_redundant_experts
 
     def compute_logits(
         self,
