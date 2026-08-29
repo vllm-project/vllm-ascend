@@ -20,6 +20,12 @@
 # (`RMSNorm(head_dim, has_weight=False)`) before attention, so V cannot simply
 # be copied out of the fused QKV tensor as `split_qkv_rmsnorm_rope` does.
 #
+# `split_qkv_rmsnorm_rope` gives V a second loop with a much wider tile because
+# a plain copy needs no scratch. Once V has to go through the same float32
+# reduction as Q and K that no longer holds, so this kernel folds V into the
+# q/k loop: one load covers the whole fused row, and one RMSNorm reduction
+# covers every q, k and v head of the tile.
+#
 
 import torch
 from vllm.triton_utils import tl, triton
@@ -30,20 +36,16 @@ from vllm_ascend.ops.triton.triton_utils import extract_slice, get_element, get_
 # Unified buffer budget of a single vector core.
 UB_SIZE = 87040  # 85K = 85 * 1024
 
-# UB bytes one token occupies in the V stage: the bfloat16 row that is loaded,
-# its float32 copy used for the variance reduction and the bfloat16 row that is
-# stored.
-V_UB_BYTES_PER_ELEMENT = 8
-
-# UB bytes one token occupies in the Q/K stage. Every element of the Q/K slice
-# is held as the bfloat16 value that was loaded plus its float32 copy used for
-# the RMSNorm reduction (6 bytes), and every Q element is additionally held as
-# the bfloat16 norm output and the bfloat16 RoPE result (4 bytes). The K tiles
-# reuse the buffers freed by the Q tiles. The cos/sin row is bfloat16 and is
-# shared by all heads of the token.
-QK_UB_BYTES_PER_QKV_ELEMENT = 6
-QK_UB_BYTES_PER_Q_ELEMENT = 4
-QK_UB_BYTES_PER_ROPE_ELEMENT = 2
+# UB bytes one token occupies. Every element of the fused qkv row is held as the
+# bfloat16 value that was loaded plus its float32 copy used for the RMSNorm
+# reduction (6 bytes). Every q element is additionally held as the bfloat16 norm
+# output and the bfloat16 RoPE result (4 bytes); the k tiles reuse the buffers
+# freed by the q tiles. Every v element is held once more as the bfloat16 store
+# buffer. The cos/sin row is bfloat16 and is shared by all heads of the token.
+UB_BYTES_PER_QKV_ELEMENT = 6
+UB_BYTES_PER_Q_ELEMENT = 4
+UB_BYTES_PER_V_ELEMENT = 2
+UB_BYTES_PER_ROPE_ELEMENT = 2
 
 
 @triton.jit
@@ -68,12 +70,11 @@ def split_qkv_rmsnorm_rope_vnorm_kernel(
     IS_PARTIAL_ROPE: tl.constexpr,
     num_vectorcore: tl.constexpr,
     batch_size_per_iter_per_vec: tl.constexpr,
-    qk_head_nums_per_iter_per_vec: tl.constexpr,
+    qkv_head_nums_per_iter_per_vec: tl.constexpr,
     q_head_num: tl.constexpr,
     kv_head_num: tl.constexpr,
     qk_head_num_sum: tl.constexpr,
-    v_batch_size_per_iter_per_vec: tl.constexpr,
-    v_head_nums_per_iter_per_vec: tl.constexpr,
+    qkv_head_num_sum: tl.constexpr,
     positions_gm_ptr,
     cos_sin_cache_gm_ptr,
 ):
@@ -84,10 +85,9 @@ def split_qkv_rmsnorm_rope_vnorm_kernel(
 
     batch_size_per_vec = tl.cdiv(batch_size, num_vectorcore)
     iter_num_per_vec = tl.cdiv(batch_size_per_vec, batch_size_per_iter_per_vec)
-    v_iter_num_per_vec = tl.cdiv(batch_size_per_vec, v_batch_size_per_iter_per_vec)
     input_batch_offset = row_pid * batch_size_per_vec
     mblk_idx = tl.arange(0, batch_size_per_iter_per_vec) + input_batch_offset
-    nblk_idx = tl.arange(0, q_hidden_size + kv_hidden_size)
+    nblk_idx = tl.arange(0, total_hidden_size)
     nmask = nblk_idx < total_hidden_size
 
     input_batch_offset_end = min(input_batch_offset + batch_size_per_vec, batch_size)
@@ -108,7 +108,7 @@ def split_qkv_rmsnorm_rope_vnorm_kernel(
         mmask = (mblk_idx + pos_offset) < input_batch_offset_end
         mask = (mmask[:, None]) & (nmask[None, :])
         idx = (mblk_idx + pos_offset)[:, None] * total_hidden_size + nblk_idx[None, :]
-        values_tmp1 = tl.load(input_gm_ptr + idx, mask=mask).reshape(qk_head_nums_per_iter_per_vec, HEAD_DIM)
+        values_tmp1 = tl.load(input_gm_ptr + idx, mask=mask).reshape(qkv_head_nums_per_iter_per_vec, HEAD_DIM)
         if BIAS:
             q_bias_values = tl.load(q_bias_ptr + tl.arange(0, HEAD_DIM))
             k_bias_values = tl.load(k_bias_ptr + tl.arange(0, HEAD_DIM))
@@ -137,14 +137,17 @@ def split_qkv_rmsnorm_rope_vnorm_kernel(
             strides=(1, 1, 1),
         )
 
+        # One reduction for every q, k and v head of the tile. V shares it
+        # because its norm is the same per-head RMSNorm with the same eps, it
+        # only skips the learnable scale that q and k apply below.
         normalized_values = values_tmp1.to(tl.float32)
         normalized_values = normalized_values * normalized_values
         normalized_values = tl.sum(normalized_values, axis=1) / HEAD_DIM
-        normalized_values = 1 / tl.sqrt(normalized_values + eps).reshape(qk_head_nums_per_iter_per_vec, 1)
+        normalized_values = 1 / tl.sqrt(normalized_values + eps).reshape(qkv_head_nums_per_iter_per_vec, 1)
         normalized_values = values_tmp1 * normalized_values
 
         normalized_values_tmp = extract_slice(
-            normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
+            normalized_values.reshape(batch_size_per_iter_per_vec, qkv_head_num_sum, HEAD_DIM),
             offsets=(0, 0, 0),
             sizes=(batch_size_per_iter_per_vec, q_head_num, HEAD_DIM),
             strides=(1, 1, 1),
@@ -207,7 +210,7 @@ def split_qkv_rmsnorm_rope_vnorm_kernel(
 
         # k rope
         normalized_values_tmp1 = extract_slice(
-            normalized_values.reshape(batch_size_per_iter_per_vec, qk_head_num_sum, HEAD_DIM),
+            normalized_values.reshape(batch_size_per_iter_per_vec, qkv_head_num_sum, HEAD_DIM),
             offsets=(0, q_head_num, 0),
             sizes=(batch_size_per_iter_per_vec, kv_head_num, HEAD_DIM),
             strides=(1, 1, 1),
@@ -269,51 +272,44 @@ def split_qkv_rmsnorm_rope_vnorm_kernel(
                 mask=mask,
             )
 
-    mblk_idx = tl.arange(0, v_batch_size_per_iter_per_vec) + input_batch_offset
-    nblk_idx = tl.arange(q_hidden_size + kv_hidden_size, total_hidden_size)
-    nmask = nblk_idx < total_hidden_size
-    out_nblk_idx = tl.arange(0, kv_hidden_size)
-    out_nmask = out_nblk_idx < kv_hidden_size
-
-    for _ in tl.range(v_iter_num_per_vec):
-        mmask = mblk_idx < input_batch_offset_end
-        mask = (mmask[:, None]) & (nmask[None, :])
-        idx = mblk_idx[:, None] * total_hidden_size + nblk_idx[None, :]
-        values = tl.load(input_gm_ptr + idx, mask=mask).reshape(v_head_nums_per_iter_per_vec, HEAD_DIM)
-
-        # v rmsnorm, per head and without a learnable scale. The reduction runs
-        # in float32 for the same reason as the q/k one above.
-        v_reciprocal_std = values.to(tl.float32)
-        v_reciprocal_std = v_reciprocal_std * v_reciprocal_std
-        v_reciprocal_std = tl.sum(v_reciprocal_std, axis=1) / HEAD_DIM
-        v_reciprocal_std = 1 / tl.sqrt(v_reciprocal_std + eps).reshape(v_head_nums_per_iter_per_vec, 1)
-        normalized_v = (values * v_reciprocal_std).to(tl.bfloat16)
-
-        out_idx = mblk_idx[:, None] * kv_hidden_size + out_nblk_idx[None, :]
-        out_mask = (mmask[:, None]) & (out_nmask[None, :])
+        # v norm. The v heads sit behind the q and k ones in the same tile and
+        # were normalized by the reduction above, so all that is left is to cut
+        # them out and store them. No weight and no rope, and the k output index
+        # and mask apply unchanged.
+        normalized_v = extract_slice(
+            normalized_values.reshape(batch_size_per_iter_per_vec, qkv_head_num_sum, HEAD_DIM),
+            offsets=(0, qk_head_num_sum, 0),
+            sizes=(batch_size_per_iter_per_vec, kv_head_num, HEAD_DIM),
+            strides=(1, 1, 1),
+        ).to(tl.bfloat16)
         tl.store(
-            v_gm_ptr + out_idx,
-            normalized_v.reshape(v_batch_size_per_iter_per_vec, kv_hidden_size),
-            mask=out_mask,
+            v_gm_ptr + kv_output_idx,
+            normalized_v.reshape(batch_size_per_iter_per_vec, kv_hidden_size),
+            mask=mask,
         )
-        mblk_idx += v_batch_size_per_iter_per_vec
 
 
-def qk_batch_size_per_iter_per_vec(
+def qkv_batch_size_per_iter_per_vec(
     q_hidden_size: int,
     kv_hidden_size: int,
     head_dim: int,
     rope_dim: int,
     element_size: int,
 ) -> int:
-    """Number of tokens the q/k stage processes per iteration and vector core.
+    """Number of tokens the kernel processes per iteration and vector core.
 
     set number of line loading from GM data is x
-    x*(q_head_num + kv_head_num)*HEAD_DIM: values_tmp
-    2x*(q_head_num + kv_head_num)*HEAD_DIM: normalized_values(float32)
+    x*(q_head_num + 2*kv_head_num)*HEAD_DIM: values_tmp
+    2x*(q_head_num + 2*kv_head_num)*HEAD_DIM: normalized_values(float32)
     x*ROPE_DIM*2 : cos/sin
-    x*q_head_num*HEAD_DIM*2： normalized_values_tmp
+    x*q_head_num*HEAD_DIM*2: normalized_values_tmp
+    x*kv_head_num*HEAD_DIM: normalized_v
     x*q_head_num*ROPE_DIM*(0.5) (not IS_PARTIAL_ROPE) x*q_head_num*ROPE_DIM*(0.5): y
+
+    This is the `split_qkv_rmsnorm_rope` accounting with the v columns moved
+    into the tile: the loaded slice and its float32 copy grow from q+kv to
+    q+2*kv (3*kv_hidden_size more elements) and the normalized v output adds one
+    more bfloat16 copy of the v columns, so the factor gains 4*kv_hidden_size.
 
     The factor is the sum of elements number. It also counts buffers that are
     not live at the same time, so it is a tiling heuristic rather than a UB
@@ -322,15 +318,10 @@ def qk_batch_size_per_iter_per_vec(
     """
     q_head_num = q_hidden_size // head_dim
     if rope_dim != head_dim:
-        factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 4 + q_head_num * rope_dim
+        factor = 5 * q_hidden_size + 7 * kv_hidden_size + rope_dim * 4 + q_head_num * rope_dim
     else:
-        factor = 5 * q_hidden_size + 3 * kv_hidden_size + rope_dim * 2 + q_head_num * rope_dim // 2
+        factor = 5 * q_hidden_size + 7 * kv_hidden_size + rope_dim * 2 + q_head_num * rope_dim // 2
     return int(UB_SIZE / element_size) // factor
-
-
-def v_batch_size_per_iter_per_vec(kv_hidden_size: int) -> int:
-    """Number of tokens the v stage processes per iteration and vector core."""
-    return UB_SIZE // (V_UB_BYTES_PER_ELEMENT * kv_hidden_size)
 
 
 def qkv_rmsnorm_rope_vnorm_fits_ub(
@@ -341,23 +332,22 @@ def qkv_rmsnorm_rope_vnorm_fits_ub(
 ) -> bool:
     """Whether a single token fits into one vector core's unified buffer.
 
-    Both stages of the kernel always process at least one token per iteration,
-    so a layer whose per-token tiles exceed the UB budget cannot be served by
-    this kernel at all. Callers are expected to fall back to the unfused
-    implementation in that case.
+    The kernel always processes at least one token per iteration, so a layer
+    whose per-token tile exceeds the UB budget cannot be served by this kernel
+    at all. Callers are expected to fall back to the unfused implementation in
+    that case.
     """
-    qk_ub_bytes_per_token = (
-        QK_UB_BYTES_PER_QKV_ELEMENT * (q_hidden_size + kv_hidden_size)
-        + QK_UB_BYTES_PER_Q_ELEMENT * q_hidden_size
-        + QK_UB_BYTES_PER_ROPE_ELEMENT * rope_dim
+    ub_bytes_per_token = (
+        UB_BYTES_PER_QKV_ELEMENT * (q_hidden_size + 2 * kv_hidden_size)
+        + UB_BYTES_PER_Q_ELEMENT * q_hidden_size
+        + UB_BYTES_PER_V_ELEMENT * kv_hidden_size
+        + UB_BYTES_PER_ROPE_ELEMENT * rope_dim
     )
-    v_ub_bytes_per_token = V_UB_BYTES_PER_ELEMENT * kv_hidden_size
     return (
         head_dim > 0
         and q_hidden_size % head_dim == 0
         and kv_hidden_size % head_dim == 0
-        and qk_ub_bytes_per_token <= UB_SIZE
-        and v_ub_bytes_per_token <= UB_SIZE
+        and ub_bytes_per_token <= UB_SIZE
     )
 
 
@@ -395,9 +385,9 @@ def split_qkv_rmsnorm_rope_vnorm_impl(
     q_head_num = q_hidden_size // head_dim
     kv_head_num = kv_hidden_size // head_dim
 
-    qk_batch_size = max(
+    qkv_batch_size = max(
         1,
-        qk_batch_size_per_iter_per_vec(
+        qkv_batch_size_per_iter_per_vec(
             q_hidden_size=q_hidden_size,
             kv_hidden_size=kv_hidden_size,
             head_dim=head_dim,
@@ -406,11 +396,8 @@ def split_qkv_rmsnorm_rope_vnorm_impl(
         ),
     )
     qk_head_num_sum = int(q_head_num + kv_head_num)
-    qk_head_nums_per_iter_per_vec = qk_batch_size * qk_head_num_sum
-
-    # v tiling
-    v_batch_size = max(1, v_batch_size_per_iter_per_vec(kv_hidden_size))
-    v_head_nums_per_iter_per_vec = v_batch_size * kv_head_num
+    qkv_head_num_sum = int(q_head_num + 2 * kv_head_num)
+    qkv_head_nums_per_iter_per_vec = qkv_batch_size * qkv_head_num_sum
 
     grid = (num_vectorcore, 1, 1)
 
@@ -434,13 +421,12 @@ def split_qkv_rmsnorm_rope_vnorm_impl(
         rope_dim // 2,
         IS_PARTIAL_ROPE,
         num_vectorcore,
-        int(qk_batch_size),
-        int(qk_head_nums_per_iter_per_vec),
+        int(qkv_batch_size),
+        int(qkv_head_nums_per_iter_per_vec),
         q_head_num,
         kv_head_num,
         qk_head_num_sum,
-        int(v_batch_size),
-        int(v_head_nums_per_iter_per_vec),
+        qkv_head_num_sum,
         positions,
         cos_sin_cache,
     )
@@ -491,4 +477,3 @@ direct_register_custom_op(
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )
-
