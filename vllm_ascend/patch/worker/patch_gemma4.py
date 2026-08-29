@@ -13,15 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# Gemma4 on Ascend: Attention.
-#
 
 import torch
 from vllm.logger import logger
 
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope_vnorm import qkv_rmsnorm_rope_vnorm_fits_ub
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 try:
     from vllm.model_executor.models.gemma4 import Gemma4Attention
@@ -48,6 +46,8 @@ def _unfused_preattention_reason(self) -> str | None:
     the kernel needs no knowledge of the layer type - only shapes that fit one
     vector core.
     """
+    if get_ascend_device_type() == AscendDeviceType.A5:
+        return "the fused kernel has no A5 variant"
     # KV-shared layers reuse the K/V of an earlier layer and only apply RoPE to
     # Q, so K/V must not be recomputed here.
     if self.is_kv_shared_layer:
@@ -55,8 +55,6 @@ def _unfused_preattention_reason(self) -> str | None:
     # The kernel normalizes V without a learnable scale, applies a single eps to
     # Q, K and V, and applies no norm bias (which quantized checkpoints may
     # carry, see AscendRMSNorm).
-    if not hasattr(DeviceOperator, "split_qkv_rmsnorm_rope_vnorm"):
-        return "DeviceOperator has no kernel registered"
     if self.v_norm.has_weight:
         return "v_norm carries a learnable scale"
     if any(getattr(norm, "bias", None) is not None for norm in (self.q_norm, self.k_norm, self.v_norm)):
@@ -82,30 +80,23 @@ def _unfused_preattention_reason(self) -> str | None:
 
 
 def _configure_fused_preattention(self) -> None:
-    """Resolve and report the fused pre-attention decision of this layer.
+    """Resolve the fused pre-attention decision of this layer, reporting fallbacks.
 
     The decision only depends on the layer's configuration. Model construction
     never runs inside a compiled region, so resolving it here keeps the branch
     out of the traced graph and keeps the outcome observable in every
     compilation mode - unlike a check inside `forward`, which torch.compile
     evaluates once at trace time and an ACL graph then replays without Python.
+
+    Only the fallback is logged. Fusing is the expected case, so silence means
+    the fused path is in use.
     """
     reason = _unfused_preattention_reason(self)
     self.use_fused_preattention = reason is None
-    layer_type = "sliding" if self.is_sliding else "full"
-    if self.use_fused_preattention:
-        logger.info_once(
-            "Gemma4 %s attention: pre-attention runs fused (q_size=%d, kv_size=%d, head_dim=%d).",
-            layer_type,
-            self.q_size,
-            self.kv_size,
-            self.head_dim,
-            scope="global",
-        )
-    else:
+    if reason is not None:
         logger.info_once(
             "Gemma4 %s attention: pre-attention stays unfused because %s (q_size=%d, kv_size=%d, head_dim=%d).",
-            layer_type,
+            "sliding" if self.is_sliding else "full",
             reason,
             self.q_size,
             self.kv_size,
@@ -128,7 +119,6 @@ def _patched_attention_forward(
     qkv, _ = self.qkv_proj(hidden_states)
 
     # The kernel indexes the fused qkv tensor as [num_tokens, hidden].
-    # if self.use_fused_preattention and qkv.dim() == 2:
     if self.use_fused_preattention:
         q, k, v = DeviceOperator.split_qkv_rmsnorm_rope_vnorm(
             input=qkv,
@@ -171,4 +161,3 @@ def _patched_attention_forward(
 if Gemma4Attention is not None:
     Gemma4Attention.__init__ = _patched_attention_init
     Gemma4Attention.forward = _patched_attention_forward
-

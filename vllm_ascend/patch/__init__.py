@@ -1199,6 +1199,5 @@
 #       Gemma4Attention.__init__ is patched as well to resolve and log that
 #       decision at build time, keeping the branch out of the traced graph.
 #    Future Plan:
-#       Skip the separate V pass on k_eq_v full attention layers, whose V slot
-#       holds a copy of K, and remove this patch once torch.compile can match
-#       one pattern per attention layer type.
+#       Remove this patch once torch.compile can match one pattern per attention
+#       layer type.
