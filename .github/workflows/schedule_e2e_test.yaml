@@ -28,6 +28,7 @@ on:
       - 'main'
       - '*-dev'
       - 'releases/v*'
+
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
