@@ -268,7 +268,7 @@ log_selected_ops
   # - SMT-enabled (e.g., AMD): logical_cpus * 2 for full throughput (matches build.sh default behavior)
   # - No SMT (e.g., ARM):      physical cores to avoid OOM
   logical_cpus=$(nproc)
-  physical_cores=$(grep '^core id' /proc/cpuinfo | sort -u | wc -l)
+  physical_cores=$(grep '^core id' /proc/cpuinfo 2>/dev/null | sort -u | wc -l || true)
   if [ "$physical_cores" -gt 0 ] && [ "$logical_cpus" -gt "$physical_cores" ]; then
     build_jobs=$((logical_cpus * 2))
   else
