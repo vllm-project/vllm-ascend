@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 from vllm.config import KVTransferConfig, VllmConfig
 
+import vllm_ascend.ascend_config as _ascend_config
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
     AscendCompilationConfig,
@@ -41,7 +42,6 @@ from vllm_ascend.ascend_config import (
     get_ascend_config,
     init_ascend_config,
 )
-import vllm_ascend.ascend_config as _ascend_config
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
@@ -996,9 +996,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
     @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_rolls_back_for_unsupported_megamoe_config(
-        self, mock_fix, mock_megamoe_supported
-    ):
+    def test_fused_mc2_rolls_back_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
         # After the megamoe op rollback (#15267), enable_fused_mc2=1 no longer
         # routes through the megamoe op: _validate_user_input_ranges forces
         # _MEGA_MOE_SUPPORTED=False and falls back to dispatch_ffn_combine.
