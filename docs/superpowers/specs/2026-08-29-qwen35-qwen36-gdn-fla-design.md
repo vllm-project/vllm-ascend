@@ -550,6 +550,7 @@ after a possibly state-mutating failure, and log mutation risk.
 | Operator smoke tests | `tests/e2e/nightly/single_node/ops/singlecard_ops/test_gdn_fla.py` |
 | Qwen3.5 model smoke | `tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py` |
 | Qwen3.6 model smoke | `tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py` |
+| A2/A3 Chinese operation guide | `docs/superpowers/guides/2026-08-29-qwen-gdn-a2-a3-validation-guide-zh.md` |
 
 ## Completion criteria
 

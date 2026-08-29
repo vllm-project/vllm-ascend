@@ -63,6 +63,10 @@ semantics.
 
 ## Validation
 
+完整的 A2/A3 Docker 源码安装、FLA wheel 构建、单算子测试和
+Qwen3.6 35B DP1/TP1 启动步骤，参见
+[`Qwen3.6 35B GDN Phase6 A2/A3 部署与验证操作指南`](../../../superpowers/guides/2026-08-29-qwen-gdn-a2-a3-validation-guide-zh.md)。
+
 Install the FLA wheel built for the target SoC, then run on each device family:
 
 ```bash
