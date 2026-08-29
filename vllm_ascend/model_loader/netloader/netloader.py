@@ -19,7 +19,9 @@ import json
 import time
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any, ClassVar, cast
+from weakref import ReferenceType, ref
 
 import torch
 from torch import nn
@@ -38,6 +40,18 @@ from .utils import find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
 MAX_FREE_PORT_RETRIES = 5
+MAX_FALLBACK_MEMORY_RECLAIM_ATTEMPTS = 2
+BYTES_PER_MIB = 1024**2
+
+
+@dataclass
+class _FallbackCleanupContext:
+    context_keys: dict[int, set[Any]]
+    static_all_moe_layers: dict[int, tuple[list[Any], list[Any]]]
+    rope_cache: dict[Any, Any] | None
+    eplb_layers: list[nn.Module]
+    eplb_layer_count: int
+    memory_baseline: tuple[int, int] | None
 
 
 @contextmanager
@@ -205,8 +219,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
                     group = pg
 
         logger.info(
-            "Waiting for local target netloader ranks before loading draft model "
-            "(local_world_size=%s)",
+            "Waiting for local target netloader ranks before loading draft model (local_world_size=%s)",
             local_world_size,
         )
         barrier_start = time.perf_counter()
@@ -225,17 +238,31 @@ class ModelNetLoaderElastic(BaseModelLoader):
         return static_forward_context
 
     @staticmethod
-    def _iter_static_forward_contexts(vllm_config: VllmConfig):
-        """Yield unique (source_name, context_dict) pairs for this and current vllm config."""
+    def _iter_compilation_configs(vllm_config: VllmConfig):
+        """Yield unique compilation configs for the passed and current vLLM configs."""
         candidates = [("vllm_config", vllm_config)]
         current_vllm_config = get_current_vllm_config_or_none()
         if current_vllm_config is not None:
             candidates.append(("current_vllm_config", current_vllm_config))
 
-        seen_context_ids: set[int] = set()
+        seen_config_ids: set[int] = set()
         for source, config in candidates:
-            static_forward_context = ModelNetLoaderElastic._get_static_forward_context(config)
-            if static_forward_context is None:
+            compilation_config = getattr(config, "compilation_config", None)
+            if compilation_config is None:
+                continue
+            config_id = id(compilation_config)
+            if config_id in seen_config_ids:
+                continue
+            seen_config_ids.add(config_id)
+            yield source, compilation_config
+
+    @staticmethod
+    def _iter_static_forward_contexts(vllm_config: VllmConfig):
+        """Yield unique (source_name, context_dict) pairs for this and current vllm config."""
+        seen_context_ids: set[int] = set()
+        for source, compilation_config in ModelNetLoaderElastic._iter_compilation_configs(vllm_config):
+            static_forward_context = getattr(compilation_config, "static_forward_context", None)
+            if static_forward_context is None or not hasattr(static_forward_context, "clear"):
                 continue
             context_id = id(static_forward_context)
             if context_id in seen_context_ids:
@@ -255,12 +282,21 @@ class ModelNetLoaderElastic(BaseModelLoader):
         return snapshots
 
     @staticmethod
-    def _remove_new_static_forward_context_keys(vllm_config: VllmConfig, snapshots: dict[int, set[Any]]) -> None:
-        """Remove keys added after snapshot; preserve target registrations on draft fallback."""
+    def _remove_new_static_forward_context_keys(
+        vllm_config: VllmConfig,
+        snapshots: dict[int, set[Any]],
+        failed_model: nn.Module | None = None,
+    ) -> None:
+        """Remove new keys and any registrations owned by the failed model."""
+        stale_modules = set(failed_model.modules()) if failed_model is not None else set()
         removed_contexts = []
         for source, static_forward_context in ModelNetLoaderElastic._iter_static_forward_contexts(vllm_config):
             keep_keys = snapshots.get(id(static_forward_context), set())
-            new_keys = [key for key in list(static_forward_context.keys()) if key not in keep_keys]
+            new_keys = [
+                key
+                for key, module in list(static_forward_context.items())
+                if key not in keep_keys or module in stale_modules
+            ]
             for key in new_keys:
                 del static_forward_context[key]
             if new_keys:
@@ -271,6 +307,150 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 "Removed new static_forward_context keys before fallback: %s",
                 removed_contexts,
             )
+
+    @staticmethod
+    def _snapshot_static_all_moe_layers(
+        vllm_config: VllmConfig,
+    ) -> dict[int, tuple[list[Any], list[Any]]]:
+        """Snapshot shared MoE registries so fallback preserves existing target layers."""
+        snapshots: dict[int, tuple[list[Any], list[Any]]] = {}
+        for _, compilation_config in ModelNetLoaderElastic._iter_compilation_configs(vllm_config):
+            static_all_moe_layers = getattr(compilation_config, "static_all_moe_layers", None)
+            if isinstance(static_all_moe_layers, list) and id(static_all_moe_layers) not in snapshots:
+                snapshots[id(static_all_moe_layers)] = (static_all_moe_layers, list(static_all_moe_layers))
+        return snapshots
+
+    @staticmethod
+    def _restore_static_all_moe_layers(snapshots: dict[int, tuple[list[Any], list[Any]]]) -> None:
+        restored = []
+        for static_all_moe_layers, baseline_layers in snapshots.values():
+            removed_count = max(0, len(static_all_moe_layers) - len(baseline_layers))
+            static_all_moe_layers[:] = baseline_layers
+            if removed_count:
+                restored.append(removed_count)
+        if restored:
+            logger.info("Removed new static_all_moe_layers entries before fallback: %s", restored)
+
+    @staticmethod
+    def _snapshot_rope_cache() -> dict[Any, Any] | None:
+        try:
+            from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+            return dict(_ROPE_DICT) if isinstance(_ROPE_DICT, dict) else None
+        except Exception as exc:
+            logger.debug("Netloader fallback: skip snapshotting _ROPE_DICT: %s", exc)
+            return None
+
+    @staticmethod
+    def _restore_rope_cache(snapshot: dict[Any, Any] | None) -> None:
+        if snapshot is None:
+            return
+        try:
+            from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+            if isinstance(_ROPE_DICT, dict):
+                removed_count = len([key for key in _ROPE_DICT if key not in snapshot])
+                _ROPE_DICT.clear()
+                _ROPE_DICT.update(snapshot)
+                if removed_count:
+                    logger.info("Removed new _ROPE_DICT entries before fallback: %s", removed_count)
+        except Exception as exc:
+            logger.debug("Netloader fallback: skip restoring _ROPE_DICT: %s", exc)
+
+    @staticmethod
+    def _cleanup_compilation_hooks(model: nn.Module) -> None:
+        """Remove bytecode hooks that otherwise pin a failed compiled model."""
+        try:
+            from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+
+            cleaned = 0
+            for module in model.modules():
+                if isinstance(module, TorchCompileWithNoGuardsWrapper):
+                    module.cleanup()
+                    cleaned += 1
+            if cleaned:
+                logger.info("Removed compilation bytecode hooks before fallback: %s", cleaned)
+        except Exception as exc:
+            logger.warning("Netloader fallback: failed to remove compilation bytecode hooks: %s", exc)
+
+    @classmethod
+    def _create_fallback_cleanup_context(
+        cls,
+        vllm_config: VllmConfig,
+        device_type: str,
+    ) -> _FallbackCleanupContext:
+        from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+
+        eplb_layers = VllmEplbAdaptor._registered_moe_layers
+        return _FallbackCleanupContext(
+            context_keys=cls._snapshot_static_forward_context_keys(vllm_config),
+            static_all_moe_layers=cls._snapshot_static_all_moe_layers(vllm_config),
+            rope_cache=cls._snapshot_rope_cache(),
+            eplb_layers=eplb_layers,
+            eplb_layer_count=len(eplb_layers),
+            memory_baseline=cls._get_npu_memory_usage(device_type),
+        )
+
+    @classmethod
+    def _release_failed_model_references(
+        cls,
+        model: nn.Module,
+        vllm_config: VllmConfig,
+        context: _FallbackCleanupContext,
+    ) -> ReferenceType[nn.Module]:
+        """Detach process-global references before the caller drops the model."""
+        model_ref = ref(model)
+        cls._cleanup_compilation_hooks(model)
+        cls._remove_new_static_forward_context_keys(vllm_config, context.context_keys, model)
+        cls._restore_static_all_moe_layers(context.static_all_moe_layers)
+        cls._restore_rope_cache(context.rope_cache)
+        del context.eplb_layers[context.eplb_layer_count :]
+        return model_ref
+
+    @staticmethod
+    def _get_npu_memory_usage(device_type: str) -> tuple[int, int] | None:
+        if device_type != "npu":
+            return None
+        try:
+            return int(torch.npu.memory_allocated()), int(torch.npu.memory_reserved())
+        except Exception as exc:
+            logger.debug("Netloader fallback: failed to query NPU memory usage: %s", exc)
+            return None
+
+    @staticmethod
+    def _reclaim_failed_model_memory(
+        device_type: str,
+        memory_baseline: tuple[int, int] | None,
+    ) -> None:
+        if device_type != "npu":
+            gc.collect()
+            if device_type == "cuda":
+                logger.info("Empty CUDA cache")
+                torch.cuda.empty_cache()
+            return
+
+        baseline_allocated = memory_baseline[0] if memory_baseline is not None else None
+        for attempt in range(1, MAX_FALLBACK_MEMORY_RECLAIM_ATTEMPTS + 1):
+            before = ModelNetLoaderElastic._get_npu_memory_usage(device_type)
+            collected = gc.collect()
+            torch.npu.empty_cache()
+            after = ModelNetLoaderElastic._get_npu_memory_usage(device_type)
+            reached_baseline = baseline_allocated is not None and after is not None and after[0] <= baseline_allocated
+            logger.info(
+                "[netloader_client] stage=fallback_memory_reclaim attempt=%s collected=%s "
+                "baseline_allocated_mib=%s before_allocated_mib=%s before_reserved_mib=%s "
+                "after_allocated_mib=%s after_reserved_mib=%s reached_baseline=%s",
+                attempt,
+                collected,
+                f"{baseline_allocated / BYTES_PER_MIB:.2f}" if baseline_allocated is not None else "unknown",
+                f"{before[0] / BYTES_PER_MIB:.2f}" if before is not None else "unknown",
+                f"{before[1] / BYTES_PER_MIB:.2f}" if before is not None else "unknown",
+                f"{after[0] / BYTES_PER_MIB:.2f}" if after is not None else "unknown",
+                f"{after[1] / BYTES_PER_MIB:.2f}" if after is not None else "unknown",
+                reached_baseline,
+            )
+            if reached_baseline:
+                break
 
     def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
         """
@@ -336,14 +516,15 @@ class ModelNetLoaderElastic(BaseModelLoader):
             _quant_config = getattr(vllm_config, "quant_config", None)
             _quant_config = deepcopy(_quant_config) if _quant_config is not None else None
             model_config_backup = deepcopy(model_config)
-            context_key_snapshot = self._snapshot_static_forward_context_keys(vllm_config)
-            from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-
-            moe_layer_count_snapshot = len(VllmEplbAdaptor._registered_moe_layers)
+            fallback_cleanup_context = self._create_fallback_cleanup_context(
+                vllm_config,
+                device_config.device_type,
+            )
 
             with set_default_torch_dtype(model_config.dtype):
                 with target_device:
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
+                elastic_model = model
 
                 if load_int8_cache == "no":
                     try:
@@ -387,7 +568,6 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.warning("Skip draft elastic load: source port exceeds 65535")
                         model = None
 
-                elastic_model = model
                 if model is not None:
                     model = elastic_load(
                         model=elastic_model,
@@ -413,18 +593,22 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         vllm_config.quant_config = _quant_config
                     model_config = model_config_backup
 
-                    # Drop layer refs before reclaiming memory. MoE experts are also
-                    # held by VllmEplbAdaptor._registered_moe_layers.
-                    self._remove_new_static_forward_context_keys(vllm_config, context_key_snapshot)
-                    del VllmEplbAdaptor._registered_moe_layers[moe_layer_count_snapshot:]
-                    del elastic_model
-                    gc.collect()
-                    if device_config.device_type == "npu":
-                        logger.info("Empty NPU cache")
-                        torch.npu.empty_cache()
-                    elif device_config.device_type == "cuda":
-                        logger.info("Empty CUDA cache")
-                        torch.cuda.empty_cache()
+                    elastic_model_ref = self._release_failed_model_references(
+                        elastic_model,
+                        vllm_config,
+                        fallback_cleanup_context,
+                    )
+                    elastic_model = None
+                    self._reclaim_failed_model_memory(
+                        device_config.device_type,
+                        fallback_cleanup_context.memory_baseline,
+                    )
+                    logger.info(
+                        "[netloader_client] stage=fallback_reference_cleanup "
+                        "model_released=%s remaining_eplb_layers=%s",
+                        elastic_model_ref() is None,
+                        len(fallback_cleanup_context.eplb_layers),
+                    )
 
                     if not is_draft:
                         ModelNetLoaderElastic._target_elastic_fallback = True
