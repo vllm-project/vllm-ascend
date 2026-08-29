@@ -10,6 +10,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_mock_vllm_config,
     create_moe_layer,
 )
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
     AscendW8A8DynamicFusedMoEMethod,
     AscendW8A8DynamicLinearMethod,
@@ -219,7 +220,8 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, hidden_size, dtype=torch.float32)
         mock_extra_ctx.moe_comm_method = mock_comm
-        self.quant_method.in_dtype = torch.bfloat16
+        mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
+        self.quant_method.in_dtype = torch.float32
 
         self.quant_method.apply(
             layer=layer,
