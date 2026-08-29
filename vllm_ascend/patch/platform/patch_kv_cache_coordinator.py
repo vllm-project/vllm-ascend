@@ -660,3 +660,69 @@ vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordi
 _kv_cache_manager = sys.modules.get("vllm.v1.core.kv_cache_manager")
 if _kv_cache_manager is not None:
     _kv_cache_manager.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
+
+
+# GLM-5.3-Flash (and other hybrid KDA/MLA models): the kpool indexer cache is
+# an MLAAttentionSpec whose page size does not divide the MLA main-cache page.
+# Ascend binds KV as block-first views and indexes padded pages by runtime
+# block stride, so padding such MLA layers is safe. Upstream
+# `unify_kv_cache_spec_page_size` only pads non-MLA attention layers; allow
+# MLA layers that opted in via `indexes_kv_by_block_stride`.
+def _ascend_unify_kv_cache_spec_page_size(kv_cache_spec):
+    from dataclasses import replace as _dc_replace
+
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    if len(page_sizes) <= 1:
+        return kv_cache_spec
+
+    max_page_size = max(page_sizes)
+    new_kv_cache_spec = {}
+    for layer_name, layer_spec in kv_cache_spec.items():
+        if layer_spec.page_size_bytes == max_page_size:
+            new_kv_cache_spec[layer_name] = layer_spec
+        elif isinstance(layer_spec, MambaSpec):
+            new_spec = _dc_replace(layer_spec, page_size_padded=max_page_size)
+            new_kv_cache_spec[layer_name] = new_spec
+        else:
+            layer_page_size = layer_spec.page_size_bytes
+            if max_page_size % layer_page_size == 0:
+                ratio = max_page_size // layer_page_size
+                new_block_size = layer_spec.block_size * ratio
+                new_spec = _dc_replace(layer_spec, block_size=new_block_size)
+            elif isinstance(layer_spec, FullAttentionSpec) and (
+                not isinstance(layer_spec, MLAAttentionSpec)
+                or getattr(layer_spec, "indexes_kv_by_block_stride", False)
+                # GLM-5.3-Flash kpool indexer/tail caches (and DeepSeek V3.2
+                # indexer caches) pad their pages safely under Ascend's
+                # block-first views even though they are MLAAttentionSpec.
+                or "indexer" in layer_name
+                or "kpool" in layer_name
+            ):
+                new_spec = _dc_replace(layer_spec, page_size_padded=max_page_size)
+            else:
+                raise NotImplementedError(
+                    f"Layer {layer_name}: page size is not divisible by the "
+                    "maximum page size and cannot be padded. Padding is only "
+                    "supported for non-MLA attention layers."
+                )
+            new_kv_cache_spec[layer_name] = new_spec
+    return new_kv_cache_spec
+
+
+import vllm.v1.core.kv_cache_utils as _vllm_kv_cache_utils  # noqa: E402
+
+_vllm_kv_cache_utils.unify_kv_cache_spec_page_size = (  # type: ignore[attr-defined]
+    _ascend_unify_kv_cache_spec_page_size
+)
+
+
+# Upstream renamed the KVCacheTensor field that lists the layers sharing a
+# tensor: the vendored tree calls it `shared_by`, upstream calls it `layers`.
+# Expose `shared_by` as a property so Ascend code written against either name
+# keeps working.
+from vllm.v1.kv_cache_interface import KVCacheTensor as _AscendKVCacheTensor  # noqa: E402
+
+if not hasattr(_AscendKVCacheTensor, "shared_by"):
+    _AscendKVCacheTensor.shared_by = property(lambda self: self.layers)  # type: ignore[attr-defined]

@@ -3798,10 +3798,102 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        # Upstream (post-aliasing) KV cache configs give every KVCacheTensor
+        # the same `size`: all tensors are views over ONE backing allocation
+        # (groups overlay each other; a block ID is owned by one group at a
+        # time). The legacy Ascend path below instead allocates each tensor
+        # independently, which multiplies the memory and OOMs. Detect the
+        # aliasing layout and use the upstream allocator for it.
+        tensor_sizes = {t.size for t in kv_cache_config.kv_cache_tensors}
+        if kv_cache_config.kv_cache_tensors and len(tensor_sizes) == 1:
+            from vllm.v1.kv_cache_interface import create_kv_cache_views
+            from vllm.v1.kv_cache_interface import (
+                KVCacheSpec as _UpstreamKVCacheSpec,
+                MLAAttentionSpec as _UpstreamMLAAttentionSpec,
+                UniformTypeKVCacheSpecs as _UpstreamUniformSpecs,
+            )
+
+            layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+            # One shared backing allocation; every tensor views into it.
+            raw_size = tensor_sizes.pop()
+            page_size = 4096
+            buf = torch.zeros(
+                ((raw_size + page_size - 1) // page_size) * page_size,
+                dtype=torch.int8,
+                device=self.device,
+            )
+            kv_caches = {}
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                layer_name = kv_cache_tensor.layers[0]
+                group = next(
+                    g
+                    for g in kv_cache_config.kv_cache_groups
+                    if layer_name in g.layer_names
+                )
+                spec = group.kv_cache_spec
+                if isinstance(spec, _UpstreamUniformSpecs):
+                    spec = spec.kv_cache_specs[layer_name]
+                # kernel_block_size=None keeps the per-layer view at manager
+                # block granularity; Ascend kernels index the cache through
+                # their own block tables, so the DeepGEMM pool-page split that
+                # upstream GPU paths configure here is not needed.
+                views = create_kv_cache_views(
+                    buf,
+                    spec,
+                    kv_cache_config.num_blocks,
+                    layout,
+                    kv_cache_tensor,
+                    kernel_block_size=None,
+                )
+                for layer_name, view in zip(kv_cache_tensor.layers, views):
+                    if (
+                        isinstance(spec, _UpstreamMLAAttentionSpec)
+                        and getattr(spec, "tokens_per_state", 1) == 1
+                        and isinstance(view, torch.Tensor)
+                    ):
+                        # Ascend MLA kernels (scatter/FIA) require CONTIGUOUS
+                        # caches shaped [num_blocks, block_size, H, D]; the
+                        # aliasing views are interleaved and rejected, so the
+                        # main MLA latent cache gets its own dense allocation
+                        # (same semantics as the legacy Ascend allocator).
+                        k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, spec)
+                        key_cache = torch.zeros(
+                            (
+                                kv_cache_config.num_blocks,
+                                spec.block_size,
+                                spec.num_kv_heads,
+                                k_dim,
+                            ),
+                            dtype=spec.dtype,
+                            device=self.device,
+                        )
+                        if v_dim > 0:
+                            value_cache = torch.zeros(
+                                (
+                                    kv_cache_config.num_blocks,
+                                    spec.block_size,
+                                    spec.num_kv_heads,
+                                    v_dim,
+                                ),
+                                dtype=spec.dtype,
+                                device=self.device,
+                            )
+                        else:
+                            # NoPE MLA: no rope part; value view stays empty.
+                            value_cache = key_cache.new_empty(
+                                kv_cache_config.num_blocks,
+                                spec.block_size,
+                                spec.num_kv_heads,
+                                0,
+                            )
+                        kv_caches[layer_name] = (key_cache, value_cache)
+                    else:
+                        kv_caches[layer_name] = view
+        else:
+            # Initialize the memory buffer for KV cache
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            # Change the memory buffer to the desired shape
+            kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -3994,6 +4086,12 @@ class NPUModelRunner(GPUModelRunner):
         # have only linear or attention layers, for example, the mtp layer.
         self.hybrid_with_attn_and_mamba = False
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            logger.info(
+                "[ascend-debug] KV tensor size=%.2f GiB shared_by=%s",
+                kv_cache_tensor.size / (1024 ** 3),
+                kv_cache_tensor.shared_by,
+            )
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             use_mamba, use_attn = False, False
             for layer_name in kv_cache_tensor.shared_by:
                 if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
@@ -4117,19 +4215,26 @@ class NPUModelRunner(GPUModelRunner):
                         v_tensor_size = None
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                        assert k_dim > 0 and v_dim > 0
-                        kv_head_dim_list = [
-                            k_dim,
-                            v_dim,
-                        ]
-                        if not self.use_sparse and enable_fa_quant(self.vllm_config):
-                            k_tensor_split_factor, v_tensor_split_factor = (
-                                self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
-                            )
+                        if v_dim <= 0:
+                            # NoPE MLA (qk_rope_head_dim == 0) and the kpool
+                            # indexer K-only caches have no separate V part;
+                            # keep a single full-size tensor like sparse C8.
+                            k_tensor_size = kv_cache_tensor.size
+                            v_tensor_size = None
                         else:
-                            k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
-                        k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
-                        v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
+                            assert k_dim > 0 and v_dim > 0
+                            kv_head_dim_list = [
+                                k_dim,
+                                v_dim,
+                            ]
+                            if not self.use_sparse and enable_fa_quant(self.vllm_config):
+                                k_tensor_split_factor, v_tensor_split_factor = (
+                                    self.vllm_config.quant_config.get_kv_quant_split_factor(layer_name, kv_head_dim_list)
+                                )
+                            else:
+                                k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
+                            k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
+                            v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
@@ -4162,7 +4267,7 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the attn kvcache for all shared layers
                         if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            if current_sparse_sfa_c8:
+                            if current_sparse_sfa_c8 or v_tensor is None:
                                 kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
                             else:
                                 assert v_tensor is not None
@@ -4901,7 +5006,12 @@ class NPUModelRunner(GPUModelRunner):
                         # Indexer/tail pages do not evenly divide the MLA page.
                         # Ascend indexes KV by block stride, so opt in to padding.
                         if isinstance(spec, AttentionSpec):
-                            spec = replace(spec, indexes_kv_by_block_stride=True)
+                            try:
+                                spec = replace(spec, indexes_kv_by_block_stride=True)
+                            except TypeError:
+                                # Upstream MLAAttentionSpec does not carry the
+                                # Ascend-only block-stride flag; skip it there.
+                                pass
                         kv_cache_spec[layer_name] = spec
                     continue
                 # TODO: This mirrors upstream's separated KV/indexer specs for
