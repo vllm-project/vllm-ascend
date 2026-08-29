@@ -132,13 +132,8 @@ The deployment scenarios validated for this release are organized by context win
 Run the following script to execute online inference.
 
 ```shell
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_TRANSFER_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=3600
-export HCCL_CONNECT_TIMEOUT=3600
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=200
+export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --host 0.0.0.0 \
@@ -203,17 +198,11 @@ local_ip="xxx"
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_TRANSFER_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=3600
-export HCCL_CONNECT_TIMEOUT=3600
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=400
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
@@ -255,17 +244,11 @@ local_ip="xxx"
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_TRANSFER_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=3600
-export HCCL_CONNECT_TIMEOUT=3600
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export HCCL_BUFFSIZE=400
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
@@ -300,7 +283,7 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 
 **Multi-node network and data parallel configuration:**
 
-- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.
 - `--data-parallel-size 4`: Total number of data parallel ranks across all nodes (2 ranks per node in this scenario).
 - `--data-parallel-size-local 2`: Number of data parallel ranks on the current node.
 - `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `2`.
@@ -437,22 +420,14 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export HCCL_TRANSFER_TIMEOUT=600
-        export HCCL_EXEC_TIMEOUT=3600
-        export HCCL_CONNECT_TIMEOUT=3600
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=400
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
             --host 0.0.0.0 \
@@ -504,22 +479,14 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export HCCL_TRANSFER_TIMEOUT=600
-        export HCCL_EXEC_TIMEOUT=3600
-        export HCCL_CONNECT_TIMEOUT=3600
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=400
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
             --host 0.0.0.0 \
@@ -570,24 +537,15 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export HCCL_TRANSFER_TIMEOUT=600
-        export HCCL_EXEC_TIMEOUT=3600
-        export HCCL_CONNECT_TIMEOUT=3600
         #Mooncake
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        export TASK_QUEUE_ENABLE=1
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
             --host 0.0.0.0 \
@@ -638,24 +596,15 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export HCCL_TRANSFER_TIMEOUT=600
-        export HCCL_EXEC_TIMEOUT=3600
-        export HCCL_CONNECT_TIMEOUT=3600
         #Mooncake
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        export TASK_QUEUE_ENABLE=1
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
             --host 0.0.0.0 \
@@ -802,7 +751,6 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 **Prefill node-specific configurations:**
 
 - `additional_config.enable_fused_mc2=1`: Enables the `dispatch_ffn_combine`/`mega_moe` fused operators. Note: fused MC2 conflicts with `multistream_overlap_shared_expert`.
-- `ACL_OP_INIT_MODE=1` / `ASCEND_A3_ENABLE=1`: A3-specific optimizations for operator initialization and communication aggregation.
 - `--speculative-config '{"num_speculative_tokens": 1, ...}'`: Minimal MTP speculation during prefill (decode nodes use a higher count, see below).
 
 **Decode node-specific configurations:**
@@ -881,22 +829,12 @@ local_ip="xxx"
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxx"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_RPC_TIMEOUT=360000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=200
-export HCCL_CONNECT_TIMEOUT=120
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ACL_OP_INIT_MODE=1
-export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --max_model_len 40000 \
@@ -931,22 +869,12 @@ local_ip="xxx"
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxx"
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_RPC_TIMEOUT=360000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=200
-export HCCL_CONNECT_TIMEOUT=120
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ACL_OP_INIT_MODE=1
-export TASK_QUEUE_ENABLE=1
-export CPU_AFFINITY_CONF=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1200
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 --max_model_len 40000 \
@@ -978,9 +906,7 @@ The A2 series uses a different optimization stack than A3; DSA-CP is not used he
 
 **A2-specific environment variables:**
 
-- `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.
-- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
-- `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
+- `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
 
 ##### 5.1.2.2 Prefill-Decode Disaggregation
 
@@ -995,25 +921,17 @@ Please refer to the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs
 nic_name="<NIC_NAME>"
 local_ip="<CURRENT_NODE_IP>"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=256
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
+export HCCL_INTRA_ROCE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
 export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=1
-export PYTHONHASHSEED=0
+export GLOO_SOCKET_IFNAME=$nic_name
 export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
-export HCCL_INTRA_ROCE_ENABLE=1
-export ACL_OP_INIT_MODE=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
@@ -1084,28 +1002,17 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
 nic_name="<NIC_NAME>"
 local_ip="<CURRENT_NODE_IP>"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_HOST_IP=$local_ip
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=2560
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
+export HCCL_INTRA_ROCE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export VLLM_USE_V1=1
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
 export LD_LIBRARY_PATH=/usr/local/python3.11.10/lib:/usr/local/lib:$LD_LIBRARY_PATH
-export PYTHONHASHSEED=0
+export GLOO_SOCKET_IFNAME=$nic_name
 export MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"
-export HCCL_INTRA_ROCE_ENABLE=1
-export ACL_OP_INIT_MODE=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --host 0.0.0.0 \
@@ -1248,13 +1155,9 @@ This 8-node A2 layout splits the global P/D topology across 8 Atlas 800 A2 nodes
 
 **Environment variables for the A2 PD scenario:**
 
-- `VLLM_USE_V1=1`: Forces the v1 scheduler.
-- `ASCEND_AGGREGATE_ENABLE=1` / `ASCEND_TRANSPORT_PRINT=1`: Communication aggregation and transport debug printing.
 - `PYTHONHASHSEED=0`: Fixed hash seed for reproducible distributed scheduling.
 - `MOONCAKE_CONFIG_PATH="/mnt/share/scripts/mooncake.json"`: Path to the Mooncake configuration file (must exist on each node).
 - `HCCL_INTRA_ROCE_ENABLE=1`: Enables HCCL intra-node communication over RoCE.
-- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode.
-- `VLLM_HOST_IP=$local_ip`: Host IP advertised by the decode engine for cross-node communication.
 
 Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
 
@@ -1278,16 +1181,9 @@ The 1M context scenarios are validated on Atlas 800 A3 only; the A2 series is no
 Recommended command:
 
 ```shell
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
-export HCCL_TRANSFER_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=3600
-export HCCL_CONNECT_TIMEOUT=3600
+export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export TASK_QUEUE_ENABLE=1
 
 vllm serve <MODEL_PATH> \
   --seed 1024 \
@@ -1318,7 +1214,6 @@ Key Parameter Descriptions (in addition to [Single-Node Deployment](#5111-single
 **1M-specific environment variables:**
 
 - `additional_config.weight_nz_mode=1`: Enables NZ format memory layout for the C8 quantized tensors, required for the 1M context deployment.
-- `VLLM_WORKER_MULTIPROC_METHOD=spawn`: Uses the spawn start method for multi-process workers (required in this scenario).
 
 **1M-specific vllm serve parameters:**
 
@@ -1339,20 +1234,12 @@ node_0_ip="<NODE0_IP>"
 data_parallel_start_rank=0
 server_role_args="--api-server-count 1"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
-export HCCL_TRANSFER_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=3600
-export HCCL_CONNECT_TIMEOUT=3600
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export TASK_QUEUE_ENABLE=1
 
 vllm serve <MODEL_PATH> \
   --seed 1024 \
@@ -1403,22 +1290,12 @@ node_p0_ip="<PREFILL_NODE0_IP>"
 data_parallel_start_rank=0
 server_role_args="--api-server-count 1"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
-export HCCL_TRANSFER_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=3600
-export HCCL_CONNECT_TIMEOUT=3600
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export TASK_QUEUE_ENABLE=1
-export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
 vllm serve <MODEL_PATH> \
   --seed 1024 \
@@ -1476,21 +1353,12 @@ node_d0_ip="<DECODE_NODE0_IP>"
 data_parallel_start_rank=0
 server_role_args="--api-server-count 1"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=20
 export HCCL_BUFFSIZE=768
-export HCCL_TRANSFER_TIMEOUT=600
-export HCCL_EXEC_TIMEOUT=3600
-export HCCL_CONNECT_TIMEOUT=3600
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export TASK_QUEUE_ENABLE=1
-export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 
 vllm serve <MODEL_PATH> \
   --seed 1024 \
