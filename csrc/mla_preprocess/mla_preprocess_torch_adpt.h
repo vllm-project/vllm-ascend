@@ -13,166 +13,183 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #ifndef MLA_PREPROCESS_TORCH_ADPT_H
 #define MLA_PREPROCESS_TORCH_ADPT_H
 
-
-#include "op_host/mla_preprocess.h"
-
 namespace vllm_ascend {
-constexpr int64_t MLA_PREPROCESS_FULLY_SUPPORTED_KV_LORA_RANK = 512;
-constexpr int64_t MLA_PREPROCESS_FULLY_SUPPORTED_QK_ROPE_HEAD_DIM = 64;
+namespace mla_preprocess_detail {
+
+constexpr int64_t FULLY_SUPPORTED_KV_LORA_RANK = 512;
+constexpr int64_t FULLY_SUPPORTED_QK_ROPE_HEAD_DIM = 64;
+
+inline int64_t ParseCacheMode(c10::optional<c10::string_view> cacheMode)
+{
+    const c10::string_view mode = cacheMode.value_or("krope_ctkv");
+    if (mode == "kvcache") {
+        return 0;
+    }
+    if (mode == "krope_ctkv") {
+        return 1;
+    }
+    if (mode == "int8_nzcache") {
+        return 2;
+    }
+    if (mode == "nzcache") {
+        return 3;
+    }
+    TORCH_CHECK(false, "Unsupported cache_mode value: '", mode, "'");
+    return 0;
+}
+
+inline int64_t ParseQuantMode(c10::optional<c10::string_view> quantMode)
+{
+    const c10::string_view mode = quantMode.value_or("per_token_quant_symm");
+    if (mode == "per_tensor_quant_asymm") {
+        return 0;
+    }
+    if (mode == "per_token_quant_symm") {
+        return 1;
+    }
+    if (mode == "per_token_quant_asymm") {
+        return 2;
+    }
+    if (mode == "no_quant") {
+        return 3;
+    }
+    TORCH_CHECK(false, "Unsupported quant_mode value: '", mode, "'");
+    return 0;
+}
+
+// The kernel supports an enlarged dim0 stride for paged cache blocks. Every
+// inner axis must still use the compact layout expected by the selected mode.
+inline void ValidateCacheNonFirstAxisContiguous(const at::Tensor &cache, const char *tensorName)
+{
+    if (cache.dim() <= 1) {
+        return;
+    }
+    const auto sizes = cache.sizes();
+    const auto strides = cache.strides();
+    int64_t expectedStride = 1;
+    for (int64_t dim = cache.dim() - 1; dim >= 1; --dim) {
+        if (sizes[dim] == 1) {
+            continue;
+        }
+        TORCH_CHECK(strides[dim] == expectedStride,
+                    tensorName, " dim", dim, " is non-contiguous: actual stride=", strides[dim],
+                    ", expected contiguous stride=", expectedStride,
+                    ". Only dim0/blockNum may be non-contiguous.");
+        expectedStride *= sizes[dim];
+    }
+}
+
+inline int64_t GetStride0(const at::Tensor &cache, const char *tensorName)
+{
+    TORCH_CHECK(cache.dim() >= 1, tensorName, " must have at least one dimension.");
+    TORCH_CHECK(cache.stride(0) > 0, tensorName, " dim0 stride must be positive.");
+    return cache.stride(0);
+}
+
+inline bool IsPhysicalNzCache(const at::Tensor &cache, int64_t cacheMode)
+{
+    return (cacheMode == 2 || cacheMode == 3) && cache.dim() == 4 && cache.size(2) != 1;
+}
+
+inline int64_t GetRopeHeadDim(const at::Tensor &kvCacheRope, int64_t cacheMode)
+{
+    TORCH_CHECK(kvCacheRope.dim() >= 1, "kv_cache_rope must not be a scalar.");
+    if (IsPhysicalNzCache(kvCacheRope, cacheMode)) {
+        return kvCacheRope.size(1) * kvCacheRope.size(3);
+    }
+    return kvCacheRope.size(-1);
+}
+
+}  // namespace mla_preprocess_detail
 
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState, const at::Tensor &wdqkv,
-    const c10::optional<at::Tensor> &descale0, const at::Tensor &gamma1, const c10::optional<at::Tensor> &beta1, const at::Tensor &wuq,
+    const c10::optional<at::Tensor> &descale0, const at::Tensor &gamma1,
+    const c10::optional<at::Tensor> &beta1, const at::Tensor &wuq,
     const c10::optional<at::Tensor> &descale1, const at::Tensor &gamma2,
     const c10::optional<at::Tensor> &cos, const c10::optional<at::Tensor> &sin,
-    const at::Tensor &wuk, const at::Tensor &kv_cache, const at::Tensor &kv_cache_rope, const at::Tensor &slotmapping,
-    const c10::optional<at::Tensor> &quant_scale0, const c10::optional<at::Tensor> &quant_offset0, const c10::optional<at::Tensor> &bias0,
-    const c10::optional<at::Tensor> &quant_scale1, const c10::optional<at::Tensor> &quant_offset1, const c10::optional<at::Tensor> &bias1,
-    const c10::optional<at::Tensor> &ctkv_scale, const c10::optional<at::Tensor> &q_nope_scale,
-    c10::optional<c10::string_view> cache_mode, c10::optional<c10::string_view> quant_mode,
-    c10::optional<bool> enable_inner_out, at::Tensor &q_out0,
-    at::Tensor &kv_cache_out0, at::Tensor &q_out1, at::Tensor &kv_cache_out1, at::Tensor &inner_out)
+    const at::Tensor &wuk, const at::Tensor &kv_cache, const at::Tensor &kv_cache_rope,
+    const at::Tensor &slotmapping, const c10::optional<at::Tensor> &quant_scale0,
+    const c10::optional<at::Tensor> &quant_offset0, const c10::optional<at::Tensor> &bias0,
+    const c10::optional<at::Tensor> &quant_scale1, const c10::optional<at::Tensor> &quant_offset1,
+    const c10::optional<at::Tensor> &bias1, const c10::optional<at::Tensor> &ctkv_scale,
+    const c10::optional<at::Tensor> &q_nope_scale, c10::optional<c10::string_view> cache_mode,
+    c10::optional<c10::string_view> quant_mode, c10::optional<bool> enable_inner_out,
+    at::Tensor &q_out0, at::Tensor &kv_cache_out0, at::Tensor &q_out1,
+    at::Tensor &kv_cache_out1, at::Tensor &inner_out)
 {
-    at::Tensor Descale0 =
-        descale0.has_value()
-            ? descale0.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Descale1 =
-        descale1.has_value()
-            ? descale1.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Beta1 =
-        beta1.has_value()
-            ? beta1.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Quant_scale0 =
-        quant_scale0.has_value()
-            ? quant_scale0.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Quant_scale1 =
-        quant_scale1.has_value()
-            ? quant_scale1.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Quant_offset0 =
-        quant_offset0.has_value()
-            ? quant_offset0.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Quant_offset1 =
-        quant_offset1.has_value()
-            ? quant_offset1.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Bias0 =
-        bias0.has_value()
-            ? bias0.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Bias1 =
-        bias1.has_value()
-            ? bias1.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor CtkvScale =
-        ctkv_scale.has_value()
-            ? ctkv_scale.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor QnopeScale =
-        q_nope_scale.has_value()
-            ? q_nope_scale.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    bool enableInnerOut =
-        enable_inner_out.has_value()
-            ? enable_inner_out.value()
-            : false;
-    TORCH_CHECK(
-        cos.has_value() == sin.has_value(),
-        "mla_preprocess requires cos and sin to both be tensors or both be None.");
-    bool enableRope = cos.has_value();
-    // Use placeholder tensors because device kernels initialize RoPE input addresses unconditionally.
-    at::Tensor Cos =
-        cos.has_value()
-            ? cos.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    at::Tensor Sin =
-        sin.has_value()
-            ? sin.value()
-            : at::empty({1}, at::TensorOptions().dtype(at::kHalf).device(hiddenState.options().device()));
-    int64_t kvLoraRank = wuk.size(-1);
-    int64_t qkRopeHeadDim = kv_cache_rope.size(-1);
-    if (kvLoraRank != MLA_PREPROCESS_FULLY_SUPPORTED_KV_LORA_RANK ||
-        qkRopeHeadDim != MLA_PREPROCESS_FULLY_SUPPORTED_QK_ROPE_HEAD_DIM) {
+    TORCH_CHECK(cos.has_value() == sin.has_value(),
+                "mla_preprocess requires cos and sin to both be tensors or both be None.");
+
+    const int64_t cacheMode = mla_preprocess_detail::ParseCacheMode(cache_mode);
+    const int64_t quantMode = mla_preprocess_detail::ParseQuantMode(quant_mode);
+    const bool enableInnerOut = enable_inner_out.value_or(false);
+    const bool enableRope = cos.has_value();
+
+    mla_preprocess_detail::ValidateCacheNonFirstAxisContiguous(kv_cache, "kv_cache");
+    mla_preprocess_detail::ValidateCacheNonFirstAxisContiguous(kv_cache_rope, "kv_cache_rope");
+    const int64_t kvCacheStride0 = mla_preprocess_detail::GetStride0(kv_cache, "kv_cache");
+    const int64_t kvCacheRopeStride0 =
+        mla_preprocess_detail::GetStride0(kv_cache_rope, "kv_cache_rope");
+
+    const int64_t kvLoraRank = wuk.size(-1);
+    const int64_t qkRopeHeadDim = mla_preprocess_detail::GetRopeHeadDim(kv_cache_rope, cacheMode);
+    if (kvLoraRank != mla_preprocess_detail::FULLY_SUPPORTED_KV_LORA_RANK ||
+        qkRopeHeadDim != mla_preprocess_detail::FULLY_SUPPORTED_QK_ROPE_HEAD_DIM) {
         TORCH_WARN_ONCE(
             "mla_preprocess currently fully supports only kv_lora_rank=",
-            MLA_PREPROCESS_FULLY_SUPPORTED_KV_LORA_RANK,
-            " and qk_rope_head_dim=",
-            MLA_PREPROCESS_FULLY_SUPPORTED_QK_ROPE_HEAD_DIM,
-            ", but received kv_lora_rank=",
-            kvLoraRank,
-            " and qk_rope_head_dim=",
-            qkRopeHeadDim,
-             ". Inputs outside the fully supported configuration are allowed to continue, "
-             "but may produce accuracy issues.");
+            mla_preprocess_detail::FULLY_SUPPORTED_KV_LORA_RANK,
+            " and qk_rope_head_dim=", mla_preprocess_detail::FULLY_SUPPORTED_QK_ROPE_HEAD_DIM,
+            ", but received kv_lora_rank=", kvLoraRank,
+            " and qk_rope_head_dim=", qkRopeHeadDim,
+            ". Inputs outside the fully supported configuration are allowed to continue, "
+            "but may produce accuracy issues.");
     }
-    auto [workspace_tensor, tiling, block_dim] = mlapo::mla_preprocess_tiling(
+
+    EXEC_NPU_CMD(
+        aclnnMlaPreprocess,
         hiddenState,
+        quant_scale0,
+        quant_offset0,
         wdqkv,
-        wuk,
+        bias0,
         gamma1,
+        beta1,
+        quant_scale1,
+        quant_offset1,
+        gamma2,
+        sin,
+        cos,
+        sin,
+        cos,
         kv_cache,
-        kv_cache_rope,
-        cache_mode,
-        quant_mode,
+        slotmapping,
+        wuq,
+        bias1,
+        wuk,
+        descale0,
+        descale1,
+        ctkv_scale,
+        q_nope_scale,
+        cacheMode,
+        quantMode,
         enableInnerOut,
-        enableRope
-    );
+        enableRope,
+        kvCacheStride0,
+        kvCacheRopeStride0,
+        q_out0,
+        kv_cache_out0,
+        q_out1,
+        kv_cache_out1,
+        inner_out);
 
-    void *hidden_state_ptr = hiddenState.data_ptr();
-    void *quant_scale0_ptr = Quant_scale0.data_ptr();
-    void *quant_offset0_ptr = Quant_offset0.data_ptr();
-    void *wdqkv_ptr = wdqkv.data_ptr();
-    void *bias0_ptr = Bias0.data_ptr();
-    void *gamma1_ptr = gamma1.data_ptr();
-    void *beta1_ptr = Beta1.data_ptr();
-    void *quant_scale1_ptr = Quant_scale1.data_ptr();
-    void *quant_offset1_ptr = Quant_offset1.data_ptr();
-    void *gamma2_ptr = gamma2.data_ptr();
-    void *sin_ptr = Sin.data_ptr();
-    void *cos_ptr = Cos.data_ptr();
-    void *kv_cache_ptr = kv_cache.data_ptr();
-    void *slotmapping_ptr = slotmapping.data_ptr();
-    void *wuq_ptr = wuq.data_ptr();
-    void *bias1_ptr = Bias1.data_ptr();
-    void *wuk_ptr = wuk.data_ptr();
-    void *descale0_ptr = Descale0.data_ptr();
-    void *descale1_ptr = Descale1.data_ptr();
-    void *ctkv_scale_ptr = CtkvScale.data_ptr();
-    void *qnope_scale_ptr = QnopeScale.data_ptr();
-    void *q_out0_ptr = q_out0.data_ptr();
-    void *kv_cache_out0_ptr = kv_cache_out0.data_ptr();
-    void *q_out1_ptr = q_out1.data_ptr();
-    void *kv_cache_out1_ptr = kv_cache_out1.data_ptr();
-    void *inner_out_ptr = inner_out.data_ptr();
-    void *workspace_ptr = workspace_tensor.data_ptr();
-    void *tiling_ptr = tiling.data_ptr();
-
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    at_npu::native::OpCommand cmd;
-    cmd.Name("mla_preprocess");
-
-    cmd.SetCustomHandler([stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
-                          gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr,
-                          kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
-                          qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
-                          tiling_ptr, block_dim]() -> int {
-        mla_preprocess_impl(stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
-                            gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr, sin_ptr, cos_ptr,
-                            kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
-                            qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, inner_out_ptr, workspace_ptr,
-                            tiling_ptr, block_dim);
-        return 0;
-    });
-    cmd.Run();
     return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1, inner_out);
 }
-}
-#endif
+
+}  // namespace vllm_ascend
+
+#endif  // MLA_PREPROCESS_TORCH_ADPT_H
