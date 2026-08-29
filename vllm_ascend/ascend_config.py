@@ -244,6 +244,12 @@ class AscendConfig:
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     draft_window_size: int | None = None
+    # Experimental: enable FULL aclgraph for the draft_model-method drafter.
+    # The drafter consumes R*(K+2) tokens per step (never a multiple of
+    # (K+1)), so this arms a drafter-specific R*(K+2) capture-size table and
+    # K+2-based dispatch instead of the shared FULL-uniform path. Default
+    # off keeps the drafter eager (upstream PIECEWISE-only semantics).
+    draft_model_full_graph: bool = False
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     mega_moe_max_tokens: int = 131072
@@ -307,6 +313,7 @@ class AscendConfig:
         from vllm_ascend import envs as ascend_envs
 
         _A_FAMILY = {
+            "draft_model_full_graph": "VLLM_ASCEND_DRAFT_MODEL_FULL_GRAPH",
             "enable_mlapo": "VLLM_ASCEND_ENABLE_MLAPO",
         }
         for key, env_name in _A_FAMILY.items():

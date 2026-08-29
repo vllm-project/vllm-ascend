@@ -274,6 +274,18 @@ def get_tp_context(drafter):
     return getattr(drafter, "tp_group_context", nullcontext())
 
 
+def derive_draft_model_graph_sizes(capture_sizes: list[int], num_speculative_tokens: int) -> list[int]:
+    """Derive the draft_model drafter's FULL-graph capture-size table.
+
+    The drafter consumes R*(K+2) tokens per step (R*(K+1) verify tokens plus
+    one extra seed slot per request), while the target's capture sizes are
+    R*(K+1)-based (num_tokens = R'*(K+1)). Each target size s therefore maps
+    to the drafter size s + s // (K+1) == R'*(K+2).
+    """
+    k = num_speculative_tokens
+    return sorted({s + s // (k + 1) for s in capture_sizes})
+
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -3670,13 +3682,30 @@ class NPUModelRunner(GPUModelRunner):
             dummy_compute_logits(hidden_states)
 
             if self.drafter and not profile_cpp:
+                drafter_num_tokens = num_tokens_padded
+                drafter_num_reqs = num_reqs_padded
+                drafter_batch_desc = batch_desc
+                # draft_model drafter runs at R*(K+2) tokens (not the target's
+                # R*(K+1)); translate the capture-time shape so its FULL graph
+                # is captured at valid drafter sizes (see
+                # _draft_model_graph_sizes).
+                if getattr(self, "_draft_model_graph_sizes", None) and cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                    query_len = self.num_spec_tokens + 1
+                    drafter_reqs = num_tokens_padded // query_len
+                    drafter_num_tokens = drafter_reqs * (self.num_spec_tokens + 2)
+                    drafter_num_reqs = drafter_reqs
+                    drafter_batch_desc = BatchDescriptor(
+                        num_tokens=drafter_num_tokens,
+                        num_reqs=drafter_reqs,
+                        uniform=True,
+                    )
                 self.drafter.dummy_run(
-                    num_tokens=num_tokens_padded,
+                    num_tokens=drafter_num_tokens,
                     with_prefill=with_prefill,
-                    num_reqs=num_reqs_padded,
+                    num_reqs=drafter_num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_desc,
+                    batch_descriptor=drafter_batch_desc,
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention,
                     is_profile=is_profile,
@@ -5170,7 +5199,24 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                # draft_model drafter consumes R*(K+2) tokens per step
+                # (R*(K+1) verify + 1 extra seed slot per request). Derive a
+                # drafter-specific capture table from the target's (K+1)-based
+                # sizes so FULL graphs can be captured at valid drafter shapes
+                # when draft_model_full_graph is enabled (AscendConfig).
+                self._draft_model_graph_sizes: list[int] | None = None
+                if self.speculative_config.uses_draft_model() and get_ascend_config().draft_model_full_graph:
+                    self._draft_model_graph_sizes = derive_draft_model_graph_sizes(
+                        capture_sizes, self.speculative_config.num_speculative_tokens
+                    )
+                    logger.info(
+                        "draft_model drafter FULL graph enabled: target sizes %s -> drafter sizes %s",
+                        capture_sizes,
+                        self._draft_model_graph_sizes,
+                    )
+                    set_draft_graph_params(self._draft_model_graph_sizes)
+                else:
+                    set_draft_graph_params(capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""

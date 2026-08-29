@@ -77,6 +77,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # DEPRECATED: use additional_config.draft_model_full_graph instead.
+    # Experimental: enable FULL aclgraph for the draft_model-method drafter.
+    # The drafter consumes R*(K+2) tokens per step (R*(K+1) verify tokens + 1
+    # extra seed slot per request), which is never a multiple of (K+1) and thus
+    # incompatible with the shared FULL-uniform dispatch. When enabled, the
+    # drafter gets its own R*(K+2) capture-size table and K+2-based dispatch
+    # (see AscendSpecDecodeBaseProposer._propose). Default off keeps the
+    # drafter in eager mode (upstream PIECEWISE-only semantics).
+    "VLLM_ASCEND_DRAFT_MODEL_FULL_GRAPH": lambda: bool(int(os.getenv("VLLM_ASCEND_DRAFT_MODEL_FULL_GRAPH", "0"))),
 }
 
 # end-env-vars-definition
