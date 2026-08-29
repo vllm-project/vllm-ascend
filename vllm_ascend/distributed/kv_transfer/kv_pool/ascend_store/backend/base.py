@@ -6,6 +6,36 @@ from typing import Any
 from vllm.config import ParallelConfig
 
 
+class GVALayerwiseCapable(ABC):
+    """Optional protocol family for backends that support the layerwise GVA
+    transfer mode (batch key-info lookup, allocation, and leases).
+
+    The generic layers must gate these calls behind
+    ``backend_supports(backend_name, "gva_layerwise")`` instead of calling
+    them unconditionally on a plain :class:`Backend`.
+    """
+
+    @abstractmethod
+    def batch_get_key_info(self, keys: list[str]) -> list[Any]:
+        pass
+
+    @abstractmethod
+    def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
+        pass
+
+    @abstractmethod
+    def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
+        pass
+
+    @abstractmethod
+    def batch_remove_lease(self, keys: list[str]) -> int:
+        pass
+
+    @abstractmethod
+    def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
+        pass
+
+
 class Backend(ABC):
     store: Any | None = None
 
@@ -32,20 +62,10 @@ class Backend(ABC):
     def batch_is_exist(self, keys: list[str]) -> list[int]:
         return self.exists(keys)
 
-    def batch_get_key_info(self, keys: list[str]):
-        raise NotImplementedError(f"{type(self).__name__} does not support batch_get_key_info")
-
-    def batch_alloc(self, keys: list[str], sizes: list[int]) -> list[int]:
-        raise NotImplementedError(f"{type(self).__name__} does not support batch_alloc")
-
-    def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
-        raise NotImplementedError(f"{type(self).__name__} does not support batch_add_lease")
-
-    def batch_remove_lease(self, keys: list[str]) -> int:
-        raise NotImplementedError(f"{type(self).__name__} does not support batch_remove_lease")
-
-    def batch_write_finish(self, keys: list[str], results: list[int]) -> list[int]:
-        raise NotImplementedError(f"{type(self).__name__} does not support batch_write_finish")
+    def on_worker_ready(self) -> None:  # noqa: B027 (optional lifecycle hook)
+        """Called after kv caches are registered and before transfer threads
+        start. Backends that need eager initialization override this.
+        """
 
     @abstractmethod
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):

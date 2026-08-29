@@ -10,7 +10,7 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend, GVALayerwiseCapable
 
 
 def _is_device_sdma() -> bool:
@@ -38,7 +38,7 @@ class MmcDirect(Enum):
     COPY_H2G = 3
 
 
-class MemcacheBackend(Backend):
+class MemcacheBackend(Backend, GVALayerwiseCapable):
     def __init__(
         self,
         parallel_config: ParallelConfig,
@@ -58,6 +58,15 @@ class MemcacheBackend(Backend):
         if not self._lazy_init:
             self.store = self._setup_store()
             self._store_initialized = True
+
+    def on_worker_ready(self) -> None:
+        # lazy_init (compress + device_sdma) intentionally defers store
+        # setup: exists/batch_get_key_info rely on the "uninitialized means
+        # all-miss" short circuit, so an unconditional eager init here would
+        # break that contract.
+        if self._lazy_init:
+            return
+        self.ensure_initialized()
 
     def ensure_initialized(self):
         if self._store_initialized:
