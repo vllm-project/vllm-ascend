@@ -1,0 +1,167 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (The "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Daily E2E test executor -- tests main HEAD, NOT the baked image.
+#
+# Each scheduled slot must test the latest main HEAD so that regressions are
+# surfaced within ~3h (the inter-slot gap). To achieve this the executor:
+#   1. Starts from the prebuilt nightly-ci image (CANN + vllm + build deps).
+#   2. Checks out main HEAD into $GITHUB_WORKSPACE.
+#   3. Uninstalls the image's baked vllm-ascend and reinstalls from the
+#      checkout (editable, full compile -- NOT COMPILE_CUSTOM_KERNELS=0, which
+#      would skip all C extensions and break E2E on NPU).
+#   4. Runs the curated pytest subset from the checkout directory.
+#
+# Incremental cost vs. image-only mode: ~15-20 min (install+compile). Total
+# per-slot budget stays well under 90 min (~20min install + ~42min tests).
+
+name: 'Daily E2E tests'
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+        description: 'Self-hosted runner label (e.g. linux-aarch64-a2b3-1).'
+      image:
+        required: true
+        type: string
+        description: 'Prebuilt nightly-ci image (provides CANN + vllm + build deps).'
+      tests:
+        required: true
+        type: string
+        description: 'Space-separated pytest paths/files to run against main HEAD.'
+      name:
+        required: false
+        type: string
+        default: ''
+        description: 'Display name used in the job name and log artifact.'
+      vllm_ascend_branch:
+        required: false
+        type: string
+        default: 'main'
+        description: 'Branch/ref to checkout and test (default: main).'
+      timeout_minutes:
+        required: false
+        type: string
+        default: '60'
+        description: 'Per-job hard timeout. Default 60 min guards the 90 min daily budget.'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be
+# explicitly declared as "shell: bash -el {0}" on steps that need to be
+# properly activated. It activates the ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  daily-e2e:
+    name: ${{ inputs.name || inputs.tests }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    container:
+      image: ${{ inputs.image }}
+      env:
+        HF_HUB_OFFLINE: 1
+        VLLM_USE_MODELSCOPE: True
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_WORKER_MULTIPROC_METHOD: spawn
+        VLLM_CI_RUNNER: ${{ inputs.runner }}
+    steps:
+      - name: Check NPU and CANN info
+        run: |
+          npu-smi info || true
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info || true
+
+      - name: Show image-baked vLLM version
+        working-directory: /vllm-workspace
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          echo "=== Image-baked vLLM packages ==="
+          pip list | grep -i vllm || echo "No vllm packages found."
+
+      - name: Checkout main HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.vllm_ascend_branch }}
+          fetch-depth: 1
+
+      - name: Configure git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Set MAX_JOBS and SOC_VERSION based on runner
+        run: |
+          CARDS=$(echo "${{ inputs.runner }}" | grep -oE '[0-9]+$')
+          echo "MAX_JOBS=$((CARDS * 23))" >> $GITHUB_ENV
+          # Set SOC_VERSION if not already set by the image (setup.py:141-154
+          # calls npu-smi to auto-detect chip type, which can fail in containers
+          # without device access -- e.g. when pip install runs in the metadata
+          # phase before any NPU init). The nightly-ci base image sets it via
+          # Dockerfile ENV, but guard against missing env here.
+          if [ -z "${SOC_VERSION:-}" ]; then
+            RUNNER="${{ inputs.runner }}"
+            if echo "$RUNNER" | grep -q "a2b3"; then
+              echo "SOC_VERSION=ascend910b1" >> $GITHUB_ENV
+            elif echo "$RUNNER" | grep -q "a3-"; then
+              echo "SOC_VERSION=ascend910_9391" >> $GITHUB_ENV
+            elif echo "$RUNNER" | grep -q "310p"; then
+              echo "SOC_VERSION=ascend310p1" >> $GITHUB_ENV
+            fi
+            echo "SOC_VERSION was not set in image, auto-detected: ${SOC_VERSION}"
+          fi
+
+      - name: Install vllm-ascend from main HEAD
+        working-directory: ${{ github.workspace }}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          echo "=== Uninstalling image-baked vllm-ascend ==="
+          pip uninstall -y vllm-ascend 2>/dev/null || true
+          echo "=== Installing from checkout (main HEAD, full compile) ==="
+          # Normal compile (NOT COMPILE_CUSTOM_KERNELS=0) -- the nightly-ci image
+          # has cmake/pybind11/CANN build deps. COMPILE_CUSTOM_KERNELS=0 would skip
+          # all C extensions (setup.py:434 ext_modules=[]), leaving vllm_ascend_C.so
+          # missing and causing E2E failures on NPU (see worker.py:110 warning).
+          pip install -e . --no-build-isolation 2>&1 | tee /tmp/install.log
+          echo "=== Verify C extension ==="
+          python3 -c "import vllm_ascend.vllm_ascend_C; print('vllm_ascend_C OK')"
+          echo "=== main HEAD under test ==="
+          git log -1 --format='%H %s'
+
+      - name: Run pytest subset
+        working-directory: ${{ github.workspace }}
+        env:
+          DAILY_TESTS: ${{ inputs.tests }}
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-}
+          mkdir -p /tmp/test-logs
+          set -o pipefail
+          echo "Running pytest subset against main HEAD:"
+          printf '  %s\n' $DAILY_TESTS
+          pytest -sv $DAILY_TESTS 2>&1 | tee /tmp/test-logs/pytest.log
+
+      - name: Upload test logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: daily-logs-${{ inputs.name }}
+          path: /tmp/test-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+          compression-level: 0
