@@ -263,6 +263,27 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     assert hash_block_size == expected_hash_block_size
 
 
+def test_resolve_divergent_mamba_hash_granularity_for_pd_consumer() -> None:
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        full_block_size=384,
+        mamba_block_size=133248,
+    )
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=1,
+        block_size=384,
+    )
+    vllm_config.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
+
+    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+        kv_cache_config,
+        vllm_config,
+    )
+
+    assert scheduler_block_size == 133248
+    assert hash_block_size == 384
+
+
 def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:
     c128_spec = MLAAttentionSpec(
         block_size=128 * 128,
