@@ -3,11 +3,9 @@ from __future__ import annotations
 import importlib
 import math
 import threading
-import time
 from collections.abc import Callable, Generator
 from typing import Any
 
-import numpy as np
 import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -32,6 +30,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     use_gva_layerwise,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol import (
+    GVASession,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -67,10 +68,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerTransferTask,
     ReqMeta,
     block_hash_to_bytes,
-    block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_partial_block_index,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -81,17 +82,6 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
 )
-
-# Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
-# read lease before batch_copy(G2L); the lease must cover the asynchronous
-# multi-layer load time.
-LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
-
-# A partial snapshot can be visible to readers before the rank responsible for
-# saving it has published its final layer.
-MEMCACHE_UNMATCHED_STATE = -3101
-PARTIAL_LEASE_RETRY_COUNT = 10
-PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 
 
 class KVPoolWorker:
@@ -339,12 +329,6 @@ class KVPoolWorker:
         self.kv_recv_thread: KVTransferThread | None = None
         self._transfer_threads_started = False
         self.external_slot_release_waiter: Callable[[int], None] | None = None
-        # Per-rank GVA cache: maps per-rank store key to its allocated GVA.
-        # batch_alloc is non-idempotent (returns MMC_DUPLICATED_OBJECT for an
-        # existing key without registering the blob), so the worker must track
-        # which keys it has already allocated and reuse those GVAs instead of
-        # re-allocating them on every save step.
-        self._allocated_gvas: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -434,6 +418,31 @@ class KVPoolWorker:
         else:
             self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
         self.sync_save_events: list[torch.npu.Event] | None = None
+
+        # The GVA session owns the worker-side layerwise GVA protocol
+        # (allocation for save, lease acquisition for load). Construction
+        # self-ensures the store is initialized (LIFE). Layout-dependent
+        # parameters (group_block_len / page_size_bytes) are bound later by
+        # register_kv_caches via bind_layout.
+        self._gva_session: GVASession | None = (
+            GVASession(
+                store=self.m_store,
+                model_name=self.model_name,
+                head_or_tp_rank=self.head_or_tp_rank,
+                tp_rank=self.tp_rank,
+                put_step=self.put_step,
+                num_kv_cache_groups=self.num_kv_cache_groups,
+                grouped_block_size=self.grouped_block_size,
+                hash_block_size=self.hash_block_size,
+                layerwise_offload=self.layerwise_offload,
+                use_eagle=self.use_eagle,
+                kv_role=self.kv_role,
+                consumer_is_to_put=self.consumer_is_to_put,
+                on_invalid_blocks=self._report_invalid_blocks,
+            )
+            if self.use_gva_layerwise
+            else None
+        )
 
         logger.info(
             "layerwise config: num_layers=%d num_groups=%d physical_layer_to_group_layers_sample=%s",
@@ -789,6 +798,8 @@ class KVPoolWorker:
             self.layer_save_tasks = [[] for _ in range(self.num_layers)]
 
         self.page_size_bytes = sum(self.block_len)
+        if self._gva_session is not None:
+            self._gva_session.bind_layout(self.group_block_len, self.page_size_bytes)
         self.token_database.set_group_buffers(
             self.group_kv_caches_base_addr,
             self.group_block_len,
@@ -814,8 +825,9 @@ class KVPoolWorker:
 
         # Initialize store, register buffers, and start transfer threads
         # directly here (like main) — no separate init_backend handshake.
-        if self.use_gva_layerwise:
-            self.m_store.ensure_initialized()
+        # The GVA path is already covered by the GVASession construction
+        # self-ensure; lazy backends keep their deferred short-circuit.
+        self.m_store.on_worker_ready()
         self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 
@@ -992,7 +1004,7 @@ class KVPoolWorker:
                 block_size,
                 self.hash_block_size,
             )
-            partial_block_index = self._get_partial_block_index(
+            partial_block_index = get_partial_block_index(
                 request.target_token_len,
                 block_size,
                 len(group_block_hashes),
@@ -1058,7 +1070,7 @@ class KVPoolWorker:
             )
             cached_full_blocks = cached_tokens // block_size
             full_blocks = min(cached_full_blocks, len(group_block_hashes))
-            partial_block_index = self._get_partial_block_index(
+            partial_block_index = get_partial_block_index(
                 cached_tokens,
                 block_size,
                 len(group_block_hashes),
@@ -1094,426 +1106,6 @@ class KVPoolWorker:
                     layer_idx_in_group=layer_idx_in_group,
                 )
             )
-
-    @staticmethod
-    def _get_partial_block_index(
-        token_count: int,
-        block_size: int,
-        hash_count: int,
-        enabled: bool,
-    ) -> int | None:
-        if not enabled or token_count <= 0:
-            return None
-        full_blocks, remainder = divmod(token_count, block_size)
-        if remainder:
-            return full_blocks
-        if full_blocks > hash_count:
-            return full_blocks - 1
-        return None
-
-    def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
-        """Generate GVA key for layerwise transfer.
-
-        Single-group models use the PR #11585 format (model@hash@rank) for
-        backward compatibility. Multi-group models include group_id
-        (model@group_id@hash@rank) to distinguish groups.
-        """
-        if self.num_kv_cache_groups > 1:
-            return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
-        else:
-            return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
-
-    def _make_layerwise_partial_key(
-        self,
-        request: ReqMeta,
-        group_id: int,
-        block_index: int,
-        end_token: int,
-    ) -> str:
-        return f"{self.model_name}@partial@{request.req_id}@{group_id}@{block_index}@{end_token}@{self.head_or_tp_rank}"
-
-    def _refresh_allocated_gvas(self, keys: list[str]) -> None:
-        """Drop local GVA entries whose MemCache blobs were evicted."""
-        cached_keys = list(dict.fromkeys(key for key in keys if key in self._allocated_gvas))
-        if not cached_keys:
-            return
-        exists_states = self.m_store.batch_is_exist(cached_keys)
-        if len(exists_states) != len(cached_keys):
-            raise RuntimeError(
-                "MemCache exists check returned unexpected number of states: "
-                f"expected={len(cached_keys)}, actual={len(exists_states)}"
-            )
-        for key, exists in zip(cached_keys, exists_states):
-            if exists == 0:
-                self._allocated_gvas.pop(key, None)
-            elif exists != 1:
-                raise RuntimeError(f"MemCache exists check failed for {key}: state={exists}")
-
-    def _alloc_gvas_for_save(self, requests: list[ReqMeta]) -> None:
-        """Allocate per-group GVA on the worker side right before batch_copy.
-
-        For multi-group models, iterates all KV cache groups and allocates
-        per-group GVAs. Key format: model@group_id@hash@head_or_tp_rank
-        (multi-group) or model@hash@head_or_tp_rank (single-group, backward
-        compat with PR #11585).
-        """
-        if not self.use_gva_layerwise:
-            return
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
-            return
-        if self.tp_rank % self.put_step != 0:
-            return
-        for request in requests:
-            if request.can_save is None or not request.can_save:
-                continue
-            block_hashes = request.block_hashes
-
-            all_group_gvas: list[np.ndarray] = []
-            all_group_block_ids: list[np.ndarray] = []
-            all_group_save_keys: list[str] = []
-            request.partial_save_gva_per_group = [0] * self.num_kv_cache_groups
-            for group_id in range(self.num_kv_cache_groups):
-                group_block_size = self.grouped_block_size[group_id]
-                effective_block_size = group_block_size
-                group_block_len = self.group_block_len.get(group_id, self.group_block_len.get(0, []))
-                alloc_size = sum(group_block_len) if group_block_len else self.page_size_bytes
-
-                group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
-                block_ids_by_group = (
-                    request.block_ids_by_group_np[group_id]
-                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                    else request.block_ids_np
-                )
-                if block_ids_by_group is None:
-                    raise RuntimeError(f"Block IDs are not initialized for request {request.req_id}")
-
-                save_start_block = request.save_start_token // effective_block_size
-                save_end_block = request.save_end_token // effective_block_size
-                if request.load_spec is not None and request.load_spec.can_load:
-                    pool_hit_tokens = (
-                        request.load_spec.kvpool_store_skip_tokens
-                        if request.load_spec.kvpool_store_skip_tokens is not None
-                        else request.load_spec.kvpool_cached_tokens
-                    )
-                    hit_full_blocks = pool_hit_tokens // effective_block_size
-                    save_start_block = max(save_start_block, hit_full_blocks)
-                candidate_keys = [
-                    self._make_layerwise_gva_key(
-                        group_id,
-                        block_hash_to_str(group_block_hashes[block_idx]),
-                    )
-                    for block_idx in range(
-                        save_start_block,
-                        min(save_end_block, len(group_block_hashes)),
-                    )
-                ]
-                self._refresh_allocated_gvas(candidate_keys)
-                # Skip blocks that are still present and readable in MemCache.
-                while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = self._make_layerwise_gva_key(
-                        group_id, block_hash_to_str(group_block_hashes[save_start_block])
-                    )
-                    if key in self._allocated_gvas:
-                        save_start_block += 1
-                    else:
-                        break
-
-                block_gvas: list[int] = []
-                new_keys: list[str] = []
-                new_positions: list[int] = []
-                for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
-                    key = self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
-                    cached = self._allocated_gvas.get(key)
-                    if cached is not None:
-                        block_gvas.append(cached)
-                    else:
-                        new_keys.append(key)
-                        new_positions.append(len(block_gvas))
-                        block_gvas.append(0)
-
-                if new_keys:
-                    new_gvas = self.m_store.batch_alloc(new_keys, [alloc_size] * len(new_keys))
-                    if any(gva <= 0 for gva in new_gvas):
-                        logger.error(
-                            "alloc_gvas FAIL: req=%s group=%d alloc_size=%d new_keys=%d gvas_sample=%s zero_count=%d",
-                            request.req_id,
-                            group_id,
-                            alloc_size,
-                            len(new_keys),
-                            new_gvas[:5],
-                            sum(1 for g in new_gvas if g <= 0),
-                        )
-                    for pos, key, gva in zip(new_positions, new_keys, new_gvas):
-                        if gva > 0:
-                            block_gvas[pos] = gva
-                            self._allocated_gvas[key] = gva
-                            all_group_save_keys.append(key)
-
-                partial_block_index = self._get_partial_block_index(
-                    request.target_token_len,
-                    effective_block_size,
-                    len(group_block_hashes),
-                    self.layerwise_offload,
-                )
-                if partial_block_index is not None and partial_block_index < len(block_ids_by_group):
-                    partial_key = self._make_layerwise_partial_key(
-                        request,
-                        group_id,
-                        partial_block_index,
-                        request.target_token_len,
-                    )
-                    partial_gva = self._allocated_gvas.get(partial_key)
-                    if partial_gva is None:
-                        allocated = self.m_store.batch_alloc(
-                            [partial_key],
-                            [alloc_size],
-                        )
-                        partial_gva = allocated[0] if allocated else 0
-                        if partial_gva > 0:
-                            self._allocated_gvas[partial_key] = partial_gva
-                            all_group_save_keys.append(partial_key)
-                        else:
-                            logger.error(
-                                "alloc_gvas: partial allocation failed req=%s group=%d block=%d gva=%d",
-                                request.req_id,
-                                group_id,
-                                partial_block_index,
-                                partial_gva,
-                            )
-                    # Partial keys are request-scoped; do not retain them forever.
-                    self._allocated_gvas.pop(partial_key, None)
-                    request.partial_save_gva_per_group[group_id] = partial_gva
-
-                logger.debug(
-                    "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
-                    "new_keys=%d cached_keys=%d alloc_size=%d",
-                    request.req_id,
-                    group_id,
-                    effective_block_size,
-                    save_start_block,
-                    save_end_block,
-                    len(new_keys),
-                    len(block_gvas) - len(new_keys),
-                    alloc_size,
-                )
-
-                # Pad block_gvas to match block_ids length (fill 0 for blocks before save_start)
-                full_gvas = [0] * len(block_ids_by_group)
-                for i, gva in enumerate(block_gvas):
-                    if save_start_block + i < len(full_gvas):
-                        full_gvas[save_start_block + i] = gva
-
-                all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))
-                all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
-
-            if all_group_gvas:
-                request.save_keys = all_group_save_keys
-                request.block_gvas_by_group_np = all_group_gvas
-                request.block_ids_by_group_np = all_group_block_ids
-                request.block_gvas_np = all_group_gvas[0]
-                request.gva_block_offset = 0
-
-    def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
-        """Fetch per-rank GVA and acquire read lease for the load path.
-
-        memcache requires batch_copy (read) to find the blob in the per-process
-        gvaBlobTracker with a valid lease. The scheduler only checks existence
-        (batch_is_exist) to decide the load range; before batch_copy(G2L) the
-        worker must, for its own per-rank keys:
-          1. batch_get_key_info to fetch the GVA (fills block_gvas_np)
-          2. batch_add_lease to register the blob locally + acquire a read lease
-        """
-        if not self.use_gva_layerwise:
-            return
-        for request in requests:
-            if request.load_spec is None or not request.load_spec.can_load:
-                continue
-            cached_tokens = request.load_spec.kvpool_cached_tokens
-            if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
-                cached_tokens = request.load_spec.kvpool_store_skip_tokens
-            block_hashes = request.block_hashes
-
-            all_group_load_gvas: list[np.ndarray] = []
-            all_group_load_keys: list[str] = []
-            request.partial_load_gva_per_group = [0] * self.num_kv_cache_groups
-            for group_id in range(self.num_kv_cache_groups):
-                group_block_size = self.grouped_block_size[group_id]
-                effective_block_size = group_block_size
-
-                group_block_hashes = get_block_hashes(block_hashes, effective_block_size, self.hash_block_size)
-                load_start_block = (
-                    0 if self.layerwise_offload else request.load_spec.vllm_cached_tokens // effective_block_size
-                )
-                cached_full_blocks = cached_tokens // effective_block_size
-                full_blocks = min(cached_full_blocks, len(group_block_hashes))
-
-                block_ids_by_group = (
-                    request.block_ids_by_group_np[group_id]
-                    if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
-                    else request.block_ids_np
-                )
-                if block_ids_by_group is None:
-                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
-                    continue
-                full_len = len(block_ids_by_group)
-
-                partial_block_index = self._get_partial_block_index(
-                    cached_tokens,
-                    effective_block_size,
-                    len(group_block_hashes),
-                    self.layerwise_offload,
-                )
-                if partial_block_index is not None and (
-                    partial_block_index < load_start_block or partial_block_index >= full_len
-                ):
-                    partial_block_index = None
-
-                if load_start_block >= full_blocks and partial_block_index is None:
-                    all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
-                    continue
-
-                keys = [
-                    self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[i]))
-                    for i in range(load_start_block, full_blocks)
-                ]
-                block_indices = list(range(load_start_block, full_blocks))
-                if partial_block_index is not None:
-                    keys.append(
-                        self._make_layerwise_partial_key(
-                            request,
-                            group_id,
-                            partial_block_index,
-                            cached_tokens,
-                        )
-                    )
-                    block_indices.append(partial_block_index)
-                if not keys:
-                    all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
-                    continue
-
-                key_infos = self.m_store.batch_get_key_info(keys)
-                gvas = []
-                valid_gva_indices = []
-                invalid_block_ids: list[int] = []
-                for ki, key, block_idx in zip(key_infos, keys, block_indices):
-                    sizes = ki.size()
-                    gva = ki.gva_list()[0] if sizes and sizes > 0 else 0
-                    gvas.append(gva)
-                    if gva > 0:
-                        valid_gva_indices.append(len(gvas) - 1)
-                    else:
-                        if block_idx < len(block_ids_by_group):
-                            invalid_block_ids.append(int(block_ids_by_group[block_idx]))
-                        logger.warning(
-                            "load_gvas: req=%s group=%d got invalid gva=%d (size=%d), block_id=%s load failed",
-                            request.req_id,
-                            group_id,
-                            gva,
-                            sizes if sizes else 0,
-                            int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
-                        )
-
-                # Only call batch_add_lease for keys with valid size
-                valid_keys = [keys[index] for index in valid_gva_indices]
-                if valid_keys:
-                    lease_results = self.m_store.batch_add_lease(valid_keys, LAYERWISE_READ_LEASE_TTL_MS)
-                    if len(lease_results) != len(valid_keys):
-                        raise RuntimeError(
-                            "MemCache lease returned unexpected number of results: "
-                            f"expected={len(valid_keys)}, actual={len(lease_results)}"
-                        )
-                    leased_keys = []
-                    for gva_index, lease_res in zip(valid_gva_indices, lease_results):
-                        block_idx = block_indices[gva_index]
-                        if lease_res == MEMCACHE_UNMATCHED_STATE and block_idx == partial_block_index:
-                            partial_key = keys[gva_index]
-                            for retry in range(1, PARTIAL_LEASE_RETRY_COUNT + 1):
-                                time.sleep(PARTIAL_LEASE_RETRY_INTERVAL_S)
-                                retry_results = self.m_store.batch_add_lease(
-                                    [partial_key],
-                                    LAYERWISE_READ_LEASE_TTL_MS,
-                                )
-                                if len(retry_results) != 1:
-                                    raise RuntimeError(
-                                        "MemCache partial lease retry returned "
-                                        f"unexpected number of results: {len(retry_results)}"
-                                    )
-                                lease_res = retry_results[0]
-                                if lease_res != MEMCACHE_UNMATCHED_STATE:
-                                    break
-                        block_id = int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else None
-                        if lease_res == 0:
-                            leased_keys.append(keys[gva_index])
-                        else:
-                            gvas[gva_index] = 0
-                            if block_id is not None:
-                                invalid_block_ids.append(block_id)
-                            logger.warning(
-                                "load_gvas: req=%s group=%d lease failed result=%d, block_id=%s load failed",
-                                request.req_id,
-                                group_id,
-                                lease_res,
-                                block_id,
-                            )
-                else:
-                    lease_results = []
-                    leased_keys = []
-
-                # Report invalid blocks to scheduler for recompute.
-                # Single-group models can safely report individual block IDs.
-                # Multi-group (hybrid) models must not report partial group
-                # failures, as the scheduler cannot handle inconsistent KV
-                # cache state across groups (see PR #9701 for rationale).
-                if invalid_block_ids:
-                    if self.num_kv_cache_groups == 1:
-                        with self._invalid_block_ids_lock:
-                            self._invalid_block_ids.update(invalid_block_ids)
-                    else:
-                        leased_keys_to_release = list(
-                            dict.fromkeys(
-                                [
-                                    *all_group_load_keys,
-                                    *leased_keys,
-                                ]
-                            )
-                        )
-                        if leased_keys_to_release:
-                            self.m_store.batch_remove_lease(leased_keys_to_release)
-                        raise RuntimeError(
-                            "Layerwise multi-group KV load failed and cannot "
-                            "safely fall back to per-block recomputation: "
-                            f"request={request.req_id}, "
-                            f"failed_blocks={invalid_block_ids}"
-                        )
-                all_group_load_keys.extend(leased_keys)
-
-                logger.debug(
-                    "load_gvas: req=%s group=%d eff_bs=%d load_blocks=[%d,%d) keys=%d valid_gvas=%d lease_fail=%d",
-                    request.req_id,
-                    group_id,
-                    effective_block_size,
-                    load_start_block,
-                    full_blocks,
-                    len(keys),
-                    sum(1 for g in gvas if g > 0),
-                    sum(1 for r in lease_results if r != 0),
-                )
-
-                # Pad to match block_ids_by_group length, with 0s before load_start_block
-                full_gvas = [0] * full_len
-                normal_gva_count = full_blocks - load_start_block
-                for i, gva in enumerate(gvas[:normal_gva_count]):
-                    if load_start_block + i < len(full_gvas):
-                        full_gvas[load_start_block + i] = gva
-                all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
-                if partial_block_index is not None and len(gvas) > normal_gva_count:
-                    request.partial_load_gva_per_group[group_id] = gvas[normal_gva_count]
-
-            if all_group_load_gvas:
-                request.load_keys = all_group_load_keys
-                request.load_block_gvas_by_group_np = all_group_load_gvas
-                request.load_block_gvas_np = all_group_load_gvas[0]
-                request.load_gva_block_offset = 0
 
     def _build_shared_save_data(self) -> None:
         """Build shared block data once and attach to all layer save tasks.
@@ -1607,8 +1199,9 @@ class KVPoolWorker:
             for group_id, layer_idx_in_group in group_layers:
                 self._process_save_for_layer_batch(requests, physical_layer, group_id, layer_idx_in_group)
         # Protect the previous partial before allocating the next snapshot.
-        self._prepare_load_gvas(requests)
-        self._alloc_gvas_for_save(requests)
+        if self._gva_session is not None:
+            self._gva_session.prepare_load_gvas(requests)
+            self._gva_session.alloc_gvas_for_save(requests)
         self._build_shared_save_data()
         for physical_layer in range(self.num_layers):
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
@@ -1663,6 +1256,10 @@ class KVPoolWorker:
             self.kv_recv_thread.raise_if_failed()
             logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
         self.layer_load_finished_events[self.current_layer].clear()
+
+    def _report_invalid_blocks(self, invalid_block_ids: list[int]) -> None:
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(invalid_block_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         with self._invalid_block_ids_lock:

@@ -27,6 +27,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     use_gva_layerwise,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol import (
+    GVAHitChecker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -41,9 +44,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     PoolKey,
     ReqMeta,
     RequestTracker,
-    block_hash_to_str,
-    get_block_hashes,
-    get_group_block_size,
     get_group_cache_family,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
@@ -212,6 +212,22 @@ class KVPoolScheduler:
 
         self.client: LookupKeyClient | None = None
 
+        # Scheduler-side GVA hit computation (all-rank key probing, group-wise
+        # min). Only constructed for the GVA layerwise mode.
+        self._gva_hit_checker: GVAHitChecker | None = (
+            GVAHitChecker(
+                store=self.store_scheduler,
+                model_name=self.model_name,
+                head_or_tp_ranks=self.tp_size // self.put_step,
+                grouped_block_size=self.grouped_block_size,
+                hash_block_size=self.hash_block_size,
+                num_groups=len(self.kv_cache_group_ids),
+                use_layerwise=self.use_layerwise,
+            )
+            if self.use_gva_layerwise
+            else None
+        )
+
     def _get_or_create_request_tracker(self, req_id: str) -> RequestTracker:
         tracker = self._request_trackers.get(req_id)
         if tracker is None:
@@ -304,88 +320,6 @@ class KVPoolScheduler:
         num_hit_blocks = query_start_block + num_queried_hit_blocks
         return num_hit_blocks * self._block_size
 
-    def _make_layerwise_gva_keys_for_hit_check(self, group_id: int, block_hash_hex: str) -> list[str]:
-        """Generate all-rank GVA keys for scheduler-side hit check.
-
-        Single-group uses PR #11585 format; multi-group includes group_id.
-        Returns one key per head_or_tp_rank (ranks in the same put_step
-        group share one key for MLA).
-        """
-        head_or_tp_ranks = self.tp_size // self.put_step
-        if len(self.kv_cache_group_ids) > 1:
-            return [f"{self.model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(head_or_tp_ranks)]
-        else:
-            return [f"{self.model_name}@{block_hash_hex}@{h}" for h in range(head_or_tp_ranks)]
-
-    def _get_layerwise_gva_hit_tokens(
-        self,
-        request: "Request",
-        token_len: int,
-        num_computed_tokens: int,
-    ) -> int:
-        # In layerwise mode, always query from block 0 because the remote
-        # pool stores per-layer data that may not match local prefix cache.
-        num_hash_blocks = token_len // self.hash_block_size
-        block_hashes_to_check = request.block_hashes[:num_hash_blocks]
-        hits_per_group: list[int] = []
-        self._get_or_create_request_tracker(request.request_id)
-
-        for group_id in range(len(self.grouped_block_size)):
-            effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
-            group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
-            query_start_block = (
-                0 if self.use_layerwise else min(num_computed_tokens // effective_block_size, len(group_block_hashes))
-            )
-            group_block_hashes = group_block_hashes[query_start_block:]
-            # Generate all-rank keys for each block hash
-            keys_by_block = [
-                self._make_layerwise_gva_keys_for_hit_check(group_id, block_hash_to_str(bh))
-                for bh in group_block_hashes
-            ]
-            all_keys = [key for block_keys in keys_by_block for key in block_keys]
-            if not all_keys:
-                continue
-
-            key_infos = self.store_scheduler.batch_get_key_info(all_keys)
-            if len(key_infos) != len(all_keys):
-                logger.error(
-                    "KV pool batch_get_key_info returned unexpected number of results: expected=%d, actual=%d",
-                    len(all_keys),
-                    len(key_infos),
-                )
-                hits_per_group.append(0)
-                continue
-
-            # A block is hit only when ALL ranks' keys return valid GVA
-            num_hit_blocks = 0
-            offset = 0
-            for block_keys in keys_by_block:
-                block_infos = key_infos[offset : offset + len(block_keys)]
-                offset += len(block_keys)
-                if all(ki.size() and ki.size() > 0 for ki in block_infos):
-                    num_hit_blocks += 1
-                else:
-                    break
-
-            hits_per_group.append((query_start_block + num_hit_blocks) * effective_block_size)
-
-        if not hits_per_group:
-            logger.debug(
-                "hit_check: req=%s token_len=%d no participating groups (all skipped)",
-                request.request_id,
-                token_len,
-            )
-            return 0
-        hit_tokens = min(hits_per_group)
-        logger.debug(
-            "hit_check: req=%s token_len=%d hits_per_group=%s hit_tokens=%d",
-            request.request_id,
-            token_len,
-            hits_per_group,
-            hit_tokens,
-        )
-        return hit_tokens
-
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
@@ -467,7 +401,8 @@ class KVPoolScheduler:
 
         if self.use_gva_layerwise:
             token_len = prompt_token_len
-            num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(request, token_len, num_computed_tokens)
+            self._get_or_create_request_tracker(request.request_id)
+            num_external_hit_tokens = self._gva_hit_checker.hit_tokens(request, token_len, num_computed_tokens)
         else:
             if self._discard_partial_chunks:
                 token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)

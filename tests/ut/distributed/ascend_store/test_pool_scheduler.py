@@ -21,6 +21,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol import (
+    GVAHitChecker,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
@@ -142,7 +145,8 @@ class TestKVPoolScheduler(unittest.TestCase):
         scheduler.use_gva_layerwise = True
         scheduler.use_eagle = True
         scheduler.cache_transfer_granularity = 16
-        scheduler._get_layerwise_gva_hit_tokens = MagicMock(return_value=64)
+        scheduler._gva_hit_checker = MagicMock()
+        scheduler._gva_hit_checker.hit_tokens.return_value = 64
 
         request = MagicMock()
         request.prompt_token_ids = list(range(64))
@@ -158,6 +162,8 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertEqual(load_spec.kvpool_cached_tokens, 48)
         self.assertEqual(load_spec.kvpool_store_skip_tokens, 64)
         self.assertTrue(load_spec.can_load)
+        # The GVA hit-check delegation must keep creating the request tracker.
+        self.assertIn("r1", scheduler._request_trackers)
         scheduler.update_state_after_alloc(request, MagicMock(), 0)
         self.assertTrue(load_spec.can_load)
 
@@ -791,7 +797,7 @@ class TestKVPoolSchedulerInferMambaGroups(unittest.TestCase):
 
 
 class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
-    """Test _get_layerwise_gva_hit_tokens."""
+    """Test GVAHitChecker.hit_tokens through the scheduler's store client."""
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
@@ -815,9 +821,18 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
                         info.gva_list.return_value = [0x1000]
                     key_infos.append(info)
                 scheduler.store_scheduler.batch_get_key_info.return_value = key_infos
+                checker = GVAHitChecker(
+                    store=scheduler.store_scheduler,
+                    model_name=scheduler.model_name,
+                    head_or_tp_ranks=scheduler.tp_size // scheduler.put_step,
+                    grouped_block_size=scheduler.grouped_block_size,
+                    hash_block_size=scheduler.hash_block_size,
+                    num_groups=len(scheduler.kv_cache_group_ids),
+                    use_layerwise=scheduler.use_layerwise,
+                )
                 request = MagicMock()
                 request.block_hashes = [b"\xaa"] * hash_count
-                result = scheduler._get_layerwise_gva_hit_tokens(request, token_count, computed_tokens)
+                result = checker.hit_tokens(request, token_count, computed_tokens)
                 self.assertEqual(result, expected)
 
 
