@@ -29,6 +29,7 @@ on:
         type: choice
         options:
           - main
+          - v0.26.0rc1
           - v0.23.0
           - v0.23.0rc1
           - v0.22.1rc1
@@ -42,6 +43,7 @@ on:
         type: choice
         options:
           - main
+          - releases/v0.26.0rc
           - releases/v0.24.0rc
           - releases/v0.23.0
           - releases/v0.22.1rc
