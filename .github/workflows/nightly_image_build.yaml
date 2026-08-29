@@ -18,20 +18,9 @@
 # This workflow builds nightly images as a layer-cache warm-up at 20:00 Beijing time.
 # The nightly test workflows (Nightly-A2, Nightly-A3) each rebuild the image fresh
 # before running tests, so this schedule only serves to pre-populate the build cache.
-#
-# The scheduled run (12:00 UTC = 20:00 Beijing) also acts as the Daily Regression
-# pipeline's build/compile gate: a successful build produces fresh
-# nightly-ci-main-{a2,a3,310p} images that schedule_daily_regression.yaml reuses
-# for high-frequency PR E2E + nightly high-freq testing (no inline rebuild).
 name: Nightly Image Build Schedule
 
 on:
-  schedule:
-    # 12:00 UTC = 20:00 Beijing time. Build finishes ~14:00 UTC (22:00 Beijing).
-    # The fresh nightly-ci image is then available for the next morning's Daily
-    # Regression slot (01:00 UTC = 09:00 Beijing). A failed build here surfaces
-    # as a broken compile on main within the day.
-    - cron: '0 12 * * *'
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
