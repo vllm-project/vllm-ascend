@@ -107,9 +107,6 @@ jobs:
     outputs:
       a2_image: ${{ steps.export.outputs.a2_image }}
       a3_image: ${{ steps.export.outputs.a3_image }}
-      a2_pr_e2e: ${{ steps.set-matrix.outputs.a2_pr_e2e }}
-      a3_pr_e2e_two_card: ${{ steps.set-matrix.outputs.a3_pr_e2e_two_card }}
-      a3_pr_e2e_four_card: ${{ steps.set-matrix.outputs.a3_pr_e2e_four_card }}
       a2_nightly_hf: ${{ steps.set-matrix.outputs.a2_nightly_hf }}
       a3_nightly_hf: ${{ steps.set-matrix.outputs.a3_nightly_hf }}
     steps:
@@ -162,59 +159,6 @@ jobs:
           echo "=== vllm ==="
           (cd /vllm-workspace/vllm && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
 
-  a2-pr-e2e:
-    name: A2 one-card PR E2E
-    needs: [setup-vars, verify-image]
-    if: always() && needs.verify-image.result == 'success'
-    strategy:
-      fail-fast: false
-      matrix:
-        test_config: ${{ fromJson(needs.setup-vars.outputs.a2_pr_e2e) }}
-    uses: ./.github/workflows/_e2e_daily_tests.yaml
-    with:
-      runner: ${{ matrix.test_config.os }}
-      image: ${{ needs.setup-vars.outputs.a2_image }}
-      tests: ${{ matrix.test_config.tests }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_branch: main
-      timeout_minutes: '75'
-
-  a3-pr-e2e-two-card:
-    name: A3 two-card PR E2E
-    needs: [setup-vars, verify-image]
-    if: always() && needs.verify-image.result == 'success'
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        test_config: ${{ fromJson(needs.setup-vars.outputs.a3_pr_e2e_two_card) }}
-    uses: ./.github/workflows/_e2e_daily_tests.yaml
-    with:
-      runner: ${{ matrix.test_config.os }}
-      image: ${{ needs.setup-vars.outputs.a3_image }}
-      tests: ${{ matrix.test_config.tests }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_branch: main
-      timeout_minutes: '60'
-
-  a3-pr-e2e-four-card:
-    name: A3 four-card PR E2E
-    needs: [setup-vars, verify-image]
-    if: always() && needs.verify-image.result == 'success'
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        test_config: ${{ fromJson(needs.setup-vars.outputs.a3_pr_e2e_four_card) }}
-    uses: ./.github/workflows/_e2e_daily_tests.yaml
-    with:
-      runner: ${{ matrix.test_config.os }}
-      image: ${{ needs.setup-vars.outputs.a3_image }}
-      tests: ${{ matrix.test_config.tests }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_branch: main
-      timeout_minutes: '60'
-
   a2-nightly-hf:
     name: A2 nightly high-freq
     needs: [setup-vars, verify-image]
@@ -254,9 +198,6 @@ jobs:
     name: Daily gate
     needs:
       - verify-image
-      - a2-pr-e2e
-      - a3-pr-e2e-two-card
-      - a3-pr-e2e-four-card
       - a2-nightly-hf
       - a3-nightly-hf
     if: always()
@@ -265,9 +206,6 @@ jobs:
       - name: Aggregate job results
         env:
           VERIFY: ${{ needs.verify-image.result }}
-          A2_PR: ${{ needs.a2-pr-e2e.result }}
-          A3_TWO: ${{ needs.a3-pr-e2e-two-card.result }}
-          A3_FOUR: ${{ needs.a3-pr-e2e-four-card.result }}
           A2_HF: ${{ needs.a2-nightly-hf.result }}
           A3_HF: ${{ needs.a3-nightly-hf.result }}
         run: |
