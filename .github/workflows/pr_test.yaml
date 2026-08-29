@@ -51,7 +51,6 @@ jobs:
       main_commit_short: ${{ steps.vllm.outputs.main_commit_short }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -89,7 +88,6 @@ jobs:
         id: vllm
         run: |
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
             echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
             exit 1
@@ -98,11 +96,6 @@ jobs:
           # Short form is for display only (job names); main_commit keeps the
           # full hash for checkout refs and artifact names.
           echo "main_commit_short=${main_commit:0:7}" >> "$GITHUB_OUTPUT"
-          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
-            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
-            exit 1
-          }
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
 
       - name: cp problem matchers
         run: |
