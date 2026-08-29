@@ -14,12 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from functools import wraps
 from typing import Any
 
 from vllm.tokenizers import deepseek_v4_encoding
 
 _original_render_message = deepseek_v4_encoding.render_message
+_render_message_signature = inspect.signature(_original_render_message)
 
 
 def _upstream_handles_trailing_system() -> bool:
@@ -34,13 +36,12 @@ def _upstream_handles_trailing_system() -> bool:
 @wraps(_original_render_message)
 def _patched_render_message(*args: Any, **kwargs: Any) -> str:
     prompt = _original_render_message(*args, **kwargs)
-    index = kwargs["index"] if "index" in kwargs else args[0]
-    messages = kwargs["messages"] if "messages" in kwargs else args[1]
-    thinking_mode = kwargs["thinking_mode"] if "thinking_mode" in kwargs else args[2]
-    drop_thinking = kwargs.get(
-        "drop_thinking",
-        args[3] if len(args) > 3 else True,
-    )
+    bound_args = _render_message_signature.bind(*args, **kwargs)
+    bound_args.apply_defaults()
+    index = bound_args.arguments["index"]
+    messages = bound_args.arguments["messages"]
+    thinking_mode = bound_args.arguments["thinking_mode"]
+    drop_thinking = bound_args.arguments["drop_thinking"]
     message = messages[index]
     if message.get("role") != "system" or message.get("task") is not None:
         return prompt
@@ -48,10 +49,7 @@ def _patched_render_message(*args: Any, **kwargs: Any) -> str:
         return prompt
 
     prompt += deepseek_v4_encoding.ASSISTANT_SP_TOKEN
-    last_user_idx = kwargs.get(
-        "last_user_idx",
-        args[5] if len(args) > 5 else None,
-    )
+    last_user_idx = bound_args.arguments.get("last_user_idx")
     if last_user_idx is None:
         last_user_idx = deepseek_v4_encoding.find_last_user_index(messages)
     if thinking_mode == "thinking" and (not drop_thinking or index >= last_user_idx):
