@@ -187,9 +187,30 @@ class ModelNetLoaderElastic(BaseModelLoader):
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
             return
 
-        logger.info("Waiting for all target netloader ranks before loading draft model")
+        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
+        local_world_size = getattr(vllm_config.parallel_config, "local_world_size", world_size)
+        if not isinstance(local_world_size, int) or local_world_size <= 0 or world_size % local_world_size != 0:
+            local_world_size = world_size
+
+        # Same-node ranks only; skip cross-node wait for disk/HBM/NIC contention.
+        group = None
+        if local_world_size < world_size:
+            my_node = rank // local_world_size
+            # new_group is world-collective: every rank must create every node group.
+            for node_idx in range(world_size // local_world_size):
+                ranks = list(range(node_idx * local_world_size, (node_idx + 1) * local_world_size))
+                pg = torch.distributed.new_group(ranks=ranks)
+                if node_idx == my_node:
+                    group = pg
+
+        logger.info(
+            "Waiting for local target netloader ranks before loading draft model "
+            "(local_world_size=%s)",
+            local_world_size,
+        )
         barrier_start = time.perf_counter()
-        torch.distributed.barrier()
+        torch.distributed.barrier(group=group)
         logger.info(
             "Target netloader barrier before draft model time: %s",
             time.perf_counter() - barrier_start,

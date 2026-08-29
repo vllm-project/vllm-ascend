@@ -39,6 +39,7 @@ class DummyDeviceConfig:
 class DummyParallelConfig:
     tensor_parallel_size = 1
     pipeline_parallel_size = 1
+    local_world_size = 1
 
 
 class DummyVllmConfig:
@@ -129,7 +130,13 @@ def _patch_dist_barrier(monkeypatch) -> list[str]:
     barrier_calls: list[str] = []
     monkeypatch.setattr("torch.distributed.is_available", lambda: True)
     monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
-    monkeypatch.setattr("torch.distributed.barrier", lambda: barrier_calls.append("barrier"))
+    monkeypatch.setattr("torch.distributed.get_world_size", lambda: 1)
+    monkeypatch.setattr("torch.distributed.get_rank", lambda: 0)
+
+    def _barrier(*args, **kwargs):
+        barrier_calls.append("barrier")
+
+    monkeypatch.setattr("torch.distributed.barrier", _barrier)
     return barrier_calls
 
 
@@ -546,6 +553,47 @@ def test_draft_model_does_not_wait_for_target_netloader_barrier(mock_logger, mon
     loader.load_model(vllm_config, DummyDraftModelConfig())
 
     assert barrier_calls == []
+
+
+@patch("vllm_ascend.model_loader.netloader.netloader.logger")
+def test_target_model_uses_node_local_barrier(mock_logger, monkeypatch):
+    dummy_model = _patch_loader_common(monkeypatch)
+    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
+    _install_elastic_server(monkeypatch)
+
+    created_groups: list[list[int]] = []
+    barrier_groups: list[Any] = []
+
+    def fake_new_group(ranks=None, **kwargs):
+        rank_list = list(ranks)
+        created_groups.append(rank_list)
+        return f"pg-{rank_list[0]}"
+
+    def fake_barrier(*args, **kwargs):
+        barrier_groups.append(kwargs.get("group", args[0] if args else None))
+
+    monkeypatch.setattr("torch.distributed.is_available", lambda: True)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
+    monkeypatch.setattr("torch.distributed.get_world_size", lambda: 8)
+    monkeypatch.setattr("torch.distributed.get_rank", lambda: 2)
+    monkeypatch.setattr("torch.distributed.new_group", fake_new_group)
+    monkeypatch.setattr("torch.distributed.barrier", fake_barrier)
+
+    extra = {
+        "SOURCE": [{"device_id": 2, "sources": ["127.0.0.1:5000"]}],
+        "MODEL": "dummy-model",
+        "LISTEN_PORT": 5555,
+        "INT8_CACHE": "no",
+    }
+    loader = make_loader_with_config(extra)
+    vllm_config = DummyVllmConfig()
+    vllm_config.parallel_config = DummyParallelConfig()
+    vllm_config.parallel_config.local_world_size = 4
+    vllm_config.speculative_config = object()
+    loader.load_model(vllm_config, DummyModelConfig())
+
+    assert created_groups == [[0, 1, 2, 3], [4, 5, 6, 7]]
+    assert barrier_groups == ["pg-0"]
 
 
 @pytest.mark.parametrize(
