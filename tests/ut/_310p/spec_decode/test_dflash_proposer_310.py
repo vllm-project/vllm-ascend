@@ -143,6 +143,47 @@ def test_dummy_capture_prepares_dual_rope_before_graph_capture():
     finish_rope.assert_called_once_with("prepared")
 
 
+def test_dummy_capture_caps_external_rope_to_drafter_query_capacity():
+    prepare_rope = MagicMock(return_value="prepared")
+    finish_rope = MagicMock()
+    positions = torch.arange(2, dtype=torch.int32)
+    fake_self = SimpleNamespace(
+        max_query_tokens=2,
+        vllm_config=None,
+        _get_positions=MagicMock(return_value=positions),
+        _prepare_full_decode_draft_rope=prepare_rope,
+        _finish_full_decode_draft_rope=finish_rope,
+    )
+
+    def original(
+        self,
+        num_tokens,
+        *,
+        aclgraph_runtime_mode=CUDAGraphMode.NONE,
+        is_profile=False,
+    ):
+        del self, num_tokens, aclgraph_runtime_mode, is_profile
+        return "captured"
+
+    wrapped = wrap_dummy_run_with_draft_flag(original)
+    assert (
+        wrapped(
+            fake_self,
+            6,
+            aclgraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        )
+        == "captured"
+    )
+    fake_self._get_positions.assert_called_once_with(2)
+    prepare_rope.assert_called_once_with(
+        query_positions=positions,
+        query_actual_tokens=2,
+        descriptor_tokens=2,
+        runtime_mode=CUDAGraphMode.PIECEWISE,
+    )
+    finish_rope.assert_called_once_with("prepared")
+
+
 def test_compute_slots_supports_mixed_physical_block_sizes():
     positions = torch.tensor([63, 64, 127, 128], dtype=torch.int32)
     request_ids = torch.zeros(4, dtype=torch.long)

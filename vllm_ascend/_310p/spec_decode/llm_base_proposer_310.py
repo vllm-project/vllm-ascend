@@ -25,6 +25,7 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm_ascend._310p.dflash_full_decode_only import (
     is_310p_dflash_full_decode_only,
 )
+from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
 from vllm_ascend._310p.ops.rotary_embedding import (
     AscendRotaryEmbedding310,
     clear_full_decode_draft_rope_310,
@@ -47,20 +48,22 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         descriptor_tokens: int,
         runtime_mode: CUDAGraphMode,
     ) -> bool:
-        """Refresh stable query/context RoPE inputs for compiled FDO draft."""
+        """Refresh stable query/context RoPE inputs outside a compiled graph."""
         runner = getattr(self, "runner", None)
         scope_config = getattr(runner, "vllm_config", self.vllm_config)
-        if getattr(self, "method", None) != "dflash" or not is_310p_dflash_full_decode_only(scope_config):
+        uses_graph_external_rope = is_310p_dflash_full_decode_only(
+            scope_config,
+        ) or is_310p_dflash_piecewise(scope_config)
+        if getattr(self, "method", None) != "dflash" or not uses_graph_external_rope:
             return False
-        # FDO compiles the rotary branch while FULL precomputed buffers are
-        # selected. The compiled callable keeps those stable addresses even
-        # when runtime dispatch falls back to NONE, so every FDO draft call
-        # must refresh the same buffers from its current positions.
+        # Both graph modes compile the rotary branch while precomputed buffers
+        # are selected. The callable keeps those stable addresses, so every
+        # draft call must refresh them from its current positions.
         if runtime_mode != CUDAGraphMode.FULL:
             query_positions = self._get_positions(descriptor_tokens)
         if query_positions.ndim != 1 or query_positions.shape[0] != descriptor_tokens:
             raise RuntimeError(
-                "310P DFlash FULL draft RoPE requires one descriptor-sized "
+                "310P DFlash graph draft RoPE requires one descriptor-sized "
                 f"query position vector, got shape={tuple(query_positions.shape)}, "
                 f"descriptor={descriptor_tokens}"
             )
@@ -73,14 +76,14 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         )
         if context_positions_buffer.shape[0] < context_descriptor_tokens:
             raise RuntimeError(
-                "310P DFlash FULL context-position buffer is smaller than the "
+                "310P DFlash graph context-position buffer is smaller than the "
                 f"descriptor: capacity={context_positions_buffer.shape[0]}, "
                 f"descriptor={context_descriptor_tokens}"
             )
         context_positions = context_positions_buffer[:context_descriptor_tokens]
         if not 0 <= context_actual_tokens <= context_descriptor_tokens:
             raise RuntimeError(
-                "310P DFlash FULL context extent is outside the descriptor: "
+                "310P DFlash graph context extent is outside the descriptor: "
                 f"actual={context_actual_tokens}, "
                 f"descriptor={context_descriptor_tokens}"
             )
@@ -92,7 +95,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
                 None,
             )
             if draft_rotary is None:
-                raise RuntimeError("310P DFlash FULL draft model has no Ascend rotary embedding")
+                raise RuntimeError("310P DFlash graph draft model has no Ascend rotary embedding")
             self._full_decode_draft_rotary_310 = draft_rotary
 
         capacity_tokens = max(
@@ -120,7 +123,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         self._full_decode_draft_context_rope_cos_310 = context_cos
         self._full_decode_draft_context_rope_sin_310 = context_sin
         logger.debug(
-            "[310p-dflash-full-decode-only/rope-precompute] "
+            "[310p-dflash-graph/rope-precompute] "
             "component=draft actual_runtime=%s descriptor_tokens=%d "
             "query_actual=%d "
             "context_actual=%d query_positions_ptr=%d "

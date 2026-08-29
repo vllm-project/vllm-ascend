@@ -334,11 +334,11 @@ def wrap_dummy_run_with_draft_flag(original):
             pass
 
         rope_num_tokens = num_tokens
+        max_query_tokens = getattr(self, "max_query_tokens", None)
+        if isinstance(rope_num_tokens, int) and isinstance(max_query_tokens, int):
+            rope_num_tokens = min(rope_num_tokens, max_query_tokens)
         if is_profile:
             runtime_mode = CUDAGraphMode.FULL
-            max_query_tokens = getattr(self, "max_query_tokens", None)
-            if isinstance(rope_num_tokens, int) and isinstance(max_query_tokens, int):
-                rope_num_tokens = min(rope_num_tokens, max_query_tokens)
         rope_prepared = None
         prepare_rope = getattr(self, "_prepare_full_decode_draft_rope", None)
         if callable(prepare_rope) and isinstance(rope_num_tokens, int):
