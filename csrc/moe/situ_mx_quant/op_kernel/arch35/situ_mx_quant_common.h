@@ -322,7 +322,7 @@ __aicore__ inline void ComputeVfSitu(__local_mem__ T* gateUbAddr, __local_mem__ 
         for (uint16_t dim0vfLoopIdx = 0; dim0vfLoopIdx < dim0VfTimes; dim0vfLoopIdx++) {
             for (uint16_t dim1vfLoopIdx = 0; dim1vfLoopIdx < dim1VfTimes; dim1vfLoopIdx++) {
                 AscendC::MicroAPI::AddrReg srcIdxOffset = AscendC::MicroAPI::CreateAddrReg<T>(
-                    dim0vfLoopIdx, alignDim1In, dim1vfLoopIdx, 64);
+                    dim0vfLoopIdx, dim1OnceSize, dim1vfLoopIdx, 64);
                 AscendC::MicroAPI::DataCopy<T, AscendC::MicroAPI::LoadDist::DIST_UNPACK_B16>(vregGate, gateUbAddr,
                                                                                              srcIdxOffset);
                 AscendC::MicroAPI::DataCopy<T, AscendC::MicroAPI::LoadDist::DIST_UNPACK_B16>(vregUp, upUbAddr,

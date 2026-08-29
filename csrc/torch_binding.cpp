@@ -2052,7 +2052,7 @@ chunk_kda_fwd(
                 "chunk_kda_fwd: q/k/v must use float16 or bfloat16.");
     TORCH_CHECK(k.scalar_type() == q.scalar_type() && v.scalar_type() == q.scalar_type(),
                 "chunk_kda_fwd: q/k/v dtype must match.");
-    TORCH_CHECK(chunk_size == 64 && K >= 16 && V >= 16 && K % 16 == 0 && V % 16 == 0 && V <= 256 &&
+    TORCH_CHECK((chunk_size == 64 || chunk_size == 128) && K >= 16 && V >= 16 && K % 16 == 0 && V % 16 == 0 && V <= 256 &&
                     K * V >= 4 * 64 * 64 && K * V >= chunk_size * (K + V),
                 "chunk_kda_fwd: shape is outside the supported split cube/vector template.");
 
