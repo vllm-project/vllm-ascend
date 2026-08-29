@@ -119,20 +119,24 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     ]
 
     # prepare_inputs has one implementation for v0.27.1 and one for newer
-    # vLLM snapshots. Both must retain the real global PCP batch when it is
-    # larger than the graph descriptor, then forward that descriptor as the
-    # rank-local padded extent. Upstream vLLM #53515 introduced both parts.
+    # vLLM snapshots. Both retain the real global PCP batch when it is larger
+    # than the graph descriptor. Only the newer upstream contract from vLLM
+    # #53515 accepts the descriptor as an explicit rank-local padded extent.
     assert len(padding_assignments) == 2
     for assignment in padding_assignments:
         assert ast.unparse(assignment.value) == "max(num_tokens, batch_desc.num_tokens)"
 
     assert len(partition_calls) == 2
-    for call in partition_calls:
-        padded_num_tokens = next(
+    padded_num_tokens_values = [
+        next(
             (keyword.value for keyword in call.keywords if keyword.arg == "padded_num_tokens"),
             None,
         )
-        assert isinstance(padded_num_tokens, ast.Attribute)
-        assert padded_num_tokens.attr == "num_tokens"
-        assert isinstance(padded_num_tokens.value, ast.Name)
-        assert padded_num_tokens.value.id == "batch_desc"
+        for call in partition_calls
+    ]
+    assert sum(value is None for value in padded_num_tokens_values) == 1
+    padded_num_tokens = next(value for value in padded_num_tokens_values if value is not None)
+    assert isinstance(padded_num_tokens, ast.Attribute)
+    assert padded_num_tokens.attr == "num_tokens"
+    assert isinstance(padded_num_tokens.value, ast.Name)
+    assert padded_num_tokens.value.id == "batch_desc"

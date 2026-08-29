@@ -25,6 +25,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -131,10 +132,13 @@ class AscendPCPManager(PCPManager):
         padded_num_tokens: int | None = None,
     ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
-        local_batch = super().partition_batch(
-            input_batch,
-            padded_num_tokens=padded_num_tokens,
-        )
+        if vllm_version_is("0.27.1"):
+            local_batch = super().partition_batch(input_batch)
+        else:
+            local_batch = super().partition_batch(
+                input_batch,
+                padded_num_tokens=padded_num_tokens,
+            )
         assert isinstance(local_batch, AscendInputBatch)
 
         # PCP builds the local layout from actual tokens, but a FULL decode
