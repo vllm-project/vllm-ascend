@@ -116,6 +116,11 @@ class NPUModelRunner310V2(NPUModelRunner):
     ) -> AscendInputBatch:
         # TODO: Refactor this Triton-free input preparation through Triton
         # Dispatcher after vLLM RFC #45133 lands.
+        # ``super().execute_model`` has already run finish/add/update_requests and
+        # ``apply_staged_writes``; sync GPU counts now so mamba preprocess matches
+        # the CPU/np values used for positions and slot mappings.
+        self._sync_num_computed_tokens_gpu_from_np()
+
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
@@ -261,8 +266,19 @@ class NPUModelRunner310V2(NPUModelRunner):
         if not vllm_version_is("0.27.1"):
             input_batch_kwargs["has_prefill"] = batch_has_prefill
         input_batch = AscendInputBatch(**input_batch_kwargs)
-        update_cos_sin(input_batch.positions)
+        # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
+        # arange buffer above is only for slot-mapping / non-MRoPE paths.
+        if not self.model_config.uses_mrope:
+            update_cos_sin(input_batch.positions)
         return input_batch
+
+    def _sync_num_computed_tokens_gpu_from_np(self) -> None:
+        """Mirror ``num_computed_tokens_np`` onto GPU before mamba preprocess."""
+        np_vals = self.req_states.num_computed_tokens_np
+        gpu = self.req_states.num_computed_tokens.gpu
+        gpu.copy_(torch.from_numpy(np_vals).to(device=gpu.device, dtype=gpu.dtype))
+        self.req_states.num_computed_tokens_cpu.copy_(torch.from_numpy(np_vals))
+        self.req_states.num_computed_tokens.cpu.copy_(torch.from_numpy(np_vals))
 
     if vllm_version_is("0.27.1"):
 
