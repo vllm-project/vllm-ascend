@@ -1,4 +1,5 @@
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
@@ -22,6 +23,7 @@ from vllm_ascend.lora.fused_moe import (
     reset_lora_indices,
     sync_lora_context,
 )
+from vllm_ascend.lora.lora_ops import bmm_expand_slice
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 
 
@@ -319,3 +321,101 @@ def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> N
     with patch.object(PunicaWrapperBase, "update_metadata"):
         wrapper.update_metadata(mapping, [], 2, 100)
     assert wrapper.no_lora is expected_no_lora
+
+
+@pytest.mark.parametrize(
+    ("rank", "slice_size", "expect_fallback"),
+    [(4, 8, False), (16, 8, True)],
+)
+def test_expand_slice_selects_fallback_from_tensor_shape(
+    rank: int,
+    slice_size: int,
+    expect_fallback: bool,
+) -> None:
+    wrapper: Any = SimpleNamespace(
+        no_lora=False,
+        _bmm_expand_slice=Mock(),
+        sgmv_expand_slice=Mock(),
+        prefill_metadata=("batches", "tokens", "indices"),
+    )
+    wrapper._requires_bmm_expand_slice = MethodType(PunicaWrapperNPU._requires_bmm_expand_slice, wrapper)
+    x = SimpleNamespace(shape=(2, rank))
+
+    PunicaWrapperNPU._expand_slice_prefill(
+        wrapper,
+        "y",
+        x,
+        "weights",
+        4,
+        slice_size,
+        True,
+    )
+
+    if expect_fallback:
+        wrapper._bmm_expand_slice.assert_called_once_with("y", x, "weights", 4, slice_size, True)
+        wrapper.sgmv_expand_slice.assert_not_called()
+    else:
+        wrapper._bmm_expand_slice.assert_not_called()
+        wrapper.sgmv_expand_slice.assert_called_once_with(
+            x,
+            "weights",
+            "y",
+            "batches",
+            "tokens",
+            "indices",
+            4,
+            slice_size,
+            True,
+        )
+
+
+@pytest.mark.parametrize("add_inputs", [False, True])
+def test_lora_bmm_expand_slice_fallback_matches_reference(add_inputs: bool) -> None:
+    x = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    weights = torch.tensor(
+        [
+            [[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]],
+            [[[2.0, 0.0], [0.0, 2.0], [1.0, -1.0]]],
+        ]
+    )
+    indices = torch.tensor([0, 1, -1], dtype=torch.long)
+    y = torch.ones((3, 5))
+
+    bmm_expand_slice(x, weights, y, indices, 1, 3, add_inputs)
+
+    delta = torch.stack(
+        [
+            x[0] @ weights[0, 0].T,
+            x[1] @ weights[1, 0].T,
+            torch.zeros(3),
+        ]
+    )
+    expected = torch.ones((3, 5))
+    expected[:, 1:4] = expected[:, 1:4] + delta if add_inputs else delta
+    torch.testing.assert_close(y, expected)
+
+
+@pytest.mark.parametrize(
+    ("x_shape", "weight_shape", "indices_shape", "y_shape", "slice_size", "message"),
+    [
+        ((3, 4), (2, 1, 5, 2), (3,), (3, 8), 5, "shrink rank"),
+        ((3, 2), (2, 1, 5, 2), (2,), (3, 8), 5, "same row count"),
+        ((3, 2), (2, 1, 5, 2), (3,), (2, 8), 5, "same row count"),
+        ((3, 2), (2, 1, 4, 2), (3,), (3, 8), 5, "destination slice"),
+    ],
+)
+def test_lora_bmm_expand_slice_rejects_incompatible_shapes(
+    x_shape,
+    weight_shape,
+    indices_shape,
+    y_shape,
+    slice_size,
+    message,
+) -> None:
+    x = torch.zeros(x_shape)
+    weights = torch.zeros(weight_shape)
+    indices = torch.zeros(indices_shape, dtype=torch.long)
+    y = torch.zeros(y_shape)
+
+    with pytest.raises(ValueError, match=message):
+        bmm_expand_slice(x, weights, y, indices, 1, slice_size, True)
