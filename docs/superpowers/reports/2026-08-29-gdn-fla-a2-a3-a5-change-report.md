@@ -73,6 +73,16 @@ The workstation has no `pytest`, `ruff`, or Python runtime, and repository
 instructions prohibit invoking `python` or `python3`. Therefore no Python test
 or syntax-pass claim is made here.
 
+## Device validation status
+
+- A5: `vllm serve` validation completed in the target environment. This is a
+  serving-path result, not a claim that every regression or performance case
+  has passed. The execution log is not checked into this repository.
+- A2: FLA Phase 6 evidence exists, but vLLM-Ascend end-to-end acceptance is
+  still pending.
+- A3: end-to-end validation has not been performed.
+- AISBench: not validated on A2, A3, or A5.
+
 ## Required device verification
 
 On each A2/A3/A5 environment, install the matching FLA wheel and run:
@@ -94,3 +104,5 @@ logs identify the failing operator and stage.
 This change makes A3 eligible and testable; it does not turn build support into
 an A3 acceptance claim. A3 operator smoke, model output comparison, and TP model
 tests must pass on physical A3 hardware before enabling it in a release matrix.
+The completed A5 `vllm serve` run does not replace AISBench or the remaining
+cross-SoC regression matrix.

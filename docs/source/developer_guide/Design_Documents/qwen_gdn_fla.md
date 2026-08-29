@@ -61,6 +61,11 @@ through the six-stage composition. The failure is logged and propagated. See
 the authoritative design for the exact resolution, probe, and fallback
 semantics.
 
+Global strict `fla_npu` mode currently validates every Stage 1 replacement
+symbol, including standalone prefill entries that the selected fused execution
+graph may not call. A wheel containing the fused Phase 6 symbol alone is
+therefore insufficient for strict startup.
+
 ## Validation
 
 完整的 A2/A3 Docker 源码安装、FLA wheel 构建、单算子测试和

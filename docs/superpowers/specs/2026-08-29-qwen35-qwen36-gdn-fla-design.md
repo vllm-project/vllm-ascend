@@ -341,6 +341,12 @@ resolution, the current implementation raises instead of restarting the six
 stages from the beginning. Documentation and test results must not describe
 this case as a successful automatic whole-pipeline fallback.
 
+Warmup currently uses the same probe phase keys as live traffic. A successful
+scratch warmup can therefore mark a signature as already probed before the
+first real request. A later shape-specific live failure then propagates without
+running a new fallback probe. This is a known implementation gap and must not
+be described as first-live-shape coverage.
+
 A future code change may implement safe full-pipeline retry because Phase 6
 receives a cloned initial state. That behavior is not part of the current
 implementation and is not authorized by this documentation update.
@@ -442,11 +448,11 @@ Initial numerical criteria remain:
 
 ## Current evidence boundary
 
-| Hardware | Build support | Phase 6 evidence | vLLM model acceptance |
-| --- | --- | --- | --- |
-| A2 | Yes | Formal FLA Phase 6 archive and focused GVA/dense-tail evidence | Pending on target environment |
-| A3 | Yes | No Phase 6 device evidence identified in the inspected branch | Pending |
-| A5 | Yes | Bring-up and direct/operator tests performed during this integration | Full regression still required |
+| Hardware | Build support | Phase 6 evidence | vLLM model status | AISBench |
+| --- | --- | --- | --- | --- |
+| A2 | Yes | Formal FLA Phase 6 archive and focused GVA/dense-tail evidence | End-to-end validation pending | Not validated |
+| A3 | Yes | No Phase 6 device evidence identified in the inspected branch | End-to-end not validated | Not validated |
+| A5 | Yes | Bring-up and direct/operator tests performed during this integration | `vllm serve` validation completed; full regression still required | Not validated |
 
 Build support is not device acceptance. A3 must pass operator and model tests on
 physical A3 hardware before it is marked accepted.
