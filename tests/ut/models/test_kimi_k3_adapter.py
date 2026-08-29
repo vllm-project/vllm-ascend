@@ -4,18 +4,52 @@
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
 
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
+    AscendKimiLinearForCausalLM,
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
+
+
+@pytest.mark.parametrize(
+    ("configured_value", "expected"),
+    [("0", 8), ("1", 1), ("8", 8)],
+)
+def test_kimi_num_loaded_layers(monkeypatch, configured_value, expected):
+    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", configured_value)
+
+    assert kimi_k3._get_kimi_k3_num_loaded_layers(8) == expected
+
+
+@pytest.mark.parametrize("configured_value", ["-1", "9", "not-an-integer"])
+def test_kimi_num_loaded_layers_rejects_invalid_values(monkeypatch, configured_value):
+    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", configured_value)
+
+    with pytest.raises(ValueError, match="VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS"):
+        kimi_k3._get_kimi_k3_num_loaded_layers(8)
+
+
+@pytest.mark.parametrize(
+    ("weight_name", "expected"),
+    [
+        ("layers.0.self_attn.q_proj.weight", 0),
+        ("model.layers.12.mlp.down_proj.weight", 12),
+        ("language_model.model.layers.3.router.weight", 3),
+        ("model.embed_tokens.weight", None),
+        ("model.layers.invalid.weight", None),
+    ],
+)
+def test_kimi_decoder_layer_idx_from_weight_name(weight_name, expected):
+    assert kimi_k3._get_decoder_layer_idx_from_weight_name(weight_name) == expected
 
 
 def test_ascend_attn_res_matches_canonical_k3_math():
@@ -67,6 +101,7 @@ def test_k3_dspark_reports_draft_attention_causality():
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
     nn.Module.__init__(model)
+    model.num_loaded_layers = 1
     layer = nn.Module()
     layer.self_attn = nn.Module()
     layer.self_attn.in_proj_gfab = nn.Module()
@@ -88,6 +123,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     )
     source_weights = [
         ("layers.0.router.weight", torch.full((1, 4), 0.5)),
+        ("layers.1.router.weight", torch.full((1, 4), 9.0)),
         ("layers.0.self_attn.g_proj.weight", torch.full((1,), 1.0)),
         ("layers.0.self_attn.f_a_proj.weight", torch.full((1,), 2.0)),
         ("layers.0.self_attn.b_proj.weight", torch.full((1,), 3.0)),
@@ -98,6 +134,7 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
 
     assert remaining[0] == source_weights[0]
     assert remaining[-1] == source_weights[-1]
+    assert all(name != "layers.1.router.weight" for name, *_ in remaining)
     assert [name for name, _, _ in remaining[1:4]] == [
         "layers.0.self_attn.in_proj_gfab.weight",
     ] * 3
@@ -108,6 +145,35 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
         "layers.0.router.weight",
         "layers.0.self_attn.o_proj.weight",
     }
+
+
+def test_reduced_kimi_remaps_materialized_dspark_aux_layers(monkeypatch):
+    model = AscendKimiLinearForCausalLM.__new__(AscendKimiLinearForCausalLM)
+    captured_layers = []
+    model.model = SimpleNamespace(
+        num_loaded_layers=2,
+        config=SimpleNamespace(num_hidden_layers=4),
+        aux_hidden_state_layers=(1, 3),
+        _set_aux_hidden_state_layers=lambda layers: captured_layers.append(layers),
+    )
+    monkeypatch.setattr(kimi_k3.logger, "warning_once", lambda *_args: None)
+
+    model.set_dspark_aux_capture_materialized(True)
+
+    assert model.model.dspark_aux_capture_materialized is True
+    assert captured_layers == [(0, 1)]
+
+
+def test_reduced_kimi_rejects_too_many_materialized_dspark_aux_layers():
+    model = AscendKimiLinearForCausalLM.__new__(AscendKimiLinearForCausalLM)
+    model.model = SimpleNamespace(
+        num_loaded_layers=1,
+        config=SimpleNamespace(num_hidden_layers=4),
+        aux_hidden_state_layers=(0, 1),
+    )
+
+    with pytest.raises(ValueError, match="cannot provide 2 distinct DSpark"):
+        model.set_dspark_aux_capture_materialized(True)
 
 
 def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):
