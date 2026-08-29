@@ -23,43 +23,6 @@
 # -----------------------------------------------------------------------
 
 daily:
-  # --- A2: PR E2E one-card smoke (pytest-driven, runs on a2b3-1) ---
-  # Coverage: attention / sampler / small-model serve / batch invariant /
-  # embedding / w8a8 quant / multi-instance / guided decoding.
-  # Sum of estimated_times ~ 2520s (~42 min) sequential + ~20 min install+compile.
-  a2_pr_e2e:
-    - name: a2-one-card-smoke
-      os: linux-aarch64-a2b3-1
-      tests: >-
-        tests/e2e/pull_request/one_card/test_attention_fa3.py
-        tests/e2e/pull_request/one_card/test_sampler.py
-        tests/e2e/pull_request/one_card/test_guided_decoding.py
-
-  # --- A3: PR E2E two-card smoke (pytest-driven, runs on a3-2) ---
-  # Coverage: distributed correctness -- flashcomm / prefix caching / SP / hccl
-  # weight transfer / multistream MoE / qwen3-30b-a3b / gpt-oss / SP pass.
-  # Sum of estimated_times ~ 970s (~16 min) + ~20 min install+compile.
-  a3_pr_e2e_two_card:
-    - name: a3-two-card-smoke
-      os: linux-aarch64-a3-2
-      tests: >-
-        tests/e2e/pull_request/two_card/test_prefix_caching.py
-        tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py
-        tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
-        tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
-        tests/e2e/pull_request/two_card/test_gpt_oss_distributed.py
-
-  # --- A3: PR E2E four-card smoke (pytest-driven, runs on a3-4) ---
-  # Coverage: DP-TP2 / MTP step3p5 / CP accuracy / graph mode.
-  # Sum of estimated_times ~ 720s (~12 min) + ~20 min install+compile.
-  a3_pr_e2e_four_card:
-    - name: a3-four-card-smoke
-      os: linux-aarch64-a3-4
-      tests: >-
-        tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
-        tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
-        tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py
-
   # --- A2: nightly high-freq subset (pytest-driven, runs on a2b3-1) ---
   # Curated from nightly high-frequency failure cases.
   # Source: tests/e2e/nightly/single_node/ops/singlecard_ops/. Fast (<2 min each).
