@@ -78,6 +78,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Phi-3/4                       | 🔵        |                                                                      | A2/A3 |
 | Mistral/Mistral-Instruct      | 🔵        |                                                                      | A2/A3 |
 | Hy3-preview                   | 🔵        |                                                                      | A3    |
+| Hy3                           | 🔵        |                                                                      | A3    |
 | DeepSeek V2.5                 | 🟡        | Need test                                                            |       |
 | Mllama                        | 🟡        | Need test                                                            |       |
 | MiniMax-Text                  | 🟡        | Need test                                                            |       |
