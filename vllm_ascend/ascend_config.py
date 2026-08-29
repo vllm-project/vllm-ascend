@@ -1385,7 +1385,14 @@ def init_ascend_config(vllm_config):
         "profiling_chunk_config",
         "batch_job_sched_config",
     }
-    kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
+
+    # NOTE: do not splat all additional_config keys into AscendConfig;
+    # unknown keys (not AscendConfig fields) break downstream like vllm-omni.
+    kwargs = {
+        k: v
+        for k, v in additional_config.items()
+        if k not in _NON_USER_INPUT_KEYS and k in AscendConfig.__dataclass_fields__
+    }
 
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,
