@@ -1255,19 +1255,13 @@ class NPUModelRunner(GPUModelRunner):
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        # In async spec decode mode, optimistic_seq_lens_cpu assumes all
-        # tokens from the previous speculative step were accepted. Correct it
-        # on CPU using the valid-sampled-token counts that are already copied
-        # asynchronously for scheduler bookkeeping. This avoids an extra
-        # NPU->CPU seq_lens copy and the synchronize() in attention metadata.
-        # Mirrors update_num_computed_tokens_for_batch_change on the GPU side.
-        async_spec_decode_active = (
-            self.use_async_spec_decode
-            and valid_sampled_token_count_gpu is not None
-            and prev_req_id_to_index
-        )
-        if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
-            self._correct_optimistic_seq_lens_cpu(num_reqs)
+        # In async spec decode mode, optimistic_seq_lens_cpu is an upper
+        # bound (it assumes all previous drafts were accepted). This is
+        # acceptable: the GPU seq_lens (computed from the corrected
+        # num_computed_tokens above) is authoritative for the attention
+        # kernel, while the CPU mirror only drives metadata construction
+        # (max_seq_len, kernel launch) where a slightly larger value is safe.
+        # No D2H copy or CPU-side correction is needed.
 
         self.input_batch.block_table.compute_slot_mapping(
             num_reqs,
@@ -1489,16 +1483,18 @@ class NPUModelRunner(GPUModelRunner):
         if self.valid_sampled_token_count_event is None:
             return
 
-        # Initialize a new stream to overlap the copy operation with
-        # prepare_input of draft model.
-        default_stream = torch.npu.current_stream()
-        with torch.npu.stream(self.valid_sampled_token_count_copy_stream): 
-            self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
-            counts = valid_sampled_tokens_count
-            counts_cpu = self.valid_sampled_token_count_cpu
-            assert counts_cpu is not None
-            counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
-            self.valid_sampled_token_count_event.record()
+        if self.pcp_size > 1:
+            default_stream = torch.npu.current_stream()
+            with torch.npu.stream(self.valid_sampled_token_count_copy_stream):
+                self.valid_sampled_token_count_copy_stream.wait_stream(
+                    default_stream
+                )
+                counts_cpu = self.valid_sampled_token_count_cpu
+                assert counts_cpu is not None
+                counts_cpu[: valid_sampled_tokens_count.shape[0]].copy_(
+                    valid_sampled_tokens_count, non_blocking=True
+                )
+                self.valid_sampled_token_count_event.record()
 
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
@@ -2068,9 +2064,6 @@ class NPUModelRunner(GPUModelRunner):
                             self.mamba_state_idx,
                         )
                 if self.use_compress:
-                    if deferred_state_corrections_fn:
-                        deferred_state_corrections_fn()
-                        deferred_state_corrections_fn = None
                     num_reqs = self.input_batch.num_reqs
                     req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
                     dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
@@ -2247,10 +2240,6 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.kv_connector_output = kv_connector_output
 
-        # Now the batch has been launched we can wait for corrections from the
-        # previous model forward without breaking async scheduling.
-        if deferred_state_corrections_fn:
-            deferred_state_corrections_fn()
         return None
 
     @torch.inference_mode()
@@ -2993,8 +2982,12 @@ class NPUModelRunner(GPUModelRunner):
             seq_lens=self.seq_lens[:num_reqs_padded],
             # Always pass optimistic_seq_lens_cpu via _seq_lens_cpu so NPU
             # attention backends can get CPU seq_lens without GPU->CPU sync.
-            # This is separate from seq_lens_cpu (None in async) which eagle
-            # proposer checks to distinguish async/non-async behavior.
+            # In async spec decode mode, optimistic_seq_lens_cpu is an upper
+            # bound (it assumes all previous drafts were accepted). This is
+            # safe: the attention kernel uses the corrected GPU seq_lens for
+            # actual computation; the CPU mirror only drives metadata
+            # (max_seq_len, kernel launch params) where a slightly larger
+            # value is harmless.
             _seq_lens_cpu=self.optimistic_seq_lens_cpu[:num_reqs_padded],
             seq_lens_cpu_upper_bound=self.optimistic_seq_lens_cpu[:num_reqs_padded],
             # TODO
