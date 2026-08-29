@@ -183,8 +183,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
 
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-
     vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
     --host 0.0.0.0 \
     --port 8015 \
@@ -202,7 +200,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3,"method": "deepseek_mtp"}' \
     --quantization ascend \
-    --additional_config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_balance_scheduling": true}' \
+    --additional_config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_balance_scheduling": true,"enable_mlapo":true}' \
     ```
 
 === "A3 series"
@@ -808,7 +806,6 @@ Parameter descriptions:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export TASK_QUEUE_ENABLE=1
 
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export DYNAMIC_EPLB="true"
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -849,7 +846,7 @@ Parameter descriptions:
                         "ascend_local_comm_res_path": "/etc/hixlep"
                 }
             }' \
-        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":false,"enable_shared_expert_dp":true, "eplb_config":{"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts":16}}'
+        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":false,"enable_shared_expert_dp":true,"enable_mlapo":true,"eplb_config":{"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts":16}}'
         ```
 
     === "Decode Node"
@@ -873,7 +870,6 @@ Parameter descriptions:
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export TASK_QUEUE_ENABLE=1
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/ \
@@ -914,12 +910,12 @@ Parameter descriptions:
                         "ascend_local_comm_res_path": "/etc/hixlep"
                 }
             }' \
-        --additional_config '{"enable_cpu_binding": "True", "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
+        --additional_config '{"enable_cpu_binding": "True", "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_mlapo": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
         ```
 
     Key Parameter Descriptions:
 
-        - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+        - `additional_config.enable_mlapo=true`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
         - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
         - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
         - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.

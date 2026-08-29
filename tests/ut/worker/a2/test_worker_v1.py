@@ -1786,10 +1786,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        # The runtime AscendConfig is authoritative even when the deprecated
-        # environment variable still carries a stale import-time value.
-        with patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "1"}):
-            worker.start_weight_update()
+        worker.start_weight_update()
 
         engine.start_weight_update.assert_called_once_with()
         self.assertTrue(worker._weight_update_active)
@@ -1810,10 +1807,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        with (
-            patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"}),
-            self.assertRaises(ValueError),
-        ):
+        with self.assertRaises(ValueError):
             worker.start_weight_update()
 
     def test_update_weights_requires_start(self):
@@ -1822,7 +1816,6 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
-    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_update_weights_dispatches_to_engine(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)

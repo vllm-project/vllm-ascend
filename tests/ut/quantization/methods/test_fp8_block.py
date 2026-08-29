@@ -23,13 +23,13 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
-from vllm_ascend.quantization.methods.fp8_block import (
+from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockFusedMoEMethod,
     AscendFp8BlockLinearMethod,
     resolve_block_scales,
 )
 
-MODULE = "vllm_ascend.quantization.methods.fp8_block"
+MODULE = "vllm_ascend.quantization.methods.w8a8.fp8_block"
 
 # Elements per shared exponent produced by npu_dynamic_mx_quant.
 MX_GROUP_SIZE = 32

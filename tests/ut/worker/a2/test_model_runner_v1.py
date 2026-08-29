@@ -1,4 +1,5 @@
 import unittest
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
@@ -18,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
@@ -964,6 +966,163 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_k_cache.dtype, torch.int8)
         self.assertEqual(indexer_scale_cache.shape, (2, 16, 1, 1))
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
+
+
+class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
+    @staticmethod
+    def _build_runner():
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.encoder_cache = {"device": object()}
+        runner.tmp_encoder_cache = {}
+        runner.cpu_encoder_cache = {}
+        runner.cached = {}
+        runner._pending_encoder_cache_copies = deque()
+        runner.late_interaction_runner = MagicMock()
+        runner._sync_device = MagicMock()
+        return runner
+
+    def test_reset_clears_score_encoder_cache_state(self):
+        runner = self._build_runner()
+        runner.tmp_encoder_cache["tmp"] = object()
+        runner.cpu_encoder_cache["cpu"] = object()
+        runner.cached["tmp"] = {"request"}
+        runner._pending_encoder_cache_copies.append((object(), MagicMock()))
+
+        runner.reset_encoder_cache()
+
+        runner._sync_device.assert_called_once_with()
+        self.assertFalse(runner.encoder_cache)
+        self.assertFalse(runner.tmp_encoder_cache)
+        self.assertFalse(runner.cpu_encoder_cache)
+        self.assertFalse(runner.cached)
+        self.assertFalse(runner._pending_encoder_cache_copies)
+        runner.late_interaction_runner.clear.assert_called_once_with()
+
+
+class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
+    @staticmethod
+    def _build_runner(use_score_encoder_cache=True):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.encoder_cache = {}
+        runner.cpu_encoder_cache = {}
+        runner.tmp_encoder_cache = {}
+        runner.cached = {}
+        runner._pending_encoder_cache_copies = deque()
+        runner.use_score_encoder_cache = use_score_encoder_cache
+        runner.maybe_save_ec_to_connector = MagicMock()
+        return runner
+
+    def test_processes_score_cache_migrations_and_frees(self):
+        runner = self._build_runner()
+        runner.encoder_cache = {
+            "npu-freed": "npu",
+            "cpu-freed": "npu",
+        }
+        runner.cpu_encoder_cache = {
+            "npu-freed": "cpu",
+            "cpu-freed": "cpu",
+            "promote": "promote",
+            "temporary": "temporary",
+        }
+        runner._copy_cpu_encoder_cache_to_device = MagicMock(side_effect=lambda value: f"device-{value}")
+        metadata = SimpleNamespace(
+            promoting_mm_hashes=["promote"],
+            cpu_get_encoder_mm_hashes=["temporary"],
+            npu_freed=["npu-freed"],
+            cpu_freed=["cpu-freed"],
+        )
+        scheduler_output = SimpleNamespace(ec_manager_metadata=metadata)
+
+        runner._process_encoder_cache_scheduler_output(scheduler_output)
+
+        self.assertEqual(set(runner.encoder_cache), {"cpu-freed", "promote"})
+        self.assertEqual(
+            set(runner.cpu_encoder_cache),
+            {"npu-freed", "promote", "temporary"},
+        )
+        self.assertEqual(runner.encoder_cache["promote"], "device-promote")
+        self.assertEqual(runner.tmp_encoder_cache["temporary"], "device-temporary")
+
+    def test_score_cache_disabled_delegates_to_upstream(self):
+        runner = self._build_runner(use_score_encoder_cache=False)
+        scheduler_output = SimpleNamespace()
+
+        with patch.object(
+            GPUModelRunner,
+            "_process_encoder_cache_scheduler_output",
+            autospec=True,
+        ) as upstream_process:
+            runner._process_encoder_cache_scheduler_output(scheduler_output)
+
+        upstream_process.assert_called_once_with(runner, scheduler_output)
+
+    def test_async_copy_keeps_pinned_source_until_event_completes(self):
+        runner = self._build_runner()
+        runner.device = "npu"
+        cpu_value = MagicMock()
+        pinned_source = MagicMock()
+        npu_value = MagicMock()
+        copy_done = MagicMock()
+        cpu_value.is_pinned.return_value = False
+        cpu_value.pin_memory.return_value = pinned_source
+        fake_npu = SimpleNamespace(
+            Event=MagicMock(return_value=copy_done),
+            current_stream=MagicMock(),
+        )
+
+        with (
+            patch.object(torch, "empty_like", return_value=npu_value),
+            patch.object(torch, "npu", fake_npu, create=True),
+        ):
+            runner._copy_cpu_encoder_cache_to_device(cpu_value)
+
+        npu_value.copy_.assert_called_once_with(pinned_source, non_blocking=True)
+        self.assertIs(runner._pending_encoder_cache_copies[0][0], pinned_source)
+        self.assertIs(runner._pending_encoder_cache_copies[0][1], copy_done)
+        copy_done.record.assert_called_once()
+
+        copy_done.query.side_effect = [False, True]
+        runner._clear_finished_encoder_cache_copies()
+        self.assertEqual(len(runner._pending_encoder_cache_copies), 1)
+        runner._clear_finished_encoder_cache_copies()
+        self.assertFalse(runner._pending_encoder_cache_copies)
+
+    def test_new_output_is_staged_on_cpu(self):
+        runner = self._build_runner()
+        output = MagicMock()
+        staging = MagicMock()
+
+        with patch.object(torch, "empty_like", return_value=staging):
+            runner._cache_encoder_output(
+                "image",
+                output,
+                SimpleNamespace(promoting_mm_hashes=[], npu_freed=[]),
+                [],
+            )
+
+        self.assertIs(runner.cpu_encoder_cache["image"], staging)
+        self.assertIs(runner.tmp_encoder_cache["image"], output)
+        self.assertNotIn("image", runner.encoder_cache)
+        staging.copy_.assert_called_once_with(
+            output.detach.return_value,
+            non_blocking=True,
+        )
+
+    def test_tmp_cache_is_released_after_last_request_reference(self):
+        runner = self._build_runner()
+        tmp_output = object()
+        runner.tmp_encoder_cache["image"] = tmp_output
+        runner.cached["image"] = {"first", "second"}
+        req_state = SimpleNamespace(mm_features=[SimpleNamespace(identifier="image")])
+
+        runner._on_request_state_removed("first", req_state)
+
+        self.assertIn("image", runner.tmp_encoder_cache)
+
+        runner._on_request_state_removed("second", req_state)
+
+        self.assertNotIn("image", runner.cached)
+        self.assertNotIn("image", runner.tmp_encoder_cache)
 
 
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):

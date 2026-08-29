@@ -192,7 +192,6 @@ templates:
       <<: *env_common
       HCCL_BUFFSIZE: "256"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -222,7 +221,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "finegrained_tp_config": {"lmhead_tensor_parallel_size":16},"enable_fused_mc2":0}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "finegrained_tp_config": {"lmhead_tensor_parallel_size":16},"enable_fused_mc2":0,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -258,7 +257,6 @@ templates:
       <<: *env_common
       HCCL_BUFFSIZE: "256"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -288,7 +286,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "finegrained_tp_config": {"lmhead_tensor_parallel_size":16},"enable_fused_mc2":0}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true, "enable_sparse_sfa_c8": false, "enable_sparse_li_c8": false, "finegrained_tp_config": {"lmhead_tensor_parallel_size":16},"enable_fused_mc2":0,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
