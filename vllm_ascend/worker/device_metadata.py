@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -33,19 +34,19 @@ class DeviceMetadataTask:
 
 
 @dataclass(frozen=True, slots=True)
-class DeviceMetadataPlan:
-    tasks: tuple[DeviceMetadataTask, ...]
+class DeviceMetadataTaskContext:
+    common_attn_metadata: object
+    layer_attn_metadata: object
+    for_cudagraph_capture: bool
 
-    def __post_init__(self) -> None:
-        if not self.tasks:
-            raise ValueError("A device metadata plan must contain at least one task")
-        stages = tuple(task.stage for task in self.tasks)
-        if stages != tuple(sorted(stages)):
-            raise ValueError("Device metadata tasks must be ordered by stage")
+
+@runtime_checkable
+class DeviceMetadataTaskProvider(Protocol):
+    def build_device_metadata_tasks(self, context: DeviceMetadataTaskContext) -> tuple[DeviceMetadataTask, ...]: ...
 
 
 class DeviceMetadataExecutor:
-    """Submit one metadata plan at a time on a worker-owned NPU stream."""
+    """Submit device metadata tasks on a worker-owned NPU stream."""
 
     def __init__(self) -> None:
         self.stream = torch.npu.Stream()
@@ -53,11 +54,14 @@ class DeviceMetadataExecutor:
         self._stage_ready = {stage: torch.npu.Event() for stage in DeviceMetadataStage}
         self._buffer_reusable = torch.npu.Event()
         self._has_reuse_fence = False
-        self._plan_in_flight = False
+        self._submission_in_flight = False
 
-    def submit(self, plan: DeviceMetadataPlan) -> None:
-        if self._plan_in_flight:
-            raise RuntimeError("The previous device metadata plan has not been released")
+    def submit(self, tasks: Iterable[DeviceMetadataTask]) -> None:
+        if self._submission_in_flight:
+            raise RuntimeError("The previous device metadata submission has not been released")
+        ordered_tasks = tuple(sorted(tasks, key=lambda task: task.stage))
+        if not ordered_tasks:
+            raise ValueError("At least one device metadata task is required")
 
         self._inputs_ready.record(torch.npu.current_stream())
         with torch.npu.stream(self.stream):
@@ -67,21 +71,21 @@ class DeviceMetadataExecutor:
 
             task_index = 0
             for stage in DeviceMetadataStage:
-                while task_index < len(plan.tasks) and plan.tasks[task_index].stage == stage:
-                    plan.tasks[task_index].run()
+                while task_index < len(ordered_tasks) and ordered_tasks[task_index].stage == stage:
+                    ordered_tasks[task_index].run()
                     task_index += 1
                 self._stage_ready[stage].record(self.stream)
 
-        self._plan_in_flight = True
+        self._submission_in_flight = True
 
     def wait(self, stage: DeviceMetadataStage) -> None:
-        if not self._plan_in_flight:
-            raise RuntimeError("No device metadata plan is in flight")
+        if not self._submission_in_flight:
+            raise RuntimeError("No device metadata submission is in flight")
         torch.npu.current_stream().wait_event(self._stage_ready[stage])
 
     def release(self) -> None:
-        if not self._plan_in_flight:
-            raise RuntimeError("No device metadata plan is in flight")
+        if not self._submission_in_flight:
+            raise RuntimeError("No device metadata submission is in flight")
         self._buffer_reusable.record(torch.npu.current_stream())
         self._has_reuse_fence = True
-        self._plan_in_flight = False
+        self._submission_in_flight = False
