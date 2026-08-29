@@ -143,6 +143,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 "_EXTRA_CTX",
                 SimpleNamespace(moe_comm_type=moe_mlp_module.MoECommType.MC2),
             ),
+            patch.object(moe_mlp_module.envs, "VLLM_ASCEND_ENABLE_GMSQ_SITU", False),
             patch(
                 "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.npu_dynamic_quant",
                 return_value=(quantized_input, input_scale),
@@ -214,6 +215,85 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         custom_ops.grouped_matmul_swiglu_quant_v2.assert_not_called()
         custom_ops.grouped_matmul_swiglu_quant_weight_nz_tensor_list.assert_not_called()
         custom_ops.npu_dequant_swiglu_quant.assert_not_called()
+
+    def test_w4a8_situ_uses_gmsq_fusion_on_a3(self):
+        from vllm_ascend.utils import AscendDeviceType
+
+        hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+        quantized_input = torch.ones(2, 4, dtype=torch.int8)
+        input_scale = torch.ones(2, 1, dtype=torch.float32)
+        quantized_situ = torch.full((2, 2), 3, dtype=torch.int8)
+        situ_scale = torch.full((2,), 0.25, dtype=torch.float32)
+        down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+        activation = SituActivationConfig(beta=4.0, linear_beta=25.0)
+        w1_scale_bias = [torch.randn(1, 4)]
+        w2_scale_bias = [torch.randn(1, 4)]
+        event = object()
+        packed_w1 = torch.ones(2, 4, 1, dtype=torch.int32)
+        w1_scale = torch.ones(2, 4, dtype=torch.int64)
+        mock_gmsq = MagicMock(return_value=(quantized_situ, situ_scale))
+        custom_ops = SimpleNamespace(
+            dequant_situ_quant=MagicMock(),
+        )
+
+        with (
+            patch.object(moe_mlp_module.torch.ops, "_C_ascend", custom_ops),
+            patch.object(moe_mlp_module, "ASCEND_DEVICE_TYPE", AscendDeviceType.A3),
+            patch.object(moe_mlp_module.envs, "VLLM_ASCEND_ENABLE_GMSQ_SITU", True),
+            patch.object(moe_mlp_module, "_GMSQ_SITU_OP", mock_gmsq),
+            patch.object(moe_mlp_module, "_GMSQ_SITU_OP_RESOLVED", True),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.npu_dynamic_quant",
+                return_value=(quantized_input, input_scale),
+            ) as mock_input_quant,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                create=True,
+            ) as mock_gmm1,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.DeviceOperator.npu_grouped_matmul_gmm2",
+                return_value=down_out,
+            ) as mock_gmm2,
+            patch("vllm_ascend.ops.fused_moe.moe_mlp.dispose_tensor"),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch.npu.current_stream",
+                return_value=MagicMock(record_event=MagicMock(return_value=event)),
+            ),
+        ):
+            output, before_gmm2_evt = quant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=[packed_w1],
+                w1_scale=[w1_scale],
+                w2=[torch.ones(1, 2, 1, dtype=torch.int32)],
+                w2_scale=[torch.ones(1, 4, dtype=torch.int64)],
+                group_list=torch.tensor([2]),
+                activation=activation,
+                fusion=True,
+                mxfp_quant_dtype=QuantType.W4A8,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
+                use_w4a8_per_channel_gmm_swiglu=True,
+            )
+
+        self.assertIs(output, down_out)
+        self.assertIs(before_gmm2_evt, event)
+        mock_input_quant.assert_called_once()
+        mock_gmm1.assert_not_called()
+        custom_ops.dequant_situ_quant.assert_not_called()
+        mock_gmsq.assert_called_once()
+        gmsq_kwargs = mock_gmsq.call_args.kwargs
+        self.assertEqual(len(gmsq_kwargs["weight"]), 2)
+        self.assertEqual(len(gmsq_kwargs["weight_scale"]), 2)
+        self.assertEqual(gmsq_kwargs["weight"][0].shape, torch.Size([4, 1]))
+        self.assertEqual(gmsq_kwargs["weight_scale"][0].shape, torch.Size([4]))
+        self.assertEqual(gmsq_kwargs["beta"], 4.0)
+        self.assertEqual(gmsq_kwargs["linear_beta"], 25.0)
+        self.assertEqual(gmsq_kwargs["group_list_type"], 1)
+        self.assertEqual(gmsq_kwargs["weight_assist_matrix"], [])
+        self.assertEqual(gmsq_kwargs["x_scale"].shape, torch.Size([2]))
+        self.assertIs(mock_gmm2.call_args.kwargs["bias"], w2_scale_bias)
+        self.assertIs(mock_gmm2.call_args.kwargs["hidden_states"], quantized_situ)
+        self.assertEqual(mock_gmm2.call_args.kwargs["per_token_scale"].shape, torch.Size([2, 1]))
 
     def test_w4a8_swiglu_stays_on_existing_fused_path(self):
         hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
