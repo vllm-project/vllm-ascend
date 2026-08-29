@@ -27,6 +27,7 @@ from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -238,7 +239,10 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             return_value=local_attn_state,
         ) as build_attn_state,
     ):
-        result = manager.partition_batch(global_batch, padded_num_tokens=12)
+        if vllm_version_is("0.27.1"):
+            result = manager.partition_batch(global_batch)
+        else:
+            result = manager.partition_batch(global_batch, padded_num_tokens=12)
 
     assert isinstance(result, AscendInputBatch)
     assert result is not global_batch
@@ -253,7 +257,8 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([3, 5], dtype=np.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 3, 8], dtype=np.int32))
     assert result.num_tokens == 8
-    assert result.num_tokens_after_padding == 12
+    expected_num_tokens_after_padding = 10 if vllm_version_is("0.27.1") else 12
+    assert result.num_tokens_after_padding == expected_num_tokens_after_padding
     assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
 
     # dataclasses.replace() retains the global Ascend-only fields by default;
