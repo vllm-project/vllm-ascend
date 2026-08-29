@@ -186,9 +186,13 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert attention_spec.page_size_bytes == 20
     assert mamba_spec.page_size_bytes == 20
 
-    kv_cache_config = KVCacheConfig(
-        num_blocks=2,
-        kv_cache_tensors=[
+    if vllm_version_is("0.27.1"):
+        kv_cache_tensors = [
+            _make_kv_cache_tensor(40, ["full_attn", "linear_attn"], 20),
+            _make_kv_cache_tensor(40, ["mtp_attn"], 20),
+        ]
+    else:
+        kv_cache_tensors = [
             _make_kv_cache_tensor(
                 80,
                 ["full_attn", "mtp_attn"],
@@ -203,7 +207,11 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
                 20,
                 layer_stride=40,
             ),
-        ],
+        ]
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[
             KVCacheGroupSpec(
                 layer_names=["full_attn", "mtp_attn"],
@@ -226,11 +234,14 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     mtp_attn_raw = raw_caches["mtp_attn"]
     assert isinstance(full_attn_raw, torch.Tensor)
     assert isinstance(mtp_attn_raw, torch.Tensor)
-    assert full_attn_raw.data_ptr() == raw_cache.data_ptr()
-    backing_ptr = raw_cache.untyped_storage().data_ptr()
-    assert full_attn_raw.untyped_storage().data_ptr() == backing_ptr
-    assert mtp_attn_raw.untyped_storage().data_ptr() == backing_ptr
-    assert mtp_attn_raw.data_ptr() - backing_ptr == 40
+    if vllm_version_is("0.27.1"):
+        assert full_attn_raw is raw_cache
+    else:
+        assert full_attn_raw.data_ptr() == raw_cache.data_ptr()
+        backing_ptr = raw_cache.untyped_storage().data_ptr()
+        assert full_attn_raw.untyped_storage().data_ptr() == backing_ptr
+        assert mtp_attn_raw.untyped_storage().data_ptr() == backing_ptr
+        assert mtp_attn_raw.data_ptr() - backing_ptr == 40
 
     backend = MagicMock()
     backend.get_kv_cache_shape.return_value = (2, 2, 4, 1, 1)
@@ -271,8 +282,9 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert value_cache.is_contiguous()
     assert mtp_key_cache.shape == key_cache.shape
     assert mtp_value_cache.shape == value_cache.shape
-    assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
-    assert mtp_value_cache.data_ptr() - value_cache.data_ptr() == 40
+    if not vllm_version_is("0.27.1"):
+        assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
+        assert mtp_value_cache.data_ptr() - value_cache.data_ptr() == 40
 
 
 @patch(
