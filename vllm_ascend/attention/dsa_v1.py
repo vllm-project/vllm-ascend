@@ -28,12 +28,7 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_otp_group
-from vllm_ascend.lora.dsa import (
-    apply_grouped_dsa_lora,
-    forward_with_dsa_lora,
-    get_dsa_lora_context,
-    has_dsa_lora,
-)
+from vllm_ascend.lora.dsa import get_dsa_lora_context
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.cv_linear import CVLinearWrapper, CVLinearWrapperWithLoRA
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
@@ -1659,12 +1654,10 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         o_proj_input: torch.Tensor,
         output: torch.Tensor,
-        token_lora_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
-        wo_a_input = o_proj_input
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
         # orthogonal to the OTP / olora_tp paths below, so it must win first.
@@ -1683,23 +1676,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                 perm_x2=(0, 1, 2),
                 perm_y=(1, 0, 2),
             )
-            o = apply_grouped_dsa_lora(
-                self.wo_a,
-                o,
-                wo_a_input,
-                token_lora_indices,
-            )
             o = o.reshape(num_tokens, -1)
-            output[...] = forward_with_dsa_lora(
-                self.wo_b,
-                o,
-                token_lora_indices,
-            )
+            output[...] = self.wo_b(o)
         elif oproj_tp_enable():
-            if has_dsa_lora(self.wo_a) or has_dsa_lora(self.wo_b):
-                raise NotImplementedError(
-                    "DeepSeek V4 DSA LoRA does not yet support fine-grained o_proj tensor parallelism."
-                )
             oproj_group = get_otp_group()
             oproj_tp_size = oproj_group.world_size
             if self.n_local_groups % oproj_tp_size != 0:
@@ -1767,15 +1746,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
             output[...] = self._oproj_rs_out_buf[:num_tokens]
         elif olora_tp_enable():
-            if has_dsa_lora(self.wo_a) or has_dsa_lora(self.wo_b):
-                raise NotImplementedError(
-                    "DeepSeek V4 DSA PEFT LoRA cannot be combined with the native o_lora tensor-parallel path yet."
-                )
             o_proj_input = self.wo_a(o_proj_input)
             output[...] = self.wo_b(o_proj_input)
         else:
-            wo_a_output = torch_npu.npu_transpose_batchmatmul(
-                wo_a_input,
+            o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                o_proj_input,
                 self.wo_a.weight,
                 bias=None,
                 scale=None,
@@ -1784,18 +1759,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                 perm_y=(1, 0, 2),
                 batch_split_factor=1,
             )
-            wo_a_output = apply_grouped_dsa_lora(
-                self.wo_a,
-                wo_a_output,
-                wo_a_input,
-                token_lora_indices,
-            )
-            wo_b_input = wo_a_output.reshape(num_tokens, -1)
-            output[...] = forward_with_dsa_lora(
-                self.wo_b,
-                wo_b_input,
-                token_lora_indices,
-            )
+            o_proj_input = o_proj_input.reshape(num_tokens, -1)
+            output[...] = self.wo_b(o_proj_input)
         return output
 
     def forward(  # type: ignore[override]
@@ -1818,8 +1783,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                     get_dsa_lora_context(self.wq_a),
                     get_dsa_lora_context(self.wq_b),
                     get_dsa_lora_context(self.wkv),
-                    get_dsa_lora_context(self.wo_a),
-                    get_dsa_lora_context(self.wo_b),
                 )
                 if context is not None
             ),
@@ -1848,18 +1811,10 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         prefill_lora_indices = None
         decode_lora_indices = None
-        o_proj_lora_indices = None
         if dsa_lora_context is not None:
             actual_lora_indices = dsa_lora_context.punica_wrapper.get_token_lora_indices(actual_tokens)
             decode_lora_indices = actual_lora_indices[:decode_tokens]
             prefill_lora_indices = actual_lora_indices[decode_tokens:actual_tokens]
-            o_proj_lora_indices = torch.full(
-                (o_proj_input_shape[0],),
-                -1,
-                dtype=torch.long,
-                device=hidden_states.device,
-            )
-            o_proj_lora_indices[:actual_tokens].copy_(actual_lora_indices)
 
         # Process for Flash Comm V1
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
@@ -1907,11 +1862,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
 
         # o
-        self._forward_o_proj(
-            o_proj_input,
-            output,
-            token_lora_indices=o_proj_lora_indices,
-        )
+        self._forward_o_proj(o_proj_input, output)
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 

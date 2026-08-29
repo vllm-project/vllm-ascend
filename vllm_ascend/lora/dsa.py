@@ -9,11 +9,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.utils import replace as replace_config
-from vllm.distributed import (
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_all_reduce,
-)
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
 from vllm.lora.layers.column_parallel_linear import (
@@ -21,20 +17,13 @@ from vllm.lora.layers.column_parallel_linear import (
     ColumnParallelLinearWithShardedLoRA,
 )
 from vllm.lora.layers.replicated_linear import ReplicatedLinearWithLoRA
-from vllm.lora.layers.row_parallel_linear import (
-    RowParallelLinearWithLoRA,
-    RowParallelLinearWithShardedLoRA,
-)
-from vllm.model_executor.custom_op import maybe_get_oot_by_class
-from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 logger = init_logger(__name__)
 
 DSA_LORA_CONTEXT_ATTR = "_ascend_dsa_lora_context"
 _DSA_QKV_PROJECTIONS = frozenset(("wq_a", "wq_b", "wkv"))
-_DSA_ATTN_PROJECTIONS = _DSA_QKV_PROJECTIONS | frozenset(("wo_a", "wo_b"))
 
-DSAParallelMode = Literal["replicated", "column", "row", "grouped_column"]
+DSAParallelMode = Literal["replicated", "column"]
 
 
 class DSASGMVMetadataLike(Protocol):
@@ -105,7 +94,7 @@ class _AscendDSALoRAContextMixin:
             lora_b_stacked=self.lora_b_stacked,
             output_slices=self.output_slices,
             parallel_mode=self._dsa_parallel_mode,
-            fully_sharded=(self._dsa_parallel_mode in ("column", "row") and bool(self.lora_config.fully_sharded_loras)),
+            fully_sharded=(self._dsa_parallel_mode == "column" and bool(self.lora_config.fully_sharded_loras)),
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
             shrink_buffer=shrink_buffer,
@@ -141,7 +130,7 @@ class AscendDSAReplicatedLinearWithLoRA(_AscendDSALoRAContextMixin, ReplicatedLi
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return _is_direct_dsa_projection(source_layer, _DSA_ATTN_PROJECTIONS) and (
+        return _is_direct_dsa_projection(source_layer, _DSA_QKV_PROJECTIONS) and (
             ReplicatedLinearWithLoRA.can_replace_layer(
                 source_layer=source_layer,
                 lora_config=lora_config,
@@ -193,98 +182,9 @@ class AscendDSAColumnParallelLinearWithShardedLoRA(_AscendDSALoRAContextMixin, C
         )
 
 
-class AscendDSAGroupedColumnParallelLinearWithLoRA(_AscendDSALoRAContextMixin, ColumnParallelLinearWithLoRA):
-    """Column LoRA storage for the group-wise DSA ``wo_a`` projection.
-
-    ``wo_a`` owns different group inputs on every TP rank. Fully sharding A's
-    rank dimension would require exchanging every rank's group inputs before
-    the shrink GEMM; gathering shrink results directly would mix different
-    inputs and be numerically wrong. Keep A replicated and shard B by the local
-    output groups, even when the deployment enables fully-sharded LoRAs.
-    """
-
-    _dsa_parallel_mode: DSAParallelMode = "grouped_column"
-
-    def create_lora_weights(
-        self,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: PretrainedConfig | None = None,
-    ) -> None:
-        grouped_lora_config = replace_config(
-            lora_config,
-            fully_sharded_loras=False,
-        )
-        super().create_lora_weights(max_loras, grouped_lora_config, model_config)
-        if lora_config.fully_sharded_loras:
-            logger.info_once(
-                "DeepSeek V4 DSA wo_a keeps LoRA A replicated because local TP "
-                "ranks own different attention-group inputs; LoRA B remains "
-                "sharded by output group."
-            )
-
-    @classmethod
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
-    ) -> bool:
-        del lora_config, packed_modules_list, model_config
-        return _is_direct_dsa_projection(source_layer, frozenset(("wo_a",))) and type(
-            source_layer
-        ) is maybe_get_oot_by_class(ColumnParallelLinear)
-
-
-class AscendDSARowParallelLinearWithLoRA(_AscendDSALoRAContextMixin, RowParallelLinearWithLoRA):
-    _dsa_parallel_mode: DSAParallelMode = "row"
-
-    @classmethod
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
-    ) -> bool:
-        return _is_direct_dsa_projection(source_layer, frozenset(("wo_b",))) and (
-            RowParallelLinearWithLoRA.can_replace_layer(
-                source_layer=source_layer,
-                lora_config=lora_config,
-                packed_modules_list=packed_modules_list,
-                model_config=model_config,
-            )
-        )
-
-
-class AscendDSARowParallelLinearWithShardedLoRA(_AscendDSALoRAContextMixin, RowParallelLinearWithShardedLoRA):
-    _dsa_parallel_mode: DSAParallelMode = "row"
-
-    @classmethod
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
-    ) -> bool:
-        return _is_direct_dsa_projection(source_layer, frozenset(("wo_b",))) and (
-            RowParallelLinearWithShardedLoRA.can_replace_layer(
-                source_layer=source_layer,
-                lora_config=lora_config,
-                packed_modules_list=packed_modules_list,
-                model_config=model_config,
-            )
-        )
-
-
 DSA_LORA_CLASSES: tuple[type[BaseLinearLayerWithLoRA], ...] = (
-    AscendDSAGroupedColumnParallelLinearWithLoRA,
     AscendDSAColumnParallelLinearWithLoRA,
     AscendDSAColumnParallelLinearWithShardedLoRA,
-    AscendDSARowParallelLinearWithLoRA,
-    AscendDSARowParallelLinearWithShardedLoRA,
     AscendDSAReplicatedLinearWithLoRA,
 )
 
@@ -296,11 +196,10 @@ def _get_reusable_shrink_buffer(
     num_slices: int,
     num_rows: int,
     rank: int,
-    row_multiplier: int = 1,
 ) -> torch.Tensor:
     """Return a reusable FP32 buffer shared across equal DSA projections.
 
-    DSA executes q, kv, and o projections on different streams, so each
+    DSA executes q and kv projections on different streams, so each
     projection name owns a separate buffer. Equal projections share the same
     buffer across transformer layers. The returned tensor is scratch storage;
     callers of additive shrink kernels must clear its active view before use.
@@ -315,7 +214,7 @@ def _get_reusable_shrink_buffer(
 
     mapping_buffer = getattr(context.punica_wrapper, "_token_lora_indices", None)
     mapping_capacity = mapping_buffer.shape[0] if isinstance(mapping_buffer, torch.Tensor) else num_rows
-    capacity = max(num_rows, mapping_capacity * row_multiplier)
+    capacity = max(num_rows, mapping_capacity)
     buffer = state.tensor
     device = context.lora_a_stacked[0].device
     if (
@@ -428,155 +327,3 @@ def apply_prepared_dsa_lora(
         sgmv_metadata=intermediate.sgmv_metadata,
     )
     return output
-
-
-def apply_grouped_dsa_lora(
-    linear: nn.Module,
-    output: torch.Tensor,
-    x: torch.Tensor,
-    token_lora_indices: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Apply token-routed LoRA to DSA's group-wise ``wo_a`` result."""
-
-    context = get_dsa_lora_context(linear)
-    if context is None:
-        return output
-    if context.parallel_mode != "grouped_column":
-        raise ValueError(f"Grouped DSA LoRA received mode {context.parallel_mode!r}.")
-    if context.fully_sharded:
-        raise ValueError("Grouped DSA wo_a requires replicated LoRA A weights.")
-    if len(context.lora_a_stacked) != 1 or len(context.lora_b_stacked) != 1:
-        raise ValueError("Grouped DSA wo_a expects exactly one LoRA weight slice.")
-    if x.ndim != 3 or output.ndim != 3:
-        raise ValueError(
-            "Grouped DSA wo_a expects [tokens, groups, hidden] input and output, "
-            f"got {tuple(x.shape)} and {tuple(output.shape)}."
-        )
-
-    num_tokens, num_groups, input_size = x.shape
-    output_size = output.shape[-1]
-    lora_a = context.lora_a_stacked[0]
-    lora_b = context.lora_b_stacked[0]
-    if lora_a.shape[-1] != input_size:
-        raise ValueError(f"Grouped DSA wo_a LoRA A input mismatch: expected {input_size}, got {lora_a.shape[-1]}.")
-    if lora_b.shape[-2] != num_groups * output_size:
-        raise ValueError(
-            f"Grouped DSA wo_a LoRA B output mismatch: expected {num_groups * output_size}, got {lora_b.shape[-2]}."
-        )
-
-    if token_lora_indices is None:
-        token_lora_indices = context.punica_wrapper.get_token_lora_indices(num_tokens)
-    if token_lora_indices.shape[0] != num_tokens:
-        raise ValueError(
-            f"Grouped DSA LoRA token mapping length mismatch: expected {num_tokens}, got {token_lora_indices.shape[0]}."
-        )
-    token_lora_indices = token_lora_indices.contiguous()
-    expanded_lora_indices = token_lora_indices.repeat_interleave(num_groups)
-    group_indices = torch.arange(num_groups, device=x.device, dtype=torch.long).repeat(num_tokens)
-    combined_indices = torch.where(
-        expanded_lora_indices >= 0,
-        expanded_lora_indices * num_groups + group_indices,
-        torch.full_like(expanded_lora_indices, -1),
-    ).contiguous()
-
-    x_2d = x.reshape(num_tokens * num_groups, input_size)
-    a_flat = lora_a[:, 0].contiguous()
-    rank = a_flat.shape[-2]
-    shrink_output = _get_reusable_shrink_buffer(
-        linear,
-        context,
-        num_slices=1,
-        num_rows=x_2d.shape[0],
-        rank=rank,
-        row_multiplier=num_groups,
-    )[0]
-    context.punica_wrapper.bgmv_shrink(
-        x_2d,
-        a_flat,
-        shrink_output,
-        expanded_lora_indices.contiguous(),
-        1.0,
-    )
-
-    output = output.contiguous()
-    output_2d = output.view(num_tokens * num_groups, output_size)
-    b_flat = lora_b[:, 0].view(-1, output_size, rank).contiguous()
-    context.punica_wrapper.bgmv_expand(
-        shrink_output,
-        b_flat,
-        output_2d,
-        combined_indices,
-        True,
-    )
-    return output
-
-
-def forward_with_dsa_lora(
-    linear: nn.Module,
-    x: torch.Tensor,
-    token_lora_indices: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Apply DSA ``wo_b`` LoRA before the row-parallel output reduction."""
-
-    context = get_dsa_lora_context(linear)
-    if context is None:
-        output = linear(x)
-        return output[0] if isinstance(output, tuple) else output
-    if context.parallel_mode != "row":
-        raise ValueError(
-            f"forward_with_dsa_lora is reserved for DSA row-parallel projections, got {context.parallel_mode!r}."
-        )
-
-    base_layer = linear
-    if not base_layer.input_is_parallel:
-        raise NotImplementedError("DSA wo_b LoRA expects a row-parallel input shard.")
-    if token_lora_indices is None:
-        token_lora_indices = context.punica_wrapper.get_token_lora_indices(x.shape[0])
-    if token_lora_indices.shape[0] != x.shape[0]:
-        raise ValueError(
-            f"DSA wo_b LoRA token mapping length mismatch: expected {x.shape[0]}, got {token_lora_indices.shape[0]}."
-        )
-    token_lora_indices = token_lora_indices.contiguous()
-
-    bias = None if (base_layer.tp_rank > 0 or base_layer.skip_bias_add) else base_layer.bias
-    output_parallel = base_layer.quant_method.apply(base_layer, x, bias)
-    output_2d = output_parallel.view(-1, output_parallel.shape[-1])
-    x_2d = x.view(-1, x.shape[-1])
-
-    if len(context.lora_a_stacked) != 1 or len(context.lora_b_stacked) != 1:
-        raise ValueError("DSA wo_b expects exactly one LoRA weight slice.")
-    lora_a = context.lora_a_stacked[0]
-    lora_b = context.lora_b_stacked[0]
-    shrink_output = _get_reusable_shrink_buffer(
-        linear,
-        context,
-        num_slices=1,
-        num_rows=x_2d.shape[0],
-        rank=lora_a.shape[-2],
-    )[0]
-    context.punica_wrapper.bgmv_shrink(
-        x_2d,
-        lora_a[:, 0].contiguous(),
-        shrink_output,
-        token_lora_indices,
-        1.0,
-    )
-
-    output_offset = 0
-    if context.fully_sharded:
-        if context.tp_size > 1:
-            shrink_output = tensor_model_parallel_all_reduce(shrink_output)
-        output_offset = context.tp_rank * lora_b.shape[-2]
-    context.punica_wrapper.bgmv_expand_slice(
-        shrink_output,
-        lora_b[:, 0].contiguous(),
-        output_2d,
-        token_lora_indices,
-        output_offset,
-        lora_b.shape[-2],
-        True,
-    )
-
-    if base_layer.reduce_results and base_layer.tp_size > 1:
-        output_parallel = tensor_model_parallel_all_reduce(output_parallel)
-    return output_parallel
