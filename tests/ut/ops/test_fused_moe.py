@@ -193,7 +193,11 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
     monkeypatch.setattr(
         fused_moe_module,
         "_EXTRA_CTX",
-        SimpleNamespace(moe_comm_type=moe_comm_type, moe_comm_method=moe_comm_method),
+        SimpleNamespace(
+            moe_comm_type=moe_comm_type,
+            moe_comm_method=moe_comm_method,
+            use_megamoe=False,
+        ),
     )
     monkeypatch.setattr(fused_moe_module, "get_moe_num_logical_experts", lambda *args, **kwargs: 4)
     monkeypatch.setattr(fused_moe_module, "get_forward_context", lambda: SimpleNamespace(input_ids=None))
