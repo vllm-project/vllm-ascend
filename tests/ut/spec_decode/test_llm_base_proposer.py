@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -41,6 +42,34 @@ NON_FULL_CUDAGRAPH_MODES = [
     CUDAGraphMode.NONE,
     CUDAGraphMode.PIECEWISE,
 ]
+
+
+def test_draft_vllm_config_uses_draft_model_config():
+    draft_model_config = SimpleNamespace(runner_type="draft")
+    base_vllm_config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
+    expected_vllm_config = SimpleNamespace(model_config=draft_model_config)
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.speculative_config = SimpleNamespace(
+        draft_model_config=draft_model_config,
+    )
+
+    with (
+        patch(
+            "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
+            return_value=base_vllm_config,
+        ),
+        patch(
+            "vllm_ascend.spec_decode.llm_base_proposer.replace",
+            return_value=expected_vllm_config,
+        ) as mock_replace,
+    ):
+        draft_vllm_config = proposer._create_draft_vllm_config()
+
+    assert draft_vllm_config is expected_vllm_config
+    mock_replace.assert_called_once_with(
+        base_vllm_config,
+        model_config=draft_model_config,
+    )
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:

@@ -9,7 +9,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from typing_extensions import override
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, replace
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
@@ -122,6 +123,20 @@ def _is_glm_model(model_config) -> bool:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+
+    @override
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Expose the validated draft model config during model construction.
+
+        ``_get_model`` calls this hook before ``get_model`` installs the
+        returned config as the current vLLM config. Attention constructors can
+        then identify the draft model from ``runner_type="draft"``.
+        """
+        draft_vllm_config = super()._create_draft_vllm_config()
+        return replace(
+            draft_vllm_config,
+            model_config=self.speculative_config.draft_model_config,
+        )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
