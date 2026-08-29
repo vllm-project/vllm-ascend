@@ -1124,6 +1124,7 @@ class TestAscendMLAImpl(TestBase):
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         model_config.dtype = torch.float16
+        model_config.runner_type = "generate"
         vllm_config.model_config = model_config
         get_current_vllm_config.return_value = vllm_config
         vllm_config.additional_config = {"refresh": True}
@@ -1191,9 +1192,49 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(self.impl.kv_a_proj_with_mqa)
         self.assertIsNotNone(self.impl.kv_a_layernorm)
         self.assertEqual(self.impl.num_queries_per_kv, 32)
+        self.assertFalse(self.impl.is_draft_model)
         # 256 is power of 2, so padding should be 0
         self.assertEqual(self.impl.num_heads_padded, 256)
         self.assertEqual(self.impl.head_padding, 0)
+
+    @patch("vllm_ascend.attention.mla_v1.enabling_mlapo", return_value=True)
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
+    def test_draft_model_disables_mlapo_at_init(self, mock_get_current_vllm_config, mock_enabling_mlapo):
+        self.impl.vllm_config.model_config.runner_type = "draft"
+        mock_get_current_vllm_config.return_value = self.impl.vllm_config
+        impl = AscendMLAImpl(
+            num_heads=self.impl.num_heads,
+            head_size=self.impl.head_size,
+            scale=self.impl.scale,
+            num_kv_heads=self.impl.num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=self.impl.kv_cache_dtype,
+            blocksparse_params=None,
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None,
+            kv_lora_rank=self.impl.kv_lora_rank,
+            qk_nope_head_dim=self.impl.qk_nope_head_dim,
+            qk_rope_head_dim=self.impl.qk_rope_head_dim,
+            qk_head_dim=self.impl.qk_head_dim,
+            v_head_dim=self.impl.v_head_dim,
+            q_lora_rank=self.impl.q_lora_rank,
+            q_proj=self.impl.q_proj,
+            q_b_proj=self.impl.q_proj,
+            kv_b_proj=self.impl.kv_b_proj,
+            o_proj=self.impl.o_proj,
+            kv_a_proj_with_mqa=self.impl.kv_a_proj_with_mqa,
+            fused_qkv_a_proj=self.impl.fused_qkv_a_proj,
+            kv_a_layernorm=self.impl.kv_a_layernorm,
+            rotary_emb=self.impl.rotary_emb,
+            g_proj=None,
+            use_mla_rope=True,
+        )
+
+        self.assertTrue(impl.is_draft_model)
+        self.assertFalse(impl.enable_mlapo)
+        mock_enabling_mlapo.assert_not_called()
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
