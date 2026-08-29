@@ -69,6 +69,25 @@ def _make_pcp_o_proj_impl():
     return impl
 
 
+def test_sfa_pcp_weight_switch_does_not_install_loader_when_disabled() -> None:
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
+    with (
+        patch.object(AscendSFAImpl, "__init__", return_value=None),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.enable_pcp_o_proj_weight_sharding",
+            return_value=False,
+        ),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=pcp_group),
+        patch.object(AscendSFAPCPImpl, "_get_o_proj_weight_switch_method") as get_method,
+    ):
+        impl = AscendSFAPCPImpl()
+
+    assert not impl.enable_pcp_o_proj_weight_sharding
+    assert impl.o_proj_weight_switch_config.group is pcp_group
+    assert not hasattr(impl, "o_proj_weight_load_state")
+    get_method.assert_not_called()
+
+
 def test_sfa_dcp_extends_v1_backend() -> None:
     assert issubclass(AscendSFADCPImpl, AscendSFAImpl)
     assert AscendSFADCPImpl.supports_mtp_with_cp_non_trivial_interleave_size
@@ -195,7 +214,7 @@ def test_sfa_pcp_o_proj_switch_slices_the_tp_local_weight_by_pcp_rank() -> None:
     AscendSFAPCPImpl.o_proj_full_pools.clear()
     impl = _make_pcp_o_proj_impl()
 
-    impl._enable_o_proj_weight_switch()
+    impl._enable_o_proj_full_weight_switch()
 
     assert impl._o_proj_weight_switch_enabled
     torch.testing.assert_close(
@@ -207,7 +226,7 @@ def test_sfa_pcp_o_proj_switch_slices_the_tp_local_weight_by_pcp_rank() -> None:
 
 def test_sfa_pcp_prefill_gathers_weight_and_restores_local_view() -> None:
     impl = _make_pcp_o_proj_impl()
-    impl._enable_o_proj_weight_switch()
+    impl._enable_o_proj_full_weight_switch()
 
     local_weight_ptr = impl.o_proj.weight.data_ptr()
     full_weight = impl.o_proj_weight_state.gather_parts["weight"].full_tensor
@@ -229,7 +248,7 @@ def test_sfa_pcp_decode_projects_local_weight_then_reduces_pcp_and_tp() -> None:
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
     impl = _make_pcp_o_proj_impl()
     impl.o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group, shard_axis="input")
-    impl._enable_o_proj_weight_switch()
+    impl._enable_o_proj_full_weight_switch()
 
     full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
     input_ = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
