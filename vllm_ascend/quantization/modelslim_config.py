@@ -181,7 +181,16 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
     # projection; sparse-MLA layers keep the DeepSeek-style q_a/kv_a pair.
     # Native HF FP8 checkpoints leave the KDA projections in bf16 via
     # modules_to_not_convert; this mapping is for ModelSlim w8a8 later.
+    # "glm5_next_text" mirrors the entry: the multimodal wrapper registers the
+    # inner text model with hf_config=text_config, so get_quant_method sees
+    # the text model_type when the inner linear layers are created.
     "glm5_next": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
+    },
+    "glm5_next_text": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
@@ -510,7 +519,10 @@ def get_linear_quant_type(
                 logger.error(err_msg)
                 raise ValueError(err_msg)
     else:
-        quant_type = quant_description[prefix + ".weight"]
+        # Layers absent from the quant description stay unquantized: draft
+        # models (e.g. the GLM-5.3 MTP predictor's SharedHead) carry modules
+        # that have no entry because ModelSlim never quantizes them.
+        quant_type = quant_description.get(prefix + ".weight", "FLOAT")
     return quant_type
 
 
@@ -581,6 +593,7 @@ def create_scheme_for_layer(
         "Please use a supported quantization format "
         "or load the model with its original float weights."
     )
+    logger.error("[ascend-debug] FLOAT-unsupported layer prefix=%r layer_type=%s", prefix, layer_type)
     logger.error(err_msg, quant_type, layer_type)
     raise NotImplementedError(err_msg % (quant_type, layer_type))
 
@@ -769,6 +782,17 @@ class AscendModelSlimConfig(QuantizationConfig):
                 for candidate in (prefix.replace("model.layers.", "language_model.model.layers.", 1),):
                     if self._has_quant_weight(candidate, packed_modules_mapping):
                         return candidate
+
+        if model_type in ("glm5_next", "glm5_next_text") and prefix.startswith("model.layers."):
+            # The GLM-5.3 MTP draft predictor queries ``model.layers.N.*``
+            # while the multimodal wrapper keys quant descriptions under
+            # ``language_model.model.layers.N.*``. Try the wrapper alias when
+            # the direct lookup misses (mirrors the step3p5_mtp fallback).
+            packed_modules_mapping = get_packed_modules_mapping(model_type)
+            if not self._has_quant_weight(prefix, packed_modules_mapping):
+                candidate = prefix.replace("model.layers.", "language_model.model.layers.", 1)
+                if self._has_quant_weight(candidate, packed_modules_mapping):
+                    return candidate
         return prefix
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
@@ -866,7 +890,13 @@ class AscendModelSlimConfig(QuantizationConfig):
                 # k_eq_v case where v_proj is replicated from k_proj.
                 if shard_key not in self.quant_description and _is_missing_v_shard(shard_key, self.quant_description):
                     continue
-                is_shard_skipped = self.quant_description[shard_key] == "FLOAT"
+                if shard_key not in self.quant_description:
+                    # Shards absent from the description stay unquantized
+                    # (FLOAT), matching get_linear_quant_type's fallback for
+                    # draft-model modules that ModelSlim never quantizes.
+                    is_shard_skipped = True
+                else:
+                    is_shard_skipped = self.quant_description[shard_key] == "FLOAT"
 
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
@@ -877,10 +907,18 @@ class AscendModelSlimConfig(QuantizationConfig):
                         "to have the same precision."
                     )
         else:
-            is_skipped = any(
-                key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
+            hits = [
+                value
                 for key, value in self.quant_description.items()
-            )
+                if key.startswith(prefix) and key.endswith(".weight")
+            ]
+            if not hits:
+                # No checkpoint entry at all (e.g. the GLM-5.3 MTP SharedHead
+                # placeholder that reuses the main lm_head): nothing to load,
+                # so the layer cannot be quantized.
+                is_skipped = True
+            else:
+                is_skipped = any(value == "FLOAT" for value in hits)
 
         assert is_skipped is not None
         return is_skipped
