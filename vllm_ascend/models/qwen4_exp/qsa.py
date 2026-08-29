@@ -20,6 +20,11 @@ import torch
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
+from vllm_ascend.ops.triton.qwen4_exp.qsa import (
+    qsa_sparse_paged_attention,
+    qsa_store_cache_rows,
+)
+
 from .common import qsa_cache
 from .common.qsa_cache import QSAForwardMetadata
 from .nvidia import indexer_qsa as upstream_indexer
@@ -27,10 +32,24 @@ from .nvidia import qsa as upstream_qsa
 from .ops import (
     qsa_compress_groups_with_ratio,
     qsa_select_paged_tokens,
-    qsa_sparse_paged_attention,
-    qsa_store_cache_rows,
     reshape_and_cache_qsa,
 )
+
+QSAKVCache = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+
+
+def _split_qsa_kv_cache(kv_cache: QSAKVCache, head_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if isinstance(kv_cache, tuple):
+        if len(kv_cache) != 2:
+            raise ValueError("QSA packed cache must contain K and V views")
+        return kv_cache
+    return kv_cache.transpose(1, 2).split(head_size, dim=-1)
+
+
+def _qsa_cache_is_bound(kv_cache: QSAKVCache) -> bool:
+    if isinstance(kv_cache, tuple):
+        return len(kv_cache) == 2 and all(cache.numel() for cache in kv_cache)
+    return bool(kv_cache.numel())
 
 
 def apply_qsa_rope(
@@ -49,18 +68,10 @@ def apply_qsa_rope(
         if getattr(rotary_emb, "mrope_interleaved", False):
             merged_cos = cos[0].clone()
             merged_sin = sin[0].clone()
-            merged_cos[..., 1 : sections[1] * 3 : 3] = cos[
-                1, ..., 1 : sections[1] * 3 : 3
-            ]
-            merged_cos[..., 2 : sections[2] * 3 : 3] = cos[
-                2, ..., 2 : sections[2] * 3 : 3
-            ]
-            merged_sin[..., 1 : sections[1] * 3 : 3] = sin[
-                1, ..., 1 : sections[1] * 3 : 3
-            ]
-            merged_sin[..., 2 : sections[2] * 3 : 3] = sin[
-                2, ..., 2 : sections[2] * 3 : 3
-            ]
+            merged_cos[..., 1 : sections[1] * 3 : 3] = cos[1, ..., 1 : sections[1] * 3 : 3]
+            merged_cos[..., 2 : sections[2] * 3 : 3] = cos[2, ..., 2 : sections[2] * 3 : 3]
+            merged_sin[..., 1 : sections[1] * 3 : 3] = sin[1, ..., 1 : sections[1] * 3 : 3]
+            merged_sin[..., 2 : sections[2] * 3 : 3] = sin[2, ..., 2 : sections[2] * 3 : 3]
             cos, sin = merged_cos, merged_sin
         else:
             cos = torch.cat(
@@ -280,11 +291,16 @@ class AscendQSAImpl:
         layer: torch.nn.Module,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: torch.Tensor,
+        kv_cache: QSAKVCache,
         slot_mapping: torch.Tensor,
     ) -> None:
         del layer
-        reshape_and_cache_qsa(key, value, kv_cache, slot_mapping, self.head_size)
+        if isinstance(kv_cache, tuple):
+            key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
+            qsa_store_cache_rows(key_cache, slot_mapping, key)
+            qsa_store_cache_rows(value_cache, slot_mapping, value)
+        else:
+            reshape_and_cache_qsa(key, value, kv_cache, slot_mapping, self.head_size)
 
     def forward_qsa(
         self,
@@ -292,7 +308,7 @@ class AscendQSAImpl:
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: torch.Tensor,
+        kv_cache: QSAKVCache,
         attn_metadata: object,
         output: torch.Tensor,
         token_to_req: torch.Tensor,
@@ -307,7 +323,7 @@ class AscendQSAImpl:
         if num_tokens == 0:
             return output
         logical_indices = layer.topk_indices_buffer[:num_tokens]
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
         return qsa_sparse_paged_attention(
@@ -347,6 +363,9 @@ qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
 
+    def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
+        self.kv_cache = kv_cache
+
     def _run_qsa(
         self,
         hidden_states: torch.Tensor,
@@ -363,7 +382,7 @@ class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
             output.zero_()
             return
         main_metadata = metadata[self.layer_name]
-        if self.kv_cache.numel() == 0:
+        if not _qsa_cache_is_bound(self.kv_cache):
             raise RuntimeError("QSA main K/V cache is not bound")
         num_tokens = main_metadata.num_actual_tokens
         side_metadata = metadata[self.indexer.raw_key_cache.prefix]

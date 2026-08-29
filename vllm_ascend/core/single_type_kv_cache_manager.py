@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
 
@@ -61,7 +62,6 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens_main_model,
             apply_admission_cap=apply_admission_cap,
         )
-
 
     def allocate_new_computed_blocks(
         self,
@@ -271,6 +271,25 @@ class CompressAttentionManager(FullAttentionManager):
         return computed_blocks, hit_length
 
 
+def get_manager_class_for_kv_cache_spec(
+    kv_cache_spec: KVCacheSpec,
+) -> type[SingleTypeKVCacheManager]:
+    """Resolve vLLM 0.26 heterogeneous UniformType group managers."""
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+    from vllm_ascend.core.kv_cache_interface import AscendCircularBufferSpec
+
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        members = list(kv_cache_spec.kv_cache_specs.values())
+        if members and all(isinstance(spec, AscendCircularBufferSpec) for spec in members):
+            return CircularBufferManager
+        if members and all(isinstance(spec, FullAttentionSpec) for spec in members):
+            return FullAttentionManager
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
+    return manager_class
+
+
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_in_flight_tokens: int | None = None,
@@ -295,12 +314,9 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
-
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
-    assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
+    manager_class = get_manager_class_for_kv_cache_spec(kv_cache_spec)
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:
@@ -362,9 +378,7 @@ class CircularBufferManager(FullAttentionManager):
         )
         return 0 if self.req_to_blocks.get(request_id) else 1
 
-    def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
-    ) -> list[KVCacheBlock]:
+    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
         del num_tokens, num_tokens_main_model
         return self._claim_ring_block(request_id)
 

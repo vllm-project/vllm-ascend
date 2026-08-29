@@ -67,11 +67,7 @@ def _logical_positions(
     requests = token_to_req[:num_tokens].long()
     query_lens = torch.diff(query_start_loc)
     within_query = arange - query_start_loc.index_select(0, requests)
-    return (
-        seq_lens.index_select(0, requests).long()
-        - query_lens.index_select(0, requests).long()
-        + within_query.long()
-    )
+    return seq_lens.index_select(0, requests).long() - query_lens.index_select(0, requests).long() + within_query.long()
 
 
 def _logical_to_physical_qsa_slots(
@@ -90,9 +86,7 @@ def _logical_to_physical_qsa_slots(
     requests = request_indices.to(device=block_table.device, dtype=torch.long)
     positions = logical_positions.to(device=block_table.device, dtype=torch.long)
     valid = (requests >= 0) & (requests < block_table.shape[0]) & (positions >= 0)
-    logical_blocks = torch.div(
-        positions.clamp_min(0), block_size, rounding_mode="floor"
-    )
+    logical_blocks = torch.div(positions.clamp_min(0), block_size, rounding_mode="floor")
     valid &= logical_blocks < block_table.shape[1]
     safe_requests = requests.clamp(0, max(block_table.shape[0] - 1, 0))
     safe_blocks = logical_blocks.clamp(0, max(block_table.shape[1] - 1, 0))
@@ -128,9 +122,7 @@ def circular_qsa_slot_mapping(
         safe_requests = requests.clamp(0, block_table.shape[0] - 1)
         physical_blocks = block_table[safe_requests, 0].long()
         valid &= physical_blocks >= 0
-        slots = physical_blocks * compressor_state_size + positions.remainder(
-            compressor_state_size
-        )
+        slots = physical_blocks * compressor_state_size + positions.remainder(compressor_state_size)
         slots = torch.where(valid, slots, PAD_SLOT_ID)
 
     if query_start_loc is not None:
@@ -141,11 +133,7 @@ def circular_qsa_slot_mapping(
         safe_requests = requests.clamp(0, num_requests - 1)
         request_ends = query_start_loc.index_select(0, safe_requests + 1)
         rows = torch.arange(slots.numel(), device=slots.device)
-        keep = (
-            (requests >= 0)
-            & (requests < num_requests)
-            & (rows + compressor_state_size >= request_ends)
-        )
+        keep = (requests >= 0) & (requests < num_requests) & (rows + compressor_state_size >= request_ends)
         slots = torch.where(keep, slots, PAD_SLOT_ID)
 
     slots = slots.to(torch.int64)
@@ -168,18 +156,14 @@ def compressed_qsa_slot_mapping(
 
     if storage_block_size <= 0 or compress_ratio <= 0:
         raise ValueError("QSA block size and compression ratio must be positive")
-    compressed_positions = torch.div(
-        logical_positions.clamp_min(0), compress_ratio, rounding_mode="floor"
-    )
+    compressed_positions = torch.div(logical_positions.clamp_min(0), compress_ratio, rounding_mode="floor")
     slots = _logical_to_physical_qsa_slots(
         block_table,
         token_to_req,
         compressed_positions,
         storage_block_size,
     )
-    valid = (logical_positions >= 0) & (
-        (logical_positions + 1).remainder(compress_ratio) == 0
-    )
+    valid = (logical_positions >= 0) & ((logical_positions + 1).remainder(compress_ratio) == 0)
     slots = torch.where(valid, slots, PAD_SLOT_ID).to(torch.int64)
     if out is not None:
         out.fill_(PAD_SLOT_ID)
@@ -281,9 +265,7 @@ def _build_qsa_metadata_kernel(
             other=-1,
         )
         valid &= physical_block >= 0
-        slot = physical_block * circular_buffer_size + (
-            logical_position % circular_buffer_size
-        )
+        slot = physical_block * circular_buffer_size + (logical_position % circular_buffer_size)
     elif compress_ratio != 1:
         compressed_position = tl.maximum(logical_position, 0) // compress_ratio
         logical_block = compressed_position // storage_block_size
@@ -294,19 +276,13 @@ def _build_qsa_metadata_kernel(
             & (logical_block < num_block_table_columns)
         )
         physical_block = tl.load(
-            block_table_ptr
-            + request_idx * block_table_stride_0
-            + logical_block * block_table_stride_1,
+            block_table_ptr + request_idx * block_table_stride_0 + logical_block * block_table_stride_1,
             mask=valid,
             other=-1,
         )
         valid &= physical_block >= 0
-        valid &= (
-            tl.load(common_slot_mapping_ptr + token_idx, mask=mapped, other=-1) >= 0
-        )
-        slot = physical_block * storage_block_size + (
-            compressed_position % storage_block_size
-        )
+        valid &= tl.load(common_slot_mapping_ptr + token_idx, mask=mapped, other=-1) >= 0
+        slot = physical_block * storage_block_size + (compressed_position % storage_block_size)
     if (circular_buffer_size > 0) or (compress_ratio != 1):
         tl.store(
             slot_mapping_ptr + token_idx,
@@ -320,12 +296,8 @@ def _build_qsa_metadata_kernel(
         # small vector lets CTAs write disjoint work tiles without a grid barrier.
         requests = tl.arange(0, REQUEST_SCAN_SIZE)
         valid_request = requests < num_reqs
-        request_query_start = tl.load(
-            query_start_loc_ptr + requests, mask=valid_request, other=0
-        )
-        request_query_end = tl.load(
-            query_start_loc_ptr + requests + 1, mask=valid_request, other=0
-        )
+        request_query_start = tl.load(query_start_loc_ptr + requests, mask=valid_request, other=0)
+        request_query_end = tl.load(query_start_loc_ptr + requests + 1, mask=valid_request, other=0)
         request_seq_len = tl.load(seq_lens_ptr + requests, mask=valid_request, other=0)
         request_query_len = request_query_end - request_query_start
         chunk_start = request_seq_len - request_query_len
@@ -386,14 +358,32 @@ def build_qsa_metadata_triton(
     circular_buffer_size: int = 0,
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
+    num_reqs_actual: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build QSA side-cache and optional pre-indexer work metadata."""
     num_tokens = common_attn_metadata.num_actual_tokens
-    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
+    num_reqs_padded = common_attn_metadata.query_start_loc.shape[0] - 1
+    if num_reqs_actual is None:
+        num_reqs_actual = num_reqs_padded
+    if not 0 < num_reqs_actual <= num_reqs_padded:
+        raise ValueError(
+            "QSA actual request count must be in [1, padded request count], "
+            f"got actual={num_reqs_actual}, padded={num_reqs_padded}"
+        )
+    query_start_loc = common_attn_metadata.query_start_loc[: num_reqs_actual + 1]
+    seq_lens = common_attn_metadata.seq_lens[:num_reqs_actual]
+    block_table = common_attn_metadata.block_table_tensor[:num_reqs_actual]
+    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs_actual])
+    if num_mapped_tokens > num_tokens:
+        raise ValueError(
+            "QSA active query rows address more tokens than the live batch: "
+            f"mapped={num_mapped_tokens}, actual_tokens={num_tokens}, "
+            f"actual_reqs={num_reqs_actual}, padded_reqs={num_reqs_padded}"
+        )
     token_to_req = token_to_req_buffer[:num_tokens]
     logical_positions = logical_positions_buffer[:num_tokens]
     slot_mapping = slot_mapping_buffer[:num_tokens]
-    num_reqs = common_attn_metadata.query_start_loc.shape[0] - 1
+    num_reqs = num_reqs_actual
     assert num_reqs > 0
 
     if k_work_metadata_buffer is not None:
@@ -410,17 +400,14 @@ def build_qsa_metadata_triton(
     if num_tokens == 0 and k_work_metadata_buffer is None:
         return token_to_req, logical_positions, slot_mapping
 
-    block_table = common_attn_metadata.block_table_tensor
     num_search_steps = int(math.ceil(math.log2(num_reqs)))
     work_search_steps = int(math.ceil(math.log2(num_reqs)))
     # The same grid covers token tiles and, for the compressed cache, work tiles.
     num_token_blocks = cdiv(num_tokens, 128)
-    num_work_blocks = (
-        cdiv(max_num_work, 256) if k_work_metadata_buffer is not None else 0
-    )
+    num_work_blocks = cdiv(max_num_work, 256) if k_work_metadata_buffer is not None else 0
     _build_qsa_metadata_kernel[(max(num_token_blocks, num_work_blocks, 1),)](
-        common_attn_metadata.query_start_loc,
-        common_attn_metadata.seq_lens,
+        query_start_loc,
+        seq_lens,
         common_attn_metadata.slot_mapping,
         block_table,
         token_to_req,
@@ -461,19 +448,35 @@ def _build_qsa_metadata_torch(
     circular_buffer_size: int = 0,
     k_work_metadata_buffer: torch.Tensor | None = None,
     request_capacity: int | None = None,
+    num_reqs_actual: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     del request_capacity
     num_tokens = common_attn_metadata.num_actual_tokens
-    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[-1])
+    num_reqs_padded = common_attn_metadata.query_start_loc.shape[0] - 1
+    if num_reqs_actual is None:
+        num_reqs_actual = num_reqs_padded
+    if not 0 < num_reqs_actual <= num_reqs_padded:
+        raise ValueError(
+            "QSA actual request count must be in [1, padded request count], "
+            f"got actual={num_reqs_actual}, padded={num_reqs_padded}"
+        )
+    query_start_loc = common_attn_metadata.query_start_loc[: num_reqs_actual + 1]
+    seq_lens = common_attn_metadata.seq_lens[:num_reqs_actual]
+    block_table = common_attn_metadata.block_table_tensor[:num_reqs_actual]
+    num_mapped_tokens = int(common_attn_metadata.query_start_loc_cpu[num_reqs_actual])
+    if num_mapped_tokens > num_tokens:
+        raise ValueError(
+            "QSA active query rows address more tokens than the live batch: "
+            f"mapped={num_mapped_tokens}, actual_tokens={num_tokens}, "
+            f"actual_reqs={num_reqs_actual}, padded_reqs={num_reqs_padded}"
+        )
     logical_positions = logical_positions_buffer[:num_tokens]
 
-    token_to_req = common_attn_metadata.token_to_req_indices(token_to_req_buffer)[
-        :num_tokens
-    ]
+    token_to_req = common_attn_metadata.token_to_req_indices(token_to_req_buffer)[:num_tokens]
     logical_positions[:num_mapped_tokens].copy_(
         _logical_positions(
-            common_attn_metadata.query_start_loc,
-            common_attn_metadata.seq_lens,
+            query_start_loc,
+            seq_lens,
             token_to_req[:num_mapped_tokens],
             num_mapped_tokens,
         )
@@ -482,40 +485,30 @@ def _build_qsa_metadata_torch(
         logical_positions[num_mapped_tokens:].fill_(-1)
     if circular_buffer_size > 0:
         slot_mapping = circular_qsa_slot_mapping(
-            common_attn_metadata.block_table_tensor,
+            block_table,
             token_to_req,
             logical_positions,
             circular_buffer_size,
-            query_start_loc=common_attn_metadata.query_start_loc,
+            query_start_loc=query_start_loc,
             out=slot_mapping_buffer,
         )
     elif compress_ratio == 1:
         slot_mapping = common_attn_metadata.slot_mapping[:num_tokens]
     else:
         slot_mapping = compressed_qsa_slot_mapping(
-            common_attn_metadata.block_table_tensor,
+            block_table,
             token_to_req,
             logical_positions,
             storage_block_size,
             compress_ratio,
             slot_mapping_buffer,
         )
-        slot_mapping.masked_fill_(
-            common_attn_metadata.slot_mapping[:num_tokens] < 0, -1
-        )
+        slot_mapping.masked_fill_(common_attn_metadata.slot_mapping[:num_tokens] < 0, -1)
     if k_work_metadata_buffer is not None:
-        query_lens = (
-            common_attn_metadata.query_start_loc[1:]
-            - common_attn_metadata.query_start_loc[:-1]
-        )
-        chunk_starts = common_attn_metadata.seq_lens - query_lens
-        num_work_per_request = (
-            common_attn_metadata.seq_lens // compress_ratio
-            - chunk_starts // compress_ratio
-        )
-        num_work_per_request = torch.where(
-            query_lens > 0, num_work_per_request.clamp_min(1), 0
-        )
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        chunk_starts = seq_lens - query_lens
+        num_work_per_request = seq_lens // compress_ratio - chunk_starts // compress_ratio
+        num_work_per_request = torch.where(query_lens > 0, num_work_per_request.clamp_min(1), 0)
         k_start_loc = torch.empty(
             query_lens.shape[0] + 1,
             dtype=torch.int32,
@@ -529,22 +522,14 @@ def _build_qsa_metadata_torch(
         )
         requests = torch.searchsorted(k_start_loc[1:], work, right=True)
         active = work < k_start_loc[-1]
-        work_in_request = (
-            work - k_start_loc[requests.clamp_max(query_lens.shape[0] - 1)]
-        )
-        k_work_metadata_buffer[:, 0].copy_(
-            torch.where(active, requests, -1).to(torch.int32)
-        )
-        k_work_metadata_buffer[:, 1].copy_(
-            torch.where(active, work_in_request, -1).to(torch.int32)
-        )
+        work_in_request = work - k_start_loc[requests.clamp_max(query_lens.shape[0] - 1)]
+        k_work_metadata_buffer[:, 0].copy_(torch.where(active, requests, -1).to(torch.int32))
+        k_work_metadata_buffer[:, 1].copy_(torch.where(active, work_in_request, -1).to(torch.int32))
     return token_to_req, logical_positions, slot_mapping
 
 
 # Resolve the fallback outside the per-step metadata hot path.
-build_qsa_metadata = (
-    build_qsa_metadata_triton if HAS_TRITON else _build_qsa_metadata_torch
-)
+build_qsa_metadata = build_qsa_metadata_triton if HAS_TRITON else _build_qsa_metadata_torch
 
 
 @dataclass
@@ -583,34 +568,23 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             self.compress_ratio = 1
         self.storage_block_size = kv_cache_spec.storage_block_size
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.token_to_req_buffer = torch.empty(
-            max_tokens, dtype=torch.int32, device=device
-        )
-        self.slot_mapping_buffer = torch.empty(
-            max_tokens, dtype=torch.int64, device=device
-        )
-        self.logical_positions_buffer = torch.empty(
-            max_tokens, dtype=torch.int64, device=device
-        )
+        self.token_to_req_buffer = torch.empty(max_tokens, dtype=torch.int32, device=device)
+        self.slot_mapping_buffer = torch.empty(max_tokens, dtype=torch.int64, device=device)
+        self.logical_positions_buffer = torch.empty(max_tokens, dtype=torch.int64, device=device)
         max_requests = vllm_config.scheduler_config.max_num_seqs
         self.request_capacity = max_requests
         if not self.is_circular_buffer and self.compress_ratio != 1:
-            max_k_work = (
-                max_tokens + (self.compress_ratio - 1) * max_requests
-            ) // self.compress_ratio
-            self.k_work_metadata_buffer = torch.empty(
-                max_k_work, 2, dtype=torch.int32, device=device
-            )
+            max_k_work = (max_tokens + (self.compress_ratio - 1) * max_requests) // self.compress_ratio
+            self.k_work_metadata_buffer = torch.empty(max_k_work, 2, dtype=torch.int32, device=device)
         else:
-            self.k_work_metadata_buffer = torch.empty(
-                0, 2, dtype=torch.int32, device=device
-            )
+            self.k_work_metadata_buffer = torch.empty(0, 2, dtype=torch.int32, device=device)
 
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        num_reqs_actual: int | None = None,
     ) -> QSAForwardMetadata:
         del common_prefix_len, fast_build
         num_tokens = common_attn_metadata.num_actual_tokens
@@ -618,11 +592,11 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         k_work_metadata = self.k_work_metadata_buffer
         request_capacity = None
         if build_k_work:
-            num_requests = common_attn_metadata.query_start_loc.shape[0] - 1
+            num_requests = (
+                num_reqs_actual if num_reqs_actual is not None else common_attn_metadata.query_start_loc.shape[0] - 1
+            )
             request_capacity = self.request_capacity
-            max_num_work = (
-                num_tokens + (self.compress_ratio - 1) * num_requests
-            ) // self.compress_ratio
+            max_num_work = (num_tokens + (self.compress_ratio - 1) * num_requests) // self.compress_ratio
             k_work_metadata = self.k_work_metadata_buffer[:max_num_work]
         token_to_req, logical_positions, slot_mapping = build_qsa_metadata(
             common_attn_metadata,
@@ -631,11 +605,10 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             self.slot_mapping_buffer,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
-            circular_buffer_size=(
-                self.kv_cache_spec.block_size if self.is_circular_buffer else 0
-            ),
+            circular_buffer_size=(self.kv_cache_spec.block_size if self.is_circular_buffer else 0),
             k_work_metadata_buffer=k_work_metadata if build_k_work else None,
             request_capacity=request_capacity,
+            num_reqs_actual=num_reqs_actual,
         )
         return QSAForwardMetadata(
             block_table=common_attn_metadata.block_table_tensor,
@@ -663,9 +636,7 @@ class QSAStateBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls():
-        raise NotImplementedError(
-            "QSA state caches run out-of-band and have no attention impl"
-        )
+        raise NotImplementedError("QSA state caches run out-of-band and have no attention impl")
 
     @staticmethod
     def get_builder_cls() -> type[QSAMetadataBuilder]:
@@ -716,9 +687,7 @@ class _QSAStateCache(nn.Module, AttentionLayerBase):
         if compress_ratio <= 0:
             raise ValueError("QSA compression ratio must be positive")
         if cache_config.block_size % compress_ratio:
-            raise ValueError(
-                "QSA cache block size must be divisible by the compression ratio"
-            )
+            raise ValueError("QSA cache block size must be divisible by the compression ratio")
         self.head_size = head_size
         self.dtype = dtype
         self.cache_config = cache_config
@@ -757,9 +726,7 @@ class QSAKeyStateCache(_QSAStateCache):
         ) * self._BF16_PER_INT64
         storage_head_size = key_head_size
         if self.cache_rope_positions:
-            storage_head_size = self.rope_position_offset + (
-                self._NUM_ROPE_AXES * self._BF16_PER_INT64
-            )
+            storage_head_size = self.rope_position_offset + (self._NUM_ROPE_AXES * self._BF16_PER_INT64)
         super().__init__(head_size=storage_head_size, **kwargs)
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
@@ -784,8 +751,7 @@ class QSAKeyStateCache(_QSAStateCache):
         span = self.compress_ratio + vllm_config.num_speculative_tokens
         capacity = self.compress_ratio * cdiv(span, self.compress_ratio)
         assert self.cache_config.block_size % capacity == 0, (
-            f"QSA ring capacity {capacity} must divide the attention block "
-            f"size {self.cache_config.block_size}"
+            f"QSA ring capacity {capacity} must divide the attention block size {self.cache_config.block_size}"
         )
         return AscendCircularBufferSpec(
             block_size=capacity,

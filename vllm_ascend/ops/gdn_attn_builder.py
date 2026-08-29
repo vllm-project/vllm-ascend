@@ -893,7 +893,7 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         return self._attach_non_spec_decode_metadata(
             attn_metadata,
-            non_spec_conv1d_cache_indices,
+            non_spec_state_indices_tensor,
         )
 
     def _build_prefill_has_initial_state_and_causal_conv1d_meta(

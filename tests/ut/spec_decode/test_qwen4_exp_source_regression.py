@@ -17,6 +17,7 @@ LOCAL_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "qwen4_exp.py"
 BASE_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "llm_base_proposer.py"
 MODEL_RUNNER = ROOT / "vllm_ascend" / "worker" / "model_runner_v1.py"
 OPS = ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "ops.py"
+TRITON_QSA = ROOT / "vllm_ascend" / "ops" / "triton" / "qwen4_exp" / "qsa.py"
 
 
 def _class(path: Path, name: str) -> ast.ClassDef:
@@ -91,25 +92,19 @@ def test_qwen4_exp_proposer_bypasses_generic_tp_padding() -> None:
 
 
 def test_qwen4_exp_mtp_type_is_registered_for_vllm_026() -> None:
-    patch = (
-        ROOT / "vllm_ascend" / "patch" / "platform" / "patch_speculative_config.py"
-    ).read_text()
+    patch = (ROOT / "vllm_ascend" / "patch" / "platform" / "patch_speculative_config.py").read_text()
     assert "qwen4_exp_mtp" in patch
     assert "MTPModelTypes" in patch
 
 
 def test_qwen4_exp_proposer_allocates_full_hc_hidden_buffer() -> None:
-    source = ast.unparse(
-        _method(PROPOSER, "AscendQwen4ExpMTPProposer", "__init__")
-    )
+    source = ast.unparse(_method(PROPOSER, "AscendQwen4ExpMTPProposer", "__init__"))
     assert "qwen_hidden_size = self._get_hidden_size()" in source
     assert "self.hidden_states = torch.zeros" in source
 
 
 def test_qwen4_exp_proposer_accepts_both_cache_group_forms() -> None:
-    source = ast.unparse(
-        _method(LOCAL_PROPOSER, "Qwen4ExpMTPProposer", "_map_draft_layers_to_groups")
-    )
+    source = ast.unparse(_method(LOCAL_PROPOSER, "Qwen4ExpMTPProposer", "_map_draft_layers_to_groups"))
     assert "isinstance(group_spec, UniformTypeKVCacheSpecs)" in source
     assert "spec = group_spec" in source
 
@@ -121,9 +116,7 @@ def test_qwen4_exp_runner_forwards_per_group_block_tables() -> None:
 
 
 def test_spec_proposer_normalizes_multiple_of_block_size() -> None:
-    source = ast.unparse(
-        _method(BASE_PROPOSER, "AscendSpecDecodeBaseProposer", "__init__")
-    )
+    source = ast.unparse(_method(BASE_PROPOSER, "AscendSpecDecodeBaseProposer", "load_model"))
     assert "isinstance(kernel_block_size, MultipleOf)" in source
     assert "kernel_block_size.base" in source
 
@@ -154,8 +147,7 @@ def test_qsa_cache_write_keeps_static_update_width() -> None:
         next(
             node
             for node in ast.parse(OPS.read_text()).body
-            if isinstance(node, ast.FunctionDef)
-            and node.name == "qsa_store_cache_rows"
+            if isinstance(node, ast.FunctionDef) and node.name == "qsa_store_cache_rows"
         )
     )
     assert "masked_select" not in source
@@ -163,6 +155,24 @@ def test_qsa_cache_write_keeps_static_update_width() -> None:
     assert "accumulate=True" in source
 
 
-def test_qsa_ascend_backend_uses_merged_cache_layout() -> None:
+def test_qsa_triton_cache_write_uses_aligned_static_prefix() -> None:
+    source = ast.unparse(
+        next(
+            node
+            for node in ast.parse(TRITON_QSA.read_text()).body
+            if isinstance(node, ast.FunctionDef) and node.name == "qsa_store_cache_rows"
+        )
+    )
+    assert "num_updates = min(slot_mapping.shape[0], rows.shape[0])" in source
+    assert "slot_mapping = slot_mapping[:num_updates]" in source
+    assert "rows = rows[:num_updates]" in source
+    assert "slot_mapping.numel()" not in source
+    assert ".item()" not in source
+
+
+def test_qsa_ascend_backend_uses_six_slab_kv_views() -> None:
     source = MODEL_RUNNER.read_text()
-    assert '"QWEN4_EXP_QSA_ASCEND"' in source
+    assert "owner.role == QSA_MAIN" in source
+    assert 'six_region_layout.region("r2")' in source
+    assert 'six_region_layout.region("r3")' in source
+    assert "kv_caches[layer_name] = (k_cache, v_cache)" in source

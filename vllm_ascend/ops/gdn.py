@@ -36,7 +36,11 @@ from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
-from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+from vllm_ascend.ops.triton.mamba.causal_conv1d import (
+    HAS_TRITON,
+    causal_conv1d_update_npu,
+    extract_last_width,
+)
 
 
 def _causal_conv1d_custom_with_fallback(
@@ -72,13 +76,39 @@ def _causal_conv1d_custom_with_fallback(
     except RuntimeError as exc:
         if "aclnnCausalConv1d" not in str(exc):
             raise
+        fallback_cache_indices = cache_indices_opt
+        if fallback_cache_indices is not None and fallback_cache_indices.ndim > 1:
+            fallback_cache_indices = fallback_cache_indices[:, 0]
+        if HAS_TRITON:
+            feature_dim = x.shape[1] if query_start_loc_opt is not None else x.shape[-1]
+            fallback_weight = weight
+            if fallback_weight.shape[0] != feature_dim and fallback_weight.shape[1] == feature_dim:
+                fallback_weight = fallback_weight.transpose(0, 1).contiguous()
+            fallback_state = conv_state
+            if fallback_state.shape[-2] != feature_dim and fallback_state.shape[-1] == feature_dim:
+                fallback_state = fallback_state.transpose(-1, -2)
+            fallback_output = causal_conv1d_update_npu(
+                x,
+                fallback_state,
+                fallback_weight,
+                bias_opt,
+                activation=bool(activation_mode),
+                conv_state_indices=fallback_cache_indices,
+                num_accepted_tokens=num_accepted_tokens_opt,
+                query_start_loc=query_start_loc_opt,
+                max_query_len=x.shape[0],
+                pad_slot_id=pad_slot_id,
+                validate_data=False,
+            )
+            output.copy_(fallback_output)
+            return
         fallback_output = causal_conv1d_update_fallback(
             x,
             conv_state,
             weight,
             bias_opt,
             activation=bool(activation_mode),
-            conv_state_indices=cache_indices_opt,
+            conv_state_indices=fallback_cache_indices,
             num_accepted_tokens=num_accepted_tokens_opt,
             query_start_loc=query_start_loc_opt,
             pad_slot_id=pad_slot_id,

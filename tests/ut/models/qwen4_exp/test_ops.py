@@ -13,7 +13,11 @@
 # limitations under the License.
 
 import torch
+from vllm.v1.attention.backend import CommonAttentionMetadata
 
+from vllm_ascend.models.qwen4_exp.common.qsa_cache import (
+    _build_qsa_metadata_torch,
+)
 from vllm_ascend.models.qwen4_exp.ops import (
     grouped_gemma_rmsnorm,
     hc_combine,
@@ -23,6 +27,46 @@ from vllm_ascend.models.qwen4_exp.ops import (
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
 )
+
+
+def _padded_qsa_common_metadata(actual_tokens: int) -> CommonAttentionMetadata:
+    query_start_loc = torch.tensor([0, 4, 8, 12, 16], dtype=torch.int32)
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([4, 4, 4, 4], dtype=torch.int32),
+        num_reqs=4,
+        num_actual_tokens=actual_tokens,
+        max_query_len=4,
+        max_seq_len=4,
+        block_table_tensor=torch.tensor([[10], [11], [12], [13]], dtype=torch.int32),
+        slot_mapping=torch.arange(actual_tokens, dtype=torch.int64),
+        causal=True,
+    )
+
+
+@torch.inference_mode()
+@torch.no_grad()
+def test_qsa_metadata_uses_actual_request_rows_with_static_graph_padding() -> None:
+    for actual_reqs, actual_tokens in ((3, 12), (2, 8)):
+        common = _padded_qsa_common_metadata(actual_tokens)
+        token_to_req, positions, slots = _build_qsa_metadata_torch(
+            common,
+            torch.empty(16, dtype=torch.int32),
+            torch.empty(16, dtype=torch.int64),
+            torch.empty(16, dtype=torch.int64),
+            storage_block_size=8,
+            compress_ratio=1,
+            circular_buffer_size=8,
+            num_reqs_actual=actual_reqs,
+        )
+        expected_reqs = torch.arange(actual_reqs, dtype=torch.int32).repeat_interleave(4)
+        torch.testing.assert_close(token_to_req, expected_reqs)
+        torch.testing.assert_close(positions, torch.arange(4).repeat(actual_reqs))
+        expected_slots = torch.arange(10, 10 + actual_reqs).repeat_interleave(4) * 8 + torch.arange(4).repeat(
+            actual_reqs
+        )
+        torch.testing.assert_close(slots, expected_slots)
 
 
 def test_hyperconnection_torch_fallbacks() -> None:

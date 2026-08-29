@@ -5,19 +5,16 @@ from __future__ import annotations
 
 import ast
 import copy
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import torch
 import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[4]
-NVIDIA_PLE = (
-    ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "nvidia" / "ple_layer.py"
-)
-NVIDIA_MODEL = (
-    ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "nvidia" / "model.py"
-)
+NVIDIA_PLE = ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "nvidia" / "ple_layer.py"
+NVIDIA_MODEL = ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "nvidia" / "model.py"
+MODEL_RUNNER = ROOT / "vllm_ascend" / "worker" / "model_runner_v1.py"
 AMD_PLE = ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "amd" / "ple_layer.py"
 AMD_MODEL = ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "amd" / "model.py"
 
@@ -33,15 +30,54 @@ def _method_node(path: Path, class_name: str, method_name: str) -> ast.FunctionD
 
 
 def _standalone_method(method_name: str) -> Callable:
-    method = copy.deepcopy(
-        _method_node(NVIDIA_PLE, "Qwen4ExpPLELayer", method_name)
-    )
+    method = copy.deepcopy(_method_node(NVIDIA_PLE, "Qwen4ExpPLELayer", method_name))
     method.decorator_list = []
     module = ast.Module(body=[method], type_ignores=[])
     ast.fix_missing_locations(module)
     namespace = {"torch": torch}
     exec(compile(module, NVIDIA_PLE, "exec"), namespace)
     return namespace[method_name]
+
+
+def _standalone_function(path: Path, function_name: str) -> Callable:
+    tree = ast.parse(path.read_text())
+    function = next(
+        copy.deepcopy(node) for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == function_name
+    )
+    function.decorator_list = []
+    module = ast.Module(body=[function], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"torch": torch}
+    exec(compile(module, path, "exec"), namespace)
+    return namespace[function_name]
+
+
+def test_ple_graph_rows_stay_static_across_128_and_120_token_captures() -> None:
+    pad_inputs = _standalone_function(MODEL_RUNNER, "_pad_qwen4_exp_ple_graph_inputs")
+    eos = 248044
+    context_buffer = torch.empty((32, 2), dtype=torch.int32)
+    query_start_loc_buffer = torch.empty((33,), dtype=torch.int32)
+
+    for num_reqs in (32, 30):
+        runtime_context = torch.arange(num_reqs * 2, dtype=torch.int32).reshape(num_reqs, 2)
+        runtime_query_start_loc = torch.arange(0, (num_reqs + 1) * 4, 4, dtype=torch.int32)
+        context, query_start_loc = pad_inputs(
+            context_buffer,
+            query_start_loc_buffer,
+            runtime_context,
+            runtime_query_start_loc,
+            num_reqs,
+            eos,
+        )
+        assert context.shape == (32, 2)
+        assert query_start_loc.shape == (33,)
+        torch.testing.assert_close(context[:num_reqs], runtime_context)
+        torch.testing.assert_close(query_start_loc[: num_reqs + 1], runtime_query_start_loc)
+        if num_reqs < 32:
+            assert torch.all(context[num_reqs:] == eos)
+            assert torch.all(query_start_loc[num_reqs + 1 :] == runtime_query_start_loc[-1])
+        packed = torch.zeros((32, 4096), dtype=torch.int64)
+        assert torch.cat((context.long(), packed), dim=-1).shape == (32, 4098)
 
 
 def test_short_conv_cross_correlation_matches_conv1d() -> None:
@@ -94,32 +130,23 @@ def test_ple_state_shape_reserves_speculative_history() -> None:
         assert "vllm_config.num_speculative_tokens" in source
 
     for path in (NVIDIA_PLE, AMD_PLE):
-        source = ast.unparse(
-            _method_node(path, "Qwen4ExpPLELayer", "get_state_shape")
-        )
+        source = ast.unparse(_method_node(path, "Qwen4ExpPLELayer", "get_state_shape"))
         assert "self.num_spec_tokens" in source
 
 
 def test_nvidia_model_does_not_compile_query_start_loc_as_dynamic() -> None:
     tree = ast.parse(NVIDIA_MODEL.read_text())
-    model = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "Qwen4ExpModel"
+    model = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Qwen4ExpModel")
+    compile_decorator = next(
+        decorator
+        for decorator in model.decorator_list
+        if isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Name)
+        and decorator.func.id == "support_torch_compile"
     )
-    assignment = next(
-        node
-        for node in model.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "dynamic_arg_dims"
-            for target in node.targets
-        )
+    dynamic_arg_dims = next(
+        keyword.value for keyword in compile_decorator.keywords if keyword.arg == "dynamic_arg_dims"
     )
-    assert isinstance(assignment.value, ast.Dict)
-    keys = {
-        key.value
-        for key in assignment.value.keys
-        if isinstance(key, ast.Constant) and isinstance(key.value, str)
-    }
+    assert isinstance(dynamic_arg_dims, ast.Dict)
+    keys = {key.value for key in dynamic_arg_dims.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)}
     assert "query_start_loc" not in keys

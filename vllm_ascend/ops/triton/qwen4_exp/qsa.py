@@ -900,11 +900,20 @@ def qsa_store_cache_rows(
         if rows.shape[1] != 1:
             raise ValueError("QSA cache rows must have one head")
         rows = rows[:, 0]
-    if rows.shape != (slot_mapping.numel(), cache.shape[3]):
-        raise ValueError("QSA cache rows and slots have incompatible shapes")
-    if not rows.shape[0]:
+    if rows.ndim != 2 or rows.shape[1] != cache.shape[3]:
+        raise ValueError("QSA cache rows have an incompatible width")
+
+    # Target prefill can have more graph-padded slots than rows, while an MTP
+    # draft pass can have more rows than active slots. Only their aligned
+    # prefix denotes real cache updates; the remainder is capacity padding.
+    # Both lengths are static graph dimensions, so no host sync is introduced.
+    slot_mapping = slot_mapping.reshape(-1)
+    num_updates = min(slot_mapping.shape[0], rows.shape[0])
+    slot_mapping = slot_mapping[:num_updates]
+    rows = rows[:num_updates]
+    if not num_updates:
         return
-    _store_qsa_rows_kernel[(rows.shape[0],)](
+    _store_qsa_rows_kernel[(num_updates,)](
         cache,
         slot_mapping,
         rows,
@@ -913,7 +922,7 @@ def qsa_store_cache_rows(
         cache.stride(3),
         rows.stride(0),
         rows.stride(1),
-        rows.shape[0],
+        num_updates,
         cache.shape[0],
         PAGE_SIZE=cache.shape[1],
         WIDTH=cache.shape[3],

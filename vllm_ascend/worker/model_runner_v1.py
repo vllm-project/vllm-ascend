@@ -153,6 +153,7 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
+from vllm_ascend.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
@@ -234,6 +235,15 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
+from vllm_ascend.core.six_region_kv_cache_layout import (
+    GDN,
+    PLE,
+    QSA_COMPRESSED,
+    QSA_MAIN,
+    QSA_RAW,
+    build_six_region_kv_cache_layout,
+    make_contiguous_slab_view,
+)
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -301,6 +311,48 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+def _pad_qwen4_exp_ple_graph_inputs(
+    context_buffer: torch.Tensor,
+    query_start_loc_buffer: torch.Tensor,
+    runtime_context: torch.Tensor,
+    runtime_query_start_loc: torch.Tensor,
+    num_reqs: int,
+    eos_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build fixed-row PLE inputs for a compiled FULL decode graph.
+
+    Qwen4Exp is compiled once at ``max_num_reqs`` and that graph is reused by
+    every decode capture size.  Keep both row-bearing inputs at that ABI size:
+    inactive ngram rows contain EOS and inactive query-start entries repeat
+    the final valid token offset, so no token can map to a padding request.
+    """
+    max_num_reqs = context_buffer.shape[0]
+    if not 0 < num_reqs <= max_num_reqs:
+        raise ValueError(
+            f"PLE num_reqs must be in [1, {max_num_reqs}], got {num_reqs}"
+        )
+    if runtime_context.shape != context_buffer[:num_reqs].shape:
+        raise ValueError(
+            "PLE runtime context shape does not match the active graph rows: "
+            f"expected={tuple(context_buffer[:num_reqs].shape)}, "
+            f"actual={tuple(runtime_context.shape)}"
+        )
+    if runtime_query_start_loc.shape != (num_reqs + 1,):
+        raise ValueError(
+            "PLE runtime query_start_loc must have one boundary per active "
+            f"request: expected={(num_reqs + 1,)}, "
+            f"actual={tuple(runtime_query_start_loc.shape)}"
+        )
+
+    context_buffer.fill_(eos_token_id)
+    context_buffer[:num_reqs].copy_(runtime_context, non_blocking=False)
+    query_start_loc_buffer[: num_reqs + 1].copy_(
+        runtime_query_start_loc, non_blocking=False
+    )
+    query_start_loc_buffer[num_reqs + 1 :].fill_(runtime_query_start_loc[-1])
+    return context_buffer, query_start_loc_buffer
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -580,6 +632,7 @@ class NPUModelRunner(GPUModelRunner):
         # for the runner lifetime so graph replay always sees a valid address;
         # _maybe_add_qwen4_exp_ple_inputs refreshes its contents every step.
         self._qwen4_exp_ngram_context_buffer: torch.Tensor | None = None
+        self._qwen4_exp_query_start_loc_buffer: torch.Tensor | None = None
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
@@ -2779,16 +2832,19 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         model_kwargs.setdefault("ple_input_ids", self.input_ids.gpu[:num_tokens])
-        model_kwargs.setdefault(
-            "query_start_loc",
-            self.query_start_loc.gpu[: num_reqs_padded + 1],
-        )
         context_len = int(text_config.ngram_size) - 1
         if not 0 < num_reqs_padded <= self.max_num_reqs:
             raise ValueError(
                 "Qwen4Exp PLE num_reqs_padded must be in "
                 f"[1, {self.max_num_reqs}], got {num_reqs_padded}"
             )
+
+        runtime_query_start_loc = model_kwargs.get("query_start_loc")
+        if runtime_query_start_loc is None:
+            runtime_query_start_loc = self.query_start_loc.gpu[
+                : num_reqs_padded + 1
+            ]
+        runtime_query_start_loc = runtime_query_start_loc[: num_reqs_padded + 1]
 
         runtime_context = model_kwargs.get("ngram_context")
         if runtime_context is None:
@@ -2841,16 +2897,37 @@ class NPUModelRunner(GPUModelRunner):
                 f"dtype={buffer.dtype}, device={buffer.device}"
             )
 
-        static_context = buffer[:num_reqs_padded]
-        if (
-            runtime_context.device != static_context.device
-            or runtime_context.data_ptr() != static_context.data_ptr()
+        query_start_loc_buffer = self._qwen4_exp_query_start_loc_buffer
+        expected_query_start_loc_shape = (self.max_num_reqs + 1,)
+        if query_start_loc_buffer is None:
+            query_start_loc_buffer = torch.empty(
+                expected_query_start_loc_shape,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._qwen4_exp_query_start_loc_buffer = query_start_loc_buffer
+        elif (
+            query_start_loc_buffer.shape != expected_query_start_loc_shape
+            or query_start_loc_buffer.dtype != torch.int32
+            or query_start_loc_buffer.device != self.device
         ):
-            # Blocking copy is intentional: runtime_context can be a temporary
-            # CPU tensor, while static_context must contain fresh request data
-            # before the captured model graph is replayed.
-            static_context.copy_(runtime_context, non_blocking=False)
+            raise RuntimeError(
+                "Qwen4Exp PLE persistent query_start_loc buffer changed "
+                f"unexpectedly: shape={tuple(query_start_loc_buffer.shape)}, "
+                f"dtype={query_start_loc_buffer.dtype}, "
+                f"device={query_start_loc_buffer.device}"
+            )
+
+        static_context, static_query_start_loc = _pad_qwen4_exp_ple_graph_inputs(
+            buffer,
+            query_start_loc_buffer,
+            runtime_context.to(device=self.device, dtype=torch.int32),
+            runtime_query_start_loc.to(device=self.device, dtype=torch.int32),
+            num_reqs_padded,
+            int(text_config.eos_token_id),
+        )
         model_kwargs["ngram_context"] = static_context
+        model_kwargs["query_start_loc"] = static_query_start_loc
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -3230,6 +3307,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             extra_attn_metadata_args = {}
+            if isinstance(builder, QSAMetadataBuilder):
+                extra_attn_metadata_args["num_reqs_actual"] = num_reqs
             if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder) and not is_gdn_noop:
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
@@ -4520,6 +4599,9 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        six_region_layout = build_six_region_kv_cache_layout(
+            kv_cache_config.kv_cache_groups, kv_cache_config.num_blocks
+        )
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -4528,6 +4610,68 @@ class NPUModelRunner(GPUModelRunner):
                     continue
 
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
+                if six_region_layout is not None:
+                    owner = six_region_layout.owner(layer_name)
+                    raw_slab = kv_cache_raw_tensors[layer_name]
+                    if owner.role == QSA_MAIN:
+                        assert isinstance(raw_slab, torch.Tensor)
+                        k_cache = make_contiguous_slab_view(
+                            raw_slab,
+                            dtype=current_kv_cache_spec.dtype,
+                            num_blocks=kv_cache_config.num_blocks,
+                            item_shape=(
+                                current_kv_cache_spec.block_size,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.head_size,
+                            ),
+                            storage_offset=six_region_layout.region("r2").offset,
+                        )
+                        v_cache = make_contiguous_slab_view(
+                            raw_slab,
+                            dtype=current_kv_cache_spec.dtype,
+                            num_blocks=kv_cache_config.num_blocks,
+                            item_shape=(
+                                current_kv_cache_spec.block_size,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.head_size_v,
+                            ),
+                            storage_offset=six_region_layout.region("r3").offset,
+                        )
+                        kv_caches[layer_name] = (k_cache, v_cache)
+                        continue
+                    if owner.role in (QSA_RAW, QSA_COMPRESSED):
+                        assert isinstance(raw_slab, torch.Tensor)
+                        storage_block_size = (
+                            current_kv_cache_spec.block_size
+                            if owner.role == QSA_RAW
+                            else current_kv_cache_spec.storage_block_size
+                        )
+                        region = six_region_layout.region(
+                            "r4" if owner.role == QSA_RAW else "r5"
+                        )
+                        expected_page_bytes = (
+                            storage_block_size
+                            * current_kv_cache_spec.num_kv_heads
+                            * current_kv_cache_spec.head_size
+                            * get_dtype_size(current_kv_cache_spec.dtype)
+                        )
+                        assert expected_page_bytes == region.page_size_bytes, (
+                            f"{layer_name} cache page mismatch: "
+                            f"view={expected_page_bytes}, region={region.page_size_bytes}"
+                        )
+                        state_cache = make_contiguous_slab_view(
+                            raw_slab,
+                            dtype=current_kv_cache_spec.dtype,
+                            num_blocks=kv_cache_config.num_blocks,
+                            item_shape=(
+                                storage_block_size,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.head_size,
+                            ),
+                            storage_offset=region.offset,
+                        )
+                        kv_caches[layer_name] = state_cache
+                        continue
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
@@ -4671,33 +4815,6 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         v_shape = (*k_shape[:-1], head_size_v)
-                        if attn_backend.get_name() in (
-                            "QWEN4_EXP_QSA_TRITON",
-                            "QWEN4_EXP_QSA_ASCEND",
-                        ):
-                            merged_shape = (
-                                *k_shape[:-1],
-                                current_kv_cache_spec.head_size + head_size_v,
-                            )
-                            merged_strides = [1] * len(merged_shape)
-                            for dim_idx in range(len(merged_shape) - 2, 0, -1):
-                                merged_strides[dim_idx] = (
-                                    merged_strides[dim_idx + 1]
-                                    * merged_shape[dim_idx + 1]
-                                )
-                            merged_strides[0] = (
-                                cache_tensor.block_stride // dtype_size
-                            )
-                            raw_cache = raw_cache.view(
-                                current_kv_cache_spec.dtype
-                            )
-                            kv_caches[layer_name] = torch.as_strided(
-                                raw_cache,
-                                size=merged_shape,
-                                stride=tuple(merged_strides),
-                                storage_offset=cache_tensor.offset // dtype_size,
-                            )
-                            continue
                         strides = [1] * len(k_shape)
                         for dim_idx in range(len(k_shape) - 2, 0, -1):
                             strides[dim_idx] = (
@@ -4954,6 +5071,42 @@ class NPUModelRunner(GPUModelRunner):
                 elif isinstance(current_kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
+                    cache_tensor = next(
+                        tensor
+                        for tensor in kv_cache_config.kv_cache_tensors
+                        if layer_name in tensor.shared_by
+                    )
+                    if six_region_layout is not None:
+                        owner = six_region_layout.owner(layer_name)
+                        region_names = {
+                            GDN: ("r1", "r2"),
+                            PLE: ("r6",),
+                        }.get(owner.role)
+                        if region_names is None or len(region_names) != len(
+                            current_kv_cache_spec.shapes
+                        ):
+                            raise RuntimeError(
+                                f"Invalid six-slab Mamba role/shape for {layer_name}: "
+                                f"role={owner.role}, shapes={current_kv_cache_spec.shapes}"
+                            )
+                        kv_caches[layer_name] = [
+                            make_contiguous_slab_view(
+                                raw_tensor,
+                                dtype=dtype,
+                                num_blocks=kv_cache_config.num_blocks,
+                                item_shape=tuple(shape),
+                                storage_offset=six_region_layout.region(
+                                    region_name
+                                ).offset,
+                            )
+                            for shape, dtype, region_name in zip(
+                                current_kv_cache_spec.shapes,
+                                current_kv_cache_spec.dtypes,
+                                region_names,
+                                strict=True,
+                            )
+                        ]
+                        continue
                     assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
