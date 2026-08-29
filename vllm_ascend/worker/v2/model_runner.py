@@ -560,7 +560,6 @@ class NPUModelRunner(GPUModelRunner):
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
                 self.pcp_manager,
                 input_batch,
-                padded_num_tokens=batch_desc.num_tokens,
             )
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
