@@ -878,17 +878,41 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
-            num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
-                self.query_start_loc,
-                num_input_tokens,
-                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
-                common_attn_metadata.num_reqs,
-                aclgraph_runtime_mode,
-                batch_descriptor.num_reqs,
-            )
+            if self.method == "dspark":
+                graph_num_reqs = (
+                    batch_descriptor.num_reqs
+                    if batch_descriptor.num_reqs is not None
+                    else common_attn_metadata.num_reqs
+                )
+                num_reqs_padded = self.pad_query_start_loc_for_graph(
+                    self.query_start_loc,
+                    num_input_tokens,
+                    common_attn_metadata.num_reqs,
+                    graph_num_reqs,
+                )
+            else:
+                num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                    self.query_start_loc,
+                    num_input_tokens,
+                    (
+                        batch_descriptor.num_reqs
+                        if batch_descriptor.num_reqs is not None
+                        else common_attn_metadata.num_reqs
+                    ),
+                    common_attn_metadata.num_reqs,
+                    aclgraph_runtime_mode,
+                    batch_descriptor.num_reqs,
+                )
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
+            if self.method == "dspark":
+                # DSpark has N real query tokens per request while the target
+                # graph bucket is sized for 1 + N. Include the padded tail in
+                # attention tensor shapes so capture and replay use the same
+                # graph key; its slot mapping remains -1 and its outputs are
+                # discarded.
+                common_attn_metadata.num_actual_tokens = num_input_tokens
             slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
@@ -1043,6 +1067,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        # DSpark context K/V has a request-dependent shape. Update it eagerly;
+        # the fixed query block remains inside the captured graph.
+        if self.method == "dspark":
+            self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -1164,9 +1193,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_positions = self._get_positions(num_input_tokens)
         model_kwargs = {"input_ids": model_input_ids, "positions": model_positions, "inputs_embeds": inputs_embeds}
 
-        if self.method in ("dflash", "dspark"):
+        if self.method == "dflash":
             self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
-        else:
+        elif self.method != "dspark":
             if self.pass_hidden_states_to_model:
                 model_hidden_states = self.hidden_states[:num_input_tokens]
                 model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
