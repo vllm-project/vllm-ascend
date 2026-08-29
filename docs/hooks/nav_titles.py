@@ -117,6 +117,7 @@ TITLES = {
     "tutorials/models/Kimi-K2-Thinking.md": {"en": "Kimi-K2-Thinking", "zh": "Kimi-K2-Thinking"},
     "tutorials/models/Kimi-K2.5.md": {"en": "Kimi-K2.5", "zh": "Kimi-K2.5"},
     "tutorials/models/Kimi-K2.6.md": {"en": "Kimi-K2.6", "zh": "Kimi-K2.6"},
+    "tutorials/models/Kimi-K3.md": {"en": "Kimi-K3 (Experimental)", "zh": "Kimi-K3（实验性支持）"},
     "tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md": {
         "en": "LLaVA-OneVision-Qwen2-0.5B-OV",
         "zh": "LLaVA-OneVision-Qwen2-0.5B-OV",
