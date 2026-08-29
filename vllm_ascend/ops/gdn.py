@@ -30,13 +30,13 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend import envs as ascend_envs
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
-from vllm_ascend.device.device_config import is_950
+from vllm_ascend.device.device_config import get_fla_gdn_soc
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.ops.gdn_a5 import (
-    A5GDNAdapter,
-    A5GDNOperatorDispatcher,
+from vllm_ascend.ops.gdn_fla import (
+    FlaGDNAdapter,
+    FlaGDNOperatorDispatcher,
     GDNBackendMode,
-    GDNPrefillMetadata as A5GDNPrefillMetadata,
+    GDNPrefillMetadata as FlaGDNPrefillMetadata,
     GDNRuntimeSignature,
     parse_gdn_backend_config,
 )
@@ -51,14 +51,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
     _fused_chunk_available: bool | None = None
-    _a5_gdn_dispatchers: dict[tuple[str, str], A5GDNOperatorDispatcher] = {}
+    _fla_gdn_dispatchers: dict[tuple[str, str], FlaGDNOperatorDispatcher] = {}
 
-    def _get_a5_gdn_adapter(
+    def _get_fla_gdn_adapter(
         self,
         activation: torch.Tensor,
         state: torch.Tensor | torch.dtype,
-    ) -> A5GDNAdapter | None:
-        if not is_950() or getattr(self, "num_spec", 0) > 0 or get_pcp_group().world_size != 1:
+    ) -> FlaGDNAdapter | None:
+        fla_soc = get_fla_gdn_soc()
+        if fla_soc is None or getattr(self, "num_spec", 0) > 0 or get_pcp_group().world_size != 1:
             return None
 
         mode_value = ascend_envs.VLLM_ASCEND_GDN_BACKEND
@@ -83,7 +84,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         state_torch_dtype = state.dtype if isinstance(state, torch.Tensor) else state
         state_dtype = str(state_torch_dtype).removeprefix("torch.")
         signature = GDNRuntimeSignature(
-            soc="ascend950",
+            soc=fla_soc,
             dtype=dtype,
             state_dtype=state_dtype,
             num_key_heads=self.num_k_heads // self.tp_size,
@@ -92,24 +93,24 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             value_dim=self.head_v_dim,
         )
         cache_key = (mode_value, overrides_value, signature)
-        cached = getattr(self, "_a5_gdn_adapter_cache", None)
+        cached = getattr(self, "_fla_gdn_adapter_cache", None)
         if cached is None or cached[0] != cache_key:
             dispatcher_key = (mode_value, overrides_value)
-            dispatcher = AscendGatedDeltaNetAttention._a5_gdn_dispatchers.get(dispatcher_key)
+            dispatcher = AscendGatedDeltaNetAttention._fla_gdn_dispatchers.get(dispatcher_key)
             if dispatcher is None:
-                dispatcher = A5GDNOperatorDispatcher(config, is_a5=True)
-                AscendGatedDeltaNetAttention._a5_gdn_dispatchers[dispatcher_key] = dispatcher
+                dispatcher = FlaGDNOperatorDispatcher(config, is_supported_soc=True)
+                AscendGatedDeltaNetAttention._fla_gdn_dispatchers[dispatcher_key] = dispatcher
             cached = (
                 cache_key,
-                A5GDNAdapter(
+                FlaGDNAdapter(
                     config,
                     signature,
                     layer_name=self.prefix,
-                    is_a5=True,
+                    is_supported_soc=True,
                     dispatcher=dispatcher,
                 ),
             )
-            self._a5_gdn_adapter_cache = cached
+            self._fla_gdn_adapter_cache = cached
         return cached[1]
 
     @classmethod
@@ -256,19 +257,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
-        if is_950():
+        if get_fla_gdn_soc() is not None:
             state_dtype = self.get_state_dtype()[1]
-            a5_warmup_adapter = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+            fla_warmup_adapter = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(
                 self,
                 hidden_states,
                 state_dtype,
             )
-            if a5_warmup_adapter is not None:
+            if fla_warmup_adapter is not None:
                 conv_weight = self.conv1d.weight.view(
                     self.conv1d.weight.size(0),
                     self.conv1d.weight.size(2),
                 ).transpose(0, 1)
-                a5_warmup_adapter.warmup(
+                fla_warmup_adapter.warmup(
                     conv_weight=conv_weight,
                     conv_bias=self.conv1d.bias,
                     state_dtype=state_dtype,
@@ -376,8 +377,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
         use_stage1_adapter = spec_sequence_masks is None and not getattr(forward_context, "capturing", False)
-        a5_adapter = (
-            AscendGatedDeltaNetAttention._get_a5_gdn_adapter(self, mixed_qkv, ssm_state)
+        fla_adapter = (
+            AscendGatedDeltaNetAttention._get_fla_gdn_adapter(self, mixed_qkv, ssm_state)
             if use_stage1_adapter
             else None
         )
@@ -471,8 +472,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 else:
                     conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
-                    if a5_adapter is not None:
-                        mixed_qkv_non_spec = a5_adapter.causal_conv1d(
+                    if fla_adapter is not None:
+                        mixed_qkv_non_spec = fla_adapter.causal_conv1d(
                             x=mixed_qkv_non_spec,
                             weight=conv_weights_T,
                             bias=self.conv1d.bias,
@@ -506,8 +507,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             activation_num = 1 if self.activation else 0
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
-            if a5_adapter is not None:
-                mixed_qkv_non_spec = a5_adapter.causal_conv1d(
+            if fla_adapter is not None:
+                mixed_qkv_non_spec = fla_adapter.causal_conv1d(
                     x=mixed_qkv_non_spec,
                     weight=conv_weights_T,
                     bias=self.conv1d.bias,
@@ -597,8 +598,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert beta_non_spec is not None
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(mixed_qkv_non_spec[:num_decode_tokens])
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            if a5_adapter is not None:
-                core_attn_out_decode = a5_adapter.decode(
+            if fla_adapter is not None:
+                core_attn_out_decode = fla_adapter.decode(
                     q=query_decode,
                     k=key_decode,
                     v=value_decode,
@@ -643,12 +644,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
-            # A5 uses the reference-aligned per-operator adapter. Other devices
-            # retain the existing fused-CANN/Triton selection unchanged.
-            if a5_adapter is not None:
+            # A2/A3/A5 use the shared FLA adapter when the configured backend
+            # is available. Unsupported devices retain the existing path.
+            if fla_adapter is not None:
                 chunk_meta = attn_metadata.non_spec_prefill_metadata.chunk
                 initial_state = ssm_state[prefill_state_indices]
-                core_attn_out_non_spec, last_recurrent_state = a5_adapter.prefill(
+                core_attn_out_non_spec, last_recurrent_state = fla_adapter.prefill(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
@@ -657,7 +658,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     initial_state=initial_state,
                     has_initial_state=prefill_has_initial_state,
                     scale=key_non_spec.shape[-1] ** -0.5,
-                    metadata=A5GDNPrefillMetadata(
+                    metadata=FlaGDNPrefillMetadata(
                         cu_seqlens=prefill_query_start_loc,
                         cu_seqlens_host=chunk_meta.cu_seqlens_host,
                         chunk_indices=chunk_meta.chunk_indices_chunk64,
@@ -714,10 +715,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            if a5_adapter is not None:
+            if fla_adapter is not None:
                 assert g_non_spec is not None
                 assert beta_non_spec is not None
-                core_attn_out_non_spec = a5_adapter.decode(
+                core_attn_out_non_spec = fla_adapter.decode(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+"""Unit coverage for the cross-SoC FLA GDN adapter."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,9 +10,9 @@ from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.ops.gdn_a5 import (
-    A5GDNAdapter,
-    A5GDNOperatorDispatcher,
+from vllm_ascend.ops.gdn_fla import (
+    FlaGDNAdapter,
+    FlaGDNOperatorDispatcher,
     GDNBackendMode,
     GDNOperator,
     GDNPrefillMetadata,
@@ -43,7 +44,7 @@ def test_log_solve_tri_debug_is_gated_by_environment(monkeypatch):
         stride=lambda: (8192, 4096, 64, 1),
         is_contiguous=lambda: True,
     )
-    with patch("vllm_ascend.ops.gdn_a5.logger.info") as info:
+    with patch("vllm_ascend.ops.gdn_fla.logger.info") as info:
         monkeypatch.setenv("VLLM_ASCEND_GDN_DEBUG_SOLVE_TRI", "1")
         log_solve_tri_debug(
             tensor,
@@ -113,7 +114,7 @@ def _fla_operator(value):
 
 
 def test_auto_selects_fla_operator_after_successful_probe():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
     selection = dispatcher.select(
         GDNOperator.CHUNK_FWD_O,
@@ -130,7 +131,7 @@ def test_auto_selects_fla_operator_after_successful_probe():
 
 
 def test_auto_falls_back_when_fla_symbol_is_missing():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
     def missing_resolver():
         raise AttributeError("missing chunk_fwd_o")
@@ -149,12 +150,12 @@ def test_auto_falls_back_when_fla_symbol_is_missing():
 
 
 def test_fallback_log_identifies_operator_backend_stage_and_exception():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
     def missing_resolver():
         raise ImportError("missing op_api library")
 
-    with patch("vllm_ascend.ops.gdn_a5.logger.warning") as warning:
+    with patch("vllm_ascend.ops.gdn_fla.logger.warning") as warning:
         dispatcher.select(
             GDNOperator.SOLVE_TRI,
             SIGNATURE,
@@ -175,7 +176,7 @@ def test_fallback_log_identifies_operator_backend_stage_and_exception():
 
 
 def test_strict_fla_mode_does_not_hide_probe_failure():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("fla_npu", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("fla_npu", ""), is_supported_soc=True)
 
     with pytest.raises(RuntimeError, match="chunk_fwd_o.*smoke_probe"):
         dispatcher.select(
@@ -194,13 +195,13 @@ def test_strict_adapter_validation_aggregates_missing_symbols(monkeypatch):
             raise ImportError(f"missing {operator.value}")
         return _fla_operator, f"fla_npu.{operator.value}"
 
-    monkeypatch.setattr("vllm_ascend.ops.gdn_a5.resolve_fla_operator", resolver)
+    monkeypatch.setattr("vllm_ascend.ops.gdn_fla.resolve_fla_operator", resolver)
     with pytest.raises(RuntimeError) as error:
-        A5GDNAdapter(
+        FlaGDNAdapter(
             parse_gdn_backend_config("fla_npu", ""),
             SIGNATURE,
             layer_name="model.layers.0.linear_attn",
-            is_a5=True,
+            is_supported_soc=True,
         )
 
     message = str(error.value)
@@ -209,7 +210,7 @@ def test_strict_adapter_validation_aggregates_missing_symbols(monkeypatch):
 
 
 def test_native_mode_does_not_resolve_fla_operator():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("native", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("native", ""), is_supported_soc=True)
 
     selection = dispatcher.select(
         GDNOperator.CHUNK_FWD_O,
@@ -222,22 +223,24 @@ def test_native_mode_does_not_resolve_fla_operator():
     assert selection.backend is GDNBackendMode.NATIVE
 
 
-def test_non_a5_always_uses_native_operator():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("fla_npu", ""), is_a5=False)
+def test_unsupported_soc_always_uses_native_operator():
+    dispatcher = FlaGDNOperatorDispatcher(
+        parse_gdn_backend_config("fla_npu", ""), is_supported_soc=False
+    )
 
     selection = dispatcher.select(
         GDNOperator.CHUNK_FWD_O,
         SIGNATURE,
         native=_native_operator,
         native_symbol="native.chunk_fwd_o",
-        fla_resolver=lambda: pytest.fail("non-A5 must not import fla_npu"),
+        fla_resolver=lambda: pytest.fail("unsupported SoC must not import fla_npu"),
     )
 
     assert selection.backend is GDNBackendMode.NATIVE
 
 
 def test_selection_is_cached_for_the_same_operator_and_signature():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
     resolves = 0
 
     def resolver():
@@ -265,7 +268,7 @@ def test_selection_is_cached_for_the_same_operator_and_signature():
 
 
 def test_runtime_error_is_propagated_without_fallback():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
     def failing_operator(value):
         raise RuntimeError(f"failed after receiving {value}")
@@ -406,14 +409,14 @@ def test_causal_conv_adapter_maps_stateful_arguments(monkeypatch):
         return x + 2
 
     monkeypatch.setattr(
-        "vllm_ascend.ops.gdn_a5.resolve_fla_operator",
+        "vllm_ascend.ops.gdn_fla.resolve_fla_operator",
         lambda operator: (causal_conv, "fla_npu.ops.ascendc.causal_conv1d"),
     )
-    adapter = A5GDNAdapter(
+    adapter = FlaGDNAdapter(
         parse_gdn_backend_config("fla_npu", ""),
         SIGNATURE,
         layer_name="model.layers.0.linear_attn",
-        is_a5=True,
+        is_supported_soc=True,
     )
     x = torch.zeros((2, 8))
     weight = torch.zeros((4, 8))
@@ -454,7 +457,7 @@ def test_causal_conv_adapter_maps_stateful_arguments(monkeypatch):
 
 
 def test_stateful_runtime_probe_falls_back_without_mutating_live_state():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
     state = torch.zeros((1,))
 
     def failing_fla(value):
@@ -489,7 +492,7 @@ def test_stateful_runtime_probe_falls_back_without_mutating_live_state():
 
 
 def test_causal_conv_prefill_and_decode_are_probed_separately():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
     calls = 0
 
     def causal(input_tensor, weight, bias, conv_state, **kwargs):
@@ -551,7 +554,7 @@ def test_causal_conv_prefill_and_decode_are_probed_separately():
 
 
 def test_runtime_probe_falls_back_on_invalid_output_contract():
-    dispatcher = A5GDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_a5=True)
+    dispatcher = FlaGDNOperatorDispatcher(parse_gdn_backend_config("auto", ""), is_supported_soc=True)
 
     def native(gate, **kwargs):
         del kwargs
@@ -588,11 +591,11 @@ def test_runtime_probe_falls_back_on_invalid_output_contract():
 
 
 def test_stage1_warmup_runs_prefill_and_both_causal_modes_once(monkeypatch):
-    adapter = A5GDNAdapter(
+    adapter = FlaGDNAdapter(
         parse_gdn_backend_config("auto", ""),
         SIGNATURE,
         layer_name="model.layers.0.linear_attn",
-        is_a5=True,
+        is_supported_soc=True,
     )
     calls = []
     monkeypatch.setattr(adapter, "prefill", lambda **kwargs: calls.append(("prefill", kwargs)))
@@ -687,7 +690,32 @@ def _fake_gdn_layer():
     )
 
 
-def test_a5_routing_constructs_and_caches_one_adapter(monkeypatch):
+@pytest.mark.parametrize("soc", ["ascend910b", "ascend910_93", "ascend950"])
+def test_fla_gdn_routing_supports_a2_a3_and_a5(monkeypatch, soc):
+    """Catch hardware-identity gates that bypass the shared FLA GDN adapter."""
+    monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
+    monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
+    layer = _fake_gdn_layer()
+
+    with (
+        patch.dict(AscendGatedDeltaNetAttention._fla_gdn_dispatchers, {}, clear=True),
+        patch("vllm_ascend.ops.gdn.get_fla_gdn_soc", return_value=soc),
+        patch(
+            "vllm_ascend.ops.gdn.get_pcp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+    ):
+        adapter = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(
+            layer,
+            torch.zeros((1, 128), dtype=torch.bfloat16),
+            torch.float32,
+        )
+
+    assert isinstance(adapter, FlaGDNAdapter)
+    assert adapter.signature.soc == soc
+
+
+def test_fla_routing_constructs_and_caches_one_adapter(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
     monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
     layer = _fake_gdn_layer()
@@ -695,37 +723,37 @@ def test_a5_routing_constructs_and_caches_one_adapter(monkeypatch):
     state = torch.zeros((2, 4, 128, 128), dtype=torch.float32)
 
     with (
-        patch("vllm_ascend.ops.gdn.is_950", return_value=True),
+        patch("vllm_ascend.ops.gdn.get_fla_gdn_soc", return_value="ascend950"),
         patch(
             "vllm_ascend.ops.gdn.get_pcp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
     ):
-        first = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(layer, activation, state)
-        second = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(layer, activation, state)
+        first = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(layer, activation, state)
+        second = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(layer, activation, state)
 
-    assert isinstance(first, A5GDNAdapter)
+    assert isinstance(first, FlaGDNAdapter)
     assert second is first
 
 
-def test_a5_routing_shares_dispatcher_across_layers(monkeypatch):
+def test_fla_routing_shares_dispatcher_across_layers(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
     monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
 
     with (
-        patch.dict(AscendGatedDeltaNetAttention._a5_gdn_dispatchers, {}, clear=True),
-        patch("vllm_ascend.ops.gdn.is_950", return_value=True),
+        patch.dict(AscendGatedDeltaNetAttention._fla_gdn_dispatchers, {}, clear=True),
+        patch("vllm_ascend.ops.gdn.get_fla_gdn_soc", return_value="ascend950"),
         patch(
             "vllm_ascend.ops.gdn.get_pcp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
     ):
-        first = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+        first = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(
             _fake_gdn_layer(),
             torch.zeros((1, 128), dtype=torch.bfloat16),
             torch.float32,
         )
-        second = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+        second = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(
             _fake_gdn_layer(),
             torch.zeros((1, 128), dtype=torch.bfloat16),
             torch.float32,
@@ -736,18 +764,18 @@ def test_a5_routing_shares_dispatcher_across_layers(monkeypatch):
     assert second.dispatcher is first.dispatcher
 
 
-def test_a5_routing_preserves_exact_native_path(monkeypatch):
+def test_fla_routing_preserves_exact_native_path(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "native")
     monkeypatch.delenv("VLLM_ASCEND_GDN_OP_BACKENDS", raising=False)
 
     with (
-        patch("vllm_ascend.ops.gdn.is_950", return_value=True),
+        patch("vllm_ascend.ops.gdn.get_fla_gdn_soc", return_value="ascend950"),
         patch(
             "vllm_ascend.ops.gdn.get_pcp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
     ):
-        adapter = AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+        adapter = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(
             _fake_gdn_layer(),
             torch.zeros((1, 128), dtype=torch.bfloat16),
             torch.zeros((2, 4, 128, 128), dtype=torch.float32),
@@ -756,7 +784,7 @@ def test_a5_routing_preserves_exact_native_path(monkeypatch):
     assert adapter is None
 
 
-def test_a5_routing_rejects_non_bfloat16_strict_operator_override(monkeypatch):
+def test_fla_routing_rejects_non_bfloat16_strict_operator_override(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
     monkeypatch.setenv(
         "VLLM_ASCEND_GDN_OP_BACKENDS",
@@ -764,21 +792,21 @@ def test_a5_routing_rejects_non_bfloat16_strict_operator_override(monkeypatch):
     )
 
     with (
-        patch("vllm_ascend.ops.gdn.is_950", return_value=True),
+        patch("vllm_ascend.ops.gdn.get_fla_gdn_soc", return_value="ascend950"),
         patch(
             "vllm_ascend.ops.gdn.get_pcp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
         pytest.raises(RuntimeError, match="requires bfloat16"),
     ):
-        AscendGatedDeltaNetAttention._get_a5_gdn_adapter(
+        AscendGatedDeltaNetAttention._get_fla_gdn_adapter(
             _fake_gdn_layer(),
             torch.zeros((1, 128), dtype=torch.float16),
             torch.float32,
         )
 
 
-def test_a5_mixed_decode_prefill_routes_and_merges_outputs():
+def test_fla_mixed_decode_prefill_routes_and_merges_outputs():
     conv_state = torch.zeros((3, 1, 2))
     ssm_state = torch.zeros((2, 1, 2, 2))
 
@@ -879,7 +907,7 @@ def test_a5_mixed_decode_prefill_routes_and_merges_outputs():
         ),
         patch.object(
             AscendGatedDeltaNetAttention,
-            "_get_a5_gdn_adapter",
+            "_get_fla_gdn_adapter",
             return_value=adapter,
         ),
         patch(

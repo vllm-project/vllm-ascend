@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A5 smoke coverage for the Qwen GDN fla_npu adapter."""
+"""Cross-SoC smoke coverage for the Qwen GDN fla_npu adapter."""
 
 import pytest
 import torch
 import torch.nn.functional as F
 import torch_npu
 
-from vllm_ascend.device.device_config import is_950
-from vllm_ascend.ops.gdn_a5 import (
-    A5GDNAdapter,
+from vllm_ascend.device.device_config import get_fla_gdn_soc, is_fla_gdn_supported
+from vllm_ascend.ops.gdn_fla import (
+    FlaGDNAdapter,
     GDNPrefillMetadata,
     GDNRuntimeSignature,
     parse_gdn_backend_config,
 )
 from vllm_ascend.ops.triton.fla.utils import prepare_chunk_indices
 
-pytestmark = pytest.mark.skipif(not is_950(), reason="A5-only GDN operator smoke")
+pytestmark = pytest.mark.skipif(
+    not is_fla_gdn_supported(), reason="requires A2/A3/A5 FLA GDN support"
+)
 torch_npu.npu.set_compile_mode(jit_compile=False)
 
 
@@ -25,11 +27,13 @@ def _assert_output_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     torch.testing.assert_close(actual, expected, rtol=5e-3, atol=5e-3)
 
 
-def _adapter(mode: str, overrides: str = "") -> A5GDNAdapter:
-    return A5GDNAdapter(
+def _adapter(mode: str, overrides: str = "") -> FlaGDNAdapter:
+    soc = get_fla_gdn_soc()
+    assert soc is not None
+    return FlaGDNAdapter(
         parse_gdn_backend_config(mode, overrides),
         GDNRuntimeSignature(
-            soc="ascend950",
+            soc=soc,
             dtype="bfloat16",
             state_dtype="float32",
             num_key_heads=1,
@@ -38,7 +42,7 @@ def _adapter(mode: str, overrides: str = "") -> A5GDNAdapter:
             value_dim=128,
         ),
         layer_name="smoke.linear_attn",
-        is_a5=True,
+        is_supported_soc=True,
     )
 
 
@@ -75,7 +79,7 @@ def _prefill_inputs(tokens: int):
 
 
 @pytest.mark.parametrize("tokens", [1, 63, 64, 65])
-def test_gdn_a5_prefill_fla_matches_native(tokens):
+def test_gdn_fla_prefill_matches_native(tokens):
     kwargs = _prefill_inputs(tokens)
 
     native_output, native_state = _adapter("native").prefill(**kwargs)
@@ -99,7 +103,7 @@ def test_gdn_a5_prefill_fla_matches_native(tokens):
         "chunk_fwd_o",
     ],
 )
-def test_gdn_a5_each_prefill_replacement_matches_native(operator):
+def test_gdn_fla_each_prefill_replacement_matches_native(operator):
     kwargs = _prefill_inputs(65)
     native_output, native_state = _adapter("native").prefill(**kwargs)
     candidate_output, candidate_state = _adapter("native", f"{operator}=fla_npu").prefill(**kwargs)
@@ -109,7 +113,7 @@ def test_gdn_a5_each_prefill_replacement_matches_native(operator):
     torch.testing.assert_close(candidate_state, native_state, rtol=5e-3, atol=5e-3)
 
 
-def test_gdn_a5_varlen_multiple_sequences_matches_native():
+def test_gdn_fla_varlen_multiple_sequences_matches_native():
     kwargs = _prefill_inputs(64)
     kwargs["initial_state"] = torch.randn((2, 2, 128, 128), dtype=torch.float32, device="npu")
     kwargs["has_initial_state"] = torch.tensor([False, True], dtype=torch.bool, device="npu")
@@ -123,7 +127,7 @@ def test_gdn_a5_varlen_multiple_sequences_matches_native():
     torch.testing.assert_close(fla_state, native_state, rtol=5e-3, atol=5e-3)
 
 
-def test_gdn_a5_causal_conv_fla_matches_native_cache_update():
+def test_gdn_fla_causal_conv_matches_native_cache_update():
     torch.manual_seed(11)
     tokens, channels, width = 5, 16, 4
     x = torch.randn((tokens, channels), dtype=torch.bfloat16, device="npu")
@@ -161,7 +165,7 @@ def test_gdn_a5_causal_conv_fla_matches_native_cache_update():
     torch.testing.assert_close(fla_state, native_state, rtol=5e-3, atol=5e-3)
 
 
-def test_gdn_a5_ordinary_decode_preserves_native_recurrent_path():
+def test_gdn_fla_ordinary_decode_matches_native_reference():
     torch.manual_seed(13)
     state = torch.randn((2, 2, 128, 128), dtype=torch.float32, device="npu")
     kwargs = {

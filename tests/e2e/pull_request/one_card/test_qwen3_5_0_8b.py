@@ -25,13 +25,13 @@ from huggingface_hub import snapshot_download as hf_snapshot_download
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner, qwen_prompt, wait_until_npu_memory_free
-from vllm_ascend.device.device_config import is_950
+from vllm_ascend.device.device_config import is_fla_gdn_supported
 
 
-@pytest.mark.skipif(not is_950(), reason="A5-only GDN model smoke")
+@pytest.mark.skipif(not is_fla_gdn_supported(), reason="requires A2/A3/A5 FLA GDN support")
 @wait_until_npu_memory_free()
-def test_qwen3_5_gdn_a5_eager_smoke():
-    """Verify ordinary eager prefill/decode with the A5 GDN adapter."""
+def test_qwen3_5_gdn_fla_eager_smoke():
+    """Verify ordinary eager prefill/decode with the shared FLA GDN adapter."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     prompts = qwen_prompt(["Describe this image briefly."])
     model_path = hf_snapshot_download(
