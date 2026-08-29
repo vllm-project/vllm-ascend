@@ -87,6 +87,10 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
         self.update_stream.wait_stream(torch.npu.current_stream())
+        if torch.distributed.get_rank() == 0:
+            print(f"IN REPLAYING {draft_attn_metadatas=}", flush=True)
+            print(f"IN REPLAYING {draft_attn_metadatas[0]['mtp.0.self_attn.swa_cache'].req_metadata.sas_metadata.data_ptr()=}")
+            print(f"IN REPLAYING {draft_attn_metadatas[0]['mtp.0.self_attn.swa_cache'].req_metadata.dspark_swa_indices.data_ptr()=}")
         ret = super().run_fullgraph(desc)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
