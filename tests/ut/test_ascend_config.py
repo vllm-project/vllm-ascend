@@ -994,7 +994,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
-    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
+    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_fused_mc2_rolls_back_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
         # After the megamoe op rollback (#15267), enable_fused_mc2=1 no longer
