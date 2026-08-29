@@ -702,6 +702,27 @@ def block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
     return bytes(block_hash)
 
 
+def get_partial_block_index(
+    token_count: int,
+    block_size: int,
+    hash_count: int,
+    enabled: bool,
+) -> int | None:
+    """Index of the trailing partial block to transfer, if any.
+
+    Returns None when disabled, when the request carries no tokens, or when
+    the token count aligns exactly with completed hash blocks.
+    """
+    if not enabled or token_count <= 0:
+        return None
+    full_blocks, remainder = divmod(token_count, block_size)
+    if remainder:
+        return full_blocks
+    if full_blocks > hash_count:
+        return full_blocks - 1
+    return None
+
+
 # Parameters related to the connector metadata
 @dataclass
 class LoadSpec:
