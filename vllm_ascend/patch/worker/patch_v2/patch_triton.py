@@ -17,7 +17,7 @@ from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
-from vllm_ascend.worker.v2.spec_decode.dflash.speculator import _prepare_dflash_inputs_kernel_ascend
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import prepare_dflash_inputs
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
 )
@@ -40,11 +40,11 @@ states.apply_temperature = apply_temperature
 logprob.compute_token_logprobs = compute_token_logprobs
 rejection_sampler_utils.rejection_sample = npu_rejection_sample
 rejection_sampler.rejection_sample = npu_rejection_sample
-dflash_speculator._prepare_dflash_inputs_kernel = _prepare_dflash_inputs_kernel_ascend
-# triton ops that filed in ops/triton
+# This patch may be revisited or reverted once the sampler layer modulizeation is done.
 topk_topp_sampler.apply_top_k_top_p_triton = apply_top_k_top_p_npu
 structured_outputs._apply_grammar_bitmask_kernel = _apply_grammar_bitmask_kernel
 mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
+# triton ops that filed in ops/triton
 # This patch may be revisited or reverted once the compiler and Triton Ascend toolkit
 # support the upstream implementation of fill_logprob_token_ids_kernel.
 # For now, use the Ascend-specific implementation.
@@ -54,3 +54,6 @@ logprob._fill_logprob_token_ids_kernel = _fill_logprob_token_ids_kernel
 # For now, use the Ascend-specific implementation.
 sampler.get_num_nans = get_num_nans
 rejection_sampler.get_num_nans = get_num_nans
+# The Ascend wrapper is version-adaptive (selected at import time inside
+# speculator.py based on vllm_version_is); install it onto the upstream module.
+dflash_speculator.prepare_dflash_inputs = prepare_dflash_inputs
