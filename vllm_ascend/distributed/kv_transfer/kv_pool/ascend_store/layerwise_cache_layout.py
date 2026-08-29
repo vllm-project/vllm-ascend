@@ -72,7 +72,7 @@ class LayerwiseReuseLayout:
 
 
 def get_gva_layerwise_config(kv_transfer_config: Any) -> dict[str, Any] | None:
-    """Return extra config for the MemCache GVA layerwise path."""
+    """Return extra config for the GVA layerwise path."""
     if kv_transfer_config is None:
         return None
 

@@ -28,7 +28,7 @@ class AttentionComputeStartGate:
     """Gate that opens when the compute stream reaches attention.
 
     The attention worker records an NPU event immediately before submitting the
-    attention op. MemCache worker threads wait for that event to complete before
+    attention op. Backend worker threads wait for that event to complete before
     submitting H2D/L2G work, so transfer starts when the compute stream is
     actually at the attention boundary rather than merely after the Python call
     site was reached.
@@ -62,7 +62,7 @@ class AttentionComputeStartGate:
 
 
 def reset_attention_compute_start_gate() -> AttentionComputeStartGate:
-    """Create a new per-layer gate for MemCache work.
+    """Create a new per-layer gate for backend transfer work.
 
     Layerwise prefetch tasks keep a reference to the gate that was current when
     they were submitted. The attention path opens that same gate when attention

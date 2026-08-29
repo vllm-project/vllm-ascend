@@ -27,9 +27,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     GVALayerwiseCapable,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_threads import (
+    GVALayerwiseThreadContext,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
     LayerBatchBuilder,
+    create_gva_recving_thread,
+    create_gva_sending_thread,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
@@ -38,6 +41,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerBlockRange,
     LayerLoadTask,
     LayerTransferTask,
+    LoadSpec,
     ReqMeta,
     SharedBlockData,
 )
@@ -366,3 +370,199 @@ class TestLayerBatchBuilder(unittest.TestCase):
         request.load_block_gvas_np = None
         with self.assertRaises(RuntimeError):
             builder.build_shared(task, is_save=False)
+
+
+class _LoadPathProbeDatabase(FakeTokenDatabase):
+    """Two-layer single-group layout with explicit entry offsets."""
+
+    def __init__(self):
+        super().__init__()
+        self.set_group_buffers(
+            {0: [1000, 2000, 3000]},
+            {0: [10, 20, 30]},
+            {0: [100, 200, 300]},
+            group_num_layers={0: 2},
+            group_layer_cache_entry_offsets={0: [0, 2, 3]},
+        )
+
+
+class TestLoadPathEndToEndProbe(unittest.TestCase):
+    """UT 5: the only direct probe against the layerwise load-path silent
+    failure. Runs the real chain protocol -> layout -> transfer and asserts
+    the GVAs reaching batch_copy are nonzero. If any stage degrades (lazy
+    empty key-info return, skipped lease, all-zero GVAs, wrong ReqMeta
+    field), the captured GVA list contains zeros and this test goes red.
+    """
+
+    def test_load_path_end_to_end_nonzero_gva(self):
+        from tests.ut.distributed.ascend_store.test_gva_protocol import (
+            _FakeKeyInfo,
+            _make_req,
+            _make_session,
+        )
+
+        # Stage 1 (protocol): GVASession.prepare_load_gvas writes the
+        # allocated GVAs from the store into the request metadata.
+        session = _make_session()
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True)
+        req = _make_req(target_token_len=32, num_hashes=2, load_spec=load_spec)
+        session._store.batch_get_key_info.return_value = [
+            _FakeKeyInfo(1, gva=100),
+            _FakeKeyInfo(1, gva=101),
+        ]
+        session.prepare_load_gvas([req])
+        self.assertEqual(req.load_block_gvas_np.tolist(), [100, 101])
+
+        # Stage 2 (layout + transfer): the factory-built receiving thread
+        # moves those GVAs through LayerBatchBuilder into batch_copy.
+        store = MagicMock(spec=GVALayerwiseCapable)
+        store.batch_copy.return_value = 0
+        database = _LoadPathProbeDatabase()
+        ctx = GVALayerwiseThreadContext(
+            m_store=store,
+            token_database=database,
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            page_size_bytes=60,
+            num_layers=2,
+            layer_save_finished_events=[threading.Event() for _ in range(2)],
+            sync_save_events=[MagicMock() for _ in range(2)],
+            max_transfer_blocks=0,
+            max_transfer_bytes=0,
+            num_kv_cache_groups=1,
+            group_num_layers={0: 2},
+            group_block_len={0: [10, 20, 30]},
+        )
+        load_finished = [threading.Event() for _ in range(2)]
+        thread = create_gva_recving_thread(
+            ctx,
+            threading.Event(),
+            threading.Event(),
+            load_finished,
+            h2d_stagger_us=0,
+        )
+
+        task = LayerTransferTask(
+            layer_id=0,
+            layer_idx_in_group=0,
+            block_ranges=[LayerBlockRange(req, 0, 2)],
+        )
+        load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[task], layer_id=0)
+        thread.request_queue.put(load_task)
+        thread._handle_request(load_task)
+
+        store.batch_copy.assert_called_once()
+        gvas, addrs, sizes, direction = store.batch_copy.call_args.args
+        self.assertEqual(direction, 1)
+        self.assertGreater(len(gvas), 0)
+        self.assertTrue(all(gva > 0 for gva in gvas), f"silent load-path failure: gvas={gvas}")
+        self.assertTrue(all(addr > 0 for addr in addrs))
+        self.assertTrue(all(size > 0 for size in sizes))
+        self.assertTrue(load_finished[0].is_set())
+
+
+class TestFactoryParameterMapping(unittest.TestCase):
+    """The factories must forward every thread-context field to the thread
+    constructors one-to-one; a dropped or swapped parameter fails here."""
+
+    def _make_ctx(self, store, database):
+        return GVALayerwiseThreadContext(
+            m_store=store,
+            token_database=database,
+            block_size=16,
+            tp_rank=2,
+            tp_size=4,
+            dcp_size=1,
+            page_size_bytes=64,
+            num_layers=2,
+            layer_save_finished_events=[threading.Event() for _ in range(2)],
+            sync_save_events=[MagicMock() for _ in range(2)],
+            max_transfer_blocks=8,
+            max_transfer_bytes=4096,
+            num_kv_cache_groups=1,
+            group_num_layers={0: 2},
+            group_block_len={0: [30, 34]},
+        )
+
+    def test_sending_factory_maps_all_parameters(self):
+        store = MagicMock(spec=GVALayerwiseCapable)
+        database = FakeTokenDatabase()
+        ctx = self._make_ctx(store, database)
+        ready_event = threading.Event()
+
+        thread = create_gva_sending_thread(ctx, ready_event)
+
+        self.assertIs(thread.m_store, store)
+        self.assertIs(thread.token_database, database)
+        self.assertEqual(thread.block_size, 16)
+        self.assertEqual(thread.tp_rank, 2)
+        self.assertEqual(thread.tp_size, 4)
+        self.assertEqual(thread.dcp_size, 1)
+        self.assertIs(thread.ready_event, ready_event)
+        self.assertEqual(thread.final_layer_id, 1)
+        self.assertIs(thread.layer_save_finished_events, ctx.layer_save_finished_events)
+        self.assertIs(thread.sync_save_events, ctx.sync_save_events)
+        self.assertEqual(thread.max_transfer_blocks, 8)
+        self.assertEqual(thread.max_transfer_bytes, 4096)
+        self.assertEqual(len(thread.group_builders), 1)
+        self.assertEqual(thread.group_builders[0].group_id, 0)
+        self.assertIs(thread.layer_batch_builder, thread.group_builders[0])
+
+    def test_recving_factory_maps_all_parameters(self):
+        store = MagicMock(spec=GVALayerwiseCapable)
+        database = FakeTokenDatabase()
+        ctx = self._make_ctx(store, database)
+        ready_event = threading.Event()
+        get_event = threading.Event()
+        load_finished = [threading.Event() for _ in range(2)]
+        external_waiter = MagicMock()
+        failure_checker = MagicMock()
+
+        thread = create_gva_recving_thread(
+            ctx,
+            ready_event,
+            get_event,
+            load_finished,
+            h2d_stagger_us=250,
+            external_slot_release_waiter=external_waiter,
+            save_failure_checker=failure_checker,
+        )
+
+        self.assertIs(thread.m_store, store)
+        self.assertIs(thread.token_database, database)
+        self.assertEqual(thread.block_size, 16)
+        self.assertEqual(thread.tp_rank, 2)
+        self.assertEqual(thread.tp_size, 4)
+        self.assertEqual(thread.dcp_size, 1)
+        self.assertIs(thread.ready_event, ready_event)
+        self.assertIs(thread.get_event, get_event)
+        self.assertIs(thread.layer_load_finished_events, load_finished)
+        self.assertIs(thread.layer_save_finished_events, ctx.layer_save_finished_events)
+        self.assertIs(thread.sync_save_events, ctx.sync_save_events)
+        self.assertEqual(thread.final_layer_id, 1)
+        self.assertEqual(thread.h2d_stagger_us, 250)
+        self.assertEqual(thread.max_transfer_blocks, 8)
+        self.assertEqual(thread.max_transfer_bytes, 4096)
+        self.assertIs(thread.external_slot_release_waiter, external_waiter)
+        self.assertIs(thread.save_failure_checker, failure_checker)
+        self.assertEqual(len(thread.group_builders), 1)
+        self.assertIs(thread.layer_batch_builder, thread.group_builders[0])
+
+    def test_send_and_recv_builders_are_independent(self):
+        # LayerBatchBuilder owns reusable numpy buffers; the send and recv
+        # threads must never share builder instances.
+        store = MagicMock(spec=GVALayerwiseCapable)
+        ctx = self._make_ctx(store, FakeTokenDatabase())
+
+        send = create_gva_sending_thread(ctx, threading.Event())
+        recv = create_gva_recving_thread(
+            ctx,
+            threading.Event(),
+            threading.Event(),
+            [threading.Event() for _ in range(2)],
+        )
+
+        self.assertIsNot(send.group_builders[0], recv.group_builders[0])
+        self.assertIsNot(send.layer_batch_builder, recv.layer_batch_builder)
