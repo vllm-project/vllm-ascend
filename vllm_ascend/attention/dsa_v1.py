@@ -1606,11 +1606,15 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         if not write_cache:
             return None
-        compressed_kv, compress_slot_mapping = compressor(
-            hidden_states=hidden_states,
-            state_cache=state_cache,
-            metadata=layer_metadata.compressor,
-        )
+        if compressor_overlap_output is not None:
+            (compressed_kv, compress_slot_mapping), compressor_done = compressor_overlap_output
+            torch.npu.current_stream().wait_event(compressor_done)
+        else:
+            compressed_kv, compress_slot_mapping = compressor(
+                hidden_states=hidden_states,
+                state_cache=state_cache,
+                metadata=layer_metadata.compressor,
+            )
         if compressed_kv.shape[0] > 0:
             get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(
                 compress_kv_cache,
@@ -1658,7 +1662,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         ori_win_right = 0 if swa_req_metadata.ori_win_right is None else swa_req_metadata.ori_win_right
 
         compressor_tail_fn = None
-        if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4:
+        if self.multistream_dsv4_dsa_overlap and self.compress_ratio > 1:
             compressor = self.compressor
             tail_compressor_metadata = layer_metadata.compressor
             assert compressor is not None
