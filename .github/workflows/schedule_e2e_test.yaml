@@ -18,6 +18,16 @@
 name: Schedule All E2E Tests
 
 on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_branch:
@@ -45,6 +55,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Prebuilt images produced by nightly_image_build.yaml (scheduled at 12:00 UTC).
+  A2_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a2'
+  A3_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a3'
+  DAILY_CONFIG: '.github/workflows/configs/daily_config.yaml'
+  
 jobs:
   select-all-tests:
     runs-on: linux-amd64-cpu-8-hk
@@ -116,24 +132,117 @@ jobs:
       base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
       base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
 
-  run-all-tests:
-    needs: [select-all-tests, ensure-csrc-cache]
-    if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
+  # run-all-tests:
+  #   needs: [select-all-tests, ensure-csrc-cache]
+  #   if: ${{ needs.select-all-tests.outputs.has_tests == 'true' }}
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       vllm_version:
+  #         - ${{ needs.select-all-tests.outputs.main_commit }}
+  #         - ${{ needs.select-all-tests.outputs.release_tag }}
+  #   uses: ./.github/workflows/_selected_tests.yaml
+  #   with:
+  #     vllm: ${{ matrix.vllm_version }}
+  #     ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
+  #     base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
+  #     base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
+  #     test_groups: ${{ needs.select-all-tests.outputs.test_groups }}
+  #     upload_timing: ${{ inputs.update_est_times }}
+
+  setup-vars:
+    name: Resolve daily test matrix
+    runs-on: linux-aarch64-a2b3-0
+    outputs:
+      a2_image: ${{ steps.export.outputs.a2_image }}
+      a3_image: ${{ steps.export.outputs.a3_image }}
+      a2_nightly_hf: ${{ steps.set-matrix.outputs.a2_nightly_hf }}
+      a3_nightly_hf: ${{ steps.set-matrix.outputs.a3_nightly_hf }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Export image refs
+        id: export
+        run: |
+          {
+            echo "a2_image=${{ env.A2_IMAGE }}"
+            echo "a3_image=${{ env.A3_IMAGE }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read daily test matrix config
+        id: set-matrix
+        env:
+          MATRIX_FILE: ${{ env.DAILY_CONFIG }}
+          MATRIX_OUTPUTS: '{"a2_nightly_hf":"daily.a2_nightly_hf","a3_nightly_hf":"daily.a3_nightly_hf"}'
+        run: |
+          python3 -m pip install pyyaml -q
+          python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+
+  verify-image:
+    name: Verify nightly-ci image (build gate)
+    needs: [setup-vars]
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 10
+    container:
+      image: ${{ needs.setup-vars.outputs.a2_image }}
+    steps:
+      - name: Smoke import vllm-ascend and vllm
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          python3 -c "import vllm_ascend, vllm; print('import OK ->', vllm_ascend.__file__)"
+      - name: Verify custom ops loadable
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          python3 -c "import vllm_ascend.vllm_ascend_C; print('custom ops OK -> vllm_ascend_C loaded')"
+      - name: Report image build provenance
+        run: |
+          echo "Image: ${{ needs.setup-vars.outputs.a2_image }}"
+          echo "=== vllm-ascend ==="
+          (cd /vllm-workspace/vllm-ascend && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
+          echo "=== vllm ==="
+          (cd /vllm-workspace/vllm && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
+          
+  a2-nightly-hf:
+    name: A2 nightly high-freq
+    needs: [setup-vars, verify-image]
+    if: always() && needs.verify-image.result == 'success'
     strategy:
       fail-fast: false
       matrix:
-        vllm_version:
-          - ${{ needs.select-all-tests.outputs.main_commit }}
-          - ${{ needs.select-all-tests.outputs.release_tag }}
-    uses: ./.github/workflows/_selected_tests.yaml
+        test_config: ${{ fromJson(needs.setup-vars.outputs.a2_nightly_hf) }}
+    uses: ./.github/workflows/_e2e_daily_tests.yaml
     with:
-      vllm: ${{ matrix.vllm_version }}
-      ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
-      base_ref: ${{ needs.select-all-tests.outputs.base_ref }}
-      base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-all-tests.outputs.test_groups }}
-      upload_timing: ${{ inputs.update_est_times }}
+      runner: ${{ matrix.test_config.os }}
+      image: ${{ needs.setup-vars.outputs.a2_image }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: main
+      timeout_minutes: '45'
 
+  a3-nightly-hf:
+    name: A3 nightly high-freq
+    needs: [setup-vars, verify-image]
+    if: always() && needs.verify-image.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        test_config: ${{ fromJson(needs.setup-vars.outputs.a3_nightly_hf) }}
+    uses: ./.github/workflows/_e2e_daily_tests.yaml
+    with:
+      runner: ${{ matrix.test_config.os }}
+      image: ${{ needs.setup-vars.outputs.a3_image }}
+      tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: main
+      timeout_minutes: '45'
+      
   update-estimated-times:
     needs: [run-all-tests]
     if: ${{ !cancelled() && inputs.update_est_times }}
