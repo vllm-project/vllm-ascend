@@ -1596,12 +1596,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if self._fa3_enabled and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            # FA3 decode requires a uniform batch: exactly one query token per
+            # request (num_tokens == num requests). DP-padded decode batches
+            # absorb dummy tokens into a request, which breaks FA3's decode
+            # scheduler metadata (its fingerprint check raises on
+            # max_seqlen_q != 1) — those batches run on CANN FIA below.
+            is_uniform_decode = (
+                attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                and num_tokens == len(attn_metadata.seq_lens_list)
+            )
+            if self._fa3_enabled and is_uniform_decode:
                 from vllm_ascend.attention.fa3_adapter import fa3_forward
 
                 # Skip during the memory-profile run: scheduler-metadata
                 # allocations would shrink the measured free memory and thus
-                # the KV cache size.
+                # the KV cache.
                 scheduler_metadata = (
                     None if _EXTRA_CTX.in_profile_run
                     else self._build_fa3_scheduler_metadata(
@@ -1625,8 +1634,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
 
-            # CANN V1 FIA: all prefill states, and decode when FA3 is
-            # unavailable for this layer.
+            # CANN V1 FIA: prefill states, DP-padded (non-uniform) decode
+            # batches, and decode when FA3 is unavailable for this layer.
             if not attn_metadata.causal:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
