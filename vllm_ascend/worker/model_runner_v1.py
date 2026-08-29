@@ -2947,6 +2947,10 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = run_model()
         else:
             if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                # PIECEWISE replay must not overtake work already submitted to
+                # the current stream (e.g. FA3 decode buffer/metadata updates):
+                # without this sync the replayed pieces race ahead of it and
+                # accuracy collapses (GPQA 32 vs 73 on Qwen3-235B).
                 is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
                 if not is_draft_eagle:
                     torch.npu.current_stream().synchronize()

@@ -543,16 +543,15 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = cudagraph_mode
 
-        # FA3 integration: plain FULL captures ONE mixed CANN graph family
-        # serving both prefill and decode; FA3 decode graphs require their own
-        # uniform-descriptor family (kernel bakes the cu layout).  Downgrade
-        # plain FULL to FULL_AND_PIECEWISE: decode replays FA3 uniform FULL
-        # graphs while prefill uses PIECEWISE CANN graphs with eager CANN
-        # attention between pieces (sanctioned exception per design doc 09).
-        import os as _os
+        # A plain FULL graph is one mixed CANN family serving both prefill and
+        # decode; FA3 decode graphs need their own uniform decode-only family
+        # (the FA3 kernel bakes the cu_seqlens_q layout into its tiling), and
+        # the two families cannot coexist in one process. With FA3 decode
+        # graphs enabled, downgrade FULL to FULL_AND_PIECEWISE: decode replays
+        # FA3 FULL graphs while prefill runs PIECEWISE CANN graphs.
         if (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-            and _os.environ.get("VLLM_ASCEND_FA3_DECODE_GRAPH") == "1"
+            and os.environ.get("VLLM_ASCEND_FA3_DECODE_GRAPH") == "1"
         ):
             logger.info(
                 "FA3: downgrading cudagraph_mode FULL -> FULL_AND_PIECEWISE "

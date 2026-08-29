@@ -186,7 +186,7 @@ class ACLGraphWrapper:
                 try:
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
-                        out = self.runnable(*args, **kwargs)
+                        output = self.runnable(*args, **kwargs)
                         # Join offloader's copy stream after forward to avoid
                         # unjoined stream error. The last layer's start_prefetch
                         # forks copy_stream, but wait_prefetch only happens in
@@ -199,8 +199,7 @@ class ACLGraphWrapper:
                             # the last graph in piecewise aclgraph mode, because
                             # the output of the last graph will not be used by
                             # any other acl graph.
-                            out = weak_ref_tensors(out)
-                        output = out
+                            output = weak_ref_tensors(output)
                 except RuntimeError as exc:
                     if _is_old_hdk_capture_error(exc):
                         raise RuntimeError(

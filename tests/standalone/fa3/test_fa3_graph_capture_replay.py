@@ -1,144 +1,62 @@
-# Copyright (c) 2026. Reproduction-only diagnostic, not a correctness test.
-#
-# Experiment C28: the one thing C1..C27 never exercised — the actual
-# NPUGraph/ACLGraph CAPTURE + REPLAY of `flash_attn_with_kvcache` with static
-# buffers refreshed between replays.
-#
-# ---------------------------------------------------------------------------
-# Why this exists
-# ---------------------------------------------------------------------------
-# C25/C26/C27 all call `_fa3_kvcache` directly with FRESH tensors and only ever
-# varied the (pre-computed, possibly stale) scheduler_metadata.  Every one was
-# correct.  But the production decode bug is graph-mode ONLY: eager FA3 decode is
-# correct, graph FA3 decode is wrong.  The production graph:
-#   * pre-computes scheduler_metadata ONCE,
-#   * allocates fixed NPU buffers (cache_seqlens / cu_seqlens_q / block_table),
-#   * captures `fa3_kvcache` INSIDE torch.npu.graph(),
-#   * replays, refreshing those buffers between replays via copy_ on a side
-#     `update_stream` (with torch.npu.current_stream().wait_stream(update_stream)).
-#
-# This experiment reproduces that capture+replay and checks each replay against
-# the CPU float64 reference.  It is the FIRST experiment that actually runs the
-# graph path, so it can distinguish:
-#   (a) capture/replay is fine, refresh works        -> bug is vllm-ascend glue
-#       ordering (update-after-replay -> first decode reads capture-time zeros),
-#   (b) capture bakes stale values / replay reads wrong buffers -> bug is in the
-#       FA3 graph capture itself,
-#   (c) the side-stream refresh races the replay     -> wait_stream insufficient.
-#
-# Read:
-#   T1 (no refresh)  wrong   -> confirms first-token stale-buffer is a REAL bug.
-#   T2 (same-stream refresh) wrong -> capture/replay itself broken (b).
-#   T3 (side-stream + wait) wrong  -> stream sync still insufficient (c).
-#   all ~1e-3 -> the graph capture/replay path is sound; look elsewhere.
-#
-# Usage:
-#   python test_fa3_graph_capture_replay.py
+# Copyright (c) 2026.
+"""UT: FA3 decode graph capture + replay with refreshed static buffers.
 
-from importlib import util as importlib_util
+This is the core mechanism behind vllm-ascend's FA3 FULL decode graphs:
+``flash_attn_with_kvcache`` is captured inside ``torch.npu.NPUGraph`` with
+fixed-address buffers (cache_seqlens / cu_seqlens_q / block_table) and a
+scheduler metadata baked for the max config. NPUGraph records addresses,
+not values — before every replay the buffers are overwritten in-place on
+the current stream (the production refresh pattern; a cross-stream
+``wait_stream`` fails under FULL aclgraph replay) and the graph computes
+from the new data.
 
+Validated against the float64 CPU reference:
+  - replay of a batch that differs completely from the warmup batch
+    (variable long KV lengths, reordered block ids);
+  - a second replay of yet another batch (refresh keeps working);
+  - a padded batch: fewer real requests than the capture size, padding
+    rows zeroed and padding cache_seqlens set to 1, mirroring
+    AscendAttentionBackendImpl.refresh_fa3_graph_params.
+"""
+
+import pytest
 import torch
-import torch_npu
 
-_HAS_FA3 = False
-_fa3_kvcache = None
-_get_scheduler_metadata = None
+from _util import (
+    BLOCK_SIZE, DTYPE, HEAD_SIZE, HAS_FA3, NUM_HEADS, NUM_KV_HEADS,
+    SCALE, cpu_ref_decode, fa3_kvcache, get_scheduler_metadata,
+    make_block_table,
+)
 
-for _mod_name in ("flash_attn_npu_3", "flash_attn_npu_3"):
-    if importlib_util.find_spec(_mod_name) is not None:
-        try:
-            _mod = __import__(
-                _mod_name,
-                fromlist=["flash_attn_with_kvcache", "get_scheduler_metadata"],
-            )
-            _fa3_kvcache = _mod.flash_attn_with_kvcache
-            _get_scheduler_metadata = _mod.get_scheduler_metadata
-            _HAS_FA3 = True
-            print(f"[import] FA3 loaded from {_mod_name}")
-            break
-        except (ImportError, AttributeError) as exc:
-            print(f"[import] {_mod_name} found but failed: {exc}")
+pytestmark = pytest.mark.skipif(not HAS_FA3, reason="flash-attention-npu not installed")
 
-if not _HAS_FA3:
-    raise SystemExit("flash_attn_with_kvcache (FA3) is not installed.")
-
-HEAD_SIZE = 128
-NUM_HEADS = 32
-NUM_KV_HEADS = 8
-BLOCK_SIZE = 128
-DTYPE = torch.bfloat16
-SCALE = 1.0 / (HEAD_SIZE ** 0.5)
-GROUP = NUM_HEADS // NUM_KV_HEADS
-WIDTH = 128
-NUM_BLOCKS_POOL = 128
+BATCH = 4
+WIDTH = 128  # block-table width == baked row stride (max 16384-token KV)
+POOL = 128
+WARMUP_SEQLENS = [16, 16, 16, 16]  # deliberately unlike the replay batches
+ATOL = 5e-2
 
 
-def _ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
-
-
-def _max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
-    return float((a.float().cpu() - b.float().cpu()).abs().max().item())
-
-
-def _mk_block_table(batch, seqlens, seed):
-    g = torch.Generator().manual_seed(seed)
-    bt = torch.full((batch, WIDTH), -1, dtype=torch.int32)
-    for b, s in enumerate(seqlens):
-        nblk = _ceil_div(s, BLOCK_SIZE)
-        ids = torch.randperm(NUM_BLOCKS_POOL, generator=g, dtype=torch.int32)[:nblk]
-        bt[b, :nblk] = ids
-    return bt
-
-
-def cpu_ref_f64(q_cpu, k_cpu, v_cpu, block_table_cpu, seqlens):
-    outs = []
-    for b, seq_len in enumerate(seqlens):
-        nblk = _ceil_div(seq_len, BLOCK_SIZE)
-        ids = block_table_cpu[b, :nblk].tolist()
-        k_flat = torch.cat([k_cpu[i] for i in ids], dim=0)[:seq_len]
-        v_flat = torch.cat([v_cpu[i] for i in ids], dim=0)[:seq_len]
-        k_g = k_flat.repeat_interleave(GROUP, dim=1)
-        v_g = v_flat.repeat_interleave(GROUP, dim=1)
-        scores = torch.einsum("hd,thd->ht", q_cpu[b], k_g) * SCALE
-        attn = torch.softmax(scores, dim=-1)
-        out = torch.einsum("ht,thd->hd", attn, v_g)
-        outs.append(out)
-    return torch.stack(outs, dim=0)
-
-
-def _report(tag, out, q, k, v, bt, seqlens, batch):
-    ref = cpu_ref_f64(q.cpu().double(), k.cpu().double(), v.cpu().double(), bt, seqlens)
-    for b in range(batch):
-        d = _max_abs_diff(out[b], ref[b])
-        flag = "  <-- WRONG" if d > 0.05 else ""
-        print(f"    [{tag}] row {b} seq={seqlens[b]:5d} : {d:.6f}{flag}")
-
-
-def main():
-    if not torch.npu.is_available():
-        raise SystemExit("No NPU device available.")
-
+@pytest.fixture(scope="module")
+def pools():
     torch.manual_seed(0)
-    batch = 4
-    print("=" * 72)
-    print(f"C28 capture+replay   batch={batch} width={WIDTH} maxk={WIDTH*BLOCK_SIZE}")
-    print("=" * 72)
-
-    # ---- static buffers (addresses captured) ----
-    q_buf = torch.zeros(batch, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
-    k = torch.randn(NUM_BLOCKS_POOL, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
+    k = torch.randn(POOL, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
     v = torch.randn_like(k)
-    cache_seqlens_buf = torch.zeros(batch, dtype=torch.int32).npu()
-    cu_q_buf = torch.arange(batch + 1, dtype=torch.int32).npu()
-    block_table_buf = torch.zeros(batch, WIDTH, dtype=torch.int32).npu()
+    return k, v
 
-    # ---- pre-computed scheduler_metadata (like production, built from warmup) ----
-    # bake with SHORT warmup lengths so the metadata differs from the replay.
-    warmup_seqlens = torch.tensor([16, 16, 16, 16], dtype=torch.int32).npu()
-    cache_seqlens_buf.copy_(warmup_seqlens)
-    meta = _get_scheduler_metadata(
-        batch_size=batch,
+
+@pytest.fixture(scope="module")
+def captured_graph(pools):
+    """Capture FA3 decode with max-config static buffers (warmup data)."""
+    q_buf = torch.zeros(BATCH, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
+    cache_seqlens_buf = torch.tensor(WARMUP_SEQLENS, dtype=torch.int32).npu()
+    cu_q_buf = torch.arange(BATCH + 1, dtype=torch.int32).npu()
+    block_table_buf = torch.zeros(BATCH, WIDTH, dtype=torch.int32).npu()
+
+    # max_seqlen_k = width * block_size bakes the block-table row stride
+    # equal to the buffer width — the constraint production relies on.
+    meta = get_scheduler_metadata(
+        batch_size=BATCH,
         max_seqlen_q=1,
         max_seqlen_k=WIDTH * BLOCK_SIZE,
         num_heads_q=NUM_HEADS,
@@ -151,9 +69,10 @@ def main():
         causal=True,
     )
 
-    def run_fn():
-        return _fa3_kvcache(
-            q_buf, k, v,
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        out = fa3_kvcache(
+            q_buf, pools[0], pools[1],
             cache_seqlens=cache_seqlens_buf,
             page_table=block_table_buf,
             cu_seqlens_q=cu_q_buf,
@@ -163,83 +82,65 @@ def main():
             window_size=(-1, -1),
             scheduler_metadata=meta,
         )
-
-    # ---- capture ----
-    print("[capture] torch.npu.graph begin")
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph):
-        out_capture = run_fn()
     torch.npu.synchronize()
-    print("[capture] done")
+    # meta and every captured input buffer must stay alive for the whole
+    # module: the captured kernel keeps reading them, and freeing any of
+    # them makes replays fault (507011).
+    return graph, out, q_buf, cache_seqlens_buf, cu_q_buf, block_table_buf, meta
 
-    # ---- the replay batch (variable lengths, differs from warmup) ----
-    seqlens = [512, 1024, 2048, 4096]
-    q = torch.randn(batch, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
-    bt = _mk_block_table(batch, seqlens, 7)
-    seq_call = torch.tensor(seqlens, dtype=torch.int32).npu()
 
-    # ---- T1: replay with NO refresh (capture-time: cache_seqlens=[16]*4,
-    # block_table=zeros) -> this is what the FIRST decode sees in production
-    # (update-after-replay ordering).  Expect WRONG if the stale-buffer bug is
-    # real.
-    print("-" * 72)
-    print("[T1] replay, no refresh (capture-time buffers)")
-    torch.npu.synchronize()
-    graph.replay()
-    torch.npu.synchronize()
-    _report("T1", out_capture, q, k, v, bt, seqlens, batch)
+def _replay_and_check(captured_graph, pools, q, bt, seqlens, real_batch=None):
+    graph, out, q_buf, cache_seqlens_buf, _cu_q, block_table_buf, _meta = captured_graph
 
-    # ---- T2: refresh on the SAME stream, then replay -> should be CORRECT if
-    # capture/replay + refresh is sound.
-    print("-" * 72)
-    print("[T2] refresh on current stream, then replay")
+    # Production refresh: in-place copies on the current stream, then a
+    # sync before the replay — without it the replay's host-args kernel
+    # launches overtake the pending copies and read a half-written
+    # block_table (MTE fault 507011). A padded batch (real_batch < BATCH)
+    # zeroes its padding block rows and gives padding requests a dummy KV
+    # length of 1.
+    n = BATCH if real_batch is None else real_batch
     q_buf.copy_(q)
-    cache_seqlens_buf.copy_(seq_call)
+    cache_seqlens_buf[:n].copy_(torch.tensor(seqlens, dtype=torch.int32).npu())
+    if n < BATCH:
+        cache_seqlens_buf[n:].fill_(1)
     block_table_buf.copy_(bt.npu())
+    if n < BATCH:
+        block_table_buf[n:].zero_()
     torch.npu.synchronize()
+
     graph.replay()
     torch.npu.synchronize()
-    _report("T2", out_capture, q, k, v, bt, seqlens, batch)
 
-    # ---- T3: refresh on a SIDE stream + wait_stream (production pattern) ----
-    print("-" * 72)
-    print("[T3] refresh on side stream + wait_stream, then replay")
-    update_stream = torch.npu.Stream()
-    q_buf.copy_(torch.zeros_like(q))  # poison so a failed refresh is visible
-    cache_seqlens_buf.fill_(0)
-    block_table_buf.fill_(-1)
-    with torch.npu.stream(update_stream):
-        q_buf.copy_(q, non_blocking=True)
-        cache_seqlens_buf.copy_(seq_call, non_blocking=True)
-        block_table_buf.copy_(bt.npu(), non_blocking=True)
-    torch.npu.current_stream().wait_stream(update_stream)
-    torch.npu.synchronize()
-    graph.replay()
-    torch.npu.synchronize()
-    _report("T3", out_capture, q, k, v, bt, seqlens, batch)
-
-    # ---- T4: a second, DIFFERENT batch to confirm refresh keeps working ----
-    seqlens2 = [256, 768, 1536, 3072]
-    q2 = torch.randn(batch, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
-    bt2 = _mk_block_table(batch, seqlens2, 8)
-    seq_call2 = torch.tensor(seqlens2, dtype=torch.int32).npu()
-    print("-" * 72)
-    print("[T4] second batch, same-stream refresh, replay")
-    q_buf.copy_(q2)
-    cache_seqlens_buf.copy_(seq_call2)
-    block_table_buf.copy_(bt2.npu())
-    torch.npu.synchronize()
-    graph.replay()
-    torch.npu.synchronize()
-    _report("T4", out_capture, q2, k, v, bt2, seqlens2, batch)
-
-    print("-" * 72)
-    print("Read:")
-    print("  T1 wrong + T2/T3/T4 correct -> stale first-token is the bug (ordering).")
-    print("  T2/T3 wrong                 -> graph capture/replay itself broken.")
-    print("  T3 wrong, T2 correct        -> side-stream refresh races replay.")
-    print("-" * 72)
+    ref = cpu_ref_decode(
+        q.double().cpu(), pools[0].double().cpu(), pools[1].double().cpu(),
+        bt[:n], seqlens,
+    )
+    for b, s in enumerate(seqlens):
+        diff = (out[b].float().cpu() - ref[b]).abs().max().item()
+        assert diff < ATOL, f"replay seq={s} row {b}: max abs diff {diff:.6f}"
 
 
-if __name__ == "__main__":
-    main()
+def test_replay_batch_differs_from_warmup(captured_graph, pools):
+    torch.manual_seed(1)
+    seqlens = [512, 1024, 2048, 4096]
+    q = torch.randn(BATCH, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
+    bt = make_block_table(BATCH, seqlens, WIDTH, POOL, seed=7)
+    _replay_and_check(captured_graph, pools, q, bt, seqlens)
+
+
+def test_replay_second_batch(captured_graph, pools):
+    torch.manual_seed(2)
+    seqlens = [256, 768, 1536, 3072]
+    q = torch.randn(BATCH, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
+    bt = make_block_table(BATCH, seqlens, WIDTH, POOL, seed=8)
+    _replay_and_check(captured_graph, pools, q, bt, seqlens)
+
+
+def test_replay_padded_batch(captured_graph, pools):
+    """Two real requests in a graph captured for four (padding semantics of
+    refresh_fa3_graph_params: padding rows -> block 0, cache_seqlens -> 1)."""
+    torch.manual_seed(3)
+    seqlens = [1024, 3584]
+    q = torch.randn(BATCH, NUM_HEADS, HEAD_SIZE, dtype=DTYPE).npu()
+    bt = make_block_table(BATCH, seqlens, WIDTH, POOL, seed=9)
+    _replay_and_check(captured_graph, pools, q, bt, seqlens, real_batch=2)
