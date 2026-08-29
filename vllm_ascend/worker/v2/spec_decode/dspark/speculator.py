@@ -26,11 +26,12 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
+
+from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
 )
-from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
@@ -61,8 +62,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             rotation_weight = get_rotation_matrix(rotation_path)
             fc = model.model.fc
             with torch.no_grad():
-                fc.weight.data.copy_(
-                    process_weight(fc.weight.data.cpu(), rotation_weight))
+                fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
         return model
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:

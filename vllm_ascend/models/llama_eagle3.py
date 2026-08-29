@@ -10,6 +10,7 @@ from safetensors.torch import load_file
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,

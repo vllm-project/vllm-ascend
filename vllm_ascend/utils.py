@@ -30,10 +30,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import regex as re
-from safetensors.torch import load_file
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
+from safetensors.torch import load_file
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 

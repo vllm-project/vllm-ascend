@@ -12,9 +12,8 @@ from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
+    vllm_version_is,
 )
-
-from vllm_ascend.utils import vllm_version_is
 
 TARGET_EMBED_WEIGHT_NAMES = (
     "language_model.model.embed_tokens.weight",

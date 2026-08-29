@@ -24,8 +24,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
@@ -33,9 +33,7 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
 _HIDDEN = 8
 _FC_IN = 5 * _HIDDEN  # concatenated aux hidden states
 # Patch where load_draft_model looks it up (the speculator module binding).
-_ROT_MATRIX = (
-    "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_matrix"
-)
+_ROT_MATRIX = "vllm_ascend.worker.v2.spec_decode.dspark.speculator.get_rotation_matrix"
 
 
 def _spec(vllm_config: SimpleNamespace) -> AscendDSparkSpeculator:
@@ -56,9 +54,7 @@ def _fake_draft() -> SimpleNamespace:
 def _quarot_config() -> SimpleNamespace:
     quarot = {"rotation_map": {"global_rotation": "x.safetensors"}}
     return SimpleNamespace(
-        quant_config=SimpleNamespace(
-            quant_description={"optional": {"quarot": quarot}}
-        ),
+        quant_config=SimpleNamespace(quant_description={"optional": {"quarot": quarot}}),
         model_config=SimpleNamespace(model="/fake"),
     )
 
@@ -68,8 +64,7 @@ def _bf16_config() -> SimpleNamespace:
 
 
 def _no_call(*args, **kwargs):
-    raise AssertionError(
-        "get_rotation_matrix must not be called without a rotation path")
+    raise AssertionError("get_rotation_matrix must not be called without a rotation path")
 
 
 class TestLoadDraftModel:
