@@ -155,11 +155,19 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             # the backend's logical cache shape starts with the K/V dimension.
             # Consequently, padded pages are indexed by their runtime block
             # stride and are safe for hybrid Attention/Mamba allocations.
-            kv_cache_spec[layer_name] = replace(
-                spec,
-                page_size_padded=page_size_padded,
-                indexes_kv_by_block_stride=True,
-            )
+            try:
+                kv_cache_spec[layer_name] = replace(
+                    spec,
+                    page_size_padded=page_size_padded,
+                    indexes_kv_by_block_stride=True,
+                )
+            except TypeError:
+                # Upstream specs do not carry the Ascend-only block-stride
+                # flag; apply the page padding alone in that case.
+                kv_cache_spec[layer_name] = replace(
+                    spec,
+                    page_size_padded=page_size_padded,
+                )
         for layer_name, spec in mamba_specs.items():
             if spec.page_size_bytes < common_page_size:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)

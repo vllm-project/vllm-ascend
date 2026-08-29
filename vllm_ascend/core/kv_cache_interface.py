@@ -50,11 +50,25 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # Ascend binds KV as block-first views and indexes padded pages by
     # runtime block stride, so unify_kv_cache_spec_page_size may pad.
     indexes_kv_by_block_stride: bool = True
+    # Sparse caches store one entry per compress_ratio tokens; plain MLA
+    # caches do not compress. Declared here because the upstream spec does
+    # not carry the field.
+    compress_ratio: int = 1
 
     @property
     def storage_block_size(self) -> int:
         """Return the physical block size consumed by Ascend kernels."""
+        override = getattr(self, "_storage_block_size_override", None)
+        if override is not None:
+            return override
         return self.block_size // self.compress_ratio
+
+    @storage_block_size.setter
+    def storage_block_size(self, value) -> None:
+        # The upstream MLAAttentionSpec declares storage_block_size as a
+        # dataclass field; accept the constructor/replace() assignment and
+        # keep it as an explicit override of the computed Ascend layout.
+        object.__setattr__(self, "_storage_block_size_override", value)
 
     @property
     def real_page_size_bytes(self) -> int:
