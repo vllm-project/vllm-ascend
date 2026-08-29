@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
 class AscendCompressorStateCache(CompressorStateCache):
@@ -214,6 +215,7 @@ class Compressor(nn.Module):
         state_metadata = metadata.state.req_metadata
         assert compressor_metadata is not None
         assert state_metadata is not None
+        wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR)
         compress_cos, compress_sin, slot_mapping = self._compute_metadata(compressor_metadata)
         compressed_kv = torch.ops._C_ascend.compressor(
             hidden_states,

@@ -14,15 +14,18 @@
 # limitations under the License.
 
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+import vllm_ascend.worker.device_metadata as device_metadata
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataExecutor,
     DeviceMetadataStage,
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
+    wait_for_device_metadata,
 )
 
 
@@ -132,6 +135,26 @@ def test_wait_and_release_fence_buffer_reuse(executor_env):
     ]
 
 
+def test_wait_records_each_stage_once_per_submission(executor_env):
+    executor, calls, _ = executor_env
+    executor.submit(_tasks(calls))
+
+    executor.wait(DeviceMetadataStage.INDEXER)
+    executor.wait(DeviceMetadataStage.INDEXER)
+
+    assert calls.count(("model", "wait", "indexer")) == 1
+
+
+def test_submission_in_flight_tracks_release(executor_env):
+    executor, calls, _ = executor_env
+
+    assert not executor.submission_in_flight
+    executor.submit(_tasks(calls))
+    assert executor.submission_in_flight
+    executor.release()
+    assert not executor.submission_in_flight
+
+
 def test_executor_rejects_overlapping_submissions(executor_env):
     executor, calls, _ = executor_env
     tasks = _tasks(calls)
@@ -171,3 +194,29 @@ def test_submit_rejects_empty_tasks(executor_env):
 
     with pytest.raises(ValueError, match="At least one"):
         executor.submit(())
+
+
+def test_wait_helper_uses_active_forward_executor(monkeypatch):
+    calls = []
+    executor = SimpleNamespace(wait=lambda stage: calls.append(stage))
+    monkeypatch.setattr(device_metadata, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(
+        device_metadata,
+        "get_forward_context",
+        lambda: SimpleNamespace(device_metadata_executor=executor),
+    )
+
+    wait_for_device_metadata(DeviceMetadataStage.ATTENTION)
+
+    assert calls == [DeviceMetadataStage.ATTENTION]
+
+
+def test_wait_helper_is_noop_without_forward_context(monkeypatch):
+    monkeypatch.setattr(device_metadata, "is_forward_context_available", lambda: False)
+    monkeypatch.setattr(
+        device_metadata,
+        "get_forward_context",
+        lambda: pytest.fail("forward context should not be read"),
+    )
+
+    wait_for_device_metadata(DeviceMetadataStage.ATTENTION)

@@ -19,6 +19,7 @@ from enum import IntEnum
 from typing import Protocol, runtime_checkable
 
 import torch
+from vllm.forward_context import get_forward_context, is_forward_context_available
 
 
 class DeviceMetadataStage(IntEnum):
@@ -55,6 +56,11 @@ class DeviceMetadataExecutor:
         self._buffer_reusable = torch.npu.Event()
         self._has_reuse_fence = False
         self._submission_in_flight = False
+        self._waited_stages: set[DeviceMetadataStage] = set()
+
+    @property
+    def submission_in_flight(self) -> bool:
+        return self._submission_in_flight
 
     def submit(self, tasks: Iterable[DeviceMetadataTask]) -> None:
         if self._submission_in_flight:
@@ -63,6 +69,7 @@ class DeviceMetadataExecutor:
         if not ordered_tasks:
             raise ValueError("At least one device metadata task is required")
 
+        self._waited_stages.clear()
         self._inputs_ready.record(torch.npu.current_stream())
         with torch.npu.stream(self.stream):
             self.stream.wait_event(self._inputs_ready)
@@ -81,7 +88,9 @@ class DeviceMetadataExecutor:
     def wait(self, stage: DeviceMetadataStage) -> None:
         if not self._submission_in_flight:
             raise RuntimeError("No device metadata submission is in flight")
-        torch.npu.current_stream().wait_event(self._stage_ready[stage])
+        if stage not in self._waited_stages:
+            torch.npu.current_stream().wait_event(self._stage_ready[stage])
+            self._waited_stages.add(stage)
 
     def release(self) -> None:
         if not self._submission_in_flight:
@@ -89,3 +98,11 @@ class DeviceMetadataExecutor:
         self._buffer_reusable.record(torch.npu.current_stream())
         self._has_reuse_fence = True
         self._submission_in_flight = False
+
+
+def wait_for_device_metadata(stage: DeviceMetadataStage) -> None:
+    if not is_forward_context_available():
+        return
+    executor = getattr(get_forward_context(), "device_metadata_executor", None)
+    if executor is not None:
+        executor.wait(stage)
