@@ -20,9 +20,9 @@ import torch
 
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataExecutor,
-    DeviceMetadataPlan,
     DeviceMetadataStage,
     DeviceMetadataTask,
+    DeviceMetadataTaskProvider,
 )
 
 
@@ -47,45 +47,57 @@ class _FakeEvent:
 @pytest.fixture
 def executor_env(monkeypatch):
     calls: list[tuple] = []
+    allocations: list[str] = []
     model_stream = _FakeStream("model", calls)
     metadata_stream = _FakeStream("metadata", calls)
     event_names = iter(("inputs", "compressor", "indexer", "attention", "reusable"))
 
-    monkeypatch.setattr(torch.npu, "Stream", lambda: metadata_stream)
-    monkeypatch.setattr(
-        torch.npu,
-        "Event",
-        lambda: _FakeEvent(next(event_names), calls),
-    )
+    def make_stream():
+        allocations.append("stream")
+        return metadata_stream
+
+    def make_event():
+        name = next(event_names)
+        allocations.append(name)
+        return _FakeEvent(name, calls)
+
+    monkeypatch.setattr(torch.npu, "Stream", make_stream)
+    monkeypatch.setattr(torch.npu, "Event", make_event)
     monkeypatch.setattr(torch.npu, "current_stream", lambda: model_stream)
     monkeypatch.setattr(torch.npu, "stream", lambda stream: nullcontext())
 
-    return DeviceMetadataExecutor(), calls
+    return DeviceMetadataExecutor(), calls, allocations
 
 
-def _plan(calls: list[tuple]) -> DeviceMetadataPlan:
-    return DeviceMetadataPlan(
-        tasks=(
-            DeviceMetadataTask(
-                DeviceMetadataStage.COMPRESSOR,
-                lambda: calls.append(("task", "compressor")),
-            ),
-            DeviceMetadataTask(
-                DeviceMetadataStage.INDEXER,
-                lambda: calls.append(("task", "indexer")),
-            ),
-            DeviceMetadataTask(
-                DeviceMetadataStage.ATTENTION,
-                lambda: calls.append(("task", "attention")),
-            ),
-        )
+def _tasks(calls: list[tuple]) -> tuple[DeviceMetadataTask, ...]:
+    return (
+        DeviceMetadataTask(
+            DeviceMetadataStage.COMPRESSOR,
+            lambda: calls.append(("task", "compressor")),
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.INDEXER,
+            lambda: calls.append(("task", "indexer")),
+        ),
+        DeviceMetadataTask(
+            DeviceMetadataStage.ATTENTION,
+            lambda: calls.append(("task", "attention")),
+        ),
     )
 
 
 def test_submit_records_inputs_and_stage_frontiers(executor_env):
-    executor, calls = executor_env
+    executor, calls, allocations = executor_env
 
-    executor.submit(_plan(calls))
+    assert allocations == [
+        "stream",
+        "inputs",
+        "compressor",
+        "indexer",
+        "attention",
+        "reusable",
+    ]
+    executor.submit(_tasks(calls))
 
     assert calls == [
         ("model", "record", "inputs"),
@@ -100,10 +112,10 @@ def test_submit_records_inputs_and_stage_frontiers(executor_env):
 
 
 def test_wait_and_release_fence_buffer_reuse(executor_env):
-    executor, calls = executor_env
-    plan = _plan(calls)
+    executor, calls, _ = executor_env
+    tasks = _tasks(calls)
 
-    executor.submit(plan)
+    executor.submit(tasks)
     executor.wait(DeviceMetadataStage.INDEXER)
     executor.release()
     assert calls[-2:] == [
@@ -111,7 +123,7 @@ def test_wait_and_release_fence_buffer_reuse(executor_env):
         ("model", "record", "reusable"),
     ]
     calls.clear()
-    executor.submit(plan)
+    executor.submit(tasks)
 
     assert calls[:3] == [
         ("model", "record", "inputs"),
@@ -120,20 +132,42 @@ def test_wait_and_release_fence_buffer_reuse(executor_env):
     ]
 
 
-def test_executor_rejects_overlapping_plans(executor_env):
-    executor, calls = executor_env
-    plan = _plan(calls)
-    executor.submit(plan)
+def test_executor_rejects_overlapping_submissions(executor_env):
+    executor, calls, _ = executor_env
+    tasks = _tasks(calls)
+    executor.submit(tasks)
 
     with pytest.raises(RuntimeError, match="has not been released"):
-        executor.submit(plan)
+        executor.submit(tasks)
 
 
-def test_plan_rejects_out_of_order_tasks():
-    with pytest.raises(ValueError, match="ordered by stage"):
-        DeviceMetadataPlan(
-            tasks=(
-                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None),
-                DeviceMetadataTask(DeviceMetadataStage.COMPRESSOR, lambda: None),
-            )
-        )
+def test_submit_orders_tasks_by_stage(executor_env):
+    executor, calls, _ = executor_env
+    tasks = tuple(reversed(_tasks(calls)))
+
+    executor.submit(tasks)
+
+    assert [call for call in calls if call[0] == "task"] == [
+        ("task", "compressor"),
+        ("task", "indexer"),
+        ("task", "attention"),
+    ]
+
+
+def test_task_provider_is_structural():
+    class LegacyBuilder:
+        pass
+
+    class ProviderBuilder:
+        def build_device_metadata_tasks(self, _context):
+            return (DeviceMetadataTask(DeviceMetadataStage.INDEXER, lambda: None),)
+
+    assert not isinstance(LegacyBuilder(), DeviceMetadataTaskProvider)
+    assert isinstance(ProviderBuilder(), DeviceMetadataTaskProvider)
+
+
+def test_submit_rejects_empty_tasks(executor_env):
+    executor, _, _ = executor_env
+
+    with pytest.raises(ValueError, match="At least one"):
+        executor.submit(())
