@@ -427,7 +427,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=combine_metadata.expanded_row_idx,
-            probs=combine_metadata.topk_weights.to(hidden_states.dtype),
+            probs=combine_metadata.topk_weights,
         )
         if len(combine_metadata.restore_shape) == 3:
             final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
