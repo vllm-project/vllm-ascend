@@ -135,6 +135,23 @@ def _resolve_layer_kv_cache_dtype(
     return kv_cache_dtype
 
 
+def _resolve_layer_kv_cache_dtypes(
+    cache_config: CacheConfig | None,
+    prefix: str,
+    model_config: ModelConfig,
+) -> tuple[str, torch.dtype]:
+    """Resolve MiniMax-M3's semantic and physical per-layer KV dtypes."""
+    kv_cache_dtype = _resolve_layer_kv_cache_dtype(cache_config, prefix)
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        # vLLM represents generic FP8 KV storage as uint8. MiniMax-M3's
+        # fixed-scale sparse-attention and indexer paths consume native E4M3
+        # tensors, so preserve that physical dtype at the cache-spec boundary.
+        kv_cache_torch_dtype = torch.float8_e4m3fn
+    else:
+        kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(kv_cache_dtype, model_config)
+    return kv_cache_dtype, kv_cache_torch_dtype
+
+
 def _cast_for_cache(tensor: torch.Tensor, cache: torch.Tensor) -> torch.Tensor:
     """Cast fixed-scale MiniMax-M3 KV values to the physical cache dtype."""
     if tensor.dtype == cache.dtype:
@@ -287,8 +304,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         vllm_config = get_current_vllm_config()
         self.layer_name = f"{prefix}.attn"
-        self.kv_cache_dtype = _resolve_layer_kv_cache_dtype(cache_config, prefix)
-        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_layer_kv_cache_dtypes(
+            cache_config,
+            prefix,
+            vllm_config.model_config,
+        )
         self.attn_backend = AscendMiniMaxM3SparseBackend
         self.impl = AscendMiniMaxM3SparseImpl(
             self.num_heads,

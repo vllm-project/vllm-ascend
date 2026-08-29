@@ -21,6 +21,7 @@ from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
 from vllm_ascend.models.minimax_m3.minimax_m3 import (
     _cast_for_cache,
     _resolve_layer_kv_cache_dtype,
+    _resolve_layer_kv_cache_dtypes,
     _scatter_index_cache,
 )
 from vllm_ascend.models.minimax_m3.msa_m3 import (
@@ -213,16 +214,44 @@ def test_indexer_cache_uses_sfa_indexer_spec(mock_get_vllm_config: MagicMock) ->
     ) == (4, 128, 128)
 
 
-def test_m3_kv_cache_dtype_skip_layers_keeps_gqa_bf16_and_msa_fp8() -> None:
+@patch(
+    "vllm_ascend.models.minimax_m3.minimax_m3.kv_cache_dtype_str_to_dtype",
+    return_value=torch.bfloat16,
+)
+def test_m3_kv_cache_dtype_skip_layers_keeps_gqa_bf16_and_msa_fp8(
+    mock_kv_dtype: MagicMock,
+) -> None:
     cache_config = SimpleNamespace(
         cache_dtype="fp8",
         kv_cache_dtype_skip_layers=["0", "1", "2"],
     )
+    model_config = SimpleNamespace(dtype=torch.bfloat16)
 
     assert _resolve_layer_kv_cache_dtype(cache_config, "model.layers.0.self_attn") == "auto"
     assert _resolve_layer_kv_cache_dtype(cache_config, "model.layers.2.self_attn") == "auto"
     assert _resolve_layer_kv_cache_dtype(cache_config, "model.layers.3.self_attn") == "fp8"
     assert _resolve_layer_kv_cache_dtype(cache_config, "model.layers.59.self_attn") == "fp8"
+    assert _resolve_layer_kv_cache_dtypes(
+        cache_config,
+        "model.layers.0.self_attn",
+        model_config,
+    ) == ("auto", torch.bfloat16)
+    assert _resolve_layer_kv_cache_dtypes(
+        cache_config,
+        "model.layers.2.self_attn",
+        model_config,
+    ) == ("auto", torch.bfloat16)
+    assert _resolve_layer_kv_cache_dtypes(
+        cache_config,
+        "model.layers.3.self_attn",
+        model_config,
+    ) == ("fp8", torch.float8_e4m3fn)
+    assert _resolve_layer_kv_cache_dtypes(
+        cache_config,
+        "model.layers.59.self_attn",
+        model_config,
+    ) == ("fp8", torch.float8_e4m3fn)
+    assert mock_kv_dtype.call_count == 2
 
 
 def test_m3_fixed_scale_fp8_cache_cast_clamps_e4m3_range() -> None:
