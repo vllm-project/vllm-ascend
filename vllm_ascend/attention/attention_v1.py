@@ -22,7 +22,7 @@ import os
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import logger
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
@@ -75,23 +75,6 @@ _FA3_GRAPH_TENSORS: dict = {}
 # num_tokens values for which we already warned about a decode-replay key
 # mismatch (S2 diagnostic); avoids spamming the log every decode step.
 _FA3_S2_LOGGED: set = set()
-# num_tokens buckets whose FULL aclgraph was ACTUALLY captured with the FA3
-# kernel inside.  Seeding alone (_FA3_GRAPH_TENSORS) does NOT qualify: under
-# async-scheduling FULL graphs are captured with MIXED warmup batches
-# (attn_state=ChunkedPrefill), which may run the CANN path at capture even
-# though decode warmups seeded the bucket.  Skipping the CANN task-group
-# update or refreshing FA3 buffers for such a bucket corrupts the replay —
-# this set is the single source of truth for "the graph contains FA3".
-_FA3_GRAPH_CAPTURED: set = set()
-# HARD op constraint (UT test_bisect_cu case A): the FA3 kernel BAKES the
-# cu_seqlens_q VALUES into the captured tiling — a graph captured with a
-# uniform q layout (all 1s) replays WRONG for a mixed q layout and vice
-# versa, even though cache_seqlens/page_table stay runtime-read (cases B/C).
-# So a bucket's FA3 graph is only replayable by batches whose q layout
-# matches the capture layout.  Layout signature: "U" for uniform decode
-# (every request q == 1), else the exact cumulative tuple.  We only ever
-# replay FA3 graphs for uniform layouts; mixed batches run eager FA3/CANN.
-_FA3_CAPTURE_LAYOUTS: dict = {}
 
 
 def _no_fa3_graph_capture() -> bool:
@@ -100,63 +83,6 @@ def _no_fa3_graph_capture() -> bool:
     accuracy issues.  Set VLLM_ASCEND_DEBUG_FA3_NO_GRAPH=1.
     """
     return os.environ.get("VLLM_ASCEND_DEBUG_FA3_NO_GRAPH") == "1"
-
-
-def _in_full_capture_stream() -> bool:
-    """True only when attention runs INSIDE a FULL-mode NPUGraph capture.
-
-    In PIECEWISE mode the attention op executes between piece graphs, yet
-    ``_EXTRA_CTX.capturing`` stays True after the first piece capture of the
-    step (it is only reset at the next init_forward_context).  Attention
-    there must take the eager path so the capture-step output is also
-    computed from the real batch instead of stale graph buffers.
-    """
-    try:
-        from vllm.forward_context import get_forward_context
-
-        return get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.FULL
-    except Exception:
-        return False
-
-
-def _fa3_decode_graph_enabled(num_tokens: int = 0) -> bool:
-    """Decode FA3 graph capture is opt-in (VLLM_ASCEND_FA3_DECODE_GRAPH=1).
-
-    Applies to graphs captured with decode-shaped warmup batches (no async
-    scheduling): the FA3 kernel is captured inside and its buffers are
-    refreshed before each replay.  Validated on single-node TP4 FULL mode.
-    """
-    return os.environ.get("VLLM_ASCEND_FA3_DECODE_GRAPH") == "1"
-
-
-def _fa3_eager_enabled() -> bool:
-    """Eager FA3 (attention outside any graph) is opt-in.
-
-    VLLM_ASCEND_FA3_EAGER=1 enables it standalone; the decode-graph switch
-    implies it (the verified FDO/F&P shapes pair decode FA3 graphs with
-    eager FA3 prefill).  Default OFF: on driver stacks where the FA3
-    kernel mis-executes when launched eagerly (observed on HDK 25.5.0:
-    decode-shaped eager calls corrupt KV), stock CANN must keep serving
-    NONE / PIECEWISE modes.
-    """
-    # Explicit-only: eager FA3 OOMed 235B under GPQA load in every tested
-    # combination.  Graph-captured FA3 (decode) is the stable replacement.
-    return os.environ.get("VLLM_ASCEND_FA3_EAGER") == "1"
-
-
-def _fa3_refresh_disabled() -> bool:
-    return os.environ.get("KV_NO_REFRESH") == "1"
-
-
-def _fa3_prefill_graph_enabled() -> bool:
-    """Prefill/mixed FA3 graph capture is opt-in (VLLM_ASCEND_FA3_PREFILL_GRAPH=1).
-
-    Under async scheduling FULL graphs are captured with MIXED
-    prefill+decode warmup batches; enabling this switch captures the FA3
-    kernel into those graphs (bucket-bound metadata bake, varlen q via the
-    shared cu_seqlens_q buffer), so both decode and mixed replays run FA3.
-    """
-    return os.environ.get("VLLM_ASCEND_FA3_PREFILL_GRAPH") == "1"
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -539,59 +465,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         except (ImportError, AttributeError):
             return False
 
-    def _fa3_eligible(self, attn_metadata: "AscendMetadata", for_capture: bool = False) -> bool:
-        """Whether this attention call can be served by FA3 instead of CANN FIA.
-
-        FA3 covers GQA with template masks only (causal / sliding-window /
-        full).  Calls with learnable sinks, ENCODER_DECODER cross-attention
-        (KV lengths decoupled from query lengths) or unsupported states stay
-        on the CANN path.  head_dim <= 256 is validated inside the adapter
-        (raises ValueError -> the caller trips _fa3_enabled and falls back).
-
-        ``for_capture=True`` drops the FULL-mode eager exclusion: eager FA3
-        prefill under FULL mode is excluded because per-batch kernel
-        workspaces (sized by max_seqlen_q, multi-hundred MiB) crashed the
-        sampler with OOM, but INSIDE a graph capture the workspace is
-        allocated once into the graph pool, which is the validated 30B
-        bring-up configuration.
-        """
-        if not self._fa3_enabled:
-            return False
-        if self.sinks is not None:
-            return False
-        if self.attn_type == AttentionType.ENCODER_DECODER:
-            return False
-        if not for_capture:
-            # Eager DECODE FA3 needs the explicit standalone switch: the
-            # decode-graph switch only implies eager FA3 for PREFILL states
-            # (the verified FDO/F&P shape).  Graph-miss decode steps fall
-            # back to stock CANN instead of the eager FA3 kernel, which
-            # mis-executes on some driver stacks (HDK 25.5.0).
-            if attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                if os.environ.get("VLLM_ASCEND_FA3_EAGER") != "1":
-                    return False
-            elif not _fa3_eager_enabled():
-                return False
-        # Eager FA3 prefill is excluded ONLY under plain FULL: there the
-        # mixed CANN graph family replays prefill in-graph (stock behavior,
-        # and eager FA3 workspaces next to the full-graph pool OOMed under
-        # GPQA load).  FULL_DECODE_ONLY / FULL_AND_PIECEWISE / PIECEWISE /
-        # NONE all run prefill attention eagerly — FA3 serves it there
-        # (verified: GPQA 69.70 FDO + eager FA3 prefill, GPQA 70.71
-        # PIECEWISE + eager FA3 attention).
-        if (
-            not for_capture
-            and attn_metadata.attn_state != AscendAttentionState.DecodeOnly
-            and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
-        ):
-            return False
-        return attn_metadata.attn_state in (
-            AscendAttentionState.DecodeOnly,
-            AscendAttentionState.PrefillNoCache,
-            AscendAttentionState.PrefillCacheHit,
-            AscendAttentionState.ChunkedPrefill,
-        )
-
     def _build_fa3_scheduler_metadata(
         self,
         attn_metadata: "AscendMetadata",
@@ -609,21 +482,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if not is_cache:
             return None
 
-        # NOTE: graph-bucket seeding is done by the caller
-        # (forward_fused_infer_attention) BEFORE the eager eligibility check,
-        # so buckets get seeded even when eager FA3 execution is disabled
-        # under FULL mode (prefill OOM guard).
+        # Seed the graph-cache during eager decode (warmup) so graph capture
+        # never calls get_scheduler_metadata inside torch.npu.graph() — FA3's
+        # get_scheduler_metadata performs an aclrtSynchronizeStream which is
+        # illegal on the captured stream.
+        #
+        # IMPORTANT: skip during the memory-profile run.  get_scheduler_metadata
+        # allocates buffers sized by max_model_len; if allocated during the
+        # profile it shrinks the measured free memory and thus the KV cache,
+        # corrupting prefill output.  Defer to the graph-capture warmup which
+        # runs AFTER the KV cache has been sized.
+        if (
+            attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            and not _EXTRA_CTX.in_profile_run
+        ):
+            num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+            self._get_fa3_graph_params(num_tokens, attn_metadata, block_size, query)
 
-        # Strip the padding dummy segment (KV len 0, query spanning all
-        # padding tokens) so the metadata fingerprint matches the call side,
-        # which applies the same stripping in fa3_forward.  Without this the
-        # dummy's huge q span explodes max_seqlen_q (fingerprint mismatch +
-        # multi-GiB kernel workspace -> OOM).
-        from vllm_ascend.attention.fa3_adapter import strip_padding_dummy
-
-        real_cu, real_kv, max_seqlen_q = strip_padding_dummy(
-            attn_metadata.actual_seq_lengths_q, attn_metadata.seq_lens_list,
-        )
+        cache_seqlens = attn_metadata.seq_lens
+        if cache_seqlens.device != query.device:
+            cache_seqlens = cache_seqlens.to(device=query.device)
+        cu_seqlens_q = attn_metadata.query_start_loc
+        if cu_seqlens_q.device != query.device:
+            cu_seqlens_q = cu_seqlens_q.to(device=query.device)
 
         # get_scheduler_metadata bakes the block-table ROW STRIDE
         # (maxNumBlocksPerBatch) as ceil(max_seqlen_k / block_size).  The kernel
@@ -640,56 +521,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 max(attn_metadata.seq_lens_list) + block_size - 1
             ) // block_size
 
-        # SHAPE-KEYED metadata cache.  Building scheduler metadata allocates
-        # NPU buffers every call; under sustained load (GPQA-class workloads)
-        # this exhausted device memory and eventually crashed even the CANN
-        # fallback path.  The metadata CONTENT only depends on the batch
-        # SHAPE (batch_size, max_seqlen_q, paged geometry); cache_seqlens /
-        # cu_seqlens_q values are runtime-read by the kernel (bisect B/C),
-        # so the cached buffers are simply refreshed with the current values.
-        # The AICPU tiling BAKES the cu_seqlens_q layout: the cache key must
-        # include the exact cu layout, otherwise multi-request batches with
-        # different q-length distributions reuse a mismatched tiling.
-        shape_key = (
-            len(real_kv), max_seqlen_q, max_blocks_per_seq * block_size,
-            tuple(real_cu),
+        return get_scheduler_metadata(
+            batch_size=len(attn_metadata.seq_lens_list),
+            max_seqlen_q=attn_metadata.max_query_len,
+            max_seqlen_k=max_blocks_per_seq * block_size,
+            num_heads_q=self.num_heads,
+            num_heads_kv=self.num_kv_heads,
+            headdim=self.head_size,
+            cache_seqlens=cache_seqlens,
+            qkv_dtype=query.dtype,
+            cu_seqlens_q=cu_seqlens_q,
+            page_size=block_size,
+            causal=attn_metadata.causal,
         )
-
-        if not hasattr(self, "_fa3_eager_meta_cache"):
-            self._fa3_eager_meta_cache = {}
-        entry = self._fa3_eager_meta_cache.get(shape_key)
-        if entry is None:
-            cs_buf = torch.zeros(len(real_kv), dtype=torch.int32, device=query.device)
-            cu_buf = torch.zeros(len(real_cu), dtype=torch.int32, device=query.device)
-            meta = get_scheduler_metadata(
-                batch_size=len(real_kv),
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_blocks_per_seq * block_size,
-                num_heads_q=self.num_heads,
-                num_heads_kv=self.num_kv_heads,
-                headdim=self.head_size,
-                cache_seqlens=cs_buf,
-                qkv_dtype=query.dtype,
-                cu_seqlens_q=cu_buf,
-                page_size=block_size,
-                causal=attn_metadata.causal,
-            )
-            entry = (meta, cs_buf, cu_buf)
-            # expose the buffers so fa3_forward passes the SAME tensors to
-            # the kernel (fingerprint + zero per-call allocation)
-            meta._fa_cs_buf = cs_buf
-            meta._fa_cu_buf = cu_buf
-            # Prefill batches produce many distinct shape keys (variable
-            # max_seqlen_q); cap the cache and drop everything when full —
-            # worst case rebuilds metadata for one batch.
-            if len(self._fa3_eager_meta_cache) >= 128:
-                self._fa3_eager_meta_cache.clear()
-            self._fa3_eager_meta_cache[shape_key] = entry
-        meta, cs_buf, cu_buf = entry
-        # Reuse existing NPU buffers — direct copies, zero new allocations.
-        cs_buf.copy_(torch.as_tensor(real_kv, dtype=torch.int32, device=query.device))
-        cu_buf.copy_(torch.as_tensor(real_cu, dtype=torch.int32, device=query.device))
-        return meta
 
     def _get_fa3_graph_params(
         self,
@@ -698,61 +542,45 @@ class AscendAttentionBackendImpl(AttentionImpl):
         block_size: int,
         query: torch.Tensor,
     ):
-        """Return cached FA3 graph params for a capture bucket (decode + prefill).
+        """Return cached FA3 graph params for *num_tokens* (decode only).
 
-        Pre-allocates fixed-size NPU buffers so that:
-          1. ``scheduler_metadata`` is baked with the BUCKET-BOUND config:
-             decode buckets use ``max_seqlen_q=1`` (every decode request has
-             exactly one query token); prefill buckets use the bucket upper
-             bound ``num_tokens`` (any packed batch composition within the
-             bucket has max q_len <= num_tokens; the kernel derives the real
-             per-seq boundaries from cu_seqlens_q, validated by
-             test_fa3_prefill_graph_contracts.py).  ``max_seqlen_k`` is baked
-             with the paged-cache capacity so the block-table row stride
-             equals the table width (a smaller stride reads across rows into
-             -1 slots -> MTE fault 507011).
-          2. The buffers' data is refreshed before each replay by
-             ``refresh_fa3_graph_params`` (no H2D inside torch.npu.graph()).
+        Pre-allocates MAX-configuration NPU buffers (fixed shapes) so that:
+          1. ``scheduler_metadata`` is valid for any decode batch padded up to
+             the graph's maximum size — every decode request has exactly one
+             query token, so ``max_seqlen_q=1`` is always correct.
+          2. The buffers' data is refreshed before each replay via
+             ``update_graph_params`` (no H2D inside ``torch.npu.graph()``).
           3. The ``block_table`` buffer is zero-padded so padding requests
              point to block 0 (valid memory), never stale freed blocks.
 
-        The metadata cache is keyed by ``(num_tokens, baked_max_seqlen_q)``
-        because the same num_tokens bucket holds a decode graph (max_q=1)
-        and a prefill graph (max_q=num_tokens) with different tilings; the
-        batch-level data buffers stay keyed by num_tokens alone (shared
-        across both, fully overwritten on refresh).
-
-        Returns ``None`` when the bucket has not been seeded by an eager
-        warmup step yet (caller falls back to the CANN V1 capture).
+        Returns ``None`` for non-decode attention states (prefill stays on
+        the CANN V1 graph path).
         """
         # E3 diagnostic: do not seed FA3 graph buffers / _FA3_GRAPH_TENSORS when
-        # FA3 graph capture is switched back to CANN V1.  The eager FA3 path
+        # decode graph capture is switched back to CANN V1.  The eager FA3 path
         # (which builds its own fresh scheduler_metadata) is unaffected.
         if _no_fa3_graph_capture():
             return None
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            # Dense varlen has no fixed-address paged KV and its metadata
-            # cannot be pre-baked for capture; its graph capture stays on the
-            # CANN V1 path (the eager path still runs FA3).
-            return None
+        if num_tokens in self._fa3_scheduler_metadata:
+            return self._fa3_scheduler_metadata[num_tokens]
 
-        # Bake the BUCKET BOUND for max_seqlen_q regardless of the seeding
-        # batch's state.  Under async scheduling the same FULL graph serves
-        # decode batches (q=1 per request) AND mixed prefill batches (q up to
-        # num_tokens in one request); the kernel derives real per-request
-        # boundaries from the refreshed cu_seqlens_q buffer at runtime, so a
-        # bucket-bound tiling covers both (a decode-captured q=1 bake breaks
-        # mixed replays with q>1).  Validated by
-        # test_fa3_prefill_graph_contracts.py (baked bound >> real q lens).
-        baked_max_seqlen_q = 1
-        cache_key = (num_tokens, baked_max_seqlen_q)
-        if cache_key in self._fa3_scheduler_metadata:
-            return self._fa3_scheduler_metadata[cache_key]
+        if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+            return None  # prefill stays on CANN V1; do not cache
 
         from vllm_ascend.attention.fa3_adapter import get_scheduler_metadata
 
         device = query.device
+        # Decode config: num_tokens requests, each with exactly 1 query token.
+        # max_seqlen_k is NOT the batch's actual max KV length for the bake
+        # below — we pass max_blocks_per_seq * block_size so the baked
+        # block-table row stride (maxNumBlocksPerBatch = ceil(max_seqlen_k /
+        # block_size)) equals the block-table width.  A smaller stride (from the
+        # warmup batch's short max KV length) makes the kernel read across rows
+        # into a previous request's unallocated (-1) slots -> MTE fault (507011).
+        # The actual max KV length is kept only as the fallback for the
+        # non-paged (no block table) case.
         max_batch_size = num_tokens
+        max_seqlen_q = 1
         max_seqlen_k = max(
             attn_metadata.seq_lens_list if attn_metadata.seq_lens_list else [num_tokens]
         )
@@ -767,11 +595,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         #
         # These hold BATCH-LEVEL data (cache_seqlens / cu_seqlens_q /
         # block_table) that is identical for every layer.  They MUST be shared
-        # across layers: `refresh_fa3_graph_params` refreshes only the single
-        # tuple stored in the global `_FA3_GRAPH_TENSORS[num_tokens]`, so if
-        # each layer allocated its own buffers, every layer except the last
-        # one would keep reading its own stale (capture-time,
-        # block_table=zeros) buffers and produce wrong output.
+        # across layers: `update_graph_params` refreshes only the single tuple
+        # stored in the global `_FA3_GRAPH_TENSORS[num_tokens]`, so if each layer
+        # allocated its own buffers, every layer except the last one would keep
+        # reading its own stale (capture-time, block_table=zeros) buffers and
+        # produce wrong decode output.
         global _FA3_GRAPH_TENSORS
         if num_tokens in _FA3_GRAPH_TENSORS:
             cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf = _FA3_GRAPH_TENSORS[num_tokens]
@@ -782,38 +610,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 max_batch_size, max_blocks_per_seq, dtype=torch.int32, device=device
             )
 
-            # cu_seqlens_q: initialize with the STRIPPED seeding batch
-            # (padding dummy removed, matching the refresh layout) — refresh
-            # fully overwrites before every replay.
-            from vllm_ascend.attention.fa3_adapter import strip_padding_dummy
-
-            seed_cu, seed_kv, _ = strip_padding_dummy(
-                attn_metadata.actual_seq_lengths_q,
-                attn_metadata.seq_lens_list,
+            # Decode: cu_seqlens_q is always [0, 1, ..., num_tokens] (each request
+            # has exactly 1 query token).  Fixed at allocation time.
+            cu_seqlens_q_buf.copy_(
+                torch.arange(max_batch_size + 1, dtype=torch.int32, device=device)
             )
-            cu_seqlens_q_buf[: len(seed_cu)] = torch.as_tensor(
-                seed_cu, dtype=torch.int32, device=device,
-            )
-            # Fill the tail with a 1-token-per-request padding layout (KV len
-            # 1 rows reading block 0) so capture-time data is well-formed.
-            _last = seed_cu[-1] if seed_cu else 0
-            for _i in range(len(seed_cu), max_batch_size + 1):
-                _last += 1
-                cu_seqlens_q_buf[_i] = _last
-            # cache_seqlens: warmup batch's real KV lengths (dummy KV=0 entries
-            # replaced by 1 so padding rows read block 0, valid memory).
+            # cache_seqlens: warmup batch's real KV lengths.
             n = min(attn_metadata.seq_lens.numel(), max_batch_size)
             cache_seqlens_buf[:n].copy_(attn_metadata.seq_lens[:n].to(device=device))
-            cache_seqlens_buf[cache_seqlens_buf == 0] = 1
             _FA3_GRAPH_TENSORS[num_tokens] = (
                 cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf,
             )
 
-        # Scheduler metadata for the bucket max config — valid for any batch
-        # padded to num_tokens requests with max_seqlen_q <= baked bound.
+        # Scheduler metadata for the decode max config — valid for any decode
+        # batch padded to num_tokens requests.
         meta = get_scheduler_metadata(
             batch_size=max_batch_size,
-            max_seqlen_q=baked_max_seqlen_q,
+            max_seqlen_q=max_seqlen_q,
             max_seqlen_k=max_blocks_per_seq * block_size,
             num_heads_q=self.num_heads,
             num_heads_kv=self.num_kv_heads,
@@ -825,16 +638,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             causal=attn_metadata.causal,
         )
 
-        fa3_graph = (
-            meta, cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf,
-            baked_max_seqlen_q,
-        )
-        self._fa3_scheduler_metadata[cache_key] = fa3_graph
-        logger.info(
-            "FA3 graph capture: cached tensors for num_tokens=%s max_seqlen_q=%s "
+        fa3_graph = (meta, cache_seqlens_buf, cu_seqlens_q_buf, block_table_buf)
+        self._fa3_scheduler_metadata[num_tokens] = fa3_graph
+        # S2 diagnostic: expose the capture key and the block_table width so a
+        # decode-replay key mismatch (or a truncated block_table) is visible in
+        # the log.  num_tokens here is actual_seq_lengths_q[-1] == num_tokens_padded.
+        logger.warning(
+            "FA3 graph capture: cached tensors for num_tokens=%s "
             "(max_seqlen_k=%s, max_batch_size=%s, block_table_cols=%s).",
-            num_tokens, baked_max_seqlen_q, max_seqlen_k, max_batch_size,
-            max_blocks_per_seq,
+            num_tokens, max_seqlen_k, max_batch_size, max_blocks_per_seq,
         )
         return fa3_graph
 
@@ -846,7 +658,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     @staticmethod
     def refresh_fa3_graph_params(update_stream, forward_context, num_tokens):
-        """Refresh FA3 graph buffers BEFORE the aclgraph replay (decode + prefill).
+        """Refresh FA3 graph buffers BEFORE the aclgraph replay (decode-only).
 
         FA3 is a plain torch op captured inside the aclgraph: it reads its
         ``cache_seqlens``/``cu_seqlens_q``/``block_table`` buffers directly at
@@ -867,44 +679,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
         Returns True if an FA3 refresh was performed.
         """
         global _FA3_GRAPH_TENSORS
-        global _FA3_GRAPH_CAPTURED
-        global _FA3_CAPTURE_LAYOUTS
         first_meta = next(iter(forward_context.attn_metadata.values()), None)
-        # FA3 graphs live only in the uniform-decode descriptor family; the
-        # mixed/prefill family of the same bucket is CANN FIA (dual-family
-        # FULL mode).  Only DECODE replays read the FA3 buffers — mixed
-        # replays must leave them alone and let update_graph_params run the
-        # CANN task-group update for their graph.
-        if first_meta is None or first_meta.attn_state != AscendAttentionState.DecodeOnly:
-            return False
-        if _fa3_refresh_disabled():
-            return False
-        # Only refresh buckets whose graph ACTUALLY contains FA3.  A merely
-        # seeded bucket (mixed-warmup graph captured with CANN FIA inside)
-        # has no FA3 kernel reading these buffers.
-        if num_tokens not in _FA3_GRAPH_CAPTURED:
-            return False
-        # HARD constraint: the kernel bakes the cu_seqlens_q VALUES into the
-        # captured tiling.  A mixed-q batch replaying a uniform-captured FA3
-        # graph (or vice versa) produces wrong output even with correctly
-        # refreshed buffers.  Decode dispatch pads uniformly (dual-family
-        # FULL mode / FULL_DECODE_ONLY), so decode replays are layout "U";
-        # log loudly if that invariant ever breaks.
-        _asq = list(first_meta.actual_seq_lengths_q)
-        _layout = "U" if all(
-            (_asq[i] - (_asq[i - 1] if i else 0)) == 1
-            for i in range(len(_asq))
-        ) else tuple(_asq)
-        _cap_layout = _FA3_CAPTURE_LAYOUTS.get(num_tokens)
-        if _cap_layout is not None and _cap_layout != _layout:
-            logger.error(
-                "FA3 layout mismatch: bucket=%s captured=%s replay=%s — "
-                "decode replays must be uniform; check _pad_query_start_loc_for_fia.",
-                num_tokens, _cap_layout, _layout,
-            )
-        fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens)
-        if fa3_tensors is None and _FA3_GRAPH_TENSORS:
-            # S2 diagnostic: FA3 replay could not find the captured FA3
+        is_decode_replay = first_meta is not None and (
+            first_meta.attn_state == AscendAttentionState.DecodeOnly
+        )
+        fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens) if is_decode_replay else None
+        if is_decode_replay and fa3_tensors is None and _FA3_GRAPH_TENSORS:
+            # S2 diagnostic: decode replay could not find the captured FA3
             # tensors for this num_tokens.  Capture keys by
             # actual_seq_lengths_q[-1] (== num_tokens_padded at capture); replay
             # keys by num_tokens_padded.  If these diverge, no refresh happens
@@ -914,7 +695,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if num_tokens not in _FA3_S2_LOGGED:
                 _FA3_S2_LOGGED.add(num_tokens)
                 logger.warning(
-                    "FA3 replay: no captured graph tensors for "
+                    "FA3 decode replay: no captured graph tensors for "
                     "num_tokens=%s (captured keys=%s). cache_seqlens/block_table "
                     "will NOT be refreshed -> stale graph replay.",
                     num_tokens, sorted(_FA3_GRAPH_TENSORS),
@@ -922,56 +703,39 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if fa3_tensors is None:
             return False
         cache_seqlens, cu_seqlens_q, block_table_buf = fa3_tensors
-
         for meta in forward_context.attn_metadata.values():
             if meta.seq_lens is not None:
-                # Replay refresh uses vllm's NATIVE padded layout (the same
-                # layout CANN V1 task-group updates feed to FIA), NOT the
-                # stripped eager layout: the graph's output rows are mapped
-                # by cu positions, so cu must mirror query_start_loc exactly
-                # (including the DP-padding dummy request) for downstream
-                # slicing to pick up the right rows.
                 n_batch = cache_seqlens.numel()
-                n_cu = cu_seqlens_q.numel()
+                n_actual = meta.seq_lens.numel()
+                n_pad = n_batch - n_actual
 
-                # cu_seqlens_q: copy the padded query_start_loc verbatim;
-                # tail entries (beyond the live requests) repeat the last
-                # value — zero-length padding requests.
-                if meta.query_start_loc is not None:
-                    qsl = meta.query_start_loc
-                    n_qsl = min(qsl.numel(), n_cu)
-                    cu_seqlens_q[:n_qsl].copy_(
-                        qsl[:n_qsl].to(device=cu_seqlens_q.device,
-                                       dtype=cu_seqlens_q.dtype)
-                    )
-                    if n_qsl < n_cu:
-                        cu_seqlens_q[n_qsl:].copy_(cu_seqlens_q[n_qsl - 1])
-
-                # cache_seqlens: live rows verbatim, but the DP-padding
-                # dummy's KV length 0 becomes 1 so the kernel reads exactly
-                # block 0 (valid memory) for it; tail padding rows get 1.
-                n_live = min(meta.seq_lens.numel(), n_batch)
-                cache_seqlens[:n_live].copy_(
-                    meta.seq_lens[:n_live].to(device=cache_seqlens.device)
+                # cache_seqlens: real lengths first, padding requests
+                # get KV length 1 (dummy, reads block 0 via zero rows).
+                cache_seqlens[:n_actual].copy_(
+                    meta.seq_lens.to(device=cache_seqlens.device, non_blocking=True)
                 )
-                cache_seqlens[:n_live][cache_seqlens[:n_live] == 0] = 1
-                if n_live < n_batch:
-                    cache_seqlens[n_live:].fill_(1)
+                if n_pad > 0:
+                    cache_seqlens[n_actual:].fill_(1)
 
-                # block_table: copy the LIVE rows (real requests + dummy) but
-                # sanitize -1 (vllm's unallocated-slot sentinel) to 0 — the
-                # kernel walks block_table[row] with stride = table width, and
-                # a -1 anywhere in a walked row is an invalid address; tail
-                # padding rows zeroed (padding requests read block 0).
+                # cu_seqlens_q: real cumulative first, then one query
+                # token per padding request.
+                n_cu = cu_seqlens_q.numel()
+                n_cu_actual = min(meta.query_start_loc.numel(), n_cu)
+                cu_seqlens_q[:n_cu_actual].copy_(meta.query_start_loc[:n_cu_actual])
+                if n_cu_actual < n_cu:
+                    last = int(cu_seqlens_q[n_cu_actual - 1].item())
+                    for i in range(n_cu_actual, n_cu):
+                        last += 1
+                        cu_seqlens_q[i] = last
+
+                # block_table: real rows first, padding rows zeroed so
+                # padding requests point to block 0 (valid memory).
                 if meta.block_tables is not None:
                     n_bt_r = min(meta.block_tables.shape[0], block_table_buf.shape[0])
                     n_bt_c = min(meta.block_tables.shape[1], block_table_buf.shape[1])
                     block_table_buf[:n_bt_r, :n_bt_c].copy_(
                         meta.block_tables[:n_bt_r, :n_bt_c]
                     )
-                    block_table_buf[:n_bt_r, :n_bt_c][
-                        block_table_buf[:n_bt_r, :n_bt_c] == -1
-                    ] = 0
                     if n_bt_r < block_table_buf.shape[0]:
                         block_table_buf[n_bt_r:].zero_()
                 break
@@ -989,27 +753,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
 
-        # FA3 graphs are invisible to the CANN task-group mechanism, so they
-        # have NO entries in graph_params.  Running the CANN task-group update
-        # for a bucket whose graph contains FA3 is at best a no-op and at
-        # worst (when graph_params holds stale entries for that num_tokens
-        # from an earlier CANN capture) corrupts unrelated handles.  The FA3
-        # buffers themselves are refreshed by refresh_fa3_graph_params BEFORE
-        # the replay.
-        #
-        # Gate on _FA3_GRAPH_CAPTURED — buckets whose UNIFORM-DECODE graph
-        # actually contains the FA3 kernel — and only for DECODE replays.
-        # The dual-family FULL mode captures a second, CANN FIA graph for
-        # the same bucket (mixed descriptor); mixed replays MUST run the
-        # CANN task-group update below, while decode replays (FA3 graph,
-        # no task-group handles) must skip it — updating CANN handles with
-        # decode data corrupts the mixed graph's next replay.
-        global _FA3_GRAPH_CAPTURED
+        # FA3 decode graph: it is invisible to the CANN task-group mechanism, so
+        # it has NO entries in graph_params.  graph_params[num_tokens] may hold
+        # entries from a prefill CANN V1 graph captured with the SAME num_tokens;
+        # running the CANN task-group update below would use DECODE data to
+        # update those PREFILL handles, corrupting the prefill graph.  The FA3
+        # buffers themselves are refreshed by refresh_fa3_graph_params BEFORE the
+        # replay.  Skip the CANN V1 update here.
+        global _FA3_GRAPH_TENSORS
         first_meta = next(iter(forward_context.attn_metadata.values()), None)
         is_decode_replay = first_meta is not None and (
             first_meta.attn_state == AscendAttentionState.DecodeOnly
         )
-        if is_decode_replay and num_tokens in _FA3_GRAPH_CAPTURED:
+        if is_decode_replay and num_tokens in _FA3_GRAPH_TENSORS:
             return
 
         if using_paged_attention(num_tokens, vllm_config):
@@ -1748,7 +1504,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_kv: list[int] | torch.Tensor,
         fa3_graph_params: tuple | None = None,
     ):
-        """FA3 graph capture — NPUGraph driver-level recording (decode + prefill).
+        """FA3 graph capture — NPUGraph driver-level recording.
 
         FA3 (PyTorch CustomOp) is invisible to the CANN task-group mechanism,
         so no ``graph_task_group_begin/End`` wrappers are used — an empty task
@@ -1757,46 +1513,64 @@ class AscendAttentionBackendImpl(AttentionImpl):
         prefill accuracy.
 
         ``fa3_graph_params`` is the cached (scheduler_metadata, cache_seqlens,
-        cu_seqlens_q, block_table, baked_max_seqlen_q) tuple from
-        ``_get_fa3_graph_params``.  All buffers are fixed-size NPU tensors
-        whose addresses are captured and whose data is refreshed before each
-        replay by ``refresh_fa3_graph_params``.  ``max_seqlen_q`` passed to
-        the kernel is the BAKED bucket bound (required to match the metadata
-        fingerprint); the kernel derives real per-seq boundaries from
-        cu_seqlens_q.
+        cu_seqlens_q, block_table) tuple from ``_get_fa3_graph_params``.  All
+        are fixed-size NPU buffers whose addresses are captured and whose data
+        is refreshed before each replay by ``update_graph_params``.
         """
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
+        is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
 
-        from flash_attn_npu_3 import flash_attn_with_kvcache as fa3_kvcache
+        if is_cache:
+            from flash_attn_npu_3 import flash_attn_with_kvcache as fa3_kvcache
 
-        num_blocks, bs = key.shape[0], key.shape[1]
-        k_fa = key.view(num_blocks, bs, self.num_kv_heads, self.head_size)
-        v_fa = value.view(num_blocks, bs, self.num_kv_heads, self.head_size)
+            num_blocks, bs = key.shape[0], key.shape[1]
+            k_fa = key.view(num_blocks, bs, self.num_kv_heads, self.head_size)
+            v_fa = value.view(num_blocks, bs, self.num_kv_heads, self.head_size)
 
-        scheduler_metadata, cache_seqlens, cu_seqlens_q, block_table_buf, baked_max_seqlen_q = (
-            fa3_graph_params
-        )
+            # Use fixed-size NPU buffers from the cached graph params — no
+            # H2D copy or tensor creation inside the graph capture stream.
+            scheduler_metadata, cache_seqlens, cu_seqlens_q, block_table_buf = fa3_graph_params
+            max_seqlen_q = 1  # decode: every request has exactly 1 query token
 
-        causal = attn_metadata.causal
-        window_size = (
-            (self.sliding_window, 0)
-            if causal and self.sliding_window is not None
-            else (-1, -1)
-        )
+            causal = attn_metadata.causal
+            window_size = (
+                (self.sliding_window, 0)
+                if causal and self.sliding_window is not None
+                else (-1, -1)
+            )
 
-        attn_output = fa3_kvcache(
-            query,
-            k_fa,
-            v_fa,
-            cache_seqlens=cache_seqlens,
-            page_table=block_table_buf,
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=baked_max_seqlen_q,
-            softmax_scale=self.scale,
-            causal=causal,
-            window_size=window_size,
-            scheduler_metadata=scheduler_metadata,
-        )
+            attn_output = fa3_kvcache(
+                query,
+                k_fa,
+                v_fa,
+                cache_seqlens=cache_seqlens,
+                page_table=block_table_buf,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                softmax_scale=self.scale,
+                causal=causal,
+                window_size=window_size,
+                scheduler_metadata=scheduler_metadata,
+            )
+        else:
+            from flash_attn_npu_3 import flash_attn_varlen_func
+
+            cu_seqlens_q = attn_metadata.query_start_loc
+            cu_seqlens_k = cu_seqlens_q
+            max_seqlen_q = attn_metadata.max_query_len
+            max_seqlen_k = max_seqlen_q
+
+            attn_output = flash_attn_varlen_func(
+                query,
+                key,
+                value,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=self.scale,
+                causal=attn_metadata.causal,
+            )
 
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
@@ -1875,69 +1649,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
         if _EXTRA_CTX.capturing:
-            _capture_num_tokens = (
-                attn_metadata.actual_seq_lengths_q[-1]
-                if attn_metadata.actual_seq_lengths_q else 0
-            )
             if (
-                self._fa3_eligible(attn_metadata, for_capture=True)
-                and _in_full_capture_stream()
+                self._fa3_enabled
+                and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
                 and not _no_fa3_graph_capture()
-                and (
-                    (
-                        attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-                        and _fa3_decode_graph_enabled(_capture_num_tokens)
-                    )
-                    or (
-                        attn_metadata.attn_state != AscendAttentionState.DecodeOnly
-                        and _fa3_prefill_graph_enabled()
-                    )
-                )
             ):
-                # FA3 graph capture (opt-in per warmup shape, see the two
-                # enable helpers).  Only reachable inside a FULL-mode NPUGraph
-                # capture where the FA3 call and its fixed-size buffers are
-                # address-captured; PIECEWISE residue capturing falls through
-                # to the eager path below so the capture-step output uses the
-                # real batch.  Unseeded buckets return None and fall back to
-                # CANN V1.
+                # FA3 decode-only graph capture.  Decode has exactly 1 query
+                # token per request (num_tokens == batch size), so the fixed
+                # scheduler config is always valid.  Prefill (variable batch /
+                # long sequences) stays on CANN V1 — padding prefill to the
+                # graph size would overflow the query tensor.
                 key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
                     key, value, attn_metadata, kv_cache,
                 )
+                num_tokens = attn_metadata.actual_seq_lengths_q[-1]
                 fa3_graph_params = self._get_fa3_graph_params(
-                    _capture_num_tokens, attn_metadata, block_size, query,
+                    num_tokens, attn_metadata, block_size, query,
                 )
-                if fa3_graph_params is not None:
-                    attn_output, num_tokens = self.full_graph_fa3(
-                        query, key, value, attn_metadata, output,
-                        block_size=block_size,
-                        block_table=block_table,
-                        actual_seq_lengths_kv=actual_seq_lengths_kv,
-                        fa3_graph_params=fa3_graph_params,
-                    )
-                    # Record that THIS bucket's graph now contains the FA3
-                    # kernel: replay-side refresh/update gating keys off this
-                    # set (seeding alone is not enough — mixed-warmup graphs
-                    # may contain CANN FIA instead).  Also record the capture
-                    # q-layout: the kernel bakes cu values into the tiling,
-                    # so only same-layout batches may replay this graph.
-                    global _FA3_GRAPH_CAPTURED
-                    global _FA3_CAPTURE_LAYOUTS
-                    _FA3_GRAPH_CAPTURED.add(_capture_num_tokens)
-                    _asq = list(attn_metadata.actual_seq_lengths_q)
-                    _layout = "U" if all(
-                        ( _asq[i] - (_asq[i - 1] if i else 0) ) == 1
-                        for i in range(len(_asq))
-                    ) else tuple(_asq)
-                    _FA3_CAPTURE_LAYOUTS[_capture_num_tokens] = _layout
-                    logger.info(
-                        "FA3 captured into graph bucket=%s state=%s layout=%s "
-                        "warmup_kv=%s",
-                        _capture_num_tokens, attn_metadata.attn_state, _layout,
-                        list(attn_metadata.seq_lens_list)[:6],
-                    )
-                    output[:num_tokens] = attn_output[:num_tokens]
-                    return output
+                attn_output, num_tokens = self.full_graph_fa3(
+                    query, key, value, attn_metadata, output,
+                    block_size=block_size,
+                    block_table=block_table,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    fa3_graph_params=fa3_graph_params,
+                )
+                output[:num_tokens] = attn_output[:num_tokens]
+                return output
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
@@ -1952,27 +1689,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         num_tokens = attn_metadata.actual_seq_lengths_q[-1]
         query = query[:num_tokens]
-        # Seed FA3 graph buckets for the upcoming FULL capture — decoupled
-        # from eager FA3 execution: under FULL mode eager prefill stays on
-        # CANN (kernel workspace OOM), but the bucket must still be seeded so
-        # the mixed-warmup graph capture can take the FA3 path.  Seeding only
-        # builds scheduler metadata (no kernel launch).
-        if (
-            self._fa3_enabled
-            and not _EXTRA_CTX.in_profile_run
-            and attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
-            and (
-                (
-                    attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-                    and _fa3_decode_graph_enabled(num_tokens)
-                )
-                or (
-                    attn_metadata.attn_state != AscendAttentionState.DecodeOnly
-                    and _fa3_prefill_graph_enabled()
-                )
-            )
-        ):
-            self._get_fa3_graph_params(num_tokens, attn_metadata, block_size, query)
         if (
             attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
             and self.attn_type != AttentionType.ENCODER_DECODER
@@ -2007,7 +1723,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 learnable_sink=self.sinks,
             )
         else:
-            if self._fa3_eligible(attn_metadata):
+            if self._fa3_enabled and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 from vllm_ascend.attention.fa3_adapter import fa3_forward
 
                 is_cache = attn_metadata.attn_state != AscendAttentionState.PrefillNoCache
@@ -2017,11 +1733,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     # memory-profile run: get_scheduler_metadata allocates
                     # buffers sized by max_model_len, shrinking the measured
                     # free memory and thus the KV cache, which corrupts prefill.
-                    # Build FA3 scheduler metadata per call (08d8226f6
-                    # approach). The metadata tensor contains the tiling and
-                    # mask, avoiding the C++ host-tiling branch's per-call
-                    # tiling_gpu/mask_gpu allocations that caused OOM under
-                    # GPQA load.
                     if _EXTRA_CTX.in_profile_run:
                         scheduler_metadata = None
                     else:
@@ -2042,27 +1753,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens_list=actual_seq_lengths_kv if is_cache else None,
                         scheduler_metadata=scheduler_metadata,
                     )
-                except (ImportError, ValueError, RuntimeError, TypeError) as exc:
+                except (ImportError, ValueError, RuntimeError, TypeError):
                     # FA3 unavailable for this invocation (e.g. head_dim too
                     # large, or FA3 package not importable) → fall back to
                     # the CANN path below.
-                    logger.warning(
-                        "FA3 forward failed for %s (q_lens=%s seq_lens_list=%s "
-                        "max_query_len=%s; %s); falling back to CANN FIA.",
-                        attn_metadata.attn_state,
-                        attn_metadata.actual_seq_lengths_q[:8],
-                        list(attn_metadata.seq_lens_list)[:8],
-                        getattr(attn_metadata, "max_query_len", None), exc,
-                    )
                     self._fa3_enabled = False
                 else:
                     attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
 
-            # CANN V1 path: reached when FA3 is disabled / tripped / not
-            # eligible for this state (e.g. ENCODER_DECODER, sinks).
-            if not attn_metadata.causal:
+            # CANN V1 path: prefill always runs here (FA3 is decode-only); decode
+            # reaches here only if FA3 failed (self._fa3_enabled reset to False).
+            if not self._fa3_enabled or attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+                if not attn_metadata.causal:
                     attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                         query=query,
                         key=key,
@@ -2077,47 +1781,47 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         scale=self.scale,
                         sparse_mode=0,
                     )
-            elif self.sliding_window is not None:
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=attn_metadata.attn_mask,
-                    block_table=block_table,
-                    input_layout="TND",
-                    block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale=self.scale,
-                    pre_tokens=self.sliding_window,
-                    next_tokens=0,
-                    sparse_mode=4,
-                )
-            else:
-                attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
-                    query=query,
-                    key=key,
-                    value=value,
-                    atten_mask=attn_metadata.attn_mask,
-                    block_table=block_table,
-                    input_layout="TND",
-                    block_size=block_size,
-                    actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
-                    actual_seq_lengths_kv=actual_seq_lengths_kv,
-                    num_key_value_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    head_size=self.head_size,
-                    scale=self.scale,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    current_key=key,
-                    current_value=passed_value,
-                    attn_metadata=attn_metadata,
-                    is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
-                    sparse_mode=3,
-                )
+                elif self.sliding_window is not None:
+                    attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                        query=query,
+                        key=key,
+                        value=value,
+                        atten_mask=attn_metadata.attn_mask,
+                        block_table=block_table,
+                        input_layout="TND",
+                        block_size=block_size,
+                        actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                        actual_seq_lengths_kv=actual_seq_lengths_kv,
+                        num_key_value_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale=self.scale,
+                        pre_tokens=self.sliding_window,
+                        next_tokens=0,
+                        sparse_mode=4,
+                    )
+                else:
+                    attn_output, _ = DeviceOperator.npu_fused_infer_attention_score(
+                        query=query,
+                        key=key,
+                        value=value,
+                        atten_mask=attn_metadata.attn_mask,
+                        block_table=block_table,
+                        input_layout="TND",
+                        block_size=block_size,
+                        actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                        actual_seq_lengths_kv=actual_seq_lengths_kv,
+                        num_key_value_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        head_size=self.head_size,
+                        scale=self.scale,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        current_key=key,
+                        current_value=passed_value,
+                        attn_metadata=attn_metadata,
+                        is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
+                        sparse_mode=3,
+                    )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]
