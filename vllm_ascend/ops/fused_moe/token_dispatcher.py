@@ -29,7 +29,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
+from vllm_ascend.ascend_forward_context import get_dispatch_v2_tokens_capacity, get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
@@ -50,7 +50,6 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
-    is_hierarchical_communication_enabled,
     should_skip_allreduce_across_dp_group,
 )
 
@@ -121,17 +120,18 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
         self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
-        # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
-        # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
-        # improve communication performance.
-        # When enable hierarchical communication, param `expert_scales` need to be passed in.
-        self.need_expert_scale = is_hierarchical_communication_enabled()
+        self.mc2_comm_alg = get_ascend_config().get_mc2_comm_alg()
+
+        # When enable hierarchical communication or A5 case, param `expert_scales` need to be passed in.
+        self.need_expert_scale = self.a5_need_extra_args or self.mc2_comm_alg == "hierarchy"
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
         vllm_config = get_current_vllm_config()
         tp_size = vllm_config.parallel_config.tensor_parallel_size
         mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if not kwargs.get("is_fused_mc2", False):
+            mc2_tokens_capacity = get_dispatch_v2_tokens_capacity() or mc2_tokens_capacity
         num_tokens_per_tp_rank = mc2_tokens_capacity // tp_size
         # Surface the per-rank capacity for CANN MegaMoe's get_symm_buffer
         # sizing (used by FusedMC2CommImpl._get_cann_symm_buffer). Without
@@ -146,10 +146,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
 
-        # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
-        self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
-
-        if not self.enable_dispatch_v2 and self.need_comm_alg:
+        if not self.enable_dispatch_v2 and self.mc2_comm_alg == "hierarchy":
             raise RuntimeError(
                 "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
             )
@@ -202,6 +199,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "group_ep": self.moe_all_to_all_group_name,
             "ep_world_size": self.ep_world_size,
             "ep_rank_id": self.ep_rank_id,
+            "comm_alg": self.mc2_comm_alg,
         }
         if self.need_extra_args:
             stage1_kwargs.update(
@@ -224,14 +222,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             ):
                 y_dtype = token_dispatch_input.quant.mxfp.act_quant_type
             stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
-        if self.need_expert_scale or self.a5_need_extra_args:
+        if self.need_expert_scale:
             stage1_kwargs.update(
                 {
                     "expert_scales": topk_weights.to(torch.float32),
                 }
             )
-        if self.need_comm_alg:
-            stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -318,6 +314,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "ep_rank_id": self.ep_rank_id,
             "expand_scales": expand_scales,
             "comm_quant_mode": quant_mode,
+            "comm_alg": self.mc2_comm_alg,
         }
 
         if self.enable_dispatch_v2:
@@ -334,8 +331,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.need_comm_alg:
-            stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2

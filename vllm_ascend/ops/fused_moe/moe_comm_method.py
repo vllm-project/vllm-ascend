@@ -22,8 +22,8 @@ import torch
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
+from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.activation import SituActivationConfig
 from vllm_ascend.ops.fused_moe import comm_utils
@@ -283,10 +283,10 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
-        self._mega_moe_symm_buffer = None
-        self._mega_moe_weight_type = None
-        if _MEGA_MOE_SUPPORTED:
+        if _CANN_OPS_TRANSFORMER_AVAILABLE:
+            self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = comm_utils.load_cann_mega_moe_ops()
+
         if get_ascend_config().enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
@@ -296,22 +296,22 @@ class FusedMC2CommImpl(MoECommMethod):
         return self.prepare_finalize.pad_and_split_input_ids(input_ids)  # type: ignore[attr-defined]
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithMC2()
+        return TokenDispatcherWithMC2(is_fused_mc2=True)
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def _init_mega_moe_symm_buffer(
         self,
-        fused_experts_input: MoEFusedExpertsInput,
+        dispatch_quant_mode: int = 0,
+        dispatch_quant_out_dtype: torch.dtype | None = None,
+        *,
+        is_decode_only_node: bool,
     ):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
         # Assert it so mypy resolves those attributes off the base dispatcher.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
-        dispatch_quant_mode, dispatch_quant_out_dtype, self._mega_moe_weight_type = (
-            comm_utils._get_cann_mega_moe_quant_settings(fused_experts_input.quant.quant_type)
-        )
         group = get_mc2_group().device_group
         # The sym buffer is allocated by get_symm_buffer_for_mega_moe, a
         # collective handshake over the EP (mc2) group. Its shape params —
@@ -334,10 +334,33 @@ class FusedMC2CommImpl(MoECommMethod):
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
         expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
-        max_recv_token_num = max(
+        absolute_safe_max_recv_token_num = max(
             1,
             num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
         )
+
+        if is_decode_only_node:
+            max_recv_token_num = absolute_safe_max_recv_token_num
+        else:
+            # P nodes and PD-mixed nodes use the configured value. This keeps
+            # the existing memory/performance tradeoff for prefill workloads.
+            max_recv_token_num = get_ascend_config().mega_moe_max_tokens
+            logger.warning_once(
+                "MegaMoe symm buffer: max_recv_token_num is set from "
+                "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
+                "node. If the actual per-rank received token count after "
+                "dispatch exceeds this value, precision degradation will "
+                "occur. The absolute safe upper bound is %d "
+                "(num_max_tokens_per_rank=%d, ep_world_size=%d, num_topk=%d, "
+                "expert_per_rank=%d). Please tune mega_moe_max_tokens in "
+                "additional_config based on actual expert load distribution.",
+                max_recv_token_num,
+                absolute_safe_max_recv_token_num,
+                num_max_tokens_per_rank,
+                int(self.token_dispatcher.ep_world_size),
+                num_topk,
+                expert_per_rank,
+            )
 
         logger.info(
             "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",
@@ -345,13 +368,14 @@ class FusedMC2CommImpl(MoECommMethod):
             getattr(self.token_dispatcher, "ep_world_size", "?"),
             self.token_dispatcher.global_bs,
         )
-        self._mega_moe_symm_buffer = self.get_symm_buffer_for_mega_moe(
+
+        return self.get_symm_buffer_for_mega_moe(
             group,
             num_experts,
             num_max_tokens_per_rank,
             num_topk,
             hidden=self.moe_config.hidden_dim,
-            intermediate_hidden=2 * self.moe_config.intermediate_size_per_partition,
+            intermediate_hidden=self.moe_config.intermediate_size_per_partition,
             max_recv_token_num=max_recv_token_num,
             dispatch_quant_mode=dispatch_quant_mode,
             dispatch_quant_out_dtype=dispatch_quant_out_dtype,
@@ -361,12 +385,19 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
         topk_ids: torch.Tensor,
+        is_decode_only_node: bool,
     ):
-        assert fused_experts_input.weights.w1_scale is not None
-        assert fused_experts_input.weights.w2_scale is not None
         # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
         # branch); assert the subtype so mypy resolves it off the base class.
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2)
+        num_tokens = fused_experts_input.hidden_states.shape[0]
+        num_max_tokens = self.token_dispatcher.max_num_tokens_per_rank
+        if num_tokens > num_max_tokens:
+            raise ValueError(
+                f"MegaMoe received {num_tokens} tokens per rank, but its symmetric buffer "
+                f"was allocated for at most {num_max_tokens}. Increase max_num_batched_tokens "
+                "or disable fused MC2."
+            )
 
         def to_list(x):
             return x if isinstance(x, list) else [x]
@@ -379,19 +410,8 @@ class FusedMC2CommImpl(MoECommMethod):
         # CheckWeight2Input). The op prototype also REQUIRES FRACTAL_NZ per expert. The W4A8 quant
         # method therefore builds per-expert int8 + FRACTAL_NZ lists (cann_mega_moe_*_weight_list) and
         # they are passed through as-is here. W8A8 weights are already int8 + FRACTAL_NZ, also as-is.
-        weight_scales1 = to_list(fused_experts_input.weights.w1_scale)
-        weight_scales2 = to_list(fused_experts_input.weights.w2_scale)
-        # MegaMoe requires per-expert weight scales to be 1-D. The W4A8 method
-        # squeezes w13 scales but leaves w2 scales as [1, hidden]; drop the
-        # leading singleton dim so CheckWeightScaleInput passes. Guarded to the
-        # [1, N] per-channel case to avoid flattening genuine per-group scales.
-        weight_scales1 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales1]
-        weight_scales2 = [t.squeeze(0) if (t.dim() == 2 and t.shape[0] == 1) else t for t in weight_scales2]
-
-        if self._mega_moe_symm_buffer is None:
-            self._init_mega_moe_symm_buffer(
-                fused_experts_input,
-            )
+        weight_scales1 = fused_experts_input.weights.w1_scale
+        weight_scales2 = fused_experts_input.weights.w2_scale
 
         activation_clamp = fused_experts_input.swiglu_limit if fused_experts_input.swiglu_limit > 0 else None
         x_active_mask = None
@@ -410,21 +430,35 @@ class FusedMC2CommImpl(MoECommMethod):
         l1_bias = fused_experts_input.weights.w1_scale_bias
         l2_bias = fused_experts_input.weights.w2_scale_bias
 
+        dispatch_quant_mode, dispatch_quant_out_dtype, weight_type = comm_utils._get_cann_mega_moe_quant_settings(
+            fused_experts_input.quant.quant_type
+        )
+
+        if self.mega_moe_symm_buffer is None:
+            self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
+                dispatch_quant_mode,
+                dispatch_quant_out_dtype,
+                is_decode_only_node=is_decode_only_node,
+            )
+        else:
+            self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
+            self.mega_moe_symm_buffer.dispatch_quant_out_dtype = dispatch_quant_out_dtype
+
         out, expert_tokens = self.mega_moe(
             fused_experts_input.hidden_states,
             topk_ids.to(torch.int32),
             fused_experts_input.topk_weights.to(torch.float32),
             weight1,
             weight2,
-            self._mega_moe_symm_buffer,
+            self.mega_moe_symm_buffer,
             l1_weights_sf=weight_scales1,
             l2_weights_sf=weight_scales2,
             l1_bias=l1_bias,
             l2_bias=l2_bias,
             x_active_mask=x_active_mask,
             activation_clamp=activation_clamp,
-            weight1_type=self._mega_moe_weight_type,
-            weight2_type=self._mega_moe_weight_type,
+            weight1_type=weight_type,
+            weight2_type=weight_type,
         )
         # NOTE: self.expert_token_nums is only used by the
         # mega_moe path (enable_fused_mc2 == 1) as a
@@ -441,9 +475,6 @@ class FusedMC2CommImpl(MoECommMethod):
         # on the upstream MegaMoE path, including unquantized shared experts.
         if isinstance(fused_experts_input.activation, SituActivationConfig):
             return super().fused_experts(fused_experts_input)
-        assert not (fused_experts_input.weights.w1_scale is None or fused_experts_input.weights.w2_scale is None), (
-            "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
-        )
 
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
@@ -456,8 +487,12 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
-            if _MEGA_MOE_SUPPORTED:
-                out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input, topk_ids)
+            if _EXTRA_CTX.use_mega_moe:
+                out, expert_tokens = self._apply_cann_mega_moe(
+                    fused_experts_input,
+                    topk_ids,
+                    is_decode_only_node=_EXTRA_CTX.is_decode_only_node,
+                )
             else:
                 assert not (
                     fused_experts_input.weights.w1_scale_bias is None

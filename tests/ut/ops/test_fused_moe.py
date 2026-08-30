@@ -137,6 +137,10 @@ def test_process_weights_after_loading_uses_version_specific_layout(
 ):
     method = _build_unquantized_method()
     layer = _build_weight_layer()
+    w13_parameter = layer.w13_weight
+    w2_parameter = layer.w2_weight
+    w13_parameter.weight_loader = MagicMock()
+    w2_parameter.weight_loader = MagicMock()
     original_w13 = layer.w13_weight.detach().clone()
     original_w2 = layer.w2_weight.detach().clone()
     ascend_config = SimpleNamespace(enable_fused_mc2=False)
@@ -157,6 +161,22 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
     assert layer.w13_weight.is_contiguous() is True
     assert layer.w2_weight.is_contiguous() is True
+    assert layer.w13_weight is w13_parameter
+    assert layer.w2_weight is w2_parameter
+    assert layer.w13_weight.weight_loader is w13_parameter.weight_loader
+    assert layer.w2_weight.weight_loader is w2_parameter.weight_loader
+
+
+def test_ascend_runner_promotes_runtime_state_to_buffer():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    state = torch.tensor([0, 1], dtype=torch.int32)
+    runner.runtime_state = state
+
+    runner._promote_attr_to_buffer("runtime_state")
+
+    assert runner.runtime_state is state
+    assert dict(runner.named_buffers())["runtime_state"] is state
 
 
 @pytest.mark.parametrize("moe_comm_type", [MoECommType.ALLGATHER, MoECommType.FUSED_MC2])

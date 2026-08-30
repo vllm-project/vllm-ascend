@@ -10,9 +10,9 @@ This document is written based on the latest vLLM-Ascend version. Both MiniMax-M
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -156,7 +156,7 @@ python -c "import vllm_ascend; print(vllm_ascend.__version__)"
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and low-to-medium throughput production scenarios.
 
-**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other startup issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 #### A3 (single node)
 
@@ -262,7 +262,7 @@ PD (Prefill-Decode) separation splits the Prefill and Decode phases across diffe
 
 **Hardware**: 2× Atlas 800 A3 (64GB × 16), one for Prefill, one for Decode.
 
-**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
+**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQs](../../faqs.md). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
 
 First, prepare `launch_online_dp.py` on each node:
 
@@ -624,7 +624,7 @@ The following configurations are validated in internal testing and are categoriz
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Model-Specific Optimizations
 
@@ -650,7 +650,7 @@ The following optimizations are enabled by default and require no additional con
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
 
 - **Q: Does C8 quantization support EAGLE3 speculative decoding?**
 

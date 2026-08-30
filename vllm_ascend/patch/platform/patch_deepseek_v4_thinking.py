@@ -20,6 +20,7 @@ from typing import Any
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.parser.deepseek_v4 import DeepSeekV4Parser
 from vllm.tokenizers import deepseek_v4, deepseek_v4_encoding
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 REASONING_EFFORT_PROMPTS = {
     "low": "",
@@ -52,6 +53,15 @@ _original_get_deepseek_v4_tokenizer = deepseek_v4.get_deepseek_v4_tokenizer
 _original_deepseek_v4_parser_init = DeepSeekV4Parser.__init__
 
 
+def _uses_preview_reasoning_effort_mapping(tokenizer: deepseek_v4.HfTokenizer) -> bool:
+    model_name_or_path = getattr(tokenizer, "name_or_path", None)
+    if not model_name_or_path:
+        return True
+
+    config = get_hf_file_to_dict("config.json", model_name_or_path)
+    return not (config and any(key.startswith("dspark_") for key in config))
+
+
 def _patched_render_message(
     index: int,
     messages: list[dict[str, Any]],
@@ -78,6 +88,7 @@ def _patched_render_message(
 
 
 def _patched_get_deepseek_v4_tokenizer(tokenizer: deepseek_v4.HfTokenizer):
+    uses_preview_mapping = _uses_preview_reasoning_effort_mapping(tokenizer)
     dsv4_tokenizer = _original_get_deepseek_v4_tokenizer(tokenizer)
     tokenizer_cls = type(dsv4_tokenizer)
 
@@ -97,21 +108,37 @@ def _patched_get_deepseek_v4_tokenizer(tokenizer: deepseek_v4.HfTokenizer):
         conversation = kwargs.get("conversation", messages)
         messages = conversation.copy()
         if tools is not None and len(tools) > 0:
-            messages.insert(0, {"role": "system"})
-            messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+            system_index = next(
+                (index for index, message in enumerate(messages) if message.get("role") == "system"),
+                None,
+            )
+            if system_index is None:
+                messages.insert(0, {"role": "system", "tools": tools})
+            else:
+                system_message = messages[system_index].copy()
+                system_message["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                messages[system_index] = system_message
 
         reasoning_effort = kwargs.get("reasoning_effort")
         if not isinstance(reasoning_effort, str):
-            reasoning_effort = "high" if thinking_enabled else None
+            if thinking_enabled:
+                reasoning_effort = "low" if uses_preview_mapping else "high"
+            else:
+                reasoning_effort = None
         elif reasoning_effort == "none":
             thinking_mode = "chat"
             reasoning_effort = None
-        elif reasoning_effort == "max":
-            reasoning_effort = "max"
-        elif reasoning_effort in ("low", "minimal", "medium"):
-            reasoning_effort = "low"
-        else:
+        elif not uses_preview_mapping:
+            if reasoning_effort == "max":
+                reasoning_effort = "max"
+            elif reasoning_effort in ("low", "minimal", "medium"):
+                reasoning_effort = "low"
+            else:
+                reasoning_effort = "high"
+        elif reasoning_effort in ("max", "xhigh"):
             reasoning_effort = "high"
+        else:
+            reasoning_effort = "low"
 
         prompt_str = deepseek_v4.encode_messages(
             messages,

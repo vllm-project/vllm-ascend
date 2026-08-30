@@ -76,9 +76,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         # when call `run_fullgraph` method in CudaGraphManager,
         # then we don't need to # copy `execute_model` method in `NPUModelRunner` class.
         self.model_runner = model_runner
-        self.update_stream: torch.npu.Stream | None = None
-        if cudagraph_mode.has_full_cudagraphs():
-            self.update_stream = torch.npu.Stream()
+        # Reuse the public update_stream from model_runner (shared with draft).
+        self.update_stream = self.model_runner.update_stream
         # The attention backend keys its per-size graph params by the actual
         # captured token counts (rounded up to decode_query_len when using
         # speculative decoding), so derive them from the capture descriptors

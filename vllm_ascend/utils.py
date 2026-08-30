@@ -1079,15 +1079,6 @@ def calculate_dp_buffer_size() -> int:
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
 
 
-# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
-# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
-# significantly improve communication performance of MC2 ops dispatch/combine.
-def is_hierarchical_communication_enabled():
-    return (
-        os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0" and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1"
-    ) or get_ascend_config().enable_mc2_hierarchy_comm
-
-
 def is_pd_decode_recompute_scheduler_enabled(vllm_config: VllmConfig | None = None) -> bool:
     """True on PD-disaggregated decode nodes with recompute_scheduler_enable.
 
@@ -1179,7 +1170,8 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
-    a non-zero global_bs and must NOT receive mc2_mask.
+    a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
+    uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
@@ -1188,7 +1180,10 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     computed once in init, and select_moe_comm_method is just config lookups, so
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
-    if is_hierarchical_communication_enabled():
+    ascend_config = get_ascend_config()
+    # When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic global_bs,
+    # we need to do allreduce and pad token across dp every step.
+    if ascend_config.get_mc2_comm_alg() == "hierarchy":
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.
@@ -1202,27 +1197,34 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if not is_kv_consumer:
         return False
 
-    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ascend_forward_context import (
+        select_moe_comm_method,
+        use_cann_megamoe,
+    )
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
-
-    def needs_mc2(n: int) -> bool:
-        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
-    # if mc2 is used in decode max potential tokens case, we can skip allreduce in decode only case.
-    decode_can_skip = needs_mc2(get_potential_max_tokens())
+    decode_comm_method = select_moe_comm_method(get_potential_max_tokens(), vllm_config, is_draft_model=is_draft_model)
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
+    prefill_comm_method = select_moe_comm_method(
+        scheduler_config.max_num_batched_tokens, vllm_config, is_draft_model=is_draft_model
+    )
+
+    if use_cann_megamoe(vllm_config):
+        return False
+
+    mc2_comm_methods = {MoECommType.MC2, MoECommType.FUSED_MC2}
+    # if mc2 is used in decode max potential tokens case, we can skip allreduce in decode only case.
+    decode_can_skip = decode_comm_method in mc2_comm_methods
     # if mc2 is used in prefill max potential tokens case and prefill and decode have the same cudagraph mode,
     # we can skip allreduce in chunked prefill case.
-    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
+    prefill_must_use_mc2 = prefill_comm_method in mc2_comm_methods
 
     uniform_cudagraph_mode = not vllm_config.compilation_config.cudagraph_mode.separate_routine()
 
     chunked_prefill_can_skip = prefill_must_use_mc2 and uniform_cudagraph_mode
-    return decode_can_skip and (
-        chunked_prefill_can_skip or get_ascend_config().scheduler_config.recompute_scheduler_enable
-    )
+    return decode_can_skip and (chunked_prefill_can_skip or ascend_config.scheduler_config.recompute_scheduler_enable)
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:

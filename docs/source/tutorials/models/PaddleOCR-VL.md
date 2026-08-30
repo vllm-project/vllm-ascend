@@ -10,9 +10,9 @@ This document is validated and written based on **vLLM-Ascend v0.21.0rc1**. The 
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -161,7 +161,7 @@ Startup Command:
     - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
     - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
 
-Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ### 5.2 Multi-Node PD Separation Deployment
 
@@ -236,9 +236,9 @@ from paddleocr import PaddleOCRVL
 
 doclayout_model_path = "/path/to/your/PP-DocLayoutV2/"
 
-pipeline = PaddleOCRVL(vl_rec_backend="vllm-server", 
-                       vl_rec_server_url="http://localhost:8000/v1", 
-                       layout_detection_model_name="PP-DocLayoutV2",  
+pipeline = PaddleOCRVL(vl_rec_backend="vllm-server",
+                       vl_rec_server_url="http://localhost:8000/v1",
+                       layout_detection_model_name="PP-DocLayoutV2",
                        layout_detection_model_dir=doclayout_model_path,
                        device="npu")
 
@@ -362,11 +362,11 @@ PaddleOCR-VL is a lightweight model that runs on a single NPU. The key tuning pa
 
 For performance tuning, please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, including OS optimization (jemalloc, tcmalloc), `torch_npu` optimization (memory and scheduling), and CANN optimization.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: What are the deployment requirements for Atlas inference products?**
 

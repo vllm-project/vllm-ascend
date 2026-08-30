@@ -121,7 +121,7 @@ on:
         description: 'Triton Ascend package version'
         required: false
         type: string
-        default: '3.2.1'
+        default: '3.2.2'
       build_args:
         description: 'Additional build arguments for Docker build'
         required: false
@@ -349,7 +349,7 @@ jobs:
           TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
           TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260715.4' }}
           TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '' }}
-          TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.1' }}
+          TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
           ${{ inputs.build_args }}
         provenance: false
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.

@@ -209,9 +209,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample = torch.zeros(
             self.vllm_config.scheduler_config.max_num_batched_tokens, dtype=torch.int32, device=device
         )
-        # Graph capture appends two request-sized padding regions even when
-        # PCP is disabled in MRV1.
-        slot_mapping_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
+        metadata_lens = self.runner.max_num_tokens + 2 * self.runner.max_num_reqs
+        num_mtp_draft_slots = max(self.num_speculative_tokens - 1, 0) * self.runner.max_num_reqs
+        slot_mapping_lens = self.runner.max_num_tokens + num_mtp_draft_slots
         self.slot_mapping_group = [
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
@@ -219,11 +219,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         # dsv32 needs seq_lens and query_start_loc persistent tensors for full graph mode
         self.seq_lens_group = [
-            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
+            torch.zeros(metadata_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
         self.query_start_loc_group = [
-            torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
+            torch.zeros(metadata_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
 
@@ -709,7 +709,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self.use_eagle,
                 self.enable_enpu,
             )
-            self.update_stream = torch.npu.Stream()
+            self.update_stream = None
             self._runnable = ACLGraphWrapper(
                 self._run_merged_draft,
                 self.vllm_config,
@@ -1524,6 +1524,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             forward_context.attn_metadata = (
                 multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
             )
+            if self.use_compress:
+                # A merged speculative forward reuses one ForwardContext while
+                # each substep has different compressor inputs. Drop the prior
+                # substep's outputs before entering the next model invocation.
+                from vllm_ascend.attention.dsa_v1 import reset_compressor_metadata_cache
+
+                reset_compressor_metadata_cache()
 
             model_kwargs = {
                 "input_ids": model_input_ids,

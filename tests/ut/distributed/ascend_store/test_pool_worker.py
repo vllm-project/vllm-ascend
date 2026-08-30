@@ -624,6 +624,19 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.ensure_initialized.assert_called_once_with()
         worker.m_store.register_buffer.assert_called_once()
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_transfer_threads_use_grouped_block_sizes(self, mock_send_thread, mock_recv_thread, mock_event):
+        worker = self._make_worker(kv_role="kv_both", extra_config={"backend": "mooncake", "load_async": True})
+        worker.grouped_block_size = [128, 8, 32]
+
+        worker._start_kv_transfer_threads()
+
+        self.assertEqual(mock_send_thread.call_args.args[2], [128, 8, 32])
+        self.assertEqual(mock_recv_thread.call_args.args[2], [128, 8, 32])
+        mock_event.return_value.wait.assert_called()
+
     def test_start_load_kv_sync(self):
         worker = self._make_worker()
         worker.m_store.get = MagicMock()
@@ -678,6 +691,31 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.start_load_kv(meta)
         # No get called since no load_spec
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    def test_async_recv_thread_shares_invalid_block_state(self, mock_recv_thread_cls):
+        worker = self._make_worker(
+            kv_role="kv_consumer",
+            extra_config={"backend": "mooncake", "load_async": True},
+        )
+        recv_thread = MagicMock()
+
+        def create_recv_thread(*args, **kwargs):
+            args[6].set()
+            return recv_thread
+
+        mock_recv_thread_cls.side_effect = create_recv_thread
+
+        worker._start_kv_transfer_threads()
+
+        kwargs = mock_recv_thread_cls.call_args.kwargs
+        self.assertIs(kwargs["invalid_block_ids"], worker._invalid_block_ids)
+        self.assertIs(
+            kwargs["invalid_block_ids_lock"],
+            worker._invalid_block_ids_lock,
+        )
+        kwargs["invalid_block_ids"].add(7)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
     def test_wait_for_save_waits_for_save(self):
         worker = self._make_worker()

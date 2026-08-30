@@ -35,7 +35,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -133,10 +133,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
 
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
-        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+        layer.w13_weight.data = w13_data
 
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        layer.w2_weight.data = w2_data
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -146,14 +146,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if enable_fused_mc2 == 1 and self.dynamic_eplb:
+            if _CANN_OPS_TRANSFORMER_AVAILABLE:
+                # MegaMoe bg16 Need to use ND format to support
                 layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
                 layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                del layer.w13_weight
-                del layer.w2_weight
-                torch.npu.empty_cache()
+            else:
+                layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+                layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+                if enable_fused_mc2 == 1 and self.dynamic_eplb:
+                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+                    del layer.w13_weight
+                    del layer.w2_weight
+                    torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
@@ -255,17 +260,25 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            if _CANN_OPS_TRANSFORMER_AVAILABLE:
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = None
+                w2_scale = None
+                w1_scale_bias = None
+                w2_scale_bias = None
+            else:
+                if self.dynamic_eplb and not has_split_weight_lists:
+                    logger.warning_once(
+                        "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
+                        "tensor lists. This may cause accuracy issues or communication hangs."
+                    )
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
             w1_scale = None
@@ -471,6 +484,14 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.num_iter = eplb_config.expert_heat_collection_interval
             self.moe_load = torch.zeros((self.num_iter, local_num_experts), dtype=torch.int32, device="npu")
 
+        # Level-2 sleep restores parameters and buffers only. Preserve the
+        # runtime EPLB tensors that are otherwise plain NPU attributes.
+        self._promote_attr_to_buffer("log2phy")
+        if self.dynamic_eplb:
+            self._promote_attr_to_buffer("moe_load")
+            if self.multi_stage:
+                self._promote_attr_to_buffer("load_counter")
+
         setup_moe_comm_method(self.moe_config)
         if self.multistream_overlap_shared_expert:
             # Wrap the quant_method's process_weights_after_loading to validate that
@@ -491,6 +512,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # PPMissingLayer (nn.Identity) never calls AscendFusedMoE.__init__,
         # so only real MoE layers on this rank are registered.
         VllmEplbAdaptor.register_layer(self)
+
+    def _promote_attr_to_buffer(self, name: str) -> None:
+        tensor = getattr(self, name, None)
+        if tensor is None:
+            return
+        delattr(self, name)
+        self.register_buffer(name, tensor)
 
     @property
     def activation(self):
@@ -575,6 +603,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         return False
 
     @property
+    def _allgather_requires_early_routed_reduce(self) -> bool:
+        # Back-ported from fused_moe_0_23_0 (v0.23 semantics). AllGather +
+        # a routed_output_transform (K3 latent MoE: RMSNorm + up_proj)
+        # requires summing the per-rank partials BEFORE the nonlinear
+        # transform: RMSNorm(allreduce(x)) != allreduce(RMSNorm(x)).
+        return (
+            _EXTRA_CTX.moe_comm_type == MoECommType.ALLGATHER
+            and not _EXTRA_CTX.flash_comm_v1_enabled
+            and getattr(self, "routed_output_transform", None) is not None
+        )
+
+    @property
     def _fused_output_is_reduced(self) -> bool:
         # For MC2/ALLTOALL/FUSED_MC2 comm types, finalize() already includes
         # TP all-reduce for the routed output, and _forward_shared_experts
@@ -582,11 +622,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # MoERunner.forward() so _maybe_reduce_final_output does not apply a
         # second TP all-reduce (which would double-count the contributions).
         moe_comm_type = _EXTRA_CTX.moe_comm_type
-        return moe_comm_type in {
-            MoECommType.ALLTOALL,
-            MoECommType.MC2,
-            MoECommType.FUSED_MC2,
-        } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+        return (
+            moe_comm_type
+            in {
+                MoECommType.ALLTOALL,
+                MoECommType.MC2,
+                MoECommType.FUSED_MC2,
+            }
+            or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+            or (self._allgather_requires_early_routed_reduce)
+        )
 
     @property
     def local_num_experts(self) -> int:
@@ -621,7 +666,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # _forward_shared_experts already handles shared expert TP all-reduce
         # for MC2/ALLTOALL/FUSED_MC2. For AllGather the reduction is done
         # via _maybe_reduce_final_output on the combined (shared + routed)
-        # output. Skip any additional reduction here.
+        # output. Skip any additional reduction here -- UNLESS the routed
+        # output goes through a nonlinear routed_output_transform (K3 latent
+        # MoE), in which case the early-reduce path reduces shared here to
+        # match the pre-transform routed reduce.
+        if shared_output is not None and self._allgather_requires_early_routed_reduce:
+            shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
     def _maybe_reduce_final_output(
@@ -629,8 +679,19 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         states: torch.Tensor,
         trunc_size: int,
     ) -> torch.Tensor:
-        states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+        if not self._allgather_requires_early_routed_reduce:
+            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
+
+    def apply_routed_output_transform(
+        self,
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        if self._allgather_requires_early_routed_reduce:
+            # K3 latent MoE: sum the per-rank routed partials BEFORE the
+            # nonlinear RMSNorm+up_proj (v0.23 early-reduce semantics).
+            fused_output = tensor_model_parallel_all_reduce(fused_output)
+        return super().apply_routed_output_transform(fused_output)
 
     @property
     def _flashcomm_uses_tp_shared_experts(self) -> bool:
@@ -870,8 +931,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         dst_type=torch.float8_e4m3fn,
                         quant_mode=2,
                         clamp_value=fused_moe_evts.swiglu_limit,
-                        glu_alpha=fused_moe_evts.swiglu_alpha,
-                        glu_bias=fused_moe_evts.swiglu_beta,
                     )
                 # Execute the down projection concurrently with the combine
                 # communication.

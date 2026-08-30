@@ -1,0 +1,70 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+test_cases:
+  - name: "Kimi-K2.6-W4A8-in3.5k-out1.5k-TPOT50-0-128-32"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_BUFFSIZE: "800"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+      DYNAMIC_EPLB: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--trust-remote-code"
+      - "--safetensors-load-strategy"
+      - 'prefetch'
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "2"
+      - "--no-enable-prefix-caching"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "24"
+      - "--max-model-len"
+      - "6144"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--seed"
+      - "42"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"eplb_config": {"dynamic_eplb": true},"ascend_compilation_config": {"enable_static_kernel": false}}'
+      - "--profiler-config"
+      - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--speculative-config"
+      - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 7}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-kimi
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1500
+        batch_size: 32
+        request_rate: 0
+        baseline: 1433.4454
+        threshold: 0.97

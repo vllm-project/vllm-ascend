@@ -10,15 +10,15 @@ This document is recommended to use the latest release candidate or official ver
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64G x 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
+- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
 
 It is recommended to download the model weight to the shared directory, such as `/mnt/sfs_turbo/.cache/`.
 
@@ -178,7 +178,7 @@ If you want to deploy a multi-node environment, set up the same software environ
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for online inference scenarios with moderate concurrency requirements.
 
-For an Atlas 800 A3 (64G x 16) node, `tensor-parallel-size` should be at least 16.
+For an Atlas 800 A3 (64GB × 16) node, `tensor-parallel-size` should be at least 16.
 
 Run the following script to start the vLLM server:
 
@@ -264,7 +264,7 @@ lm_eval \
 
 Reference configuration: `gsm8k` (5-shot), `--apply_chat_template`, `--fewshot_as_multiturn`, greedy decoding (`temperature=0.0`, `top_p=1.0`), max 2048 output tokens, batch size 1.
 
-Below are reference `gsm8k` results for `Kimi-K2-Thinking` powered by `vllm-ascend:v0.20.2rc1`, evaluated on one Atlas 800 A3 node (64G × 16).
+Below are reference `gsm8k` results for `Kimi-K2-Thinking` powered by `vllm-ascend:v0.20.2rc1`, evaluated on one Atlas 800 A3 node (64GB × 16).
 
 | task | version | filter | n-shot | metric | value | stderr |
 | --- | ---: | --- | ---: | --- | ---: | ---: |
@@ -291,7 +291,7 @@ vllm bench serve \
 
 After the benchmark completes, you can get the performance result, including request throughput, output token throughput, TTFT, TPOT, and ITL.
 
-The following reference results are obtained with `vllm-ascend:v0.20.2rc1` on one Atlas 800 A3 node (64G × 16), using OpenAI chat serving, random input/output lengths, 10 prompts, and `--request-rate 1`:
+The following reference results are obtained with `vllm-ascend:v0.20.2rc1` on one Atlas 800 A3 node (64GB × 16), using OpenAI chat serving, random input/output lengths, 10 prompts, and `--request-rate 1`:
 
 | random input len | random output len | success | duration (s) | request throughput (req/s) | output throughput (tok/s) | total throughput (tok/s) | mean TTFT (ms) | mean TPOT (ms) | mean ITL (ms) |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -365,11 +365,11 @@ Reference results for 1024 input tokens and 1024 output tokens are:
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-> For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+> For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: API returns `{"error":"Model not found"}` or `404` when requesting with `model: "Kimi-K2-Thinking"`?**
 

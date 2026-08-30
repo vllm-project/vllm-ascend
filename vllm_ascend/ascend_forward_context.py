@@ -1,4 +1,3 @@
-import importlib.util
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -12,7 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config, is_megamoe_supported_by_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -31,19 +30,35 @@ class MoECommType(Enum):
 
 
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
-_CANN_MEGAMOE_SUPPORTED_QUANT_NAMES = {
-    "w8a8",
-    "w4a8",
-    "w8a8_dynamic",
-    "w4a8_dynamic",
-    "quanttype.w8a8",
-    "quanttype.w4a8",
-}
-
-_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
+
+
+def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is None:
+        return False
+
+    is_decode_bench = getattr(kv_transfer_config, "kv_connector", None) == "DecodeBenchConnector"
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    is_kv_consumer = (
+        kv_role == "kv_consumer"
+        if kv_role is not None
+        else bool(
+            getattr(kv_transfer_config, "is_kv_consumer", False)
+            and not getattr(kv_transfer_config, "is_kv_producer", False)
+        )
+    )
+    if not (is_decode_bench or is_kv_consumer):
+        return False
+
+    scheduler_config = getattr(get_ascend_config(), "scheduler_config", None)
+    # Actual semantics of `recompute_scheduler_enable`:
+    # - Enabled: when preemption occurs on the decode node, the request is sent back
+    #     to the P node to redo prefill, so the decode node only ever decodes;
+    # - Disabled: prefill is executed locally on the decode node.
+    return bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
 
 
 @contextmanager
@@ -66,31 +81,20 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
-def _cann_megamoe_supported_by_config(vllm_config: VllmConfig) -> bool:
-    hf_text_config = vllm_config.model_config.hf_text_config
-    hidden_size = getattr(hf_text_config, "hidden_size", None)
-    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
-        hidden_size = vllm_config.model_config.get_hidden_size()
-    if hidden_size is None:
-        return False
-    hidden_size = int(hidden_size)
-    # Hidden-size bounds come from the CANN MegaMoe kernel constraints:
-    # the dispatch / FFN / combine cube tiles require hidden in the closed
-    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
-    # outside this range (e.g. small Qwen variants with hidden=896, or any
-    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
-    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
-        return False
-
-    quant_type = getattr(
-        vllm_config.model_config.hf_text_config,
-        "moe_quantize",
-        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
+def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    # Disable MegaMoE pending related bug fixes
+    return False
+    # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
+    return (
+        _CANN_OPS_TRANSFORMER_AVAILABLE
+        and get_ascend_device_type() == AscendDeviceType.A3
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_moe_model(vllm_config)
+        and vllm_config.parallel_config.enable_expert_parallel
+        and 1 < get_ep_group().world_size <= 64
+        and getattr(vllm_config, "lora_config", None) is None
+        and is_megamoe_supported_by_config(vllm_config)
     )
-    if quant_type is None:
-        return True
-    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
-    return quant_name in _CANN_MEGAMOE_SUPPORTED_QUANT_NAMES
 
 
 @contextmanager
@@ -137,10 +141,13 @@ def set_ascend_forward_context(
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
+            is_draft_model=is_draft_model,
         )
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+        forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
@@ -237,13 +244,22 @@ def set_ascend_forward_context(
 
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
+# TODO: Remove the following variables and related methods once the megamoe operator supports mixed weight formats
+#  (e.g., main model quantized, draft model in floating point)
+_moe_quant_mismatch: bool | None = None
+_dispatch_v2_tokens_capacity: int | None = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
-    if get_ascend_config().enable_prefill_mc2:
+
+    ascend_config = get_ascend_config()
+    use_mega_moe = use_cann_megamoe(vllm_config)
+    is_decode_only_node = _is_decode_only_node(vllm_config)
+
+    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not is_decode_only_node):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -254,11 +270,24 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
-    if get_ascend_config().enable_fused_mc2:
-        if _MEGA_MOE_SUPPORTED:
+    if ascend_config.enable_fused_mc2:
+        if use_mega_moe:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
         else:
             num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
+        global _dispatch_v2_tokens_capacity
+        # Compute dispatch_v2 (normal MC2) tokens capacity independently from the
+        # fused_mc2 path above. When enable_prefill_mc2 or use_mega_moe is true,
+        # max_num_tokens is based on max_num_batched_tokens (prefill+decode unified
+        # batch), which is too large for the normal MC2 decode path. Recompute the
+        # token count from the decode-only configuration so that
+        # _dispatch_v2_tokens_capacity follows the normal MC2 branch logic.
+        if vllm_config.compilation_config.cudagraph_capture_sizes:
+            dispatch_v2_max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
+        else:
+            dispatch_v2_max_num_tokens = max_num_reqs * uniform_decode_query_len
+        dispatch_v2_tokens_per_tp_rank = (dispatch_v2_max_num_tokens + tp_size - 1) // tp_size
+        _dispatch_v2_tokens_capacity = min(dispatch_v2_tokens_per_tp_rank, _MC2_TOKENS_PER_RANK_LIMIT) * tp_size
 
     # keep the num_tokens_per_tp_rank less than mc2 tokens per rank limit
     else:
@@ -268,6 +297,10 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
 
 def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
+
+
+def get_dispatch_v2_tokens_capacity():
+    return _dispatch_v2_tokens_capacity
 
 
 def set_mc2_mask(vllm_config, device):
@@ -298,24 +331,98 @@ def _select_a2_moe_comm_method(
     num_experts_per_device = num_experts // ep_world_size
     if num_experts > 512:
         return MoECommType.ALLGATHER
-    if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
+    if (
+        num_experts_per_device <= 24
+        and ep_world_size >= 16
+        and (num_tokens is None or num_tokens <= mc2_tokens_capacity)
+    ):
         return MoECommType.MC2
     return MoECommType.ALLGATHER
+
+
+def _is_moe_quantized(model_instance: torch.nn.Module) -> bool | None:
+    """Check if the model's MoE layers use a quantized method.
+
+    Scans the model for the first ``routed_experts.quant_method`` and checks
+    whether it is an unquantized (float) or quantized MoE method instance.
+    modelslim quantization cannot be reliably detected from config, so the
+    actual runtime instance type is used instead.
+
+    Returns ``True`` if quantized, ``False`` if unquantized, ``None`` if no MoE
+    layers are found (e.g. dense model or ``model_instance`` is ``None``).
+    """
+    if model_instance is None:
+        return None
+    for module in model_instance.modules():
+        routed_experts = getattr(module, "routed_experts", None)
+        if routed_experts is None:
+            continue
+        quant_method = getattr(routed_experts, "quant_method", None)
+        if quant_method is None:
+            continue
+        from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+            UnquantizedFusedMoEMethod,
+        )
+
+        return not isinstance(quant_method, UnquantizedFusedMoEMethod)
+    return None
+
+
+def set_moe_quant_mismatch(
+    main_model: torch.nn.Module | None,
+    draft_model: torch.nn.Module | None,
+) -> None:
+    """Cache whether the main and draft models have inconsistent MoE quantization.
+
+    MegaMoe is configured from the MoE-part weight format. When the main model
+    and the draft model use different MoE quantization (e.g. main is quantized
+    while the draft is floating-point), the MegaMoe kernel cannot handle the
+    mixed weight formats and hangs.
+
+    Should be called once after both models are loaded. The weight format is
+    fixed for the lifetime of the process, so the result is cached. Only the MoE
+    part is compared; a model without MoE layers (or a ``None`` draft model)
+    never exercises the MegaMoe path, so its quantization is irrelevant.
+    """
+    global _moe_quant_mismatch
+    if _moe_quant_mismatch is not None:
+        return
+
+    _moe_quant_mismatch = False
+    main_quantized = _is_moe_quantized(main_model)
+    if main_quantized is None:
+        return
+
+    draft_quantized = _is_moe_quantized(draft_model)
+    if draft_quantized is None:
+        return
+
+    if main_quantized != draft_quantized:
+        _moe_quant_mismatch = True
+        logger.warning_once(
+            "FUSED_MC2 disabled on draft model path due to inconsistent MoE "
+            "quantization between main model (quantized=%s) and draft model "
+            "(quantized=%s). Main model still uses FUSED_MC2; draft model falls "
+            "back to MC2/ALLTOALL.",
+            main_quantized,
+            draft_quantized,
+        )
 
 
 def _select_a3_moe_comm_method(
     num_tokens: int,
     mc2_tokens_capacity: int,
     vllm_config: VllmConfig,
+    is_draft_model: bool = False,
 ) -> MoECommType:
-    if get_ascend_config().enable_fused_mc2 == 1:
-        # TODO: drop the EP-size guard when mega_moe supports larger EP sizes
-        mega_moe_enable = get_ep_group().world_size <= 64 and _cann_megamoe_supported_by_config(vllm_config)
-        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32
-        if (_MEGA_MOE_SUPPORTED and mega_moe_enable) or dispatch_ffn_combine_enable:
-            return MoECommType.FUSED_MC2
+    skip_fused_mc2 = is_draft_model and _moe_quant_mismatch
+    if not skip_fused_mc2 and use_cann_megamoe(vllm_config):
+        return MoECommType.FUSED_MC2
+    if not skip_fused_mc2 and get_ascend_config().enable_fused_mc2 == 1 and get_ep_group().world_size <= 32:
+        return MoECommType.FUSED_MC2
 
-    if num_tokens <= mc2_tokens_capacity:
+    mc2_tokens_capacity = get_dispatch_v2_tokens_capacity() or mc2_tokens_capacity
+    if num_tokens is None or num_tokens <= mc2_tokens_capacity:
         return MoECommType.MC2
 
     return MoECommType.ALLTOALL
@@ -332,14 +439,18 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
-    if num_tokens <= mc2_tokens_capacity and world_size > 1:
+    if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:
         return MoECommType.ALLGATHER
     return MoECommType.ALLTOALL
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+def select_moe_comm_method(
+    num_tokens: int,
+    vllm_config: VllmConfig,
+    is_draft_model: bool = False,
+) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, and token count.
 
@@ -387,6 +498,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
             num_tokens,
             mc2_tokens_capacity,
             vllm_config,
+            is_draft_model=is_draft_model,
         )
     elif soc_version == AscendDeviceType.A5:
         moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
@@ -412,6 +524,8 @@ class _ExtraForwardContextProxy:
         "capturing",
         "moe_comm_type",
         "moe_comm_method",
+        "use_mega_moe",
+        "is_decode_only_node",
         "mmrs_fusion",
         "num_tokens",
         "flash_comm_v1_enabled",

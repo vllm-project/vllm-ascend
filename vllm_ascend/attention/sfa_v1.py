@@ -73,9 +73,6 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
-# token count limits within bmm_transpose operator
-BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
-
 
 class PreprocessType(enum.Enum):
     NATIVE = "native"
@@ -438,7 +435,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
             local_query_lens = torch.cumsum(num_local_tokens.clamp(min=0), dim=0)
             offset = global_end - req_local_end  # request tokens on later ranks
-            local_key_lens = torch.where(num_local_tokens > 0, seq_lens - offset, 0)
+            local_key_lens = torch.where(
+                num_local_tokens > 0,
+                torch.clamp_min(seq_lens - offset, 0),
+                0,
+            )
 
             actual_seq_lengths_query[:num_segs] = local_query_lens
             actual_seq_lengths_key[:num_segs] = local_key_lens
@@ -1182,29 +1183,31 @@ class AscendSFAImpl(MLAAttentionImpl):
         return ql_nope.transpose(0, 1), q_pe
 
     def _v_up_proj(self, x):
-        num_input_tokens, _, _ = x.shape
-        if (
-            x.dtype in [torch.float16, torch.bfloat16]
-            and hasattr(torch.ops._C_ascend, "batch_matmul_transpose")
-            and num_input_tokens <= BMM_TRANS_MAX_SUPPORTED_TOKENS
-        ):
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            res = torch.empty((num_input_tokens, self.local_num_heads, self.v_head_dim), dtype=x.dtype, device=x.device)
-            torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res)
-            x = res.reshape(-1, self.local_num_heads * self.v_head_dim)
-        elif hasattr(torch_npu, "npu_transpose_batchmatmul"):
-            # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
-            x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
-            # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
-            x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
-            # Convert from (N, B, V) to (B, N * V)
+        if hasattr(torch_npu, "npu_transpose_batchmatmul"):
+            # aclnn TransposeBatchMatMul with perm_x1=(1,0,2) (internal
+            # transpose) requires N*L < 65536 on older CANN binaries.
+            #   - If satisfied: keep x as (B, N, L) and let the operator
+            #     transpose internally, saving a contiguous copy.
+            #   - Otherwise: explicit transpose to (N, B, L) and use
+            #     perm_x1=(0,1,2), which downgrades the check to L < 65536.
+            # TODO: CANN 9.2 removes the N*L<65536 check; once it is the
+            # deployment baseline, collapse this branch to perm_x1=(1,0,2).
+            if self.local_num_heads * self.kv_lora_rank < 65536:
+                # (B, N, L) -> operator transposes internally -> (B, N, V)
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank)
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(1, 0, 2), perm_y=(1, 0, 2))
+            else:
+                # (B, N, L) -> (N, B, L) -> (B, N, V); perm_x1=(0,1,2) skips inner transpose
+                x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1).contiguous()
+                x = torch_npu.npu_transpose_batchmatmul(x, self.W_UV, perm_x1=(0, 1, 2), perm_y=(1, 0, 2))
+            # (B, N, V) -> (B, N * V)
             x = x.reshape(-1, self.local_num_heads * self.v_head_dim)
         else:
-            # Convert from (B, N, L) to (N, B, L)
+            # (B, N, L) -> (N, B, L)
             x = x.view(-1, self.local_num_heads, self.kv_lora_rank).transpose(0, 1)
-            # # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            # (N, B, L) x (N, L, V) -> (N, B, V)
             x = torch.bmm(x, self.W_UV)
-            # # Convert from (N, B, V) to (B, N * V)
+            # (N, B, V) -> (B, N * V)
             x = x.transpose(0, 1).reshape(-1, self.local_num_heads * self.v_head_dim)
         return x
 

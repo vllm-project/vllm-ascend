@@ -654,6 +654,7 @@
     - vllm_ascend/meta_registration.py
     - vllm_ascend/platform.py
     - vllm_ascend/profiling_config.py
+    - vllm_ascend/recompute_proxy.py
     - vllm_ascend/utils.py
     - setup.py
   tests:
@@ -664,6 +665,7 @@
     - tests/ut/test_logger.py
     - tests/ut/test_meta_registration.py
     - tests/ut/test_profiling_config.py
+    - tests/ut/test_recompute_proxy.py
     - tests/ut/test_utils.py
     - tests/ut/test_platform.py
     - tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
@@ -706,7 +708,7 @@
     - tests/ut/tools/bisect
 
 - name: _tools
-  optional: false
+  optional: true
   source_file_dependencies:
     - tools/
   tests:
@@ -778,6 +780,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 510
   tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py: 500
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 520
+  tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 600
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 740
   tests/e2e/pull_request/two_card/test_data_parallel.py: 570
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 150
@@ -822,6 +825,7 @@ estimated_times:
   tests/ut/attention/a2/test_attention_v1.py: 30
   tests/ut/attention/a2/test_attention_v1_precision.py: 430
   tests/ut/attention/a2/test_common_cp.py: 30
+  tests/ut/attention/a2/test_dsv4_compressor_metadata_cache.py: 30
   tests/ut/attention/a2/test_mla_cp.py: 40
   tests/ut/attention/a2/test_mla_cp_precision.py: 30
   tests/ut/attention/a2/test_mla_fia_split.py: 60

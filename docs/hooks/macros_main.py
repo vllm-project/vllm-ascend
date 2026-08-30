@@ -56,7 +56,7 @@ def define_env(env):
     env.variables["main_pytorch_torch_npu_version"] = env.variables.get(
         "main_pytorch_torch_npu_version", "2.10.0 / 2.10.0.post4"
     )
-    env.variables["main_triton_ascend_version"] = env.variables.get("main_triton_ascend_version", "3.2.1")
+    env.variables["main_triton_ascend_version"] = env.variables.get("main_triton_ascend_version", "3.2.2")
     env.variables["main_vllm_commit"] = main_vllm_commit
     env.variables["main_vllm_tag"] = main_vllm_tag
 

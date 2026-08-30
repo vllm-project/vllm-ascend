@@ -157,15 +157,15 @@ extra:
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
   # Version substitutions used by macros plugin
-  vllm_version: v0.22.1
-  vllm_ascend_version: v0.22.1rc1
-  pip_vllm_ascend_version: 0.22.1rc1
-  pip_vllm_version: 0.22.1
+  vllm_version: v0.23.0
+  vllm_ascend_version: v0.23.0
+  pip_vllm_ascend_version: v0.23.0
+  pip_vllm_version: v0.23.0
   cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
   main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post4"
-  main_triton_ascend_version: "3.2.1"
+  main_triton_ascend_version: "3.2.2"
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend

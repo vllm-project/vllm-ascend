@@ -21,33 +21,58 @@ ARG BASE_OS="ubuntu22.04"
 FROM ${CANN_QUAY_URL}:${CANN_VERSION}-950-${BASE_OS}-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
+ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cpu/"
+ARG ASCEND_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi"
+ARG APTMIRROR=""
+ARG GIT_PROXY=""
+ARG PIP_TRUSTED_HOST=""
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 WORKDIR /workspace
 
+# Note: Install CANN 950 Ops Transformer Package
+ARG TARGETPLATFORM
+RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
+    case "$ARCH" in \
+        "linux/arm64"|"aarch64") ARCH="aarch64" ;; \
+        "linux/amd64"|"x86_64") ARCH="x86_64" ;; \
+        *) echo "Skipping unsupported architecture: $ARCH" && exit 0 ;; \
+    esac && \
+    CANN_OPS_TRANSFORMER_URL="https://ascend-cann-open.obs.cn-north-4.myhuaweicloud.com/CANN/9.2.beta2/cann-950-ops-transformer_9.2.0-beta.2_linux-${ARCH}.run" && \
+    wget --quiet ${CANN_OPS_TRANSFORMER_URL} -O /tmp/cann-950-ops-transformer.run && \
+    chmod +x /tmp/cann-950-ops-transformer.run && \
+    /tmp/cann-950-ops-transformer.run --full --quiet --install-for-all && \
+    rm -f /tmp/cann-950-ops-transformer.run
+
 # Install clang-15 (for triton-ascend) and Mooncake
 ARG MOONCAKE_TAG=0.3.11.post1
-RUN apt-get update -y && \
+RUN if [ -n "$APTMIRROR" ]; then \
+        sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
+    fi && \
+    apt-get update -y && \
     apt-get install -y git vim wget net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url https://mirrors.aliyun.com/pypi/web/simple && \
+    python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url ${MOONCAKE_INDEX_URL} && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
 # Install modelscope (for fast download) and ray (for multinode)
 RUN pip config set global.index-url ${PIP_INDEX_URL} && \
+    if [ -n "$PIP_TRUSTED_HOST" ]; then pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi && \
     python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.26.0
-RUN git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm
+RUN if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
+    git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
@@ -60,12 +85,13 @@ ENV SOC_VERSION=$SOC_VERSION \
     OMP_NUM_THREADS=1
 COPY . /vllm-workspace/vllm-ascend/
 
-RUN export PIP_EXTRA_INDEX_URL="https://mirrors.huaweicloud.com/ascend/repos/pypi" && \
+RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton triton-ascend && \
-    python3 -m pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi && \
+    python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
+    python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH

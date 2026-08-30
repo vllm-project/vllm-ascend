@@ -616,7 +616,15 @@ class AscendKimiK3ForConditionalGeneration(
         )
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         if rot_proj is not None and rot_proj_weight_names.isdisjoint(loaded_weights):
-            del self.mm_projector.rot_proj
+            # StageMissingLayer.__getattr__ delegates to the wrapped module, so
+            # rot_proj above is the real one, but del must act on the module
+            # that actually holds the registration. Unwrap the placeholder
+            # (language-model-only / zero mm limit deployments) before deleting.
+            # cast: the runtime value is the projector or its StageMissingLayer
+            # wrapper, both nn.Module; the getattr default form confuses mypy.
+            target = cast(nn.Module, getattr(self.mm_projector, "module", self.mm_projector))
+            if "rot_proj" in target._modules:
+                del target.rot_proj
         return loaded_weights
 
 

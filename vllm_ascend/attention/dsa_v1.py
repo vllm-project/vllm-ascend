@@ -57,6 +57,63 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
+CompressorMetadataOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+_COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
+
+
+def reset_compressor_metadata_cache() -> None:
+    """Release metadata outputs before a composite forward changes substeps."""
+    get_forward_context().additional_kwargs.pop(_COMPRESSOR_METADATA_CACHE_KEY, None)
+
+
+def get_or_compute_compressor_metadata(
+    metadata: Any,
+    compress_ratio: int,
+) -> CompressorMetadataOutput:
+    """Build compressor metadata once per cache group in the current substep."""
+    forward_context = get_forward_context()
+    cache: dict[tuple[str, type], CompressorMetadataOutput] = forward_context.additional_kwargs.setdefault(
+        _COMPRESSOR_METADATA_CACHE_KEY,
+        {},
+    )
+    cache_group_key = metadata.cache_group_key
+    if not cache_group_key:
+        raise ValueError("DSV4 compressor metadata requires a cache-group key")
+    # The pre-refactor v0.26 DSA path invokes prefill and decode separately
+    # within one mixed-batch forward. They share a cache group but require
+    # different compressor metadata, so keep the metadata phases isolated.
+    cache_key = (cache_group_key, type(metadata))
+    cached_metadata = cache.get(cache_key)
+    if cached_metadata is not None:
+        return cached_metadata
+
+    assert metadata.full_compress_cos is not None
+    assert metadata.full_compress_sin is not None
+    assert metadata.num_compressed_tokens is not None
+    assert metadata.start_pos is not None
+    assert metadata.num_reqs_actual is not None
+    full_compress_cos = metadata.full_compress_cos.view(
+        metadata.full_compress_cos.shape[0],
+        metadata.full_compress_cos.shape[-1],
+    )
+    full_compress_sin = metadata.full_compress_sin.view(
+        metadata.full_compress_sin.shape[0],
+        metadata.full_compress_sin.shape[-1],
+    )
+    computed_metadata = torch.ops._C_ascend.compressor_metadata(
+        full_compress_cos,
+        full_compress_sin,
+        metadata.query_start_loc,
+        metadata.start_pos,
+        metadata.block_table,
+        metadata.block_size,
+        DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+        compress_ratio,
+        metadata.num_compressed_tokens,
+        metadata.num_reqs_actual,
+    )
+    cache[cache_key] = computed_metadata
+    return computed_metadata
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -247,6 +304,7 @@ class AscendDSAPrefillMetadata:
     max_query_len: int
     max_seq_lens: int
 
+    cache_group_key: str = ""
     num_compressed_tokens: int | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
@@ -277,6 +335,7 @@ class AscendDSADecodeMetadata:
     slot_mapping: torch.Tensor | None
     block_size: int
 
+    cache_group_key: str = ""
     num_compressed_tokens: int | None = None
     query_start_loc: torch.tensor = None
     query_start_loc_cpu: torch.tensor = None
@@ -503,6 +562,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
+        if not layer_names:
+            raise ValueError("DSA metadata builder requires at least one layer name")
+        # vLLM assigns one builder result to every layer in an attention group.
+        self.cache_group_key = layer_names[0]
         hf_config = self.model_config.hf_config
 
         if AscendDSAMetadataBuilder.hadamard is None:
@@ -923,6 +986,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             block_table=self.block_table[reqs_start:, ...],
             slot_mapping=prefill_slot_mapping,
             block_size=self.block_size,
+            cache_group_key=self.cache_group_key,
             num_compressed_tokens=num_compressed_tokens,
             max_query_len=max_query_len,
             max_seq_lens=max_seq_lens,
@@ -1149,6 +1213,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             block_table=self.block_table[:block_table_size, ...],
             slot_mapping=slot_mapping,
             block_size=self.block_size,
+            cache_group_key=self.cache_group_key,
             num_compressed_tokens=num_compressed_tokens,
             seq_lens=self.seq_lens[: self.num_decodes],  # cached
             seq_lens_list=seq_lens_list,
@@ -1303,6 +1368,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             block_table=block_table[reqs_start:, ...],
             slot_mapping=prefill_slot_mapping,
             block_size=self.block_size,
+            cache_group_key=self.cache_group_key,
             max_query_len=None,  # type: ignore[arg-type]
             max_seq_lens=None,  # type: ignore[arg-type]
             query_start_loc=prefill_query_start_loc,
@@ -1401,6 +1467,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             block_table=block_table[:num_decodes, ...],
             slot_mapping=slot_mapping,
             block_size=self.block_size,
+            cache_group_key=self.cache_group_key,
             seq_lens=seq_lens[:num_decodes],
             seq_lens_list=None,  # type: ignore[arg-type]
             max_seq_lens=None,  # type: ignore[arg-type]
@@ -1597,31 +1664,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         self,
         metadata: AscendDSAPrefillMetadata | AscendDSADecodeMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        assert metadata.full_compress_cos is not None
-        assert metadata.full_compress_sin is not None
-        assert metadata.num_compressed_tokens is not None
-        assert metadata.start_pos is not None
-        assert metadata.num_reqs_actual is not None
-        full_compress_cos = metadata.full_compress_cos.view(
-            metadata.full_compress_cos.shape[0],
-            metadata.full_compress_cos.shape[-1],
-        )
-        full_compress_sin = metadata.full_compress_sin.view(
-            metadata.full_compress_sin.shape[0],
-            metadata.full_compress_sin.shape[-1],
-        )
-        return torch.ops._C_ascend.compressor_metadata(
-            full_compress_cos,
-            full_compress_sin,
-            metadata.query_start_loc,
-            metadata.start_pos,
-            metadata.block_table,
-            metadata.block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
-            self.compress_ratio,
-            metadata.num_compressed_tokens,
-            metadata.num_reqs_actual,
-        )
+        return get_or_compute_compressor_metadata(metadata, self.compress_ratio)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Attention impls are not walked by vllm's process_weights_after_loading

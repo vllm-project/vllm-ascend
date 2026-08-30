@@ -137,6 +137,12 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from vllm_ascend.patch.recompute_proxy import (
+    RECOMPUTE_TOKEN_IDS_KEY,
+    RecomputeContext,
+    iter_sse_events,
+)
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -186,11 +192,6 @@ def update_cached_tokens_in_chunk(chunk_json: dict, cached_tokens: int | None) -
     usage["prompt_tokens_details"] = prompt_tokens_details
     prompt_tokens_details["cached_tokens"] = cached_tokens
     return True
-
-
-def encode_response_chunk(chunk_json: dict, is_sse: bool) -> bytes:
-    chunk = json.dumps(chunk_json, ensure_ascii=False).encode("utf-8")
-    return b"data: " + chunk + b"\n\n" if is_sse else chunk
 
 
 global_args: argparse.Namespace | None = None
@@ -817,6 +818,7 @@ def auth_headers(request_id: str) -> dict[str, str]:
 
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
+    recompute_token_ids = (req_data.get("kv_transfer_params") or {}).get(RECOMPUTE_TOKEN_IDS_KEY)
     payload["kv_transfer_params"] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
@@ -825,7 +827,10 @@ def build_prefill_request(req_data: dict) -> dict:
         "remote_host": None,
         "remote_port": None,
     }
+    if recompute_token_ids is not None:
+        payload["kv_transfer_params"][RECOMPUTE_TOKEN_IDS_KEY] = recompute_token_ids
     payload["stream"] = False
+    payload["return_token_ids"] = False
     payload["max_tokens"] = 1
     payload["min_tokens"] = 1
     if "max_completion_tokens" in payload:
@@ -844,23 +849,24 @@ async def send_request_to_service(
 ):
     req_data = build_prefill_request(req_data)
     headers = auth_headers(request_id)
-    last_exc = None
-    for attempt in range(1, max_retries + 1):
+    max_attempts = max(1, max_retries)
+    for attempt in range(1, max_attempts + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
             response.raise_for_status()
             return response
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 or attempt == max_attempts:
+                raise
             logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
-            last_exc = exc
-            if attempt < max_retries:
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
-                raise last_exc
+        except httpx.RequestError as exc:
+            if attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, exc)
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
 
 
-async def stream_service_response_with_retry(
+async def stream_service_response(
     client: httpx.AsyncClient,
     endpoint: str,
     req_data: dict,
@@ -869,32 +875,35 @@ async def stream_service_response_with_retry(
     base_delay: float = 0.2,
 ):
     headers = auth_headers(request_id)
-    for attempt in range(1, max_retries + 1):
+    max_attempts = max(1, max_retries)
+    for attempt in range(1, max_attempts + 1):
+        first_chunk_sent = False
         try:
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
-                first_chunk_sent = False
                 async for chunk in response.aiter_bytes():
                     first_chunk_sent = True
                     yield chunk
                 return
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-            if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise exc
-        except Exception as exc:
-            if "first_chunk_sent" in locals() and first_chunk_sent:
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 400 or attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        except httpx.RequestError as exc:
+            if first_chunk_sent:
                 logger.error("Streaming to client interrupted after response started: %s", exc)
                 return
-            if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
-                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
-            else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
-                raise exc
+            if attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        except Exception as exc:
+            if first_chunk_sent:
+                logger.error("Streaming to client interrupted after response started: %s", exc)
+                return
+            if attempt == max_attempts:
+                raise
+            logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, exc)
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
 
 
 async def _abort_prefill_selection(
@@ -951,8 +960,11 @@ async def assign_instances(
         raise
 
     response_json = response.json()
+    recompute_token_ids = (req_data.get("kv_transfer_params") or {}).get(RECOMPUTE_TOKEN_IDS_KEY)
     kv_transfer_params = response_json.get("kv_transfer_params", {})
     if kv_transfer_params:
+        if recompute_token_ids is not None:
+            kv_transfer_params[RECOMPUTE_TOKEN_IDS_KEY] = recompute_token_ids
         req_data["kv_transfer_params"] = kv_transfer_params
     prefiller_cached_tokens = extract_cached_tokens(response_json)
 
@@ -997,27 +1009,15 @@ async def handle_completions_impl(api: str, request: Request):
         req_data = await request.json()
         req_body = await request.body()
         request_length = len(req_body)
+        recompute_context = RecomputeContext.from_request(req_data)
         instance_info = await assign_instances(api, req_data, request_length, is_initial_request=True)
-        stream_flag = bool(req_data.get("stream", False))
-        chat_flag = "messages" in req_data
-
-        if "prompt" in req_data:
-            origin_prompt = req_data["prompt"]
-        elif chat_flag:
-            messages = req_data["messages"]
-            origin_prompt = messages[0].get("content", "")
-        else:
-            origin_prompt = ""
-        origin_max_tokens = req_data.get("max_tokens", 16)
+        stream_flag = recompute_context.stream
 
         async def generate_stream():
             nonlocal instance_info
             nonlocal request_released
-            generated_token = ""
             released_kv = False
-            retry_count = 0
             retry = True
-            completion_tokens = 0
             reported_prefiller_cached_tokens = instance_info.prefiller_cached_tokens
 
             async def release_prefill_kv_once() -> None:
@@ -1028,81 +1028,73 @@ async def handle_completions_impl(api: str, request: Request):
                     )
                     released_kv = True
 
+            async def response_chunks(decoder_client: httpx.AsyncClient):
+                async for chunk in stream_service_response(
+                    decoder_client,
+                    api,
+                    req_data,
+                    request_id=instance_info.request_id,
+                    max_retries=args.max_retries,
+                    base_delay=args.retry_delay,
+                ):
+                    if not released_kv and chunk:
+                        await release_prefill_kv_once()
+                    yield chunk
+
             try:
                 while retry:
                     retry = False
                     decoder_client = await runtime.get_client(ServerRole.DECODE, instance_info.decoder_key)
-                    async for chunk in stream_service_response_with_retry(
-                        decoder_client,
-                        api,
-                        req_data,
-                        request_id=instance_info.request_id,
-                        max_retries=args.max_retries,
-                        base_delay=args.retry_delay,
-                    ):
-                        if not released_kv and chunk:
-                            await release_prefill_kv_once()
-                        try:
-                            chunk_str = chunk.decode("utf-8").strip()
-                        except UnicodeDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk)
-                            yield chunk
-                            continue
-                        if not chunk_str:
-                            continue
-                        is_sse = chunk_str.startswith("data: ")
-                        if is_sse:
-                            chunk_str = chunk_str[len("data: ") :]
-                        try:
-                            chunk_json = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            logger.debug("Skipping chunk: %s", chunk_str)
-                            yield chunk
-                            continue
-                        choices = chunk_json.get("choices", [])
-                        if not choices:
-                            if update_cached_tokens_in_chunk(chunk_json, reported_prefiller_cached_tokens):
-                                chunk = encode_response_chunk(chunk_json, is_sse)
-                            yield chunk
-                            continue
+                    chunks = response_chunks(decoder_client)
+                    if stream_flag:
+                        async for event in iter_sse_events(chunks):
+                            data_lines = [line[5:].lstrip() for line in event.splitlines() if line.startswith(b"data:")]
+                            if not data_lines:
+                                yield event
+                                continue
+                            data = b"\n".join(data_lines)
+                            if data == b"[DONE]":
+                                yield event
+                                continue
+                            try:
+                                payload = json.loads(data)
+                            except json.JSONDecodeError:
+                                logger.debug("Skipping SSE event: %s", event)
+                                yield event
+                                continue
 
-                        choice = choices[0]
-                        delta = choice.get("delta") or {}
-                        message = choice.get("message") or {}
-                        content = delta.get("content") or message.get("content") or choice.get("text") or ""
-                        generated_token += content
+                            update_cached_tokens_in_chunk(payload, reported_prefiller_cached_tokens)
 
-                        stop_reason = choice.get("stop_reason")
-                        usage = chunk_json.get("usage", {})
-                        completion_tokens = (
-                            (completion_tokens + 1)
-                            if stream_flag
-                            else (completion_tokens + usage.get("completion_tokens", 0))
-                        )
-                        if stop_reason == "recomputed":
-                            retry = True
-                            retry_count += 1
-                            if chat_flag:
-                                messages[0]["content"] = (
-                                    origin_prompt
-                                    + ([{"type": "text", "text": generated_token}] if generated_token else [])
-                                    if isinstance(origin_prompt, list)
-                                    else (origin_prompt or "") + generated_token
-                                )
-                            else:
-                                req_data["prompt"] = origin_prompt + generated_token
-                            req_data["max_tokens"] = origin_max_tokens - completion_tokens + retry_count
-                            tmp_request_length = len(json.dumps(req_data).encode("utf-8"))
-                            instance_info = await reassign_instances(api, req_data, tmp_request_length, instance_info)
+                            if recompute_context.observe_response(payload):
+                                recompute_context.prepare_retry(req_data)
+                                request_length = len(json.dumps(req_data).encode("utf-8"))
+                                instance_info = await reassign_instances(api, req_data, request_length, instance_info)
+                                released_kv = False
+                                retry = True
+                                break
+
+                            client_payload = recompute_context.response_for_client(payload)
+                            if client_payload is not None:
+                                yield (
+                                    "data: "
+                                    + json.dumps(client_payload, ensure_ascii=False, separators=(",", ":"))
+                                    + "\n\n"
+                                ).encode("utf-8")
+                    else:
+                        body = b"".join([chunk async for chunk in chunks])
+                        payload = json.loads(body)
+                        update_cached_tokens_in_chunk(payload, reported_prefiller_cached_tokens)
+                        if recompute_context.observe_response(payload):
+                            recompute_context.prepare_retry(req_data)
+                            request_length = len(json.dumps(req_data).encode("utf-8"))
+                            instance_info = await reassign_instances(api, req_data, request_length, instance_info)
                             released_kv = False
-                            break
-                        if retry_count > 0 and not stream_flag:
-                            if chat_flag:
-                                choice["message"]["content"] = generated_token
-                            else:
-                                choice["text"] = generated_token
-                            chunk = encode_response_chunk(chunk_json, is_sse)
-                        yield chunk
+                            retry = True
+                            continue
+
+                        client_payload = recompute_context.response_for_client(payload)
+                        if client_payload is not None:
+                            yield json.dumps(client_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             except asyncio.CancelledError:
                 logger.warning(
                     "Streaming from decoder %s:%s was cancelled; releasing request %s resources",

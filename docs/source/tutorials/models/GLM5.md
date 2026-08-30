@@ -6,15 +6,15 @@ This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified,
 
 [GLM-5](https://huggingface.co/zai-org/GLM-5) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version. The version of transformers need to be upgraded to 5.2.0 or later versions.
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -127,7 +127,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -137,7 +137,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```shell
     # The version of transformers needs to be upgraded to 5.2.0.
@@ -169,7 +169,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-prefix-caching \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
     - Quantized model `glm-5-w8a8` and `glm-5.1-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16) .
@@ -204,7 +204,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
     --enable-prefix-caching \
     --additional-config '{"multistream_overlap_shared_expert": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     ```
 
 === "A2 series"
@@ -213,7 +213,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```shell
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -254,7 +254,7 @@ The parameters are explained as follows:
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
 === "A3 series"
 
@@ -750,7 +750,7 @@ Before you start, please
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-          
+
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -830,7 +830,7 @@ Before you start, please
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-       
+
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
@@ -885,37 +885,37 @@ Before you start, please
         ```shell
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
-    
+
         export HCCL_OP_EXPANSION_MODE="AIV"
-    
+
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
         export HCCL_SOCKET_IFNAME=$nic_name
-    
+
         #Mooncake
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=1
-    
+
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-    
-    
+
+
         export ASCEND_AGGREGATE_ENABLE=1
         export ASCEND_TRANSPORT_PRINT=1
         export ACL_OP_INIT_MODE=1
         export ASCEND_A3_ENABLE=1
         # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
         export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-    
+
         export TASK_QUEUE_ENABLE=1
-    
+
         export ASCEND_RT_VISIBLE_DEVICES=$1
-          
+
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_ASCEND_ENABLE_MLAPO=1
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-    
+
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -966,36 +966,36 @@ Before you start, please
          ```shell
          nic_name="xxxx" # change to your own nic name
          local_ip="xxxx" # change to your own ip
-            
+
          export HCCL_OP_EXPANSION_MODE="AIV"
-            
+
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-            
+
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-            
+
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-            
+
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
+
          export TASK_QUEUE_ENABLE=1
-            
+
          export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
+
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
+
          vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
@@ -1046,36 +1046,36 @@ Before you start, please
          ```shell
          nic_name="xxxx" # change to your own nic name
          local_ip="xxxx" # change to your own ip
-            
+
          export HCCL_OP_EXPANSION_MODE="AIV"
-            
+
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-            
+
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-            
+
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-            
+
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
+
          export TASK_QUEUE_ENABLE=1
-            
+
          export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
+
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
+
          vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
@@ -1126,36 +1126,36 @@ Before you start, please
          ```shell
          nic_name="xxxx" # change to your own nic name
          local_ip="xxxx" # change to your own ip
-            
+
          export HCCL_OP_EXPANSION_MODE="AIV"
-            
+
          export HCCL_IF_IP=$local_ip
          export GLOO_SOCKET_IFNAME=$nic_name
          export TP_SOCKET_IFNAME=$nic_name
          export HCCL_SOCKET_IFNAME=$nic_name
-            
+
          #Mooncake
          export OMP_PROC_BIND=false
          export OMP_NUM_THREADS=1
-            
+
          export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
          export HCCL_BUFFSIZE=256
-            
+
          export ASCEND_AGGREGATE_ENABLE=1
          export ASCEND_TRANSPORT_PRINT=1
          export ACL_OP_INIT_MODE=1
          export ASCEND_A3_ENABLE=1
          # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
          export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-            
+
          export TASK_QUEUE_ENABLE=1
-            
+
          export ASCEND_RT_VISIBLE_DEVICES=$1
-                     
+
          export VLLM_ASCEND_ENABLE_FUSED_MC2=1
          export VLLM_ASCEND_ENABLE_MLAPO=1
          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
-            
+
          vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
              --host 0.0.0.0 \
              --port $2 \
@@ -1283,7 +1283,7 @@ python load_balance_proxy_server_example.py \
       6721 6722 6723 6724 \
       6721 6722 6723 6724 \
       6721 6722 6723 6724 \
-      6721 6722 6723 6724      
+      6721 6722 6723 6724
 ```
 
 **Notice:**
@@ -1359,7 +1359,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ## 10 FAQ
 
-- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
 - **Q: How to solve ValueError: Tokenizer class TokenizersBackend does not exist or is not currently imported?**
 

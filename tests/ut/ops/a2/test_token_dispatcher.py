@@ -132,9 +132,9 @@ class TestTokenDispatcherWithMC2(TestBase):
         )
         self.ascend_soc_version_patch.start()
 
-        # Mock get_ascend_config() and is_hierarchical_communication_enabled()
+        # Mock get_ascend_config()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_mc2_hierarchy_comm = False
+        mock_ascend_config.mc2_comm_alg = ""
         mock_ascend_config.eplb_config = MagicMock()
         mock_ascend_config.eplb_config.dynamic_eplb = False
         self.ascend_config_patch = patch(
@@ -143,10 +143,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.ascend_config_patch.start()
         self.ascend_config_utils_patch = patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config)
         self.ascend_config_utils_patch.start()
-        self.hier_comm_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.is_hierarchical_communication_enabled", return_value=False
-        )
-        self.hier_comm_patch.start()
         self.skip_allreduce_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.should_skip_allreduce_across_dp_group", return_value=False
         )
@@ -164,7 +160,6 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.ascend_soc_version_patch.stop()
         self.ascend_config_patch.stop()
         self.ascend_config_utils_patch.stop()
-        self.hier_comm_patch.stop()
         self.skip_allreduce_patch.stop()
 
     def test_init(self):

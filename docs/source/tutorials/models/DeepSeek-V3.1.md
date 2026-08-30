@@ -16,9 +16,9 @@ This document is validated and written based on **vLLM-Ascend v0.9.1rc3**. The c
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -27,7 +27,7 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
 - `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
 - `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
-- `Quantization method`: [msmodelslim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v31-w8a8-%E6%B7%B7%E5%90%88%E9%87%8F%E5%8C%96-mtp-%E9%87%8F%E5%8C%96). You can use this method to quantize the model.
+- `Quantization method`: [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md). You can use this method to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -181,7 +181,7 @@ Key Parameter Descriptions:
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -355,7 +355,7 @@ Key Parameter Descriptions:
 - `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -421,7 +421,7 @@ Parameter descriptions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.1"
+    local_ip="192.xx.xx.1"
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
@@ -496,7 +496,7 @@ Parameter descriptions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.2"
+    local_ip="192.xx.xx.2"
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
@@ -571,7 +571,7 @@ Parameter descriptions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.3"
+    local_ip="192.xx.xx.3"
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
@@ -644,7 +644,7 @@ Parameter descriptions:
     # this obtained through ifconfig
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.4"
+    local_ip="192.xx.xx.4"
 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
@@ -711,25 +711,25 @@ Parameter descriptions:
         }'
     ```
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-- `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
-- `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
-- `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
-- `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
+    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+    - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+    - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
 2. run server for each node:
 
     ```shell
     # p0
-    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
     # p1
-    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 2 --tp-size 8 --dp-size-local 2 --dp-rank-start 0 --dp-address 192.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
     # d0
-    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 0 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     # d1
-    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 141.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 32 --tp-size 1 --dp-size-local 16 --dp-rank-start 16 --dp-address 192.xx.xx.3 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
 3. Run the `proxy.sh` script on the prefill master node
@@ -739,47 +739,47 @@ Key Parameter Descriptions:
     ```shell
     python load_balance_proxy_server_example.py \
       --port 1999 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --prefiller-hosts \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
       --prefiller-ports \
         7100 7101 7100 7101 \
       --decoder-hosts \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.3 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
-        141.xx.xx.4 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.3 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
+        192.xx.xx.4 \
       --decoder-ports \
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115 \
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115 \
@@ -795,7 +795,7 @@ Deployment Verification:
 After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together:
 
 ```shell
-curl http://141.xx.xx.1:1999/v1/chat/completions \
+curl http://192.xx.xx.1:1999/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "deepseek_v3",
@@ -840,7 +840,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 }
 ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -882,7 +882,7 @@ Not test yet.
 
 Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
-The performance result is:  
+The performance result is:
 
 **Hardware**: A3-752T, 4 node
 
@@ -957,8 +957,8 @@ After several minutes, you can get the performance evaluation result.
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

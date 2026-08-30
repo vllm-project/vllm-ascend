@@ -29,6 +29,7 @@ on:
         type: choice
         options:
           - main
+          - v0.23.0
           - v0.23.0rc1
           - v0.22.1rc1
           - v0.21.0rc1
@@ -89,7 +90,7 @@ on:
       triton_ascend:
         description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
         required: false
-        default: '["", "3.2.1"]'
+        default: '["", "3.2.2"]'
         type: string
 
 permissions:
@@ -158,8 +159,8 @@ jobs:
         TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
         ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[0]) || '' }}
         ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1]) || '' }}
-        TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.1"]')[0] }}
-        TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.1"]')[1] }}
+        TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
+        TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
       
     secrets:
       quay_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_PASSWORD || secrets.QUAY_PASSWORD }}
@@ -225,8 +226,8 @@ jobs:
         TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
         ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[0]) || '' }}
         ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.07.29"]')[1]) || '' }}
-        TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.1"]')[0] }}
-        TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.1"]')[1] }}
+        TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
+        TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
 
     secrets:
       quay_temp_password: ${{ inputs.build_type == 'daily' && secrets.QUAY_DAILY_TEMP_PASSWORD || secrets.QUAY_TEMP_PASSWORD }}

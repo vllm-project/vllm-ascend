@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.util
 import json
 import os
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,34 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+_CANN_OPS_TRANSFORMER_AVAILABLE = importlib.util.find_spec("cann_ops_transformer") is not None
+
+
+def is_megamoe_supported_by_config(vllm_config) -> bool:
+    hf_text_config = vllm_config.model_config.hf_text_config
+    hidden_size = getattr(hf_text_config, "hidden_size", None)
+    if hidden_size is None and hasattr(vllm_config.model_config, "get_hidden_size"):
+        hidden_size = vllm_config.model_config.get_hidden_size()
+    if hidden_size is None:
+        return False
+    hidden_size = int(hidden_size)
+    # Hidden-size bounds come from the CANN MegaMoe kernel constraints:
+    # the dispatch / FFN / combine cube tiles require hidden in the closed
+    # range [1024, 8192] and a multiple of 512 (the cube K-step). Models
+    # outside this range (e.g. small Qwen variants with hidden=896, or any
+    # hidden=9216 LLaMA-style head) are silently routed back to MC2.
+    if hidden_size < 1024 or hidden_size > 8192 or hidden_size % 512 != 0:
+        return False
+
+    # Intermediate-size bounds come from the CANN MegaMoe kernel constraints:
+    # For CANN 9.1.0 MegaMoe tiling requires intermediate_size in the closed
+    # range [1024, 3072] and a multiple of 512. This constraint may be removed
+    # in CANN 9.2.0
+    moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+    if moe_intermediate_size is None:
+        return False
+    return moe_intermediate_size >= 1024 and moe_intermediate_size <= 3072 and moe_intermediate_size % 512 == 0
 
 
 class AscendConfig:
@@ -98,8 +127,9 @@ class AscendConfig:
             os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend"),
         )
 
+        enable_shared_expert_dp = additional_config.get("enable_shared_expert_dp", self.enable_flashcomm1)
         self.enable_shared_expert_dp = (
-            additional_config.get("enable_shared_expert_dp", False)
+            enable_shared_expert_dp
             and vllm_config.parallel_config.enable_expert_parallel
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
@@ -178,6 +208,16 @@ class AscendConfig:
                 "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
+        if (
+            self.enable_fused_mc2 == 1
+            and _CANN_OPS_TRANSFORMER_AVAILABLE
+            and not is_megamoe_supported_by_config(vllm_config)
+        ):
+            self.enable_fused_mc2 = 0
+            logger.warning_once(
+                "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+            )
+
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",
@@ -274,13 +314,37 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
-        # Per-rank token capacity after dispatch in the mega moe (dispatch_ffn_combine) fused operator.
-        # When load imbalance causes a rank to receive more tokens than this limit, the excess tokens
-        # are dropped and skipped from computation, degrading accuracy.
-        # Do not set this too large: workspace memory scales linearly with this value, which matters
-        # especially under long-context scenarios where the operator should not hold too much memory.
-        # Default 131072.
-        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 131072)
+        self.mc2_comm_alg = additional_config.get("mc2_comm_alg", "")
+        if self.enable_mc2_hierarchy_comm:
+            self.mc2_comm_alg = "hierarchy"
+
+        if self.mc2_comm_alg not in ["", "fullmesh", "hierarchy", "fullmesh_v2"]:
+            raise ValueError(
+                'additional_config.mc2_comm_alg need in ["", "fullmesh", "hierarchy", "fullmesh_v2"], '
+                f"but got {self.mc2_comm_alg}."
+            )
+
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        device_type = get_ascend_device_type()
+        if self.mc2_comm_alg == "fullmesh_v2" and device_type != AscendDeviceType.A3:
+            raise NotImplementedError(
+                f"mc2_comm_alg == 'fullmesh_v2' is only supported on A3, but got {device_type.name}."
+            )
+
+        if self.mc2_comm_alg == "hierarchy" and device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
+            raise NotImplementedError(
+                f"mc2_comm_alg == 'hierarchy' is only supported on A2 and A3, but got {device_type.name}."
+            )
+
+        # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
+        # The same value is passed as dispatch_ffn_combine's max_output_size
+        # and CANN MegaMoe buffer's max_recv_token_num.
+        # This is a reference value: if the actual per-rank received token
+        # count exceeds it, tokens may be truncated, causing precision
+        # degradation. Do not set it too large because workspace memory scales
+        # linearly with this value. Default 65536.
+        self.mega_moe_max_tokens = additional_config.get("mega_moe_max_tokens", 65536)
         if not isinstance(self.mega_moe_max_tokens, int):
             raise ValueError(
                 f"mega_moe_max_tokens must be an integer, got {type(self.mega_moe_max_tokens).__name__}: "
@@ -449,6 +513,15 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+    def get_mc2_comm_alg(self) -> str:
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+        # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
+        # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
+        if self.mc2_comm_alg == "fullmesh" and get_ascend_device_type() == AscendDeviceType.A3:
+            return "fullmesh_v1"
+        return self.mc2_comm_alg
 
 
 class FinegrainedTPConfig:

@@ -36,12 +36,13 @@ Pipeline (PR-driven mode):
   5. Partition  -- split test groups across parallel runners by estimated time.
   6. Output     -- write test_groups / has_tests / matched_modules.
 
-Test-only optimization:
-  If a PR changes only files under ``tests/`` (no source code touched), the
-  module-matching step is bypassed. Only the ``default_cpu_ut`` module (which
-  is always-on) and the changed test files themselves are run. This avoids
-  the broad regression triggered by ``optional: false`` modules when the
-  intent of the PR is purely to add or adjust tests.
+Test/tool-scoped optimization:
+  In PR-driven mode, the workflow passes both the full diff and the changed
+  files matched by the PR test path filter. If the filtered files contain only
+  test paths and/or non-bisect ``tools`` paths, normal module matching is
+  bypassed. The selector runs ``default_cpu_ut`` and directly changed test
+  files. Files outside the PR test filter, such as nightly-only files and docs,
+  do not widen the test scope. Bisect changes retain their dedicated policy.
 
 Bisect-tool optimization:
   If a PR is scoped to ``tools/bisect`` and its paired UT/config/format files,
@@ -357,14 +358,17 @@ def _is_test_path(path: str) -> bool:
     return _is_ut_path(path) or _is_e2e_path(path)
 
 
-def _is_test_only_change(changed_files: list[str]) -> bool:
-    """Return True if *changed_files* contains only files under ``tests/``.
+def _is_cpu_ut_scoped_change(changed_files: list[str]) -> bool:
+    """Return True when PR-filtered changes only require CPU UT.
 
-    When a PR touches nothing but test files, there is no source change
-    requiring broad regression; only the changed tests (and the always-on
-    ``default_cpu_ut`` module) need to run.
+    The workflow removes files outside its source-path filter before passing
+    this list. Ordinary tools and test-only changes share the same broad CPU
+    UT coverage; bisect paths retain their dedicated selection policy.
     """
-    return bool(changed_files) and all(_is_test_path(f) for f in changed_files)
+    return bool(changed_files) and all(
+        _is_test_path(f) or (_matches_path_dependency(f, "tools") and not _is_bisect_tool_scoped_path(f))
+        for f in changed_files
+    )
 
 
 def _is_bisect_tool_scoped_path(file_path: str) -> bool:
@@ -733,6 +737,13 @@ def main():
         "to run a single test method.",
     )
     parser.add_argument(
+        "--filtered-changed-files-json",
+        type=str,
+        default=None,
+        help="JSON array containing changed files matched by the PR workflow path filter. "
+        "Used only for test-scoped detection and changed-test collection.",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=_CONFIG_PATH,
@@ -768,16 +779,26 @@ def main():
             _scan_e2e_test_dir(path, all_groups)
     else:
         changed_files = _get_changed_files(args.diff_base) if args.diff_base else args.changed_files
+        filtered_changed_files = changed_files
+        if args.filtered_changed_files_json is not None:
+            try:
+                filtered_changed_files = json.loads(args.filtered_changed_files_json)
+            except json.JSONDecodeError as exc:
+                parser.error(f"Invalid --filtered-changed-files-json: {exc}")
+            if not isinstance(filtered_changed_files, list) or not all(
+                isinstance(file_path, str) for file_path in filtered_changed_files
+            ):
+                parser.error("--filtered-changed-files-json must be a JSON array of strings")
         bisect_tool_scoped_change = _is_bisect_tool_scoped_change(changed_files)
-        test_only_change = _is_test_only_change(changed_files)
+        cpu_ut_scoped_change = _is_cpu_ut_scoped_change(filtered_changed_files)
         if bisect_tool_scoped_change:
             print(
                 "Detected bisect tool-scoped change: running only matching tool modules (skipping always-on modules).",
                 file=sys.stderr,
             )
-        elif test_only_change:
+        elif cpu_ut_scoped_change:
             print(
-                "Detected test-only change: running only default_cpu_ut"
+                "Detected CPU-UT-scoped change: running only default_cpu_ut"
                 " and the changed test files (skipping source-driven modules).",
                 file=sys.stderr,
             )
@@ -785,14 +806,14 @@ def main():
             matched_modules = [module["name"] for module in config]
         elif bisect_tool_scoped_change:
             matched_modules = _match_modules(changed_files, config, include_always=False)
-        elif test_only_change:
+        elif cpu_ut_scoped_change:
             matched_modules = [m["name"] for m in config if m["name"] == DEFAULT_CPU_UT_MODULE]
         else:
             matched_modules = _match_modules(changed_files, config)
         test_dirs, cpu_only_dirs = _collect_test_dirs(matched_modules, config)
 
         changed_test_files = []
-        for f in changed_files:
+        for f in filtered_changed_files:
             if not _is_test_path(f):
                 continue
             target = Path(_pytest_node_file_path(f))

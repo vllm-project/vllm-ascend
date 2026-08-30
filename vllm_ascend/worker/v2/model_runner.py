@@ -46,6 +46,7 @@ from vllm_ascend.ascend_forward_context import (
     set_mc2_tokens_capacity,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
+from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -76,6 +77,10 @@ class NPUModelRunner(GPUModelRunner):
             and not self.model_config.enforce_eager
         )
 
+        self.update_stream = None
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
+
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.req_states
@@ -88,6 +93,9 @@ class NPUModelRunner(GPUModelRunner):
         self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None:
             self.speculator = init_speculator(self.vllm_config, self.device)
+            # Shared update_stream: main model (ModelAclGraphManager) and draft
+            # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
+            self.speculator.update_stream = self.update_stream
 
         # AscendRequestState has extra `num_computed_tokens_cpu` attribute.
         # so reinitialize req_states here.
@@ -158,7 +166,9 @@ class NPUModelRunner(GPUModelRunner):
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
-                self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
+                # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
+                with disable_compilation(self.get_model()):
+                    self._dummy_run(mc2_tokens_capacity, skip_attn=True, is_profile=True)
             super().profile_run()
 
     def prepare_inputs(
@@ -462,7 +472,10 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
-        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        if (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+        ):
             num_reqs_padded = num_reqs
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs

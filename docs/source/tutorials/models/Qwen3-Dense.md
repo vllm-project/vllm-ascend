@@ -240,7 +240,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --served-model-name qwen3 \
         --trust-remote-code \
         --quantization ascend \
-        --distributed-executor-backend mp \
+        --distributed-executor-backend "mp" \
         --tensor-parallel-size 4 \
         --max-model-len 5500 \
         --max-num-batched-tokens 40960 \
@@ -511,6 +511,8 @@ After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Features](https://docs.vllm.ai/en/stable/features), [vLLM Ascend Additional Configuration](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html), [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) and [vLLM Ascend Feature Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide) for detailed key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -533,7 +535,7 @@ After several minutes, you will get the performance evaluation result.
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
 
-For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment)
+>For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 <u>High Throughput Configuration:</u>
 
@@ -546,7 +548,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend "mp" \
     --tensor-parallel-size 4 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
@@ -598,7 +600,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend "mp" \
     --tensor-parallel-size 8 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
@@ -616,8 +618,8 @@ vllm serve your_model_path \
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3 Dense models.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This section only covers issues specific to Qwen3 Dense models.

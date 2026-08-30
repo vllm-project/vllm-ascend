@@ -226,7 +226,7 @@ jobs:
           export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
           # Preserve CI availability during the transition by compiling on the
           # NPU only when the new CPU-produced cache is unavailable.
           if [ "$CSRC_CACHE_HIT" = "true" ]; then
@@ -318,7 +318,7 @@ jobs:
           retention-days: 7
 
       - name: Upload coverage data
-        if: ${{ always() && inputs.enable-coverage }}
+        if: ${{ !cancelled() && inputs.enable-coverage }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -329,7 +329,7 @@ jobs:
           compression-level: 0
 
       - name: Upload selected test logs
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
@@ -340,7 +340,7 @@ jobs:
           compression-level: 0
 
   upload-coverage-to-obs:
-      if: ${{ always() && inputs.enable-coverage }}
+      if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
       runs-on: ubuntu-latest
       continue-on-error: true

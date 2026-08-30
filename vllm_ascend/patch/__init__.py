@@ -32,7 +32,8 @@
 # =================
 # Entries are listed in alphabetical order by file name.
 #
-# ** 1. File: platform/patch_balance_schedule.py**
+# ** 1. Files: platform/patch_async_scheduler.py, platform/patch_balance_schedule.py,
+#              platform/patch_kv_delivery_preemption.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
 #      `vllm.v1.core.sched.scheduler.Scheduler`
@@ -47,6 +48,39 @@
 #       https://github.com/vllm-project/vllm/pull/29721
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
+#
+#   2. `vllm.v1.core.sched.async_scheduler.AsyncScheduler._update_request_with_output`
+#    Why:
+#       vLLM #48245 adds lossless stale-output handling for async scheduling.
+#       AsyncScheduler owns placeholder accounting, so this method cannot
+#       inherit the implementation from the scheduler patch.
+#    How:
+#       Replace only `_update_request_with_output` with the #48245 version.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/48245
+#    Future Plan:
+#       Remove this patch when the supported vLLM version includes PR #48245.
+#
+#   3. `vllm.v1.core.sched.scheduler.Scheduler`
+#      `vllm.v1.request.Request`
+#      `vllm.distributed.kv_transfer.kv_connector.v1.*`
+#    Why:
+#       vLLM #48245/#50297 prevent preemption from losing or reordering
+#       in-flight output while a producer connector still requires reliable KV
+#       delivery. This correctness requirement is independent of balance
+#       scheduling.
+#    How:
+#       Install `KVDeliveryScheduler` first with all affected scheduler methods
+#       and request/connector contracts. `BalanceScheduler` derives from it and
+#       keeps its own vLLM `v0.26.0`-based balance `schedule()`. When balance
+#       is disabled,
+#       that method delegates to `KVDeliveryScheduler.schedule()`; when enabled,
+#       it runs only the original balance scheduling logic.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/48245
+#       https://github.com/vllm-project/vllm/pull/50297
+#    Future Plan:
+#       Remove this patch when the supported vLLM version includes both PRs.
 #
 # ** 2. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -75,21 +109,38 @@
 #    Why:
 #       DeepSeek-V4-Flash-0731 defines three reasoning effort levels: low has
 #       no prompt prefix, high uses the original "Absolute maximum" prefix,
-#       and max uses the new "Beyond maximum" prefix. The supported vLLM
-#       Python tokenizer predates this 0731 prompt mapping.
+#       and max uses the new "Beyond maximum" prefix. The earlier Flash
+#       checkpoint uses a different mapping where only max/xhigh selects the
+#       "Absolute maximum" prefix. The supported vLLM Python tokenizer
+#       predates the 0731 prompt mapping.
 #    How:
-#       Monkey-patch tokenizer normalization so omitted options select
-#       thinking with high effort and compatibility aliases map to canonical
-#       low, high, or max. Wrap render_message to prepend the official 0731
-#       prompt before the first message in thinking mode. Align the parser's
-#       default state with the tokenizer so implicit thinking is extracted as
-#       reasoning instead of content.
+#       Select the 0731 mapping when the model config contains a dspark_*
+#       field; otherwise preserve the earlier Flash mapping. Wrap
+#       render_message to prepend the selected prompt before the first message
+#       in thinking mode. Align the parser's default state with the tokenizer
+#       so implicit thinking is extracted as reasoning instead of content.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/50580
 #       https://github.com/vllm-project/vllm/pull/51296
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #50580
 #       and PR #51296.
+#
+# ** 3a. File: platform/patch_deepseek_v4_tool_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.deepseek_v4.DeepSeekV4Parser._compute_arg_delta`
+#    Why:
+#       The supported vLLM skips argument conversion for DeepSeek V4 parameter-body
+#       deltas without `>`. A long string is consequently emitted only when
+#       `</parameter>` arrives instead of streaming incrementally.
+#    How:
+#       After the original converter confirms an in-progress, schema-stable
+#       string parameter, JSON-escape and emit plain body deltas directly.
+#       Structural deltas and final conversion remain on the original path.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/52865
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #52865.
 #
 # ** 4. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -551,6 +602,23 @@
 #       Remove or narrow this patch if upstream exposes stable hooks for backend
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
+#
+# ** 19a. File: platform/patch_shm_broadcast.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue`
+#    Why:
+#       vLLM 0.26.0 local readers can wait indefinitely after a best-effort ZMQ
+#       notification is lost. A caller exception can also leave a read slot
+#       unreleased and block the writer.
+#    How:
+#       Replace `timeout_ms` and `acquire_read` with the implementations from the
+#       upstream fix. Idle waits are capped at five seconds, and read-slot cleanup
+#       runs in a `finally` block.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/45224
+#       https://github.com/vllm-project/vllm-ascend/pull/14181
+#    Future Plan:
+#       Remove this patch when the supported vLLM release includes PR #45224.
 #
 # ** 20. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1326,12 +1394,34 @@
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
 #    Why:
 #       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
+#       apply_penalties also fails on large input shape because of the triton kernel limitation.
 #    How：
 #       override triton ops in vLLM with ascend implementation
+#       re-write apply_penalties kernel with minimum change to support large input shape.
+#    Test:
+#       UT added at vllm-ascend\tests\e2e\nightly\single_node\ops\singlecard_ops\triton\test_penality.py
 #    Related PR (if no, explain why):
 #       Let vLLM support triton ops dispatch.
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
+#
+#   2. `vllm.v1.worker.gpu.metrics.logits.libdevice`
+#    Why:
+#       The upstream `get_num_nans` Triton kernel imports its libdevice
+#       functions from the default CUDA-oriented module. On Ascend, this makes
+#       Triton resolve CUDA libdevice symbols instead of the CANN equivalents,
+#       causing the kernel compilation to fail.
+#    How:
+#       Rebind `metrics.logits.libdevice` to
+#       `triton.language.extra.cann.libdevice`. Existing references to
+#       `get_num_nans` in the sampler and rejection sampler then use the CANN
+#       libdevice when the kernel is compiled.
+#    Related PR (if no, explain why):
+#       No. This is a Triton-Ascend backend compatibility patch for the
+#       upstream module-level libdevice import.
+#    Future Plan:
+#       Remove this patch once vLLM selects the Triton libdevice through a
+#       backend-dispatch mechanism.
 #
 # ** 32. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1359,3 +1449,17 @@
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
 #
+# ** 34. File: platform/patch_recompute_chat.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.renderers.online_renderer.OnlineRenderer.render_chat`
+#    Why:
+#       P/D recompute retries must resume from exact token IDs. Rebuilding chat
+#       messages changes role placement and applies the chat template again.
+#    How:
+#       Replace the rendered engine input only when the proxy supplies its
+#       internal recompute token prefix through KV transfer parameters.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/issues/13466
+#    Future Plan:
+#       Remove this patch when upstream vLLM exposes a token-native internal
+#       resume input for chat-completion P/D proxies.
