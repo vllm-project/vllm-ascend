@@ -76,7 +76,8 @@ class TestRlConfig(TestBase):
 
     def test_lax_bool_and_unknown_key(self):
         config = RlConfig(  # type: ignore[arg-type]
-            enabled="true", sleep_mode_extra_cleanup="false"
+            enabled="true",  # type: ignore[arg-type]
+            sleep_mode_extra_cleanup="false",  # type: ignore[arg-type]
         )
 
         self.assertTrue(config.enabled)
@@ -578,7 +579,7 @@ class TestShortRequestFirstConfig(TestBase):
 
     def test_explicit_config(self):
         cfg = ShortRequestFirstConfig(
-            **{
+            **{  # type: ignore[arg-type]
                 "enabled": True,
                 "threshold": 512,
                 "long_max_wait_ms": 2000,
@@ -590,15 +591,15 @@ class TestShortRequestFirstConfig(TestBase):
 
     def test_unknown_key_rejected(self):
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig(**{"foo": 1})
+            ShortRequestFirstConfig(**{"foo": 1})  # type: ignore[arg-type]
 
     def test_validation_rejects_out_of_range(self):
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig(**{"long_token_reservation": 1.5})
+            ShortRequestFirstConfig(**{"long_token_reservation": 1.5})  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig(**{"threshold": -1})
+            ShortRequestFirstConfig(**{"threshold": -1})  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig(**{"long_max_wait_ms": -1})
+            ShortRequestFirstConfig(**{"long_max_wait_ms": -1})  # type: ignore[arg-type]
 
     def test_none_config_is_disabled(self):
         cfg = ShortRequestFirstConfig()
@@ -773,22 +774,28 @@ class TestSubconfigPydanticTypeValidation(TestBase):
 
     def test_ascend_fusion_config_string_false_disables(self):
         # bool("false") is True in Python; pydantic lax must resolve to False.
-        self.assertFalse(AscendFusionConfig(fusion_ops_gmmswigluquant="false").fusion_ops_gmmswigluquant)
-        self.assertTrue(AscendFusionConfig(fusion_ops_gmmswigluquant="true").fusion_ops_gmmswigluquant)
+        cfg = AscendFusionConfig(
+            fusion_ops_gmmswigluquant="false"  # type: ignore[arg-type]
+        )
+        self.assertFalse(cfg.fusion_ops_gmmswigluquant)
+        cfg = AscendFusionConfig(
+            fusion_ops_gmmswigluquant="true"  # type: ignore[arg-type]
+        )
+        self.assertTrue(cfg.fusion_ops_gmmswigluquant)
 
     def test_ascend_fusion_config_forbids_unknown_key(self):
         with self.assertRaises(ValueError):
-            AscendFusionConfig(unknown_key=1)
+            AscendFusionConfig(unknown_key=1)  # type: ignore[call-arg]
 
     def test_ascend_compilation_config_bool_lax_and_forbid(self):
-        cfg = AscendCompilationConfig(enable_npugraph_ex="false")
+        cfg = AscendCompilationConfig(enable_npugraph_ex="false")  # type: ignore[arg-type]
         self.assertFalse(cfg.enable_npugraph_ex)
         with self.assertRaises(ValueError):
-            AscendCompilationConfig(unknown_key=1)
+            AscendCompilationConfig(unknown_key=1)  # type: ignore[call-arg]
 
     def test_profiling_chunk_config_int_lax_and_range(self):
         # int string "2" coerces to 2 (fixes "2"==2 silent failure)
-        cfg = ProfilingChunkConfig(min_chunk="4096", max_fit_chunk="30")
+        cfg = ProfilingChunkConfig(min_chunk="4096", max_fit_chunk="30")  # type: ignore[arg-type]
         self.assertEqual(cfg.min_chunk, 4096)
         # range check preserved
         with self.assertRaises(ValueError):
@@ -800,11 +807,13 @@ class TestSubconfigPydanticTypeValidation(TestBase):
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):
-            ShortRequestFirstConfig(foo=1)
+            ShortRequestFirstConfig(foo=1)  # type: ignore[call-arg]
 
     def test_dyntra_lb_config_lax_types_and_forbid(self):
         cfg = DyntraLBConfig(  # type: ignore[call-arg]
-            enabled="true", start_step="10", bubble_threshold="2.5"
+            enabled="true",  # type: ignore[arg-type]
+            start_step="10",  # type: ignore[arg-type]
+            bubble_threshold="2.5",  # type: ignore[arg-type]
         )
         self.assertTrue(cfg.enabled)
         self.assertEqual(cfg.start_step, 10)
@@ -825,7 +834,7 @@ class TestSubconfigPydanticTypeValidation(TestBase):
             FinegrainedTPConfig(lmhead_tensor_parallel_size=-1)
 
     def test_eplb_config_int_field_lax(self):
-        cfg = EplbConfig(eplb_policy_type="2")
+        cfg = EplbConfig(eplb_policy_type="2")  # type: ignore[arg-type]
         self.assertEqual(cfg.eplb_policy_type, 2)
 
 
@@ -993,11 +1002,18 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
+    @patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=object())
     @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
+    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(
+        self, mock_fix, mock_megamoe_supported, mock_find_spec
+    ):
+        # enable_fused_mc2=2 is the megamoe testing path (rolled back from
+        # enable_fused_mc2=1 since the megamoe op is disabled by default); it
+        # sets _MEGA_MOE_SUPPORTED from cann_ops_transformer availability, so
+        # the config downgrade to 0 only applies here.
         vc = VllmConfig()
-        vc.additional_config = {"enable_fused_mc2": 1}
+        vc.additional_config = {"enable_fused_mc2": 2}
 
         self.assertEqual(init_ascend_config(vc).enable_fused_mc2, 0)
 
