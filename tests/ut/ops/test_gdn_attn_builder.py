@@ -341,6 +341,7 @@ def _cache_index_first_column(cache_indices: torch.Tensor) -> torch.Tensor:
 
 def _assert_non_spec_conv1d_args_match_metadata(attn_metadata) -> None:
     conv1d_meta = attn_metadata.non_spec_prefill_metadata.causal_conv1d
+    assert conv1d_meta.max_query_len == -1
     assert torch.equal(conv1d_meta.query_start_loc, attn_metadata.non_spec_query_start_loc)
     assert torch.equal(
         _cache_index_first_column(conv1d_meta.cache_indices),
@@ -499,6 +500,7 @@ def test_spec_conv1d_args_use_device_cache_and_accepted_tokens():
         torch.tensor([[10, 11, 12, 13], [20, 21, 22, 23]], dtype=torch.int32),
     )
     assert torch.equal(spec_conv1d_meta.num_accepted_tokens, num_accepted_tokens)
+    assert spec_conv1d_meta.max_query_len == 4
     assert torch.equal(
         attn_metadata.spec_decode_metadata.actual_seq_lengths,
         torch.tensor([0, 4, 4], dtype=torch.int32),
@@ -651,6 +653,7 @@ def test_mamba_align_cache_indices_follow_device_seq_lens(monkeypatch: pytest.Mo
     attn_metadata = builder.build(0, common_attn_metadata)
 
     conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
+    assert conv1d_meta.max_query_len == 1
     assert torch.equal(
         _cache_index_first_column(conv1d_meta.cache_indices),
         torch.tensor([0, 12], dtype=torch.int32),
