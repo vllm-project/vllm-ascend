@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 from safetensors.torch import save_file
@@ -16,6 +16,24 @@ from vllm_ascend.models.kimi_k3 import (
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
+
+
+def test_kimi_moe_leaves_routed_input_transform_to_runner():
+    moe = kimi_k3.AscendKimiMoE.__new__(kimi_k3.AscendKimiMoE)
+    nn.Module.__init__(moe)
+    hidden_states = torch.randn(4, 8)
+    router_logits = torch.randn(4, 16)
+    output = torch.randn(4, 8)
+    moe.gate = MagicMock(return_value=(router_logits, None))
+    moe.experts = MagicMock(return_value=output)
+
+    result = moe.forward(hidden_states)
+
+    moe.experts.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=router_logits,
+    )
+    torch.testing.assert_close(result, output)
 
 
 def test_ascend_attn_res_matches_canonical_k3_math():

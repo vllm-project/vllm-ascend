@@ -137,4 +137,8 @@ class AscendMoERunner310(AscendMoERunner):
         ascend_shared_experts = getattr(self, "ascend_shared_experts", None)
         if ascend_shared_experts is not None:
             ascend_shared_experts.multistream_overlap = False
+            # The parent may have selected the SP-multistream custom op before
+            # 310P disables the unsupported feature. Restore the upstream entry
+            # so its fake output contract matches the single-stream execution.
+            self._forward_entry = self._select_forward()
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl310(self.moe_config)
