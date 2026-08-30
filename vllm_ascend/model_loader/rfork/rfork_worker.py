@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import atexit
 import threading
 
 from vllm.logger import logger
@@ -23,6 +24,9 @@ from vllm_ascend.model_loader.rfork.seed_server import start_rfork_server
 from vllm_ascend.model_loader.rfork.transfer_backend import (
     RForkTransferBackend,
 )
+
+HEARTBEAT_INTERVAL_SEC = 30
+SHUTDOWN_WAIT_TIMEOUT_SEC = 11.0
 
 
 class RForkWorker:
@@ -46,6 +50,9 @@ class RForkWorker:
         self.transfer_backend = RForkTransferBackend()
         self.ready_to_start_seed_service = False
         self.seed_service_started = False
+        self._seed_service_stop_event = threading.Event()
+        self._seed_service_stopped_event = threading.Event()
+        self.rfork_heartbeat_thread: threading.Thread | None = None
         self._excluded_weight_blocks: list[tuple[int, int]] = []
         self.seed_timeout_sec = seed_timeout_sec
         self.seed_protocol = RForkSeedProtocol(
@@ -60,6 +67,8 @@ class RForkWorker:
             pp_rank=pp_rank,
             ep_rank=ep_rank,
         )
+        # Register cleanup early so TransferEngine waits for remote leases without relying on native destruction.
+        atexit.register(self.shutdown)
 
     def is_seed_available(self) -> bool:
         self.rfork_seed = self.seed_protocol.get_seed()
@@ -119,6 +128,41 @@ class RForkWorker:
         self.rfork_seed = None
         return True
 
+    def shutdown(self) -> bool:
+        """Release the planner lease and explicitly finalize TransferEngine."""
+        self.ready_to_start_seed_service = False
+        seed_service_stopped = True
+        stop_event = getattr(self, "_seed_service_stop_event", None)
+        if stop_event is not None:
+            stop_event.set()
+        heartbeat_thread = getattr(self, "rfork_heartbeat_thread", None)
+        if heartbeat_thread is not None and heartbeat_thread.is_alive():
+            heartbeat_thread.join(timeout=SHUTDOWN_WAIT_TIMEOUT_SEC)
+            seed_service_stopped = not heartbeat_thread.is_alive()
+        stopped_event = getattr(self, "_seed_service_stopped_event", None)
+        if self.seed_service_started and stopped_event is not None:
+            seed_service_stopped &= stopped_event.wait(timeout=SHUTDOWN_WAIT_TIMEOUT_SEC)
+        self.seed_service_started = False
+
+        release_ok = False
+        try:
+            release_ok = self.post_transfer()
+        except Exception as e:
+            logger.warning("Failed to release RFork seed during shutdown: %s", e)
+
+        finalize_ok = False
+        if seed_service_stopped:
+            try:
+                finalize_ok = self.transfer_backend.finalize_transfer_engine()
+            except Exception as e:
+                logger.warning("Failed to finalize RFork TransferEngine during shutdown: %s", e)
+        else:
+            logger.warning("RFork seed service did not stop in time; skipping TransferEngine finalization.")
+
+        if not finalize_ok:
+            logger.warning("RFork shutdown retained TransferEngine registration state for safety.")
+        return release_ok and finalize_ok
+
     def start_seed_service(self, model, processed_layout: bool):
         if self.seed_service_started:
             logger.info("Seed service already started, skipping.")
@@ -132,6 +176,8 @@ class RForkWorker:
                 )
                 return
 
+        self._seed_service_stop_event.clear()
+        self._seed_service_stopped_event.clear()
         port = start_rfork_server(
             self.seed_protocol.get_local_seed_key(),
             (
@@ -140,6 +186,8 @@ class RForkWorker:
                 self.transfer_backend.rfork_transfer_engine_weights_shape_dict,
             ),
             health_timeout_sec=self.seed_timeout_sec,
+            stop_event=self._seed_service_stop_event,
+            stopped_event=self._seed_service_stopped_event,
         )
         if port <= 0:
             logger.warning("start_seed_service failed for device_id=%s", self.device_id)
@@ -147,7 +195,7 @@ class RForkWorker:
 
         self.rfork_heartbeat_thread = threading.Thread(
             target=self.seed_protocol.report_seed,
-            args=(port,),
+            args=(port, HEARTBEAT_INTERVAL_SEC, self._seed_service_stop_event),
             daemon=True,
             name="RForkHeartbeat",
         )

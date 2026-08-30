@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-import time
+import threading
 from urllib.error import HTTPError
 
 import requests
@@ -186,7 +186,8 @@ class RForkSeedProtocol:
             logger.exception("release_seed to planner Exception: %s", e)
             return False
 
-    def report_seed(self, port: int, sleep_interval: int = 30):
+    def report_seed(self, port: int, sleep_interval: int = 30, stop_event: threading.Event | None = None):
+        stop_event = stop_event or threading.Event()
         heartbeat_idx = 0
         log_every_n = HEARTBEAT_LOG_EVERY_N
         try:
@@ -198,7 +199,7 @@ class RForkSeedProtocol:
             logger.exception("report_seed setup Exception: %s", e)
             return
 
-        while True:
+        while not stop_event.is_set():
             heartbeat_idx += 1
             result = False
             try:
@@ -239,4 +240,4 @@ class RForkSeedProtocol:
                     log_every_n,
                     seed_key,
                 )
-            time.sleep(sleep_interval)
+            stop_event.wait(sleep_interval)

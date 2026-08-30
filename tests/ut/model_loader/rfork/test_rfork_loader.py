@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import threading
 from functools import wraps
 from types import SimpleNamespace
 from typing import Any
@@ -33,7 +34,7 @@ from vllm_ascend.model_loader.rfork.rfork_loader import (
     _rfork_pre_transfer_weight_processing,
     _rfork_skip_unquantized_moe_post_load_processing,
 )
-from vllm_ascend.model_loader.rfork.rfork_worker import RForkWorker
+from vllm_ascend.model_loader.rfork.rfork_worker import SHUTDOWN_WAIT_TIMEOUT_SEC, RForkWorker
 from vllm_ascend.model_loader.rfork.seed_protocol import get_local_seed_key
 
 
@@ -399,6 +400,88 @@ def test_reset_transfer_state_survives_backend_exception():
     assert worker.ready_to_start_seed_service is False
 
 
+def test_rfork_worker_shutdown_finalizes_transfer_engine():
+    shutdown_steps: list[str] = []
+    worker: Any = RForkWorker.__new__(RForkWorker)
+    worker.rfork_seed = None
+    worker.ready_to_start_seed_service = True
+    worker.seed_service_started = True
+    worker._seed_service_stop_event = threading.Event()
+    worker._seed_service_stopped_event = threading.Event()
+
+    class _HeartbeatThread:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout):
+            assert timeout == SHUTDOWN_WAIT_TIMEOUT_SEC
+            shutdown_steps.append("heartbeat-joined")
+            self.alive = False
+            worker._seed_service_stopped_event.set()
+
+    worker.rfork_heartbeat_thread = _HeartbeatThread()
+
+    def finalize_transfer_engine():
+        assert worker._seed_service_stop_event.is_set()
+        assert worker._seed_service_stopped_event.is_set()
+        shutdown_steps.append("finalized")
+        return True
+
+    worker.transfer_backend = SimpleNamespace(finalize_transfer_engine=finalize_transfer_engine)
+
+    assert worker.shutdown()
+    assert shutdown_steps == ["heartbeat-joined", "finalized"]
+    assert worker.ready_to_start_seed_service is False
+    assert worker.seed_service_started is False
+    assert worker._seed_service_stop_event.is_set()
+
+
+def test_rfork_worker_shutdown_skips_finalize_until_seed_service_stops():
+    finalize_calls: list[bool] = []
+    worker: Any = RForkWorker.__new__(RForkWorker)
+    worker.rfork_seed = None
+    worker.ready_to_start_seed_service = True
+    worker.seed_service_started = False
+    worker._seed_service_stop_event = threading.Event()
+    worker._seed_service_stopped_event = threading.Event()
+
+    class _StuckHeartbeatThread:
+        @staticmethod
+        def is_alive():
+            return True
+
+        @staticmethod
+        def join(timeout):
+            assert timeout == SHUTDOWN_WAIT_TIMEOUT_SEC
+
+    worker.rfork_heartbeat_thread = _StuckHeartbeatThread()
+
+    def finalize_transfer_engine():
+        finalize_calls.append(True)
+        return True
+
+    worker.transfer_backend = SimpleNamespace(finalize_transfer_engine=finalize_transfer_engine)
+
+    assert not worker.shutdown()
+    assert finalize_calls == []
+
+
+def test_rfork_worker_shutdown_preserves_state_when_finalize_fails():
+    worker: Any = RForkWorker.__new__(RForkWorker)
+    worker.rfork_seed = None
+    worker.ready_to_start_seed_service = True
+    worker.seed_service_started = False
+    worker._seed_service_stop_event = threading.Event()
+    worker._seed_service_stopped_event = threading.Event()
+    worker.rfork_heartbeat_thread = None
+    worker.transfer_backend = SimpleNamespace(finalize_transfer_engine=lambda: False)
+
+    assert not worker.shutdown()
+    assert worker.ready_to_start_seed_service is False
+
+
 def test_rfork_draft_load_passes_target_registered_blocks_to_worker(monkeypatch):
     import vllm.model_executor.model_loader as model_loader
 
@@ -413,9 +496,13 @@ def test_rfork_draft_load_passes_target_registered_blocks_to_worker(monkeypatch)
     target_blocks = [(128, 4096)]
     load_config.rfork_worker = SimpleNamespace(transfer_backend=SimpleNamespace(registered_weight_blocks=target_blocks))
     captured_blocks = []
+
+    def set_excluded_weight_blocks(blocks):
+        captured_blocks.append(list(blocks))
+
     draft_worker = SimpleNamespace(
         is_seed_available=lambda: False,
-        set_excluded_weight_blocks=lambda blocks: captured_blocks.append(list(blocks)),
+        set_excluded_weight_blocks=set_excluded_weight_blocks,
         post_transfer=lambda: True,
         reset_transfer_state=lambda: True,
         start_seed_service=lambda model, processed_layout: None,

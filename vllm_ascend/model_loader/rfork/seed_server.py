@@ -31,6 +31,8 @@ def start_fastapi_server(
     port_queue: queue.Queue[int],
     local_seed_key,
     info,
+    stop_event: threading.Event,
+    stopped_event: threading.Event,
 ):
     logger.debug("[RFork Seed] Preparing socket with dynamic port...")
 
@@ -48,28 +50,42 @@ def start_fastapi_server(
 
     @app.get("/get_rfork_transfer_engine_info")
     def get_rfork_transfer_engine_info(seed_key: str):
+        if stop_event.is_set():
+            return Response(status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         if seed_key == local_seed_key:
             return {"rfork_transfer_engine_info": rfork_transfer_engine_info}
         return {"rfork_transfer_engine_info": None}
 
     @app.get("/get_rfork_transfer_engine_shape_info")
     def get_rfork_transfer_engine_shape_info(seed_key: str):
+        if stop_event.is_set():
+            return Response(status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         if seed_key == local_seed_key:
             return {"rfork_transfer_engine_shape_info": rfork_transfer_engine_shape_info}
         return {"rfork_transfer_engine_shape_info": None}
 
     @app.get("/rfork_fetch_seed")
     def rfork_fetch_seed():
+        if stop_event.is_set():
+            return Response(status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         return {"status": "ok"}
 
     @app.get("/health_check_with_key")
     def health_check_with_key(seed_key: str):
+        if stop_event.is_set():
+            return Response(status_code=HTTPStatus.SERVICE_UNAVAILABLE)
         if seed_key == local_seed_key:
             return Response(status_code=HTTPStatus.OK)
         return Response(status_code=HTTPStatus.BAD_REQUEST)
 
     config = uvicorn.Config(app, host=None, port=None, log_level="warning")
     server = uvicorn.Server(config)
+
+    def stop_server():
+        stop_event.wait()
+        server.should_exit = True
+
+    threading.Thread(target=stop_server, daemon=True, name="RForkSeedServerStopper").start()
 
     try:
         port_queue.put(port)
@@ -79,15 +95,26 @@ def start_fastapi_server(
         return
 
     logger.debug("[RFork Seed] FastAPI server starting on port %s...", port)
-    server.run(sockets=[sock])
-    sock.close()
+    try:
+        server.run(sockets=[sock])
+    finally:
+        sock.close()
+        stopped_event.set()
 
 
-def start_rfork_server(local_seed_key, rfork_transfer_engine_info, health_timeout_sec: float = 30.0) -> int:
+def start_rfork_server(
+    local_seed_key,
+    rfork_transfer_engine_info,
+    health_timeout_sec: float = 30.0,
+    stop_event: threading.Event | None = None,
+    stopped_event: threading.Event | None = None,
+) -> int:
+    stop_event = stop_event or threading.Event()
+    stopped_event = stopped_event or threading.Event()
     port_queue: queue.Queue[int] = queue.Queue()
     process = threading.Thread(
         target=start_fastapi_server,
-        args=(port_queue, local_seed_key, rfork_transfer_engine_info),
+        args=(port_queue, local_seed_key, rfork_transfer_engine_info, stop_event, stopped_event),
         daemon=True,
     )
     process.start()
