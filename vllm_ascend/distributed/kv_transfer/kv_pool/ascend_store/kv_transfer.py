@@ -14,7 +14,10 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
+    GVALayerwiseCapable,
+)
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -1377,6 +1380,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             if write_finish_keys:
                 finish_keys = list(dict.fromkeys(write_finish_keys))
                 results = [self.write_results.pop(key) for key in finish_keys]
+                assert isinstance(self.m_store, GVALayerwiseCapable)
                 finish_results = self.m_store.batch_write_finish(finish_keys, results)
                 if len(finish_results) != len(finish_keys) or any(result != 0 for result in finish_results):
                     raise RuntimeError(
@@ -1578,6 +1582,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
         if layer_id == self.final_layer_id and all_load_keys:
             unique_load_keys = list(dict.fromkeys(all_load_keys))
+            assert isinstance(self.m_store, GVALayerwiseCapable)
             self.m_store.batch_remove_lease(unique_load_keys)
             logger.debug(
                 "[KVPOOL] load_thread released %d leases after final layer %d",

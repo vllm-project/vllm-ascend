@@ -402,6 +402,7 @@ class KVPoolScheduler:
         if self.use_gva_layerwise:
             token_len = prompt_token_len
             self._get_or_create_request_tracker(request.request_id)
+            assert self._gva_hit_checker is not None
             num_external_hit_tokens = self._gva_hit_checker.hit_tokens(request, token_len, num_computed_tokens)
         else:
             if self._discard_partial_chunks:
