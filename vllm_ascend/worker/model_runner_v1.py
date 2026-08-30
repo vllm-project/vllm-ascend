@@ -3575,12 +3575,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.sparse_kv_offload_config,
             )
 
-        # Profile the multimodal encoder before the auxiliary MC2 warmup.
-        # The MC2 dummy run can initialize torch.compile state for both the
-        # target and draft models. Keeping that state alive while profiling
-        # maximum-sized multimodal inputs can exhaust device memory.
-        super().profile_run()
-
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
             mc2_tokens_capacity, self.vllm_config
@@ -3588,6 +3582,7 @@ class NPUModelRunner(GPUModelRunner):
             # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
             with disable_compilation(self.get_model()):
                 self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+        super().profile_run()
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
