@@ -532,9 +532,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # comparison.
             draft_owns_head = getattr(self.model, "has_own_lm_head", None)
             for _, layer_module in self.model.model.layers.items():
-                if draft_owns_head is False or torch.equal(
-                    layer_module.shared_head.head.weight, model.lm_head.weight
-                ):
+                if draft_owns_head is False or torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:

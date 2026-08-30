@@ -168,8 +168,12 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
         )
         del layer.weight_scale_inv
 
-        if self.mxfp8_method is not None and _is_absorbed_by_attention(layer):
-            self.mxfp8_method = None
+        if _is_absorbed_by_attention(layer):
+            # Decided locally rather than on the scheme: the attention backend
+            # splits this layer and disposes of it, so apply() is never reached
+            # and nothing about this layer should speak for any other.
+            layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
+            return
 
         if self.mxfp8_method is not None and not _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size):
             logger.warning_once(
