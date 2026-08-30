@@ -2638,10 +2638,8 @@ class NPUModelRunner(GPUModelRunner):
         # already contain the global token dimension. Gathering them again
         # multiplies that dimension by TP (for example, 16K x TP16) and can
         # allocate several GiB per auxiliary state.
-        if hidden_states.shape[0] == padded_num_tokens:
-            return hidden_states[:-pad_size] if pad_size > 0 else hidden_states
-
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        if hidden_states.shape[0] != padded_num_tokens:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
         if pad_size > 0:
             hidden_states = hidden_states[:-pad_size, :]
 
