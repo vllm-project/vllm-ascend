@@ -162,6 +162,52 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertFalse(result)
 
+    def test_flash_attn_metadata_uses_live_lengths_and_stable_buffers(self):
+        self.builder._flash_attn_impl = SimpleNamespace(
+            num_heads=8,
+            num_kv_heads=2,
+            head_size=128,
+            sliding_window=None,
+        )
+        query_start_loc = torch.tensor([0, 5, 12], dtype=torch.int32)
+        seq_lens = torch.tensor([5, 7], dtype=torch.int32)
+
+        def return_output_buffer(*args, **kwargs):
+            return kwargs["output_buffer"]
+
+        with patch.object(attn_module, "build_flash_attn_metadata", side_effect=return_output_buffer) as mock_build:
+            first = self.builder._build_flash_attn_metadata(
+                query_start_loc,
+                seq_lens,
+                True,
+                AscendAttentionState.PrefillNoCache,
+            )
+            second = self.builder._build_flash_attn_metadata(
+                query_start_loc,
+                seq_lens,
+                True,
+                AscendAttentionState.PrefillNoCache,
+            )
+
+            self.assertIs(first, second)
+            tnd_kwargs = mock_build.call_args.kwargs
+            self.assertEqual(tnd_kwargs["layout_kv"], "TND")
+            self.assertIs(tnd_kwargs["cu_seqlens_kv"], query_start_loc)
+            self.assertNotIn("seqused_kv", tnd_kwargs)
+            self.assertEqual(tnd_kwargs["max_seqlen_q"], -1)
+            self.assertEqual(tnd_kwargs["max_seqlen_kv"], -1)
+
+            self.builder._build_flash_attn_metadata(
+                query_start_loc,
+                seq_lens,
+                True,
+                AscendAttentionState.DecodeOnly,
+            )
+            pa_kwargs = mock_build.call_args.kwargs
+            self.assertEqual(pa_kwargs["layout_kv"], "PA_BBND")
+            self.assertIs(pa_kwargs["seqused_kv"], seq_lens)
+            self.assertNotIn("cu_seqlens_kv", pa_kwargs)
+
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
         internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -499,6 +545,74 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_forward.assert_not_called()
         self.impl.forward_fused_infer_attention.assert_called_once()
         self.assertIs(result, output)
+
+    @patch("vllm_ascend.attention.attention_v1.run_flash_attn")
+    def test_flash_attn_prefill_contract(self, mock_flash_attn):
+        query = torch.randn(3, 8, 64)
+        key = torch.randn(3, 8, 64)
+        value = torch.randn_like(key)
+        expected = torch.randn_like(query)
+        mock_flash_attn.return_value = (expected, torch.empty(1))
+        query_start_loc = torch.tensor([0, 1, 3], dtype=torch.int32)
+        metadata = SimpleNamespace(
+            flash_attn_num_tokens=3,
+            attn_state=AscendAttentionState.PrefillNoCache,
+            query_start_loc=query_start_loc,
+            causal=True,
+            attn_mask=torch.ones(4, 4, dtype=torch.int8),
+            flash_attn_metadata=torch.empty(4096, dtype=torch.int32),
+            flash_attn_seq_lens=torch.tensor([1, 2], dtype=torch.int32),
+            flash_attn_max_query_len=-1,
+            flash_attn_max_seq_len=-1,
+            block_tables=None,
+        )
+
+        result = self.impl._forward_flash_attn(query, key, value, metadata)
+
+        self.assertTrue(torch.equal(result, expected))
+        kwargs = mock_flash_attn.call_args.kwargs
+        self.assertEqual(kwargs["layout_kv"], "TND")
+        self.assertIs(kwargs["cu_seqlens_kv"], query_start_loc)
+        self.assertIsNone(kwargs["block_table"])
+        self.assertNotIn("seqused_kv", kwargs)
+        self.assertEqual(kwargs["max_seqlen_q"], -1)
+        self.assertEqual(kwargs["max_seqlen_kv"], -1)
+
+    @patch("vllm_ascend.attention.attention_v1.run_flash_attn")
+    def test_flash_attn_paged_contract(self, mock_flash_attn):
+        query = torch.randn(2, 8, 64)
+        current_key = torch.randn(2, 8, 64)
+        current_value = torch.randn_like(current_key)
+        self.impl.key_cache = torch.randn(4, 128, 8, 64)
+        self.impl.value_cache = torch.randn_like(self.impl.key_cache)
+        expected = torch.randn_like(query)
+        mock_flash_attn.return_value = (expected, torch.empty(1))
+        seq_lens = torch.tensor([20, 35], dtype=torch.int32)
+        block_tables = torch.tensor([[0], [1]], dtype=torch.int32)
+        metadata = SimpleNamespace(
+            flash_attn_num_tokens=2,
+            attn_state=AscendAttentionState.DecodeOnly,
+            query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+            causal=True,
+            attn_mask=torch.ones(4, 4, dtype=torch.int8),
+            flash_attn_metadata=torch.empty(4096, dtype=torch.int32),
+            flash_attn_seq_lens=seq_lens,
+            flash_attn_max_query_len=-1,
+            flash_attn_max_seq_len=-1,
+            block_tables=block_tables,
+        )
+
+        result = self.impl._forward_flash_attn(query, current_key, current_value, metadata)
+
+        self.assertTrue(torch.equal(result, expected))
+        args = mock_flash_attn.call_args.args
+        kwargs = mock_flash_attn.call_args.kwargs
+        self.assertIs(args[1], self.impl.key_cache)
+        self.assertIs(args[2], self.impl.value_cache)
+        self.assertEqual(kwargs["layout_kv"], "PA_BBND")
+        self.assertTrue(torch.equal(kwargs["block_table"], block_tables))
+        self.assertIs(kwargs["seqused_kv"], seq_lens)
+        self.assertNotIn("cu_seqlens_kv", kwargs)
 
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
     def test_decode_uses_paged_attention(self, mock_using_pa):

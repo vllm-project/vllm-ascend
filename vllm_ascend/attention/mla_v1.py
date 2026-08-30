@@ -52,6 +52,11 @@ from vllm_ascend.ops.fia_v2_sink import (
     build_fia_v2_sink_metadata,
     fused_infer_attention_score_v2_sink,
 )
+from vllm_ascend.ops.flash_attn import (
+    build_flash_attn_metadata,
+    flash_attn_metadata_size,
+    run_flash_attn,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -77,6 +82,12 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 # token count limits within the mlapo operator
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
+FLASH_ATTN_SUPPORTED_HEAD_DIMS = (64, 128, 256)
+
+
+def _flash_attn_padded_head_dim(qk_head_dim: int, v_head_dim: int) -> int | None:
+    required_dim = max(qk_head_dim, v_head_dim)
+    return next((dim for dim in FLASH_ATTN_SUPPORTED_HEAD_DIMS if dim >= required_dim), None)
 
 
 def _npu_mla_prolog_v3_no_rope(**kwargs):
@@ -152,6 +163,8 @@ class ChunkedContextMetadata:
     chunk_seq_lens: torch.Tensor
     chunk_seq_lens_npu: torch.Tensor
     chunk_actual_seq_lengths_kv_list: list[list[int]]
+    flash_attn_cu_seqlens_kv: list[torch.Tensor] | None = None
+    flash_attn_metadata: list[torch.Tensor] | None = None
 
 
 @dataclass
@@ -171,6 +184,8 @@ class AscendMLAPrefillMetadata:
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     actual_seq_lengths_q: list[int] | None = None
+    flash_attn_metadata: torch.Tensor | None = None
+    flash_attn_head_dim: int | None = None
 
 
 @dataclass
@@ -182,9 +197,9 @@ class AscendMLADecodeMetadata:
     input_positions: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
-    seq_lens_device: torch.Tensor
     max_seq_lens: int
     seq_lens_list: list[int]
+    seq_lens_device: torch.Tensor = None
     actual_seq_lengths_q: list[int] | None = None
     actual_seq_lengths_q_device: torch.Tensor = None
     fia_v2_metadata: torch.Tensor | None = None
@@ -326,15 +341,13 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.seq_lens_device: torch.Tensor = None
         self.query_start_loc_device: torch.Tensor = None
-        self._fia_seq_lens_buffer = torch.zeros(
-            scheduler_config.max_num_seqs,
-            dtype=torch.int32,
-            device=device,
-        )
         self._fia_actual_seq_len_buffers: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
         self._fia_v2_sink_impl: AscendMLAImpl | None = None
         self._fia_v2_metadata_buffer: torch.Tensor | None = None
+        self._flash_attn_impl: AscendMLAImpl | None = None
+        self._flash_attn_head_dim: int | None = None
+        self._flash_attn_metadata_buffers: dict[tuple[str, int, int], torch.Tensor] = {}
         if layer_names:
             impl = vllm_config.compilation_config.static_forward_context[layer_names[0]].impl
             if isinstance(impl, AscendMLAImpl) and not impl.fa_quant_layer and not impl.enable_kv_nz:
@@ -344,6 +357,17 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                     dtype=torch.int32,
                     device=device,
                 )
+            if isinstance(impl, AscendMLAImpl):
+                flash_attn_head_dim = _flash_attn_padded_head_dim(impl.qk_head_dim, impl.v_head_dim)
+                if (
+                    get_ascend_device_type() == AscendDeviceType.A5
+                    and str(device).startswith("npu")
+                    and not impl.fa_quant_layer
+                    and not impl.enable_kv_nz
+                    and flash_attn_head_dim is not None
+                ):
+                    self._flash_attn_impl = impl
+                    self._flash_attn_head_dim = flash_attn_head_dim
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -504,6 +528,57 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             output_buffer=self._fia_v2_metadata_buffer,
         )
 
+    def _get_flash_attn_metadata_buffer(
+        self,
+        buffer_key: tuple[str, int, int],
+        batch_size: int,
+        num_heads_kv: int,
+    ) -> torch.Tensor:
+        buffer = self._flash_attn_metadata_buffers.get(buffer_key)
+        if buffer is None:
+            buffer = torch.empty(
+                flash_attn_metadata_size(batch_size, num_heads_kv),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._flash_attn_metadata_buffers[buffer_key] = buffer
+        return buffer
+
+    def _build_flash_attn_metadata(
+        self,
+        *,
+        buffer_key: tuple[str, int, int],
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_kv: torch.Tensor,
+        causal: bool,
+    ) -> torch.Tensor | None:
+        impl = self._flash_attn_impl
+        head_dim = self._flash_attn_head_dim
+        if impl is None or head_dim is None:
+            return None
+        batch_size = cu_seqlens_q.shape[0] - 1
+        mask_mode = 3 if causal else 0
+        return build_flash_attn_metadata(
+            impl.num_heads,
+            impl.num_heads,
+            head_dim,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            batch_size=batch_size,
+            # Derive maxima from the live cumulative-length tensors. Python
+            # scalar attributes are frozen by ACLGraph capture and would drift
+            # from metadata when replayed with a different request partition.
+            max_seqlen_q=-1,
+            max_seqlen_kv=-1,
+            mask_mode=mask_mode,
+            win_left=-1,
+            win_right=-1,
+            layout_q="TND",
+            layout_kv="TND",
+            layout_out="TND",
+            output_buffer=self._get_flash_attn_metadata_buffer(buffer_key, batch_size, impl.num_heads),
+        )
+
     def _get_fia_actual_seq_len_buffers(self, num_reqs: int) -> tuple[torch.Tensor, torch.Tensor]:
         buffers = self._fia_actual_seq_len_buffers.get(num_reqs)
         if buffers is None:
@@ -546,16 +621,21 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         # NOTE: MTP full graph is incompatible with context parallelism.
         self.slot_mapping = common_attn_metadata.slot_mapping[: self.num_actual_tokens]
-        self.seq_lens_device = common_attn_metadata.seq_lens[:num_reqs]
+        if isinstance(common_attn_metadata.seq_lens, torch.Tensor):
+            self.seq_lens_device = common_attn_metadata.seq_lens[:num_reqs]
+        elif isinstance(common_attn_metadata._seq_lens_cpu, torch.Tensor):
+            self.seq_lens_device = common_attn_metadata._seq_lens_cpu[:num_reqs].to(self.device)
+        else:
+            self.seq_lens_device = common_attn_metadata.seq_lens_cpu[:num_reqs].to(self.device)
         self.query_start_loc_device = query_start_loc
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
         # Prefer _seq_lens_cpu, which remains populated in async speculative
         # decode, over seq_lens_cpu, which is intentionally None in that mode.
-        if common_attn_metadata._seq_lens_cpu is not None:
+        if isinstance(common_attn_metadata._seq_lens_cpu, torch.Tensor):
             self.seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
-        elif common_attn_metadata.seq_lens_cpu is not None:
+        elif isinstance(common_attn_metadata.seq_lens_cpu, torch.Tensor):
             self.seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
             self.seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
@@ -624,8 +704,28 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         chunk_actual_seq_lengths_kv_list = [
             torch.cumsum(self.chunk_seq_lens[i], dim=0).tolist() for i in range(self.num_chunks)
         ]
+        cu_seq_lens = self.cu_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True)
+        flash_attn_cu_seqlens_kv = None
+        flash_attn_metadata = None
+        if self._flash_attn_impl is not None:
+            prefill_query_start_loc = (
+                common_attn_metadata.query_start_loc[reqs_start:] - common_attn_metadata.query_start_loc[reqs_start]
+            )
+            flash_attn_cu_seqlens_kv = []
+            flash_attn_metadata = []
+            for chunk_idx in range(self.num_chunks):
+                chunk_cu_seqlens_kv = cu_seq_lens[chunk_idx].clone()
+                flash_attn_cu_seqlens_kv.append(chunk_cu_seqlens_kv)
+                metadata = self._build_flash_attn_metadata(
+                    buffer_key=("chunk", chunk_idx, self.num_prefills),
+                    cu_seqlens_q=prefill_query_start_loc,
+                    cu_seqlens_kv=chunk_cu_seqlens_kv,
+                    causal=False,
+                )
+                assert metadata is not None
+                flash_attn_metadata.append(metadata)
         return ChunkedContextMetadata(
-            cu_seq_lens=self.cu_seq_lens_cpu.pin_memory().to(self.device, non_blocking=True),
+            cu_seq_lens=cu_seq_lens,
             starts=chunk_starts.pin_memory().to(self.device, non_blocking=True),
             seq_tot=self.chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=self.chunk_seq_lens.max(dim=1).values.tolist(),
@@ -633,6 +733,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             chunk_seq_lens_npu=self.chunk_seq_lens.npu(),
             workspace=self.chunked_prefill_workspace,
             chunk_actual_seq_lengths_kv_list=chunk_actual_seq_lengths_kv_list,
+            flash_attn_cu_seqlens_kv=flash_attn_cu_seqlens_kv,
+            flash_attn_metadata=flash_attn_metadata,
         )
 
     def get_block_table_size(self, common_attn_metadata: AscendCommonAttentionMetadata, build_metadata_step: int):
@@ -673,6 +775,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             cos = sin = None
         prefill_query_lens = self.query_lens[reqs_start:].to(torch.int32)
         actual_seq_lengths_q = torch.cumsum(prefill_query_lens, dim=0).tolist()
+        flash_attn_metadata = self._build_flash_attn_metadata(
+            buffer_key=("prefill", 0, self.num_prefills),
+            cu_seqlens_q=prefill_query_start_loc,
+            cu_seqlens_kv=prefill_query_start_loc,
+            causal=common_attn_metadata.causal,
+        )
         return AscendMLAPrefillMetadata(
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             query_lens=prefill_query_lens,
@@ -687,6 +795,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             sin=sin,
             cos=cos,
             actual_seq_lengths_q=actual_seq_lengths_q,
+            flash_attn_metadata=flash_attn_metadata,
+            flash_attn_head_dim=self._flash_attn_head_dim if flash_attn_metadata is not None else None,
         )
 
     def build_decode_metadata(
@@ -762,8 +872,11 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             cos = sin = None
         num_fia_reqs = len(actual_seq_lengths_q)
         actual_seq_lengths_q_device, seq_lens_device = self._get_fia_actual_seq_len_buffers(num_fia_reqs)
-        actual_seq_lengths_q_device.copy_(self.query_start_loc_device[1 : num_fia_reqs + 1])
-        seq_lens_device.copy_(self._build_fia_seq_lens_device(num_fia_reqs))
+        actual_seq_lengths_q_device.copy_(torch.tensor(actual_seq_lengths_q, dtype=torch.int64, device=self.device))
+        # seq_lens_list already includes the synthetic zero-length requests
+        # added for full-graph padding. Copy that complete list into the
+        # graph-stable buffer instead of slicing the unpadded runtime tensor.
+        seq_lens_device.copy_(torch.tensor(seq_lens_list, dtype=torch.int64, device=self.device))
         decode_metadata = self.decode_metadata_cls(
             input_positions=input_positions,
             block_table=self.block_table,
@@ -783,14 +896,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             common_attn_metadata.causal,
         )
         return decode_metadata
-
-    def _build_fia_seq_lens_device(self, num_reqs: int) -> torch.Tensor:
-        seq_lens_device = self.seq_lens_device[:num_reqs]
-        if seq_lens_device.shape[0] == num_reqs:
-            return seq_lens_device
-        self._fia_seq_lens_buffer[:num_reqs].zero_()
-        self._fia_seq_lens_buffer[: seq_lens_device.shape[0]].copy_(seq_lens_device)
-        return self._fia_seq_lens_buffer[:num_reqs]
 
     def build_for_graph_capture(
         self,
@@ -1287,6 +1392,69 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return kv_c_normed, k_pe
 
+    def _use_flash_attn_prefill(self, prefill_metadata: AscendMLAPrefillMetadata) -> bool:
+        return (
+            get_ascend_device_type() == AscendDeviceType.A5
+            and not self.fa_quant_layer
+            and not self.enable_kv_nz
+            and prefill_metadata.flash_attn_metadata is not None
+            and prefill_metadata.flash_attn_head_dim is not None
+        )
+
+    @staticmethod
+    def _pad_flash_attn_tensor(tensor: torch.Tensor, head_dim: int) -> torch.Tensor:
+        pad_size = head_dim - tensor.shape[-1]
+        if pad_size < 0:
+            raise ValueError(f"FlashAttention head dimension {head_dim} is smaller than input {tensor.shape[-1]}.")
+        return F.pad(tensor, (0, pad_size)) if pad_size else tensor
+
+    def _prepare_flash_attn_qkv(
+        self,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        value: torch.Tensor,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        query = self._pad_flash_attn_tensor(torch.cat((q_nope, q_pe), dim=-1), head_dim)
+        key = self._pad_flash_attn_tensor(torch.cat((k_nope, k_pe), dim=-1), head_dim)
+        padded_value = self._pad_flash_attn_tensor(value, head_dim)
+        return query, key, padded_value
+
+    def _run_flash_attn_prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        *,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_kv: torch.Tensor,
+        metadata: torch.Tensor,
+        causal: bool,
+        attn_mask: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        mask_mode = 3 if causal else 0
+        return run_flash_attn(
+            query,
+            key,
+            value,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            attn_mask=attn_mask if mask_mode != 0 else None,
+            metadata=metadata,
+            softmax_scale=self.scale,
+            mask_mode=mask_mode,
+            win_left=-1,
+            win_right=-1,
+            max_seqlen_q=-1,
+            max_seqlen_kv=-1,
+            layout_q="TND",
+            layout_kv="TND",
+            layout_out="TND",
+            return_softmax_lse=True,
+        )
+
     def _compute_prefill_context(
         self,
         q_nope: torch.Tensor,
@@ -1324,7 +1492,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         out_list = [prefix_output.reshape(num_tokens * H, D)]
         lse_list = [prefix_lse.reshape(num_tokens * H)]
 
-        if self.head_padding > 0:
+        use_flash_attn = (
+            self._use_flash_attn_prefill(prefill_metadata)
+            and prefill_metadata.chunked_context.flash_attn_cu_seqlens_kv is not None
+            and prefill_metadata.chunked_context.flash_attn_metadata is not None
+        )
+        flash_head_dim = prefill_metadata.flash_attn_head_dim
+        flash_query = None
+        if use_flash_attn:
+            assert flash_head_dim is not None
+            flash_query = self._pad_flash_attn_tensor(torch.cat((q_nope, q_pe), dim=-1), flash_head_dim)
+
+        if not use_flash_attn and self.head_padding > 0:
             query = torch.cat((q_nope, q_pe), dim=-1)
 
         common_kwargs = {
@@ -1374,7 +1553,23 @@ class AscendMLAImpl(MLAAttentionImpl):
             actual_seq_lengths_kv = prefill_metadata.chunked_context.chunk_actual_seq_lengths_kv_list[i]
             common_kwargs["actual_seq_lengths_kv"] = actual_seq_lengths_kv
 
-            if self.head_padding > 0:
+            if use_flash_attn:
+                assert flash_query is not None
+                assert flash_head_dim is not None
+                chunk_key = self._pad_flash_attn_tensor(torch.cat((k_nope, k_pe), dim=-1), flash_head_dim)
+                chunk_value = self._pad_flash_attn_tensor(v, flash_head_dim)
+                chunk_out, chunk_lse = self._run_flash_attn_prefill(
+                    flash_query,
+                    chunk_key,
+                    chunk_value,
+                    cu_seqlens_q=prefill_metadata.query_start_loc,
+                    cu_seqlens_kv=prefill_metadata.chunked_context.flash_attn_cu_seqlens_kv[i],
+                    metadata=prefill_metadata.chunked_context.flash_attn_metadata[i],
+                    causal=False,
+                    attn_mask=None,
+                )
+                chunk_out = chunk_out[..., : self.v_head_dim]
+            elif self.head_padding > 0:
                 key = torch.cat((k_nope, k_pe), dim=-1)
             else:
                 common_kwargs["query_rope"] = q_pe
@@ -1382,9 +1577,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 query = q_nope
                 key = k_nope
 
-            chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
-                query, key.contiguous(), v.contiguous(), **common_kwargs
-            )
+            if not use_flash_attn:
+                chunk_out, chunk_lse = torch_npu.npu_fused_infer_attention_score(
+                    query, key.contiguous(), v.contiguous(), **common_kwargs
+                )
 
             if chunk_lse.dim() == 2:
                 chunk_lse = chunk_lse.transpose(0, 1).unsqueeze(-1)
@@ -1444,7 +1640,29 @@ class AscendMLAImpl(MLAAttentionImpl):
         }
         record_attention_compute_start()
 
-        if self.head_padding > 0:
+        if self._use_flash_attn_prefill(prefill_meta):
+            assert prefill_meta.flash_attn_head_dim is not None
+            assert prefill_meta.flash_attn_metadata is not None
+            query, key, padded_value = self._prepare_flash_attn_qkv(
+                q_nope,
+                q_pe,
+                k_nope,
+                k_pe,
+                value,
+                prefill_meta.flash_attn_head_dim,
+            )
+            attn_output, attn_lse = self._run_flash_attn_prefill(
+                query,
+                key,
+                padded_value,
+                cu_seqlens_q=prefill_meta.query_start_loc,
+                cu_seqlens_kv=prefill_meta.query_start_loc,
+                metadata=prefill_meta.flash_attn_metadata,
+                causal=attn_metadata.causal,
+                attn_mask=prefill_meta.attn_mask,
+            )
+            attn_output = attn_output[..., : self.v_head_dim]
+        elif self.head_padding > 0:
             query = torch.cat((q_nope, q_pe), dim=-1)
             key = torch.cat((k_nope, k_pe), dim=-1)
         else:
@@ -1452,9 +1670,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             common_kwargs["key_rope"] = k_pe.contiguous()
             query, key = q_nope, k_nope
 
-        attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(
-            query, key.contiguous(), value.contiguous(), **common_kwargs
-        )
+        if not self._use_flash_attn_prefill(prefill_meta):
+            attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(
+                query, key.contiguous(), value.contiguous(), **common_kwargs
+            )
 
         attn_output, attn_lse = self._compute_prefill_context(
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
