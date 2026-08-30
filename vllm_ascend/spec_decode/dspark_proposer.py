@@ -418,12 +418,10 @@ class AscendDSparkProposer(AscendDflashProposer):
                     seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu[:num_metadata_reqs],
                     seq_lens=self.runner.seq_lens[:num_metadata_reqs],
                     num_reqs=num_metadata_reqs,
-                    # FULL graph capture must materialize the complete graph
-                    # bucket. The tail slots are already padded with -1, so
-                    # treating them as graph tokens keeps attention tensor
-                    # shapes and graph-parameter keys fixed at
-                    # ``num_input_tokens``.
-                    num_actual_tokens=num_input_tokens,
+                    # Keep cache writes limited to real draft queries. The
+                    # graph still executes ``num_input_tokens`` rows; padding
+                    # rows have -1 slot mappings and are discarded.
+                    num_actual_tokens=num_query_total,
                     num_input_tokens=num_input_tokens,
                     max_query_len=self.num_query_per_req,
                     max_seq_len=0,
@@ -450,7 +448,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             self.vllm_config,
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
-            num_actual_tokens=num_input_tokens,
+            num_actual_tokens=num_query_total,
             in_profile_run=is_profile,
             batch_descriptor=batch_descriptor,
             aclgraph_runtime_mode=aclgraph_runtime_mode,
