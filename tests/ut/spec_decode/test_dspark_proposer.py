@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MLAAttentionSpec,
@@ -34,6 +35,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -406,6 +408,60 @@ def test_pad_query_start_loc_matches_graph_capture_layout(
     assert num_metadata_reqs == len(expected) - 1
     assert query_start_loc.np[: len(expected)].tolist() == expected
     query_start_loc.copy_to_gpu.assert_called_once_with()
+
+
+def test_graph_dispatch_uses_target_verification_width(monkeypatch):
+    """Seven draft queries still require an eight-token target graph slot."""
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.method = "dspark"
+    proposer.model = SimpleNamespace(combine_hidden_states=lambda hidden_states: hidden_states)
+    proposer.hidden_size = _HIDDEN_SIZE
+    proposer.use_cuda_graph = True
+    proposer.set_inputs_first_pass = MagicMock()
+
+    batch_size = 16
+    num_speculative_tokens = 7
+    num_draft_tokens = batch_size * num_speculative_tokens
+    common_attn_metadata = MagicMock()
+    common_attn_metadata.batch_size.return_value = batch_size
+    proposer.set_inputs_first_pass.return_value = (
+        num_draft_tokens,
+        torch.arange(num_draft_tokens, dtype=torch.int32),
+        common_attn_metadata,
+        None,
+    )
+
+    proposer.runner = MagicMock()
+    proposer.runner.dcp_manager = None
+    proposer.runner.input_batch.lora_id_to_lora_request = {}
+    proposer.runner.cudagraph_dispatcher.dispatch.return_value = (
+        CUDAGraphMode.FULL,
+        SimpleNamespace(num_tokens=128, num_reqs=batch_size),
+    )
+    proposer.runner._sync_metadata_across_dp.side_effect = RuntimeError("stop after first dispatch")
+    monkeypatch.setattr(
+        "vllm_ascend.spec_decode.llm_base_proposer._HIDDEN_STATE_DRAFTER_TYPES",
+        (object,),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after first dispatch"):
+        proposer._propose(
+            num_speculative_tokens=num_speculative_tokens,
+            target_token_ids=torch.zeros(num_draft_tokens, dtype=torch.int64),
+            target_positions=torch.zeros(num_draft_tokens, dtype=torch.int32),
+            target_hidden_states=torch.zeros(num_draft_tokens, _HIDDEN_SIZE),
+            next_token_ids=torch.zeros(batch_size, dtype=torch.int64),
+            token_indices_to_sample=torch.arange(num_draft_tokens, dtype=torch.int32),
+            common_attn_metadata=common_attn_metadata,
+            target_model_batch_desc=SimpleNamespace(uniform=True),
+            sampling_metadata=MagicMock(),
+        )
+
+    proposer.runner.cudagraph_dispatcher.dispatch.assert_called_once_with(
+        num_tokens=batch_size * (1 + num_speculative_tokens),
+        uniform_decode=True,
+        has_lora=False,
+    )
 
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
