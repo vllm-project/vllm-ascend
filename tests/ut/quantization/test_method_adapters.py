@@ -89,15 +89,21 @@ class TestAscendLinearMethod(TestBase):
         layer = torch.nn.Module()
         weight_loader = MagicMock()
 
-        self.method.create_weights(
-            layer,
-            input_size_per_partition=6144,
-            output_partition_sizes=[2048, 576],
-            input_size=6144,
-            output_size=2624,
-            params_dtype=torch.bfloat16,
-            weight_loader=weight_loader,
-        )
+        # vLLM's typed parameters read the TP rank while constructing, which is
+        # unavailable without a distributed group.
+        with (
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_rank", return_value=0),
+            patch("vllm.model_executor.parameter.get_tensor_model_parallel_world_size", return_value=1),
+        ):
+            self.method.create_weights(
+                layer,
+                input_size_per_partition=6144,
+                output_partition_sizes=[2048, 576],
+                input_size=6144,
+                output_size=2624,
+                params_dtype=torch.bfloat16,
+                weight_loader=weight_loader,
+            )
 
         self.assertIsInstance(layer.weight_scale_inv, BlockQuantScaleParameter)
         self.assertEqual(layer.weight_block_size, (128, 128))
