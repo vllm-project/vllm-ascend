@@ -56,10 +56,19 @@ class ParamInfo(VllmParamInfo):
 
 
 def _format_static_buffers_for_nz(
+    module_offloaders: list["_ModuleOffloader"],
     buffer_pool: StaticBufferPool,
     param_infos: list[ParamInfo],
 ) -> None:
-    """Cast static buffers to NZ format for keys whose parameters require it."""
+    """Cast static buffers to NZ format and re-bind params that require it.
+
+    npu_format_cast returns a NEW tensor, so the NZ buffers stored in the pool
+    are not the ones bound by PrefetchOffloader.post_init(): params still point
+    at the pre-cast ND buffers, and NZ-only w8a8 kernels
+    (e.g. npu_grouped_matmul_swiglu_quant) would read ND storage as NZ.
+    Re-bind NZ-marked params to the cast buffers so the subsequent initial
+    prefetches fill NZ storage before the first forward.
+    """
     key_to_use_nz: dict[tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype], bool] = {}
 
     for info in param_infos:
@@ -78,6 +87,21 @@ def _format_static_buffers_for_nz(
         buffer_pool._buffers[key] = [
             torch_npu.npu_format_cast(buffer, ACL_FORMAT_FRACTAL_NZ) for buffer in buffer_pool._buffers[key]
         ]
+
+    for offloader in module_offloaders:
+        for name, param_offloader in offloader._param_offloaders.items():
+            if not _is_prefetch_offload_nz_weight(param_offloader._param):
+                continue
+            cpu_storage = param_offloader._cpu_storage
+            nz_buffer = buffer_pool.get_buffer(
+                name=name,
+                shape=tuple(cpu_storage.shape),
+                stride=tuple(cpu_storage.stride()),
+                dtype=cpu_storage.dtype,
+                slot_idx=offloader._buffer_slot_idx,
+            )
+            param_offloader._gpu_buffer = nz_buffer
+            param_offloader._param.data = nz_buffer
 
 
 class AscendPrefetchOffloader(PrefetchOffloader):
@@ -126,7 +150,10 @@ class AscendPrefetchOffloader(PrefetchOffloader):
             # No modules to offload
             return
 
-        _format_static_buffers_for_nz(self.buffer_pool, param_infos)
+        _format_static_buffers_for_nz(self.module_offloaders, self.buffer_pool, param_infos)
+
+        for i in range(min(self.prefetch_step, len(self.module_offloaders))):
+            self.module_offloaders[i].start_onload_to_static()
 
 
 class _ModuleOffloader(VllmModuleOffloader):
