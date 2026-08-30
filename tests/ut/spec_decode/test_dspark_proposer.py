@@ -33,7 +33,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.spec_decode.dspark_proposer import (
+    AscendDSparkProposer,
+    _derive_current_window_rejected_tokens,
+)
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -163,6 +166,7 @@ class _DSparkProposerTestBase:
         async_metadata=False,
         context=None,
         num_rejected=None,
+        valid_sampled_count=None,
         with_optional_attrs=False,
     ):
         """Drive ``set_inputs_first_pass`` with a configurable cad.
@@ -200,6 +204,7 @@ class _DSparkProposerTestBase:
             token_indices_to_sample=None,
             cad=cad,
             num_rejected_tokens_gpu=num_rejected,
+            valid_sampled_tokens_count_gpu=valid_sampled_count,
         )
         return num_query_total, token_indices, cad, extra, next_token_ids, target_hidden_states
 
@@ -509,7 +514,142 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         kwargs = sub.call_args.kwargs
         assert kwargs["HAS_NUM_REJECTED"] is True
         assert kwargs["num_rejected_tokens_ptr"] is rejected
+        assert kwargs["HAS_VALID_SAMPLED_COUNT"] is False
+        assert kwargs["valid_sampled_tokens_count_ptr"] == 0
         assert kwargs["SAMPLE_FROM_ANCHOR"] is True
+
+    def test_kernel_receives_current_window_valid_counts(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+        num_reqs, block_size, max_num_tokens = 2, 7, 64
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
+        rejected = torch.full((num_reqs,), 7, dtype=torch.int32)
+        valid_count = torch.ones(num_reqs, dtype=torch.int64)
+
+        self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            num_rejected=rejected,
+            valid_sampled_count=valid_count,
+        )
+
+        kwargs = kernel[1,].call_args.kwargs
+        assert kwargs["HAS_NUM_REJECTED"] is True
+        assert kwargs["HAS_VALID_SAMPLED_COUNT"] is True
+        assert kwargs["num_rejected_tokens_ptr"] is rejected
+        forwarded = kwargs["valid_sampled_tokens_count_ptr"]
+        assert forwarded.dtype == torch.int32
+        assert torch.equal(forwarded, valid_count.to(torch.int32))
+
+    def test_partial_window_without_valid_count_fails_before_kernel(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+
+        def _assert_async(condition, message):
+            if not bool(condition.item()):
+                raise AssertionError(message)
+
+        monkeypatch.setattr(torch, "_assert_async", _assert_async)
+        num_reqs, block_size, max_num_tokens = 2, 7, 64
+        proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
+        rejected = torch.full((num_reqs,), 7, dtype=torch.int32)
+
+        with pytest.raises(AssertionError, match="target-only fallback"):
+            self._invoke_set_inputs_first_pass(
+                proposer,
+                num_reqs=num_reqs,
+                block_size=block_size,
+                num_rejected=rejected,
+            )
+
+        assert not kernel.mock_calls
+
+
+class TestCurrentWindowAnchorValidation:
+    """The physical current-window reject count must never replace the real
+    speculative rollback count or permit a cross-request anchor."""
+
+    @staticmethod
+    def _raise_on_false_async_assert(monkeypatch):
+        def _assert_async(condition, message):
+            if not bool(condition.item()):
+                raise AssertionError(message)
+
+        monkeypatch.setattr(torch, "_assert_async", _assert_async)
+
+    @pytest.mark.parametrize("valid_dtype", [torch.int32, torch.int64])
+    def test_partial_window_derives_physical_rejects_without_clamping_real_rejects(
+        self, monkeypatch, valid_dtype
+    ):
+        self._raise_on_false_async_assert(monkeypatch)
+        query_start_loc = torch.tensor([0, 5, 13], dtype=torch.int32)
+        real_rejected = torch.tensor([7, 0], dtype=torch.int32)
+        valid_count = torch.tensor([1, 8], dtype=valid_dtype)
+
+        current_rejected, normalized_valid_count = _derive_current_window_rejected_tokens(
+            query_start_loc,
+            real_rejected,
+            valid_count,
+        )
+
+        assert torch.equal(real_rejected, torch.tensor([7, 0], dtype=torch.int32))
+        assert torch.equal(current_rejected, torch.tensor([4, 0], dtype=torch.int32))
+        assert normalized_valid_count is not None
+        assert normalized_valid_count.dtype == query_start_loc.dtype
+        assert torch.equal(normalized_valid_count, torch.tensor([1, 8], dtype=torch.int32))
+
+    @pytest.mark.parametrize("invalid_valid_count", [0, 6])
+    def test_invalid_request_local_anchor_fails_fast(self, monkeypatch, invalid_valid_count):
+        self._raise_on_false_async_assert(monkeypatch)
+        with pytest.raises(AssertionError, match="target-only fallback"):
+            _derive_current_window_rejected_tokens(
+                torch.tensor([0, 5], dtype=torch.int32),
+                torch.tensor([7], dtype=torch.int32),
+                torch.tensor([invalid_valid_count], dtype=torch.int64),
+            )
+
+    def test_missing_valid_count_fails_fast_only_for_partial_window(self, monkeypatch):
+        self._raise_on_false_async_assert(monkeypatch)
+        complete_rejected, normalized = _derive_current_window_rejected_tokens(
+            torch.tensor([0, 8], dtype=torch.int32),
+            torch.tensor([7], dtype=torch.int32),
+            None,
+        )
+        assert torch.equal(complete_rejected, torch.tensor([7], dtype=torch.int32))
+        assert normalized is None
+
+        with pytest.raises(AssertionError, match="target-only fallback"):
+            _derive_current_window_rejected_tokens(
+                torch.tensor([0, 5], dtype=torch.int32),
+                torch.tensor([7], dtype=torch.int32),
+                None,
+            )
+
+    def test_negative_real_rejection_fails_fast(self, monkeypatch):
+        self._raise_on_false_async_assert(monkeypatch)
+        with pytest.raises(AssertionError, match="target-only fallback"):
+            _derive_current_window_rejected_tokens(
+                torch.tensor([0, 5], dtype=torch.int32),
+                torch.tensor([-1], dtype=torch.int32),
+                None,
+            )
+
+    @pytest.mark.parametrize("invalid_dtype", [torch.float16, torch.float32])
+    def test_valid_count_requires_integer_dtype(self, monkeypatch, invalid_dtype):
+        self._raise_on_false_async_assert(monkeypatch)
+        with pytest.raises(TypeError, match="integer dtype"):
+            _derive_current_window_rejected_tokens(
+                torch.tensor([0, 5], dtype=torch.int32),
+                torch.tensor([7], dtype=torch.int32),
+                torch.tensor([1], dtype=invalid_dtype),
+            )
 
 
 class TestInitializeAttnBackend(_DSparkProposerTestBase):
