@@ -92,8 +92,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 RUN cd /vllm-workspace/vllm && \
     python3 -m pip install setuptools-rust && \
     ./build_rust.sh && \
-    python3 -m pip cache purge && \
-    rm -rf rust/target ~/.cargo ~/.rustup
+    rm -rf rust/target
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
