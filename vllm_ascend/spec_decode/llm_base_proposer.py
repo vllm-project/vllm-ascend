@@ -871,8 +871,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         uniform_decode = target_model_batch_desc.uniform
 
         if self.use_cuda_graph:
+            graph_dispatch_tokens = num_tokens
+            if self.method == "dspark":
+                # DSpark may run N anchor-first draft queries per request,
+                # while the target graph verifies 1 + N tokens. Graph batch
+                # descriptors use the target width, so dispatch with that
+                # width and retain ``num_tokens`` as the real draft count.
+                graph_dispatch_tokens = batch_size * (1 + self.num_speculative_tokens)
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
+                num_tokens=graph_dispatch_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
             )
             num_input_tokens = batch_descriptor.num_tokens
         else:
@@ -930,13 +939,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
-            if self.method == "dspark":
-                # DSpark has N real query tokens per request while the target
-                # graph bucket is sized for 1 + N. Include the padded tail in
-                # attention tensor shapes so capture and replay use the same
-                # graph key; its slot mapping remains -1 and its outputs are
-                # discarded.
-                common_attn_metadata.num_actual_tokens = num_input_tokens
             slicing_length = num_reqs_padded * self.decode_threshold if self.dcp_size > 1 else num_reqs_padded
             common_attn_metadata.block_table_tensor = self._adjust_tensor(
                 common_attn_metadata.block_table_tensor, slicing_length
