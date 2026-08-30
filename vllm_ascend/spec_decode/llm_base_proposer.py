@@ -524,8 +524,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.model.lm_head = target_lm_head
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
+            # Comparing weights only tells the two heads apart when the draft
+            # actually loaded one. A checkpoint that ships no MTP head leaves
+            # shared_head.head at its allocation-time contents, which compare
+            # unequal and would leave the draft predicting from garbage, so ask
+            # the model whether it owns a head before falling back to the
+            # comparison.
+            draft_owns_head = getattr(self.model, "has_own_lm_head", None)
             for _, layer_module in self.model.model.layers.items():
-                if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
+                if draft_owns_head is False or torch.equal(
+                    layer_module.shared_head.head.weight, model.lm_head.weight
+                ):
                     layer_module.shared_head.head = model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
