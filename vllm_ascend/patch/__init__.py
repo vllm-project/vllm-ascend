@@ -1190,22 +1190,30 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams.verify`
 #      `vllm.sampling_params.SamplingParams._validate_stop_token_ids`
+#      `vllm.sampling_params.SamplingParams._validate_allowed_token_ids`
 #    Why:
 #       Upstream vLLM (before #54196) does not validate stop_token_ids
-#       against the vocabulary. Out-of-vocab stop token ids flow into
-#       all_stop_token_ids and are later used as logits indices on the
-#       device side (min_tokens / EOS masking does logits.index_put_).
+#       against the vocabulary, and validates allowed_token_ids against
+#       len(tokenizer) instead of the model vocab. Both fields are
+#       client-supplied ids used as column indices into the logits tensor
+#       on the device side (min_tokens / EOS masking does logits.index_put_
+#       on all_stop_token_ids; the allowed_token_ids mask in InputBatch is
+#       sized by model_config.get_vocab_size() and the ids are written as
+#       mask[req_index][allowed_token_ids]). For models whose tokenizer
+#       knows more ids than the language model, gap ids pass the
+#       tokenizer-based check yet still index out of bounds.
 #       On CANN 9.1.x the inserted IndexCheck kernel traps on the OOB index
 #       and the whole engine dies with an unrecoverable vector core exception;
 #       on older CANN the write silently corrupts logits of neighboring
 #       requests in the same batch. A single client request can therefore
 #       crash a production instance (vllm-ascend issue #15200).
 #    How：
-#       Monkey-patch SamplingParams.verify to run a vocabulary-range check on
-#       stop_token_ids (mirroring upstream _validate_logit_bias) and reject
-#       invalid requests with a 400 before they reach the engine. The patch
-#       self-disables once the bundled vLLM already ships
-#       `_validate_stop_token_ids`.
+#       Monkey-patch SamplingParams.verify to run vocabulary-range checks on
+#       both stop_token_ids and allowed_token_ids (mirroring upstream
+#       _validate_logit_bias) and reject invalid requests with a 400 before
+#       they reach the engine. The patch self-disables once the bundled vLLM
+#       already ships `_validate_stop_token_ids` (the two validators landed
+#       in vllm#54196 together, so the single hasattr check covers both).
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/54196 (merged into vLLM main;
 #       not yet in the vLLM commit pinned by vllm-ascend main as of this patch)
