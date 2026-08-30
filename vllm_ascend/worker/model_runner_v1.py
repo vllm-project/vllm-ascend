@@ -2624,8 +2624,24 @@ class NPUModelRunner(GPUModelRunner):
     # all-gather one hidden-states in sp scene
     @staticmethod
     def _all_gather_hidden_states(hidden_states):
+        forward_context = get_forward_context()
+        pad_size = forward_context.pad_size
+        num_tokens = forward_context.num_tokens
+        padded_num_tokens = getattr(
+            forward_context,
+            "padded_length",
+            num_tokens + pad_size,
+        )
+
+        # Multimodal inputs bypass the first sequence-parallel scatter. Eagle3
+        # auxiliary states captured before the first reduce-scatter therefore
+        # already contain the global token dimension. Gathering them again
+        # multiplies that dimension by TP (for example, 16K x TP16) and can
+        # allocate several GiB per auxiliary state.
+        if hidden_states.shape[0] == padded_num_tokens:
+            return hidden_states[:-pad_size] if pad_size > 0 else hidden_states
+
         hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-        pad_size = get_forward_context().pad_size
         if pad_size > 0:
             hidden_states = hidden_states[:-pad_size, :]
 
