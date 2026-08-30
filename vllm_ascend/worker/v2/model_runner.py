@@ -123,10 +123,7 @@ class NPUModelRunner(GPUModelRunner):
             if pp_disabled:
                 restore_pp_after_upstream_init(self, vllm_config)
         self.use_spec_pp = spec_pp_support is not None
-        if (
-            spec_pp_support is not None
-            and spec_pp_support.needs_aux_hidden_states
-        ):
+        if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
 
         self.use_aclgraph = (

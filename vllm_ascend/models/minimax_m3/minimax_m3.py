@@ -111,6 +111,8 @@ from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_utils import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
@@ -956,9 +958,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
         self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(
             self,
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size
-            ),
+            make_empty_intermediate_tensors_factory(["hidden_states", "residual"], config.hidden_size),
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -997,9 +997,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(aux_hidden_states, idx + 1, hidden_states, residual)
 
         if not pp_group.is_last_rank:
-            intermediate_tensors = IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            intermediate_tensors = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
             return add_pp_transport_tensors(
                 intermediate_tensors,
                 PPTransportDataType.AUX_HIDDEN_STATES,

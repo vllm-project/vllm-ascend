@@ -36,34 +36,33 @@ class SpecPPSupport:
     unsupported_feature: str | None = None
 
 
-_SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType({
-    "mtp": SpecPPSupport(),
-    "eagle3": SpecPPSupport(
-        architectures=frozenset(
-            {
-                "MiniMaxM3SparseForCausalLM",
-                "MiniMaxM3SparseForConditionalGeneration",
-            }
+_SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
+    {
+        "mtp": SpecPPSupport(),
+        "eagle3": SpecPPSupport(
+            architectures=frozenset(
+                {
+                    "MiniMaxM3SparseForCausalLM",
+                    "MiniMaxM3SparseForConditionalGeneration",
+                }
+            ),
+            needs_aux_hidden_states=True,
+            bypass_upstream_pp_guard=True,
+            unsupported_feature="EAGLE3 with pipeline parallelism",
         ),
-        needs_aux_hidden_states=True,
-        bypass_upstream_pp_guard=True,
-        unsupported_feature="EAGLE3 with pipeline parallelism",
-    ),
-    "dspark": SpecPPSupport(
-        architectures=frozenset({"DeepseekV4ForCausalLM"}),
-        needs_aux_hidden_states=True,
-        bypass_upstream_pp_guard=True,
-    ),
-})
+        "dspark": SpecPPSupport(
+            architectures=frozenset({"DeepseekV4ForCausalLM"}),
+            needs_aux_hidden_states=True,
+            bypass_upstream_pp_guard=True,
+        ),
+    }
+)
 
 
 def resolve_spec_pp_support(vllm_config: VllmConfig) -> SpecPPSupport | None:
     """Return the registered Spec+PP capabilities for this configuration."""
     speculative_config = vllm_config.speculative_config
-    if (
-        speculative_config is None
-        or vllm_config.parallel_config.pipeline_parallel_size <= 1
-    ):
+    if speculative_config is None or vllm_config.parallel_config.pipeline_parallel_size <= 1:
         return None
 
     support = _SPEC_PP_SUPPORT_BY_METHOD.get(speculative_config.method)
@@ -72,8 +71,7 @@ def resolve_spec_pp_support(vllm_config: VllmConfig) -> SpecPPSupport | None:
 
     model_config = vllm_config.model_config
     if support.architectures is not None and (
-        model_config is None
-        or model_config.architecture not in support.architectures
+        model_config is None or model_config.architecture not in support.architectures
     ):
         return None
     return support
@@ -85,9 +83,7 @@ def bypass_upstream_spec_pp_guard(
     support: SpecPPSupport | None,
 ) -> Iterator[bool]:
     """Initialize the upstream runner as PP=1 to bypass its Spec+PP guard."""
-    bypass_guard = (
-        support.bypass_upstream_pp_guard if support is not None else False
-    )
+    bypass_guard = support.bypass_upstream_pp_guard if support is not None else False
     if not bypass_guard:
         yield False
         return
@@ -130,9 +126,7 @@ class PPTransportDataType(str, Enum):
 
 def make_empty_intermediate_tensors(
     model: _PPAuxHiddenStateModel,
-    tensor_factory: Callable[
-        [int, torch.dtype, torch.device], IntermediateTensors
-    ],
+    tensor_factory: Callable[[int, torch.dtype, torch.device], IntermediateTensors],
 ) -> Callable[[int, torch.dtype, torch.device], IntermediateTensors]:
     """Wrap a model's PP tensor factory with auxiliary receive buffers."""
 
@@ -142,10 +136,7 @@ def make_empty_intermediate_tensors(
         device: torch.device,
     ) -> IntermediateTensors:
         intermediate_tensors = tensor_factory(batch_size, dtype, device)
-        num_incoming_aux_layers = sum(
-            layer_idx <= model.start_layer
-            for layer_idx in model.aux_hidden_state_layers
-        )
+        num_incoming_aux_layers = sum(layer_idx <= model.start_layer for layer_idx in model.aux_hidden_state_layers)
         return add_pp_transport_buffers(
             intermediate_tensors,
             PPTransportDataType.AUX_HIDDEN_STATES,

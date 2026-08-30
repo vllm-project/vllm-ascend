@@ -92,6 +92,8 @@ from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_utils import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
 
