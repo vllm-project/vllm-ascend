@@ -182,11 +182,10 @@ def pad_decode_query_to_bsnd(
     num_decodes = len(query_lens)
     num_heads, head_size = query.shape[1], query.shape[-1]
     out = query.new_zeros((num_decodes, max_q, num_heads, head_size))
-    offset = 0
-    for i, qlen in enumerate(query_lens):
-        if qlen > 0:
-            out[i, :qlen] = query[offset : offset + qlen]
-            offset += qlen
+    
+    query_lens = torch.tensor(query_lens, device=query.device)
+    mask = torch.arange(max_q, device=query.device)[None, :] < query_lens[:, None]
+    out[mask] = query
     return out
 
 def _compact_bsnd_out(
