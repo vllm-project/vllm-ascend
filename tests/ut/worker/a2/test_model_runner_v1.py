@@ -15,10 +15,45 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestNPUModelRunnerProfileRun(unittest.TestCase):
+    @patch("vllm_ascend.worker.model_runner_v1.disable_compilation")
+    @patch("vllm_ascend.worker.model_runner_v1.select_moe_comm_method", return_value=MoECommType.MC2)
+    @patch("vllm_ascend.worker.model_runner_v1.get_mc2_tokens_capacity", return_value=8)
+    @patch("vllm.v1.worker.gpu_model_runner.GPUModelRunner.profile_run", autospec=True)
+    def test_multimodal_profile_precedes_mc2_warmup(
+        self,
+        mock_base_profile,
+        mock_get_mc2_tokens_capacity,
+        mock_select_moe_comm_method,
+        mock_disable_compilation,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.sparse_kv_offload_enabled = False
+        runner.max_num_tokens = 16
+        runner.vllm_config = MagicMock()
+        runner.eplb_warmup = MagicMock()
+        runner.get_model = MagicMock(return_value=MagicMock())
+        runner._dummy_run = MagicMock()
+
+        call_order = []
+        runner.eplb_warmup.side_effect = lambda: call_order.append("eplb")
+        mock_base_profile.side_effect = lambda _: call_order.append("multimodal")
+        runner._dummy_run.side_effect = lambda *args, **kwargs: call_order.append("mc2")
+
+        runner.profile_run()
+
+        self.assertEqual(call_order, ["eplb", "multimodal", "mc2"])
+        runner._dummy_run.assert_called_once_with(8, with_prefill=True, is_profile=True)
+        mock_get_mc2_tokens_capacity.assert_called_once_with()
+        mock_select_moe_comm_method.assert_called_once_with(8, runner.vllm_config)
+        mock_disable_compilation.assert_called_once_with(runner.get_model.return_value)
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):
