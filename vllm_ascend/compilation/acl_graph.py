@@ -46,6 +46,14 @@ def _is_old_hdk_capture_error(exc: RuntimeError) -> bool:
     return any(marker in message for marker in _OLD_HDK_CAPTURE_ERROR_MARKERS)
 
 
+def _has_host_attention_updates(num_tokens: int) -> bool:
+    if _EXTRA_CTX.is_draft_model:
+        params = _draft_graph_prefill_params if _EXTRA_CTX.is_draft_model_prefill else _draft_graph_params
+    else:
+        params = _graph_params
+    return params is not None and bool(params.attn_params.get(num_tokens))
+
+
 @dataclasses.dataclass
 class ACLGraphEntry:
     batch_descriptor: BatchDescriptor
@@ -250,17 +258,17 @@ class ACLGraphWrapper:
             )
 
         logger.info_once("Replaying aclgraph")
-        # In async scheduling or multi-threaded (MT) scenarios, it is possible that
-        # the CPU's record event (from update_attn_params) for the iteration i completes
-        # before the grph replay of iteration i-1.
-        # To ensure proper ordering, we must call synchronize here before replaying,
-        # so that update_attn_params only executes after the previous graph replay has fully completed.
-        # If we do not in main model and in full-graph mode when using merge-eagle-graph,
-        # we do not need to synchronize.
+        # Host-side FIA task updates must not race the previous graph replay.
+        # Device-side tiling has no host task update and therefore needs no
+        # stream synchronization here.
         # When enable_enpu is on, model_runner orders update vs replay; skip here.
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+        need_sync = (
+            self.runtime_mode == CUDAGraphMode.FULL
+            and not is_draft_eagle
+            and _has_host_attention_updates(batch_descriptor.num_tokens)
+        )
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()

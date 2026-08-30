@@ -89,7 +89,8 @@ else()
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/attention/fused_infer_attention_score_v2_sink/torch_binding/*.cpp)
 endif()
 
 include_directories(

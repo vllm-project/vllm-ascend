@@ -47,6 +47,11 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.ops.fia_v2_sink import (
+    FIA_V2_SINK_METADATA_SIZE,
+    build_fia_v2_sink_metadata,
+    fused_infer_attention_score_v2_sink,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -177,9 +182,12 @@ class AscendMLADecodeMetadata:
     input_positions: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
+    seq_lens_device: torch.Tensor
     max_seq_lens: int
     seq_lens_list: list[int]
     actual_seq_lengths_q: list[int] | None = None
+    actual_seq_lengths_q_device: torch.Tensor = None
+    fia_v2_metadata: torch.Tensor | None = None
     attn_mask: torch.Tensor | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
@@ -316,7 +324,26 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.graph_pad_size = 0
         self.query_lens: torch.Tensor = None
         self.seq_lens: torch.Tensor = None
+        self.seq_lens_device: torch.Tensor = None
+        self.query_start_loc_device: torch.Tensor = None
+        self._fia_seq_lens_buffer = torch.zeros(
+            scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=device,
+        )
+        self._fia_actual_seq_len_buffers: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self.attn_mask_builder = AttentionMaskBuilder(self.device)
+        self._fia_v2_sink_impl: AscendMLAImpl | None = None
+        self._fia_v2_metadata_buffer: torch.Tensor | None = None
+        if layer_names:
+            impl = vllm_config.compilation_config.static_forward_context[layer_names[0]].impl
+            if isinstance(impl, AscendMLAImpl) and not impl.fa_quant_layer and not impl.enable_kv_nz:
+                self._fia_v2_sink_impl = impl
+                self._fia_v2_metadata_buffer = torch.zeros(
+                    FIA_V2_SINK_METADATA_SIZE,
+                    dtype=torch.int32,
+                    device=device,
+                )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -452,6 +479,46 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
     ):
         self.num_actual_tokens = common_attn_metadata.num_actual_tokens
 
+    def _build_fia_v2_metadata(
+        self,
+        actual_seq_qlen: torch.Tensor,
+        actual_seq_kvlen: torch.Tensor,
+        causal: bool,
+    ) -> torch.Tensor | None:
+        impl = self._fia_v2_sink_impl
+        if impl is None:
+            return None
+        assert self._fia_v2_metadata_buffer is not None
+        return build_fia_v2_sink_metadata(
+            actual_seq_qlen=actual_seq_qlen,
+            actual_seq_kvlen=actual_seq_kvlen,
+            num_query_heads=impl.num_heads_padded,
+            num_key_value_heads=impl.num_kv_heads,
+            head_dim_qk=impl.kv_lora_rank,
+            head_dim_v=impl.kv_lora_rank,
+            input_layout="TND_NTD",
+            input_layout_kv="BnNBsD",
+            sparse_mode=3 if causal else 0,
+            block_size=self.block_size,
+            rope_head_dim=impl.qk_rope_head_dim,
+            output_buffer=self._fia_v2_metadata_buffer,
+        )
+
+    def _get_fia_actual_seq_len_buffers(self, num_reqs: int) -> tuple[torch.Tensor, torch.Tensor]:
+        buffers = self._fia_actual_seq_len_buffers.get(num_reqs)
+        if buffers is None:
+            # ACLNN converts tensor views to static descriptors. Reusing one
+            # backing allocation with different view shapes can retain the
+            # descriptor from the first captured graph. Keep a stable, distinct
+            # allocation for each request-count so graph replay can update the
+            # same addresses without sharing descriptors across graph sizes.
+            buffers = (
+                torch.empty(num_reqs, dtype=torch.int64, device=self.device),
+                torch.empty(num_reqs, dtype=torch.int64, device=self.device),
+            )
+            self._fia_actual_seq_len_buffers[num_reqs] = buffers
+        return buffers
+
     def build(
         self,
         common_prefix_len: int,
@@ -479,6 +546,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         # NOTE: MTP full graph is incompatible with context parallelism.
         self.slot_mapping = common_attn_metadata.slot_mapping[: self.num_actual_tokens]
+        self.seq_lens_device = common_attn_metadata.seq_lens[:num_reqs]
+        self.query_start_loc_device = query_start_loc
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         self.query_lens = query_seq_lens_cpu[:num_reqs]
@@ -691,18 +760,37 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             sin = sin[: self.num_decode_tokens, ...]
         else:
             cos = sin = None
+        num_fia_reqs = len(actual_seq_lengths_q)
+        actual_seq_lengths_q_device, seq_lens_device = self._get_fia_actual_seq_len_buffers(num_fia_reqs)
+        actual_seq_lengths_q_device.copy_(self.query_start_loc_device[1 : num_fia_reqs + 1])
+        seq_lens_device.copy_(self._build_fia_seq_lens_device(num_fia_reqs))
         decode_metadata = self.decode_metadata_cls(
             input_positions=input_positions,
             block_table=self.block_table,
             seq_lens=self.seq_lens,
+            seq_lens_device=seq_lens_device,
             seq_lens_list=seq_lens_list,
             max_seq_lens=max_seq_lens,
             attn_mask=self.attn_mask_builder.get_splitfuse_attn_mask(),
             actual_seq_lengths_q=actual_seq_lengths_q,
+            actual_seq_lengths_q_device=actual_seq_lengths_q_device,
             sin=sin,
             cos=cos,
         )
+        decode_metadata.fia_v2_metadata = self._build_fia_v2_metadata(
+            decode_metadata.actual_seq_lengths_q_device,
+            decode_metadata.seq_lens_device,
+            common_attn_metadata.causal,
+        )
         return decode_metadata
+
+    def _build_fia_seq_lens_device(self, num_reqs: int) -> torch.Tensor:
+        seq_lens_device = self.seq_lens_device[:num_reqs]
+        if seq_lens_device.shape[0] == num_reqs:
+            return seq_lens_device
+        self._fia_seq_lens_buffer[:num_reqs].zero_()
+        self._fia_seq_lens_buffer[: seq_lens_device.shape[0]].copy_(seq_lens_device)
+        return self._fia_seq_lens_buffer[:num_reqs]
 
     def build_for_graph_capture(
         self,
@@ -1634,6 +1722,34 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_qlen": actual_seq_lengths,
             "actual_seq_kvlen": decode_meta.seq_lens_list,
         }
+        if (
+            not self.fa_quant_layer
+            and not self.enable_kv_nz
+            and input_layout == "TND_NTD"
+            and decode_meta.fia_v2_metadata is not None
+        ):
+            attn_output = fused_infer_attention_score_v2_sink(
+                q_nope,
+                k_nope,
+                k_nope,
+                query_rope=q_pe,
+                key_rope=k_pe,
+                actual_seq_qlen=decode_meta.actual_seq_lengths_q_device,
+                actual_seq_kvlen=decode_meta.seq_lens_device,
+                block_table=decode_meta.block_table,
+                metadata=decode_meta.fia_v2_metadata,
+                num_query_heads=self.num_heads_padded,
+                num_key_value_heads=self.num_kv_heads,
+                softmax_scale=self.scale,
+                input_layout=input_layout,
+                sparse_mode=sparse_mode,
+                block_size=block_size,
+                atten_mask=attn_mask,
+            )
+            if self.head_padding > 0:
+                attn_output = attn_output[: self.num_heads]
+            return self._v_up_proj(attn_output)
+
         if self.fa_quant_layer:
             extra_fa_args = {
                 "query_quant_mode": 3,

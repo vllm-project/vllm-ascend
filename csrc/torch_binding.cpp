@@ -2705,3 +2705,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
              &vllm_ascend::npu_msa_index_score);
 }
 #endif
+
+// FIA v2 sink operators. The implementations live under
+// csrc/attention/fused_infer_attention_score_v2_sink/torch_binding/ and are
+// exported through the same vLLM Ascend namespace as the other custom ops.
+TORCH_LIBRARY_FRAGMENT(_C_ascend, m)
+{
+    m.def("npu_fused_infer_attention_score_v2_sink(Tensor query, Tensor key, Tensor value, *,"
+          "Tensor? query_rope=None, Tensor? key_rope=None, Tensor? pse_shift=None, Tensor? atten_mask=None,"
+          "Tensor? actual_seq_qlen=None, Tensor? actual_seq_kvlen=None, Tensor? block_table=None,"
+          "Tensor? meta_data=None, int num_query_heads=1, int num_key_value_heads=0,"
+          "float softmax_scale=1.0, int pre_tokens=2147483647, int next_tokens=2147483647,"
+          "str input_layout='TND', int sparse_mode=0, int block_size=0, int inner_precise=0,"
+          "bool return_softmax_lse=False) -> (Tensor, Tensor)");
+
+    m.def("_npu_fused_infer_attention_score_v2_sink_metadata(int num_heads_q, int num_heads_kv, "
+          "int head_dim_qk, int head_dim_v, *, Tensor? actual_seq_lengths=None,"
+          "Tensor? actual_seq_lengths_kv=None, int batch_size=0, int sparse_mode=0,"
+          "int pre_tokens=2147483647, int next_tokens=2147483647, str input_layout='TND',"
+          "str input_layout_kv='TND', int sink_num=0, int k_sink_num=0, int rope_head_dim=0,"
+          "int block_size=0, int aic_core_num=24, int aiv_core_num=48, bool batch_invariant=False) -> Tensor");
+}

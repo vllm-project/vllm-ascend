@@ -99,6 +99,16 @@
   tests:
     - tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py
 
+- name: attention_fia_v2_sink
+  optional: false
+  base:
+    - attention_gqa
+    - attention_mla
+  source_file_dependencies:
+    - vllm_ascend/ops/fia_v2_sink.py
+  tests:
+    - tests/ut/ops/a3_2/test_fia_v2_sink.py
+
 - name: attention_sfa
   optional: false
   base: attention_common
@@ -937,6 +947,7 @@ estimated_times:
   tests/ut/ops/a2/test_gdn_layerwise_kv.py: 70
   tests/ut/ops/a2/test_token_dispatcher.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50
+  tests/ut/ops/a3_2/test_fia_v2_sink.py: 60
   tests/ut/ops/a3_2/test_kimi_kda_fused_norm_gate.py: 60
   tests/ut/ops/a3_2/test_select_experts.py: 20
   tests/ut/quantization/methods/a2/test_w4a16.py: 30
