@@ -2139,8 +2139,14 @@ class NPUModelRunner(GPUModelRunner):
                         # 0, and has_unfinished_requests in the outer loop
                         # returns True. before returning early here we call
                         # dummy run to ensure coordinate_batch_across_dp
-                        # is called into to avoid out of sync issues.
-                        self._dummy_run(1, skip_gdn_state_update=True)
+                        # is called into to avoid out of sync issues. Match the
+                        # active decode descriptor so an idle rank does not
+                        # downgrade graph mode across the DP group.
+                        self._dummy_run(
+                            self.uniform_decode_query_len,
+                            uniform_decode=True,
+                            skip_gdn_state_update=True,
+                        )
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
