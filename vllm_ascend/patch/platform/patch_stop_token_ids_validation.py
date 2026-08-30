@@ -36,11 +36,7 @@ def _validate_stop_token_ids(self, model_config) -> None:
         return
 
     vocab_size = model_config.get_vocab_size()
-    invalid_token_ids = [
-        token_id
-        for token_id in stop_token_ids
-        if token_id < 0 or token_id >= vocab_size
-    ]
+    invalid_token_ids = [token_id for token_id in stop_token_ids if token_id < 0 or token_id >= vocab_size]
 
     if invalid_token_ids:
         raise VLLMValidationError(

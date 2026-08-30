@@ -5,13 +5,12 @@ Out-of-vocab stop token ids crash the engine on CANN 9.1.x (IndexCheck
 kernel traps on the OOB logits index). See vllm-ascend issue #15200.
 """
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from vllm.sampling_params import SamplingParams, VLLMValidationError
 
 import vllm_ascend.patch.platform.patch_stop_token_ids_validation  # noqa: F401
-from vllm.sampling_params import SamplingParams, VLLMValidationError
 
 
 def _make_model_config(vocab_size: int) -> MagicMock:
