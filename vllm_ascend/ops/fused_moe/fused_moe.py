@@ -24,6 +24,8 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import _moe_forward_shared
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -34,6 +36,45 @@ from vllm_ascend.ops.fused_moe.shared_experts import (
     SharedExpertParallelMode,
 )
 from vllm_ascend.utils import vllm_version_is
+
+
+def _ascend_moe_forward_shared_sp_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
+    layer_name: object,
+    hidden_dim_unpadded: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Infer the local SP outputs of the shared-expert custom op.
+
+    The explicit shared input contains all gathered tokens, while the real
+    shared output has already been reduce-scattered back to the routed input's
+    local token count.  The upstream fake uses the shared input's token count,
+    which is only correct before the early all-gather optimization.
+    """
+    del router_logits, input_ids, layer_name
+    assert shared_experts_input is not None
+    shared_out = shared_experts_input.new_empty(
+        (*hidden_states.shape[:-1], shared_experts_input.shape[-1]),
+    )
+    if hidden_dim_unpadded > 0:
+        fused_out = hidden_states.new_empty(
+            (*hidden_states.shape[:-1], hidden_dim_unpadded),
+        )
+    else:
+        fused_out = torch.empty_like(hidden_states)
+    return shared_out, fused_out
+
+
+# Keep the gathered shared input as an explicit graph dependency, but expose
+# the SP-local shared output shape to torch.compile/ACL graph tracing.
+direct_register_custom_op(
+    op_name="ascend_moe_forward_shared_sp",
+    op_func=_moe_forward_shared,
+    fake_impl=_ascend_moe_forward_shared_sp_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
 
 
 class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
@@ -85,6 +126,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.quant_type,
                 self._quant_method,
             )
+            if (
+                self.ascend_shared_experts.multistream_overlap
+                and self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+            ):
+                self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
         alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
@@ -213,6 +259,45 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if self.ascend_shared_experts is not None:
             self.ascend_shared_experts.set_lora_context(lora_context)
 
+    def apply_routed_input_transform(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Start the SP shared-input gather before the latent down projection."""
+        gathered_input = hidden_states
+        all_gather_done = None
+        if self.ascend_shared_experts is not None:
+            gathered_input, all_gather_done = self.ascend_shared_experts.start_input_all_gather(hidden_states)
+        routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
+        if all_gather_done is not None:
+            torch.npu.current_stream().wait_event(all_gather_done)
+            shared_input = gathered_input
+        return routed_input, shared_input
+
+    def apply_routed_output_transform(self, fused_output: torch.Tensor) -> torch.Tensor:
+        """Run the latent up projection before joining the SP shared output."""
+        fused_output = super().apply_routed_output_transform(fused_output)
+        if self.ascend_shared_experts is not None:
+            self.ascend_shared_experts.wait_for_output()
+        return fused_output
+
+    def _maybe_apply_routed_scale_to_output(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        if (
+            shared_output is not None
+            and fused_output.dtype == torch.float16
+            and self.routed_scaling_factor != 1.0
+            and self.ascend_shared_experts is not None
+        ):
+            # The base FP16 overflow path scales shared_output in place. Join
+            # a deferred SP reduce-scatter before that write; BF16 keeps the
+            # overlap because only fused_output is touched.
+            self.ascend_shared_experts.wait_for_output()
+        return super()._maybe_apply_routed_scale_to_output(shared_output, fused_output)
+
     if vllm_version_is("0.27.1"):
 
         def _forward_impl(
@@ -230,17 +315,28 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         router_logits=router_logits,
                         input_ids=input_ids,
                     )
-                shared_expert_input, shared_input_all_gather_done = (
-                    self.ascend_shared_experts.prepare_input_before_routed_experts(shared_hidden_states)
+                # The runner input transform provides a padded gathered tensor
+                # in SP multistream mode. Trim only the shared-MLP view; retain
+                # the padded tensor for local internal-router reconstruction.
+                shared_input_is_gathered = (
+                    self.ascend_shared_experts.multistream_overlap
+                    and self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+                )
+                shared_expert_input = (
+                    shared_hidden_states[: _EXTRA_CTX.num_tokens] if shared_input_is_gathered else shared_hidden_states
                 )
                 if self.is_internal_router:
+                    router_hidden_states = self.ascend_shared_experts.local_input_from_gathered(
+                        shared_hidden_states,
+                        local_num_tokens=hidden_states.shape[0],
+                    )
                     gate = self.gate
                     assert gate is not None
                     # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
                     # increase with extra hidden states. We also assume that all gate
                     # linear is unquantized so that we the weight is pre-casted in
                     # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                    hidden_states_fp32 = shared_hidden_states.float()
+                    hidden_states_fp32 = router_hidden_states.float()
                     before_routed_experts = torch.npu.current_stream().record_event()
                     # v0.27.1: weight_fp32 is guaranteed by is_internal_router.
                     router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
@@ -249,8 +345,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     before_routed_experts = torch.npu.current_stream().record_event()
                     after_routed_experts = None
 
-                if shared_input_all_gather_done is not None:
-                    torch.npu.current_stream().wait_event(shared_input_all_gather_done)
                 routed_out, fused_moe_events = self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -258,13 +352,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 )
                 fused_moe_events.before_routed_experts = before_routed_experts
                 fused_moe_events.after_routed_experts = after_routed_experts
-                if shared_input_all_gather_done is not None:
+                if shared_input_is_gathered:
                     fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
 
                 shared_out = self.ascend_shared_experts.forward(
                     shared_expert_input,
                     fused_moe_events,
-                    input_is_gathered=shared_input_all_gather_done is not None,
+                    input_is_gathered=shared_input_is_gathered,
                 )
                 return shared_out, routed_out
 
@@ -293,17 +387,26 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         router_logits=router_logits,
                         input_ids=input_ids,
                     )
-                shared_expert_input, shared_input_all_gather_done = (
-                    self.ascend_shared_experts.prepare_input_before_routed_experts(shared_hidden_states)
+                # See the v0.27.1 branch above for the input-shape contract.
+                shared_input_is_gathered = (
+                    self.ascend_shared_experts.multistream_overlap
+                    and self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+                )
+                shared_expert_input = (
+                    shared_hidden_states[: _EXTRA_CTX.num_tokens] if shared_input_is_gathered else shared_hidden_states
                 )
                 if self.is_internal_router:
+                    router_hidden_states = self.ascend_shared_experts.local_input_from_gathered(
+                        shared_hidden_states,
+                        local_num_tokens=hidden_states.shape[0],
+                    )
                     gate = self.gate
                     assert gate is not None
                     # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
                     # increase with extra hidden states. We also assume that all gate
                     # linear is unquantized so that we the weight is pre-casted in
                     # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                    hidden_states_fp32 = shared_hidden_states.float()
+                    hidden_states_fp32 = router_hidden_states.float()
                     before_routed_experts = torch.npu.current_stream().record_event()
                     # main (cdc4824a21): is_internal_router only checks self.gate,
                     # weight_fp32 may be absent, fall back to gate.weight.
@@ -316,8 +419,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     before_routed_experts = torch.npu.current_stream().record_event()
                     after_routed_experts = None
 
-                if shared_input_all_gather_done is not None:
-                    torch.npu.current_stream().wait_event(shared_input_all_gather_done)
                 routed_out, fused_moe_events = self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -325,12 +426,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 )
                 fused_moe_events.before_routed_experts = before_routed_experts
                 fused_moe_events.after_routed_experts = after_routed_experts
-                if shared_input_all_gather_done is not None:
+                if shared_input_is_gathered:
                     fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
 
                 shared_out = self.ascend_shared_experts.forward(
                     shared_expert_input,
                     fused_moe_events,
-                    input_is_gathered=shared_input_all_gather_done is not None,
+                    input_is_gathered=shared_input_is_gathered,
                 )
                 return shared_out, routed_out
