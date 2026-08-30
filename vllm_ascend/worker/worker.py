@@ -482,14 +482,7 @@ class NPUWorker(WorkerBase):
         self.device = self._init_device()
         # Initialize workspace manager
         num_ubatches = 1
-        if not self.use_v2_model_runner:
-            init_workspace_manager(self.device, num_ubatches)
-        else:
-            speculative_config = self.vllm_config.speculative_config
-            if speculative_config is not None and speculative_config.use_dspark():
-                init_workspace_manager(self.device, num_ubatches, num_lanes=2)
-            else:
-                init_workspace_manager(self.device, num_ubatches)
+        init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
