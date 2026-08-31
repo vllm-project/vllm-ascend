@@ -1,18 +1,18 @@
-# Technical Documentation Template for Deployment Tutorials Based on the XXX Model
+# Model Deployment Tutorial Template
 
 <p align="center">
   <a href="Model-Deployment-Tutorial-Template.md"><b>English</b></a> | <a href="Model-Deployment-Tutorial-Template.zh.md"><b>中文</b></a>
 </p>
 
-**Document Version**: v2.0
+**Document Version**: v2.0<br>
 **Updated**: 2026-08-27
 
-| Version | Date       | Change Description |
-|---------|------------|-------------------|
-| v2.0    | 2026-08-27 | Added 0day/POC and weight path constraint specifications; unified model naming and port numbers; restructured Chapter 9; supplemented echo output examples and hardware support descriptions; fixed documentation issues. |
-| v1.0    | 2026-03-01 | Initial version creation |
+|   Version  |     Date      | Change Description |
+|------------|---------------|--------------------|
+|    v2.0    |    2026-08    | Added 0day/POC and weight path constraint specifications; restructured Chapter 9; <br>supplemented echo output examples and hardware support descriptions; fixed documentation issues. |
+|    v1.0    |    2026-03    | Initial version creation |
 
-This template is based on deployment tutorials for models such as DeepSeek-V3.2 and Qwen-VL-Dense, and is intended to serve as a reference for technical documentation writing. Users can systematically construct relevant technical documentation by following the guidelines provided in this template.
+This template aims to serve as a reference for writing model deployment documentation. Users can follow the guidelines provided in the template to systematically complete the construction of relevant technical documentation.
 
 **Title conventions:**
 
@@ -23,19 +23,14 @@ This template is based on deployment tutorials for models such as DeepSeek-V3.2 
 
 **Content Writing Requirements:**
 
-- Provide a one-sentence description of the model's basic architecture, core features, and primary application scenarios.
-- Provide a one-sentence description of the document's purpose and the objectives to be achieved.
+- Provide a single paragraph that describes the model's basic architecture, core features, and primary application scenarios, along with the purpose and intended outcomes of this document.
 - Specify the version of vLLM-Ascend used in the document and the version support status of the model,**If 0day or POC models are involved, a relevant description must be provided to explain the model's adaptation status.**
 
 **Example 1: Model Introduction**
 
-DeepSeek-V3.2 is a sparse attention model. Its core architecture is similar to that of DeepSeek-V3.1, but it employs a sparse attention mechanism, aiming to explore and validate optimization solutions for training and inference efficiency in long-context scenarios.
+DeepSeek-V3.2 is a sparse attention model. Its core architecture is similar to that of DeepSeek-V3.1, but it employs a sparse attention mechanism, aiming to explore and validate optimization solutions for training and inference efficiency in long-context scenarios.This document will demonstrate the primary validation steps for the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
 
-**Example 2: Document Purpose**
-
-This document will demonstrate the primary validation steps for the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, as well as accuracy and performance evaluation.
-
-**Example 3: Version Information and Adaptation Status Description**
+**Example 2: Version Information and Adaptation Status Description**
 
 - **Official releases**: This document is validated and written based on **vLLM-Ascend v0.13.0**. The current model (XXX) is fully supported in this version and can run stably on **v0.13.0 and later versions**. For access to the latest features (e.g., PD separation, MTP, etc.), it is recommended to use the latest release candidate or official release.
 
@@ -49,14 +44,13 @@ This section introduces the features supported by the model, including supported
 
 - Present the support status of models and features in a table format.
 - Or provide cross-references with jump links (recommended).
-- The model name must remain consistent throughout the text; hyphens (-), underscores (_), and letter case within the name must be unified across the entire document.
 
 **Example 1: Feature Support List**
 
 | Model Name | Support Status | Remarks | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Caching | LoRA | Speculative Decoding | Asynchronous Scheduling | Tensor Parallelism | Pipeline Parallelism | Expert Parallelism | Data Parallelism | Prefill-Decode Separation | Segmented ACL Graph Execution | Full ACL Graph Execution | Max Model Length | Documentation |
 | ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ---------- | ---- |
-| DeepSeek-V3.2 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../tutorials/models/DeepSeek-V3.2.md) |
-| Qwen3 | ✅ | | ✅ | Atlas 800I A2:<br>Minimum card requirement: xx | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | [Qwen3-Dense](../tutorials/models/Qwen3-Dense.md) |
+| DeepSeek-V3.2 | ✅ | | ✅ | Atlas 800I A2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../tutorials/models/DeepSeek-V3.2.md) |
+| Qwen3-Dense | ✅ | | ✅ | Atlas 800I A2 | ✅ | ✅ | ✅ | | | ✅ | ✅ | | | ✅ | | ✅ | ✅ | 128k | [Qwen3-Dense](../tutorials/models/Qwen3-Dense.md) |
 
 >**Note**: This is a simplified example. Please refer to the complete feature matrix for the full table.
 
@@ -78,14 +72,12 @@ Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for fe
 
 **Example:**
 
-`DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes.
-Weight links: [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8), [HuggingFace](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `DeepSeek-V3.2-Exp-W8A8` |  1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-W8A8` | 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \| [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
 
-`DeepSeek-V3.2-W8A8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes.
-Weight links: [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/), [HuggingFace](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-
->**Path description:**
-Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8`. In subsequent deployment commands, the placeholder `<YOUR_MODEL_PATH>` will be used; please replace it with the path you have recorded here.
+>**Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8`. In subsequent deployment commands, the placeholder `<YOUR_MODEL_PATH>` will be used; please replace it with the path you have recorded here.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 

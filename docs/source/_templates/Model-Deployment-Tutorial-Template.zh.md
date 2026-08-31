@@ -1,18 +1,18 @@
-# 基于XXX模型部署教程的技术文档模板
+# 模型部署教程模板
 
 <p align="center">
   <a href="Model-Deployment-Tutorial-Template.md"><b>English</b></a> | <a href="Model-Deployment-Tutorial-Template.zh.md"><b>中文</b></a>
 </p>
 
- **文档版本**：v2.0
+ **文档版本**：v2.0<br>
  **更新日期**：2026-08-27
 
-| 版本 |     日期   |   变更说明   |
-|------|------------|-------------|
-| v2.0 | 2026-08-27 | 新增0day/POC及权重路径约束规范；统一模型名称及端口号；重构第9章结构；补充回显示例和硬件支持说明；文档问题修正 |
-| v1.0 | 2026-03-01 | 初始版本创建 |
+|   版本  |    日期    |   变更说明  |
+|---------|-----------|-------------|
+|   v2.0  |  2026-08  | 新增0day/POC及权重路径约束规范；重构第9章结构；补充回显示例和硬件支持说明；文档问题修正 |
+|   v1.0  |  2026-03  | 初始版本创建 |
 
-本模板基于DeepSeek-V3.2、Qwen-VL-Dense等部署教程编写，旨在为技术文档撰写提供参考。使用者可遵循模板指引，系统性完成相关技术文档的构建工作。
+该模板旨在为模型部署文档撰写提供参考，使用者可遵循模板指引，系统性完成相关技术文档的构建工作。
 
 **标题规范：**
 
@@ -23,19 +23,14 @@
 
 **资料写作要求：**
 
-- 一句话介绍模型的基本架构、核心特性及主要应用场景。
-- 一句话写清楚文档要干什么，要达成的目的。
+- 用一段话同时涵盖模型的基本架构、核心特性、主要应用场景，以及本文档的目的与达成目标。
 - 说明文档使用的vLLM-Ascend版本及模型的版本支持情况，**若涉及0day或POC模型，须进行相关描述，说明模型的适配状态**。
 
 **示例1：模型介绍**
 
-DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 类似，但采用了稀疏注意力机制，旨在探索和验证在长上下文场景下训练和推理效率的优化方案。
+DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 类似，但采用了稀疏注意力机制，旨在探索和验证在长上下文场景下训练和推理效率的优化方案。本文档将展示模型的主要验证步骤，包括支持的功能、功能配置、环境准备、单节点和多节点部署、准确性和性能评估。
 
-**示例2：文档目的**
-
-本文档将展示模型的主要验证步骤，包括支持的功能、功能配置、环境准备、单节点和多节点部署、准确性和性能评估。
-
-**示例3：版本信息与适配状态说明**
+**示例2：版本信息与适配状态说明**
 
 - **正式版本**：本文档基于**vLLM-Ascend v0.13.0** 版本进行验证和编写。当前模型（XXX）在该版本中已完整支持，**v0.13.0 及更高版本**均可稳定运行。如需使用最新特性（如PD分离、MTP等），建议使用最新的候选版本或正式版本。
 
@@ -49,14 +44,13 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 - 采用表格形式，呈现模型和特性的支持情况。
 - 或提供可跳转的交叉引用（推荐）。
-- 模型名称全文需保持一致，名称中的短横线（-）、下划线（_）和大小写须全文统一。
 
 **示例1：特性支持列表**
 
 | 模型名称 | 支持状态 | 备注 | BF16 | 支持的硬件 | W8A8 | 分块预填充 | 自动前缀缓存 | LoRA | 推测解码 | 异步调度 | 张量并行 | 流水线并行 | 专家并行 | 数据并行 | Prefill-Decode分离 | 分段式ACL图执行 | 整图ACL图执行 | 最大模型长度 | 文档 |
 | ------ | ---------- | ------ | ------ | ---------- | ------ | ------------ | -------------- | ------ | ---------- | ---------- | ---------- | ------------ | ---------- | ---------- | ------------------- | ----------- | ----------- | ------------- | ---------- |
-| DeepSeek-V3.2 | ✅ |  | ✅ | Atlas 800I A2:<br>最低卡数要求为xx | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../tutorials/models/DeepSeek-V3.2.md) |
-| Qwen3 | ✅ |  | ✅ | Atlas 800I A2:<br>最低卡数要求为xx | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ | 128k | [Qwen3-Dense](../tutorials/models/Qwen3-Dense.md) |
+| DeepSeek-V3.2 | ✅ |  | ✅ | Atlas 800I A2 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 160k | [DeepSeek-V3.2](../tutorials/models/DeepSeek-V3.2.md) |
+| Qwen3-Dense | ✅ |  | ✅ | Atlas 800I A2 | ✅ | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ | 128k | [Qwen3-Dense](../tutorials/models/Qwen3-Dense.md) |
 
 >**注意**：此为简化示例，完整表格请参考完整特性矩阵。
 
@@ -78,14 +72,12 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **示例：**
 
-`DeepSeek-V3.2-Exp-W8A8`（量化版）：需要 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点。
-权重链接：[Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8), [HuggingFace](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+| 权重版本 | 硬件要求 |       权重链接      |
+|---------|---------|---------------------|
+| `DeepSeek-V3.2-Exp-W8A8` |  1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-W8A8` | 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \|    [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
 
-`DeepSeek-V3.2-W8A8`（量化版）：需要 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点。
-权重链接：[Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/), [HuggingFace](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-
->**路径说明：**
-请将模型权重下载至您指定的目录，并记录该路径。例如：`/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8`，后续部署命令中将使用 `<YOUR_MODEL_PATH>` 占位符，请替换为此处记录的路径。
+> **路径说明：** 请将模型权重下载至您指定的目录，并记录该路径。例如：`/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8`，后续部署命令中将使用 `<YOUR_MODEL_PATH>` 占位符，请替换为此处记录的路径。
 
 ### 3.2 验证多节点通信（可选）
 
