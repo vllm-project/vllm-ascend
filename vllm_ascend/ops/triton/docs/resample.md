@@ -196,16 +196,21 @@ own; it is covered through `_resample_kernel`, its only caller. Its
 from this repository, because the call site passes `None, 0, None` and `False`,
 and are therefore not covered.
 
-One test-only Triton probe kernel replays the Philox noise stream so the
-reference can compare sampling results deterministically. Because that replay
-shares a blind spot with the code under test, a separate 16,384-draw statistical
-test compares the resampled-token frequencies with `softmax(logits)` without
-using the probe.
+The test file contains no Triton kernel of its own and does not reproduce any
+part of the operator. Sampling requests are checked in two ways that are both
+independent of the Gumbel draw:
+
+- Cases that need an exact expected token are built so that each vocabulary
+  block holds exactly one finite residual, which the noise cannot displace.
+- Cases that need the residual values themselves compare sampling frequencies
+  over 16,384 draws against the analytic distribution: `softmax(logits)` for the
+  bonus branch, and the normalised `(p - q)+` residual for the draft-logits
+  branch.
 
 The cases cover greedy and sampling requests, all three residual branches, the
 greedy early return, ragged vocabulary tails, shuffled request-state rows,
-deterministic seeds and positions, the sampling distribution, and an end-to-end
-greedy call through `rejection_sample`.
+deterministic seeds and positions, both sampling distributions, and an
+end-to-end greedy call through `rejection_sample`.
 
 The fp32 score comparison uses `rtol=1e-5` and `atol=1e-5`. Token IDs are
 compared exactly, except that a different argmax is accepted when its reference
