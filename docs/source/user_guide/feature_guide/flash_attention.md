@@ -3,7 +3,7 @@
 !!! note
 
     Flash Attention 3 on Ascend is currently in beta. The `flash_attn_npu` package required for FA3 has been open-sourced on GitHub.
-    Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu/tree/trainInferConsist) for more details.
+    Please refer to the [flash-attention-npu repository](https://github.com/MinghuasLab/flash-attention-npu/tree/trainInferConsist) (trainInferConsist branch) for more details.
 
 This document shows how to enable Flash Attention 3 (FA3) in vLLM-Ascend. FA3 provides a training-inference consistent attention implementation for Ascend NPUs.
 
@@ -53,7 +53,7 @@ FA3 requires the `flash_attn_npu` package, which provides the `flash_attn_npu_v3
 
 ### Installation
 
-To install the `flash_attn_npu` wheel package, refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/trainInferConsist/README.md#installation>.
+To install the `flash_attn_npu` wheel package, refer to: <https://github.com/MinghuasLab/flash-attention-npu/blob/trainInferConsist/README.md#installation> (trainInferConsist branch).
 
 ## Enabling Flash Attention 3
 
@@ -138,7 +138,6 @@ for output in outputs:
 
 ## Limitations
 
-- **Package not yet open-sourced**: The `flash_attn_npu` package required for FA3 has not yet been released. External users cannot use FA3 until the package is available.
 - **Sliding window not supported**: FA3 does not support sliding window attention. Models that require sliding window need to use the default FIA backend.
 - **ACL graph capture not supported**: The tiling of `flash_attn_with_kvcache` is processed on the host side and currently does not support ACL graph capture. Please use `compilation_config={"cudagraph_mode": "PIECEWISE"}` when enabling FA3.
 - **RoPE not supported**: FA3 does not support rotary position embedding within the attention kernel. vLLM-Ascend patches this by using the PyTorch native RoPE fallback instead.
