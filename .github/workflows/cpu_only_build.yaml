@@ -1,0 +1,66 @@
+# Real CPU-only package verification.  This workflow deliberately uses a
+# clean Docker image rather than the CANN-based image used by NPU tests.
+name: CPU-only build verification
+
+on:
+  pull_request:
+    branches:
+      - main
+      - '*-dev'
+      - 'releases/v*'
+    paths:
+      - 'Dockerfile.cpu'
+      - 'tools/cpu_only_build.sh'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'csrc/**'
+      - 'vllm_ascend/envs.py'
+      - 'vllm_ascend/device/hardware.py'
+      - '.github/workflows/cpu_only_build.yaml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile.cpu'
+      - 'tools/cpu_only_build.sh'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'csrc/**'
+      - 'vllm_ascend/envs.py'
+      - 'vllm_ascend/device/hardware.py'
+      - '.github/workflows/cpu_only_build.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify CPU image
+    runs-on: linux-amd64-cpu-4
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12
+    timeout-minutes: 90
+    steps:
+      - name: Checkout vllm-ascend
+        uses: actions/checkout@v7
+
+      - name: Build and verify CPU-only image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.cpu
+          outputs: type=cacheonly
+          build-args: |
+            CPU_BASE_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/openeuler/openeuler:24.03-lts
+            DNF_MIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/openeuler
+            PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+            PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
+            PYTORCH_CPU_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
+            ASCEND_EXTRA_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
+          provenance: false

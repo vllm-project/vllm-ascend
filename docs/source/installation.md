@@ -238,12 +238,12 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
 CPU-only verification checks that the Python package can be built when no
 Ascend device is visible. It does **not** validate NPU runtime loading,
-inference examples, custom kernels, or NPU-specific tests. A CANN toolkit is
-still required because the build reads its headers and libraries.
+inference examples, custom kernels, or NPU-specific tests. With
+`COMPILE_CUSTOM_KERNELS=0`, this build-only path does not require a CANN
+toolkit; CANN is still required for custom kernels and NPU runtime validation.
 
 Install the Python build backend and native build tools first. The editable
-build uses setuptools-scm directly, and `arctic-inference` requires CMake and
-Ninja when a compatible wheel is not available:
+build uses setuptools-scm directly:
 
 ```bash
 python -m pip install --upgrade \
@@ -262,21 +262,38 @@ index before installing the remaining Ascend dependencies:
 
 ```bash
 python -m pip install \
-    --index-url https://download.pytorch.org/whl/cpu/ \
-    torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
+    --extra-index-url https://download.pytorch.org/whl/cpu/ \
+    torch==2.10.0+cpu torchvision==0.25.0+cpu torchaudio==2.10.0+cpu
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     torch-npu==2.10.0.post4 triton-ascend==3.2.2
+grep -Fxv 'arctic-inference==0.1.1' requirements.txt \
+    > /tmp/vllm-ascend-cpu-only-requirements.txt
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    -r requirements.txt
+    -r /tmp/vllm-ascend-cpu-only-requirements.txt
+```
+
+`arctic-inference==0.1.1` remains part of the normal vLLM Ascend dependency
+contract and is required for suffix speculative decoding. CPU-only
+verification excludes only this exact requirement in its temporary
+requirements file because its source distribution is incompatible with the
+CPU-only build environment. This local CI exception does not affect normal NPU
+installations or suffix speculative decoding.
+
+Use `tools/cpu_only_build.sh` for CPU-only verification. In addition to the
+temporary requirements file above, it temporarily replaces `requirements.txt`
+during the editable `--no-deps` install so the generated package metadata also
+excludes Arctic Inference, then restores the original file with a shell trap:
+
+```bash
+bash tools/cpu_only_build.sh all
 ```
 
 Set the build target explicitly and disable device backend auto-loading before
 building vLLM Ascend:
 
 ```bash
-export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 export COMPILE_CUSTOM_KERNELS=0
 export SOC_VERSION=ascend910b1  # Atlas A2; use the matching value below for other products
