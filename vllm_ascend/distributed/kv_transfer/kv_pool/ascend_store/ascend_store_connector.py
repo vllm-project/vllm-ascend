@@ -173,12 +173,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         if self.connector_scheduler is not None:
             self.connector_scheduler.update_connector_output(connector_output)
-            self.connector_scheduler.update_finished_sending(
-                connector_output.finished_sending
-            )
-            self.connector_scheduler.update_finished_recving(
-                connector_output.finished_recving
-            )
 
         # Get the KV events
         kv_cache_events = connector_output.kv_cache_events
