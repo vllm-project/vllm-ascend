@@ -223,25 +223,25 @@ a3:
         os: linux-aarch64-nightly-a3-16
         config_file_path: Minimax_m2.7_w8a8_A3.yaml
       - name: Qwen3_32b_w8a8_ml_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-a3-800t-16
         config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
       - name: Deepseek_R1_W8A8_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-a3-800t-16
         config_file_path: Deepseek_R1_W8A8_A3.yaml
       - name: Qwen3.8-27B-w8a8-A3
-        os: linux-aarch64-a3-2
+        os: linux-aarch64-a3-800t-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
       - name: Qwq_32b_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-a3-800t-16
         config_file_path: Qwq_32b_A3.yaml
       - name: Qwen3_32b_W8A8_wl_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-a3-800t-16
         config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
       - name: Deepseek_R1_W8A8_Reasoning_output_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-a3-800t-16
         config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
       - name: qwen_3_6_27b_w8a8_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-a3-800t-16
         config_file_path: qwen_3_6_27b_w8a8_A3.yaml
   multi_card:
     test_config:

@@ -103,7 +103,7 @@ jobs:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'workflow_dispatch'
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a3-800t-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
@@ -220,7 +220,7 @@ jobs:
     with:
       soc_version: a3
       test_frequency: weekly
-      runner: linux-aarch64-a3-0
+      runner: linux-aarch64-a3-800t-0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
@@ -272,7 +272,7 @@ jobs:
     with:
       soc_version: a3
       test_frequency: weekly
-      runner: linux-aarch64-a3-0
+      runner: linux-aarch64-a3-800t-0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
@@ -355,7 +355,7 @@ jobs:
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   clear-pre-logs:
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a3-800t-0
     needs: [double-node-tests]
     if: needs.double-node-tests.result != 'skipped'
     steps:

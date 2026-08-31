@@ -277,7 +277,7 @@ partition:
     runner_label: linux-aarch64-a3-8-
     count: 1
   a3-16:
-    runner_label: linux-aarch64-a3-16
+    runner_label: linux-aarch64-a3-800t-16
     count: 1
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk

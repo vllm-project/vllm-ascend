@@ -25,7 +25,7 @@ jobs:
         include:
           - runner: linux-aarch64-a2b3-0
             cluster: a2
-          - runner: linux-aarch64-a3-0
+          - runner: linux-aarch64-a3-800t-0
             cluster: a3
           - runner: linux-aarch64-a5-0
             cluster: a5
