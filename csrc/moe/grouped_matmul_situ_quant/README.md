@@ -36,7 +36,7 @@ accepted kernel change:
 
 ```bash
 GMSQ_P0_KERNEL=/path/to/p0_entries/kernel \
-    bash csrc/grouped_matmul_situ_quant/sync_from_p0.sh
+    bash csrc/moe/grouped_matmul_situ_quant/sync_from_p0.sh
 pip install -e .
 pytest tests/ut/ops/test_grouped_matmul_situ_quant.py
 ```

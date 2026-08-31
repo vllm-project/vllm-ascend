@@ -9,11 +9,10 @@
 namespace ascend_kernel {
 
 // V2-aligned dual entries (aclnnGroupedMatmulSwigluQuantV2 / WeightNzV2 API
-// habits): two entry names sharing one implementation (host tiling +
-// gmm_situ_vcv_dev kernel). ND weight entry converts at the entry layer, NZ
-// entry feeds the kernel's native byte stream; .list overloads gather
-// per-expert TensorLists. See op_host/gmm_situ_quant_entries.cpp header
-// comment for the full parameter behavior matrix.
+// habits): two entry names sharing one ACLNN custom-op implementation. The ND
+// weight entry converts at the entry layer, the NZ entry feeds the kernel's
+// native byte stream, and .list overloads gather per-expert TensorLists. See
+// op_host/gmm_situ_quant_entries.cpp for the full parameter behavior matrix.
 std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nd(
     const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weightScale,
     const std::optional<at::Tensor> &weightAssistMatrix, const std::optional<at::Tensor> &bias,

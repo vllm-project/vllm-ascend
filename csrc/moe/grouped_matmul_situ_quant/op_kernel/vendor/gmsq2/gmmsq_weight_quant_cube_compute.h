@@ -19,7 +19,7 @@
 #include "kernel_operator_intf.h"
 #include "basic_block_config.h"
 #include "basic_block_vf_mx.h"
-#include "weight_quant_tool.h"
+#include "../wqbmm/weight_quant_tool.h"
 #include "gmmsq_weight_quant_cube_compute_tools.h"
 
 using AscendC::Dn2NzParams;

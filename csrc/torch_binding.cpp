@@ -57,7 +57,7 @@
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
-#include "grouped_matmul_situ_quant/ops.h"
+#include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
 #endif
 #include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
 #include <c10/core/Device.h>
