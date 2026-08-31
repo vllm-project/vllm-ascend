@@ -118,8 +118,13 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/dsa_v1.py
+    - vllm_ascend/attention/dsa_attn_kv_plan.py
+    - vllm_ascend/attention/sparse_flash_mla.py
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+    - tests/ut/attention/test_dsa_attn_kv_plan.py
+    - tests/ut/attention/test_dsa_v1.py
+    - tests/ut/attention/test_sparse_flash_mla.py
 
 - name: attention_cp
   optional: false
