@@ -1206,7 +1206,7 @@ def _setup_worker_and_scheduler(
             and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
         ):
             parallel_config.all2all_backend = (
-                "flashinfer_all2allv"  # TODO: a triky way to disable SP moe. Disable this when SP is supported.
+                "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         hardware_profile = get_current_hardware_profile()
