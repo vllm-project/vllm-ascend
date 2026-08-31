@@ -50,9 +50,9 @@ on:
       name:
         required: false
         type: string
-      # should_run:
-      #   required: true
-      #   type: boolean
+      should_run:
+        required: true
+        type: boolean
       vllm_ascend_branch:
         required: false
         type: string
@@ -148,7 +148,7 @@ jobs:
   e2e-nightly:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
-    # if: ${{ inputs.should_run }}
+    if: ${{ inputs.should_run }}
     timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
