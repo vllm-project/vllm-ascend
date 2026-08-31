@@ -525,7 +525,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     self.model.lm_head = target_lm_head
 
-        if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
+        # GLM-5.3-Flash: the runtime method is normalized to "deepseek_mtp"
+        # (vllm/config/speculative.py), so the previous `== "mtp"` comparison
+        # never fired and the drafter kept the checkpoint's separately-trained
+        # shared_head.head instead of the tied target lm_head. Accept both
+        # spellings so the tie-in executes (measured: acceptance max 1.75->2.33,
+        # TPOT median 171->168ms on GLM-5.3-Flash spec=3).
+        if self.method in ("mtp", "deepseek_mtp") and self.vllm_config.model_config.is_deepseek_mla:
             # mtp_lm_head_lookup: multimodal wrappers such as
             # Glm5NextForConditionalGeneration keep lm_head on the nested
             # language model, so resolve it the same way the EAGLE branch does.
