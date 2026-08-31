@@ -214,7 +214,8 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
         self.assertFalse(ascend_compilation_config.enable_super_kernel)
 
-    def test_ascend_compilation_config_super_kernel_defaults_to_static_kernel(self):
+    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    def test_ascend_compilation_config_super_kernel_defaults_to_static_kernel(self, mock_is_310p):
         cfg = AscendCompilationConfig(enable_static_kernel=True)
         self.assertTrue(cfg.enable_static_kernel)
         self.assertTrue(cfg.enable_super_kernel)
@@ -233,6 +234,11 @@ class TestAscendConfig(TestBase):
         cfg = AscendCompilationConfig()
         self.assertFalse(cfg.enable_static_kernel)
         self.assertFalse(cfg.enable_super_kernel)
+
+    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    def test_ascend_compilation_config_rejects_super_kernel_without_static_kernel(self, mock_is_310p):
+        with self.assertRaisesRegex(AssertionError, "Super kernel generation requires static kernel to be enabled"):
+            AscendCompilationConfig(enable_static_kernel=False, enable_super_kernel=True)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -348,10 +354,15 @@ class TestAscendConfig(TestBase):
 
         self.assertFalse(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
+        self.assertFalse(ascend_compilation_config.enable_super_kernel)
         warning_messages = [call.args[0] for call in mock_warning.call_args_list]
         self.assertIn("npugraph_ex is not supported on Ascend 310P. Disabling it.", warning_messages)
         self.assertIn(
             "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it.",
+            warning_messages,
+        )
+        self.assertIn(
+            "super kernel requires static kernel, which is not supported on Ascend 310P. Disabling it.",
             warning_messages,
         )
 
