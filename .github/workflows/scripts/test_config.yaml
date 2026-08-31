@@ -162,7 +162,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
-  tests/e2e/pull_request/sixteen_card/test_kimi_k3.py: 360
+  tests/e2e/pull_request/four_card/test_kimi_k3.py: 360
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 540
   tests/e2e/pull_request/one_card/test_mla_precision.py: 190
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 120
@@ -219,8 +219,6 @@ runner_mapping:
     310p: 310p-4
   tests/e2e/pull_request/eight_card:
     default: a3-8
-  tests/e2e/pull_request/sixteen_card:
-    default: a3-16
 
 # === Partition Configuration ===
 # Maps logical test buckets to exact labels from runner_label.json and controls
@@ -249,9 +247,6 @@ partition:
     count: 2
   a3-8:
     runner_label: linux-aarch64-a3-8-
-    count: 1
-  a3-16:
-    runner_label: linux-aarch64-a3-800t-16
     count: 1
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk
