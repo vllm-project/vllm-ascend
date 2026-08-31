@@ -2222,19 +2222,16 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
     @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
-    def test_exec_kv_prefill_with_fa_quant(self, mock_get_ascend_device_type, mock_kv_rmsnorm_rope_cache):
+    def test_exec_kv_prefill_with_fa_quant(self, mock_kv_rmsnorm_rope_cache):
         # if fa_quant_layer is True
-        from vllm_ascend.attention.mla_v1 import AscendDeviceType
-
         B = 2
         N = self.impl.num_kv_heads
         D = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
         kv_no_split = torch.randn(B, N, D)
         self.impl.enable_kv_nz = None
         self.impl.fa_quant_layer = True
+        self.impl.support_fp8_attention = True
         self.impl.fak_descale_reciprocal = MagicMock()
-        mock_get_ascend_device_type.return_value = AscendDeviceType.A5
         self.impl.kv_a_layernorm.weight = MagicMock()
         self.impl.kv_a_layernorm.variance_epsilon = MagicMock()
         cos = MagicMock()
