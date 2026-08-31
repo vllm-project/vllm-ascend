@@ -1,6 +1,6 @@
 # Installation Guide
 
-This guide helps you prepare the host and software environment so that you can run your first model by following the [Quick Start](quick_start.md).
+This document describes how to install vllm-ascend manually.
 
 ## Requirements {: #installation-requirements }
 
@@ -29,8 +29,8 @@ The following hardware and software stack is validated together for this release
     | Layer | Component | Validated version / requirement | Role |
     | --- | --- | --- | --- |
     | Runtime environment | Python | `{{ release_image_python_version }}` | Python version used by the validated release image |
-    | Host enablement | Ascend HDK | See <a href="https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/{{ release_cann_version.replace('.', '') }}/softwareinst/releasenote/{{ release_cann_version }}/release-notes.md">CANN {{ release_cann_version }} release notes</a> | Driver and firmware requirements for the selected CANN release |
-    | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` | Ascend user-space runtime and hardware operator packages |
+    | Host enablement | Ascend HDK | 26.0.RC1 | Driver and firmware requirements for the selected CANN release |
+    | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` | Ascend user-space runtime, including the CANN Toolkit and hardware-specific Ops packages |
     | Ascend runtime | NNAL | `{{ release_nnal_version }}` | Provides `libatb.so` and ATB runtime capabilities |
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
     | Framework | TorchNPU | `{{ release_torch_npu_version }}` | Connects PyTorch to the Ascend runtime |
@@ -40,7 +40,7 @@ The following hardware and software stack is validated together for this release
 
     The versions and requirements in the table above are validated as one compatibility set. Do not arbitrarily mix versions from different releases.
 
-    For another release, select a complete row from [Versioning Policy > Release compatibility matrix](../community/versioning_policy.md#release-compatibility-matrix). For main-branch development, use the verified vLLM commit recorded in `.github/vllm-main-verified.commit`.
+    For another release, select a complete row from [Versioning Policy > Release compatibility matrix](../community/versioning_policy.md#release-compatibility-matrix).
 
 ## Installation {: #installation }
 
@@ -56,7 +56,7 @@ For more information, see the [CANN installation resources](https://www.hiascend
 
 ### Set up the software environment {: #installation-software-environment }
 
-Choose one complete path based on your requirements.
+Choose one complete path based on your requirements. Container-based paths require Docker; see the [Docker installation guide](https://docs.docker.com/get-started/get-docker/) if needed.
 
 | Requirement | Recommended method | Intended users |
 | --- | --- | --- |

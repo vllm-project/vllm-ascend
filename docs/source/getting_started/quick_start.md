@@ -6,6 +6,7 @@ This guide uses Qwen3-0.6B as an example to help you run your first offline infe
 
 - Operating system: Linux
 - Python: {{ release_python_version }}
+- Docker
 - Supported hardware:
 
 {% include "getting_started/installation/supported_hardware.inc.md" %}
