@@ -416,6 +416,7 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         cache_hit_blocks = tuple(blocks if blocks is not None else [] for blocks in hit_blocks_by_group)
         if vllm_version_is("0.25.1"):
+            self.num_uncached_common_prefix_tokens = longest_hit_length - hit_length
             return cache_hit_blocks, hit_length
         return cache_hit_blocks, hit_length, longest_hit_length - hit_length
 
