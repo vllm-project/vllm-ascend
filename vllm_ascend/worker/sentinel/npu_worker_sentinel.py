@@ -111,6 +111,14 @@ class WorkerSentinel(GPUWorkerSentinel):
         and a dummy-batch runnability check on top.
         """
         self._validate_scale_down_preconditions()
+        # Record the per-rank physical slot count first: every elastic_info
+        # rebuild (the update_mask calls inside retry, and the rebuild after
+        # redistribution) derives the shrunk physical-expert width from the
+        # surviving ranks, so no separate width setter is needed downstream.
+        eplb_model_state = self._eplb_model_state()
+        num_local_experts = eplb_model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
+        get_ep_all2all_manager().set_num_local_physical_experts(num_local_experts)
+
         super().scale_down(ft_request)
 
         # Verify the redistributed model is runnable before reporting healthy.
@@ -172,7 +180,3 @@ class WorkerSentinel(GPUWorkerSentinel):
             routing_table = getattr(getattr(layer, "eplb_state", None), "expert_replica_routing_table", None)
             if routing_table is not None:
                 densify_routing_table_physical_ids(routing_table, orig_to_dense_rank, num_local_experts)
-
-        # Shrink the physical-expert width to the surviving slots; this also
-        # flips elastic_info into scaling-down mode.
-        get_ep_all2all_manager().set_num_physical_experts((ep_world_size - len(dead_ep_ranks)) * num_local_experts)
