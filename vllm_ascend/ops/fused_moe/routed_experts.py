@@ -29,7 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
-from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -89,10 +89,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            if not _MEGA_MOE_SUPPORTED:
+            if not is_mega_moe_supported():
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if _MEGA_MOE_SUPPORTED or self.dynamic_eplb:
+            if is_mega_moe_supported() or self.dynamic_eplb:
                 layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
                 layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
                 del layer.w13_weight
@@ -120,7 +120,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if _MEGA_MOE_SUPPORTED:
+            if is_mega_moe_supported():
                 w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
                 w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
                 w1_scale = None

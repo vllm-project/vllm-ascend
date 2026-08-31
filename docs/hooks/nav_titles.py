@@ -119,6 +119,7 @@ TITLES = {
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
+    "tutorials/models/Hy4-preview.md": {"en": "Hy4-preview (Experimental)", "zh": "Hy4-preview (Experimental)"},
     "tutorials/models/InternVL3.5.md": {"en": "InternVL3.5(38B/241B-A28B)", "zh": "InternVL3.5(38B/241B-A28B)"},
     "tutorials/models/Kimi-K2-Thinking.md": {"en": "Kimi-K2-Thinking", "zh": "Kimi-K2-Thinking"},
     "tutorials/models/Kimi-K2.5.md": {"en": "Kimi-K2.5", "zh": "Kimi-K2.5"},

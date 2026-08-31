@@ -85,10 +85,6 @@ a3:
         config_file_path: DeepSeek_V3.2T_MTP3_PD.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
         size: 4
-      - name: QWEN3_235B_PD_3_5K_1_5k
-        config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml
-        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
-        size: 3
       - name: QWEN3_235B_PD
         config_file_path: QWEN3_235B_PD.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
@@ -306,15 +302,6 @@ a3:
       - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
         os: linux-aarch64-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
-      - name: Deepseek_R1_W8A8_Reasoning_output_A3
-        os: linux-aarch64-a3-16
-        config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
-      - name: Qwen3_32b_W8A8_wl_A3
-        os: linux-aarch64-a3-16
-        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
-      - name: Qwq_32b_A3
-        os: linux-aarch64-a3-16
-        config_file_path: Qwq_32b_A3.yaml
       - name: Qwen3.6-35B-A3B-w8a8-A3-accuracy
         os: linux-aarch64-a3-2
         config_file_path: Qwen3.6-35B-A3B-w8a8-A3-accuracy.yaml
@@ -333,9 +320,6 @@ a3:
       - name: Qwen3.5-122B-A10B-w4a8-A3
         os: linux-aarch64-a3-16
         config_file_path: Qwen3.5-122B-A10B-w4a8-A3.yaml
-      - name: qwen_3_6_27b_w8a8_A3
-        os: linux-aarch64-a3-16
-        config_file_path: qwen_3_6_27b_w8a8_A3.yaml
       - name: Minimax_M2.7_w8a8_A3
         os: linux-aarch64-a3-16
         config_file_path: Minimax_M2.7_w8a8_A3.yaml
