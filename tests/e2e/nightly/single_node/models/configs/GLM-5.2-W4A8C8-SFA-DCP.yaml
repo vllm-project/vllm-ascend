@@ -3,13 +3,16 @@
 # ==========================================
 
 test_cases:
-  - name: "DeepSeek-V3.2-W8A8-DCP-replicated-indexer"
-    model: "vllm-ascend/DeepSeek-V3.2-W8A8"
+  - name: "GLM-5.2-W4A8C8-SFA-DCP-replicated-indexer-1M"
+    model: "Eco-Tech/GLM-5.2-w4a8c8"
     envs:
       HCCL_OP_EXPANSION_MODE: "AIV"
       OMP_PROC_BIND: "false"
       OMP_NUM_THREADS: "20"
       HCCL_BUFFSIZE: "768"
+      HCCL_TRANSFER_TIMEOUT: "600"
+      HCCL_EXEC_TIMEOUT: "3600"
+      HCCL_CONNECT_TIMEOUT: "3600"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       VLLM_SERVER_DEV_MODE: "1"
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
@@ -29,9 +32,9 @@ test_cases:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "8192"
+      - "1024000"
       - "--max-num-batched-tokens"
-      - "1024"
+      - "16384"
       - "--max-num-seqs"
       - "32"
       - "--trust-remote-code"
@@ -43,25 +46,28 @@ test_cases:
       - "1"
       - "--tensor-parallel-size"
       - "16"
+      - "--prefill-context-parallel-size"
+      - "1"
       - "--decode-context-parallel-size"
       - "16"
-      - "--cp-kv-cache-interleave-size"
-      - "1"
       - "--block-size"
+      - "128"
+      - "--cp-kv-cache-interleave-size"
       - "128"
       - "--enable-expert-parallel"
       - "--gpu-memory-utilization"
-      - "0.95"
+      - "0.80"
       - "--api-server-count"
       - "1"
       - "--safetensors-load-strategy"
       - "prefetch"
       - "--compilation-config"
-      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 16, 64, 128]}'
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 16, 128]}'
+      # Keep SFA C8 disabled to match the GLM-5.2 1M reference deployment.
       - "--additional-config"
-      - '{"enable_dsa_cp": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false,"enable_fused_mc2":0,"weight_nz_mode":1,"enable_mlapo":false}'
+      - '{"enable_dsa_cp": true, "ascend_compilation_config":{"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false,"enable_fused_mc2":0,"weight_nz_mode":1,"enable_mlapo":false}'
       - "--speculative-config"
-      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
     test_content: []
     benchmarks:
       acc_gsm8k:
