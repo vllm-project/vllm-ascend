@@ -33,6 +33,17 @@ if TYPE_CHECKING:
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 
 
+def is_mega_moe_supported() -> bool:
+    """Whether the megamoe op is available at runtime.
+
+    Always read _MEGA_MOE_SUPPORTED through this accessor instead of
+    ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
+    during config init (AscendConfig._validate_user_input_ranges rolls back
+    megamoe), and a direct import binds a stale snapshot for the bool.
+    """
+    return _MEGA_MOE_SUPPORTED
+
+
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
     try:
