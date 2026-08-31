@@ -191,7 +191,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "enable_fused_mc2": 1, "enable_flashcomm1": true}'  \
-    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
 
 **node 1**
@@ -266,8 +266,7 @@ This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ff
 
 ##### 5.1.1.2 Prefill-Decode Disaggregation (Experimental)
 
-Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#prefill-decode-disaggregation). 
-
+Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#prefill-decode-disaggregation).
 
 #### 5.1.2 Atlas 800 A2
 
@@ -322,9 +321,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
     --trust-remote-code \
     --quantization ascend \
     --gpu-memory-utilization 0.92 \
-    --speculative-config '{"num_speculative_tokens":3,"method":"deepseek_mtp","enforce_eager":true}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,96,128]}' \
-    --additional-config '{"enable_dsa_cp": true,"enable_balance_scheduling": true,"fuse_muls_add": true,"multistream_overlap_shared_expert": true,"enable_sparse_sfa_c8": true,"enable_sparse_li_c8": true, "enable_flashcomm1": true}' \
+    --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true, "fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_flashcomm1": true}' \
     --enable-prefix-caching \
     --async-scheduling \
     --api-server-count 1
@@ -383,7 +382,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.3-w8a8c8 \
     --gpu-memory-utilization 0.92 \
     --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_dsa_cp": true,"enable_balance_scheduling": true,"fuse_muls_add": true，"multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_flashcomm1": true}' \
+    --additional-config '{"enable_dsa_cp": true, "enable_balance_scheduling": true,"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_flashcomm1": true}' \
     --enable-prefix-caching \
     --async-scheduling
 ```
@@ -396,13 +395,13 @@ Key Parameter Descriptions ([Multi-Node Co-Located Deployment](#5121-multi-node-
 - `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.
 - `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time.
 
-##### 5.1.2.2 Prefill-Decode Disaggregation
+##### 5.1.2.2 Prefill-Decode Disaggregation (Experimental)
 
 Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#id2).
 
 ### 5.2 1M Context Deployment (Experimental)
 
-The 1M context scenarios have not yet tested for `GLM-5.3`. If you want to deploy, please refer to scripts in [GLM-5.2 1M Context Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#m-context-deployment). 
+The 1M context scenarios have not yet tested for `GLM-5.3`. If you want to deploy, please refer to scripts in [GLM-5.2 1M Context Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#m-context-deployment).
 
 ## 6 Functional Verification
 
