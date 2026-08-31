@@ -154,9 +154,9 @@ def _ascend_FusedMoE(
     if hash_indices_table_for_legacy_path is not None:
         routed_experts_args["tid2eid"] = hash_indices_table_for_legacy_path
     runner = _original_FusedMoE(
+        num_experts,
+        top_k,
         *args,
-        num_experts=num_experts,
-        top_k=top_k,
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
