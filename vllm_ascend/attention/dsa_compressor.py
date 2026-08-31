@@ -19,6 +19,10 @@ from vllm.forward_context import get_forward_context
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.triton.dsa_compressor import (
+    can_use_triton_compressor_state_gather,
+    triton_compressor_state_gather,
+)
 
 CompressorMetadataOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 _COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
@@ -191,7 +195,7 @@ class CompressorSPMetadataBuilder:
         """Copy one variable-length CPU list into a reusable device view."""
         count = len(values)
         if count > buffer.cpu.shape[0]:
-            raise ValueError(f"Compressor metadata length {count} exceeds buffer capacity " f"{buffer.cpu.shape[0]}")
+            raise ValueError(f"Compressor metadata length {count} exceeds buffer capacity {buffer.cpu.shape[0]}")
         buffer.np[:count] = values
         return buffer.copy_to_gpu(count)
 
@@ -216,7 +220,7 @@ class CompressorSPMetadataBuilder:
         if state_slot_mapping.ndim != 2 or state_slot_mapping.shape[1] != 2:
             raise ValueError("Compressor SP state slot mapping must have shape [num_tokens, 2]")
         if state_slot_mapping.shape[0] > num_tokens_pad:
-            raise ValueError(f"State slot rows {state_slot_mapping.shape[0]} exceed planned " f"rows {num_tokens_pad}")
+            raise ValueError(f"State slot rows {state_slot_mapping.shape[0]} exceed planned rows {num_tokens_pad}")
         if tokens_per_rank != metadata.tokens_per_rank or num_tokens_pad != metadata.num_tokens_pad:
             raise ValueError("Compressor and state-cache SP partitions do not match")
         if local_token_start < 0 or tokens_per_rank < 0 or local_token_start + tokens_per_rank > num_tokens_pad:
@@ -312,9 +316,7 @@ class CompressorSPMetadataBuilder:
             prefix_len = seq_len - query_len
             local_query_start = max(query_start, local_start)
             local_query_end = min(query_end, local_end, actual_end)
-            local_query_len = (
-                max(0, local_query_end - local_query_start) if req_idx < num_reqs_actual else 0
-            )
+            local_query_len = max(0, local_query_end - local_query_start) if req_idx < num_reqs_actual else 0
 
             if local_query_len == 0:
                 packed_start_pos.append(0)
@@ -381,9 +383,8 @@ class CompressorSPMetadataBuilder:
                 history_start = query_start + compressor_start_pos - prefix_len
                 packed_len = rank_query_end - history_start
                 output_rows = (
-                    (compressor_start_pos + packed_len) // compress_ratio
-                    - compressor_start_pos // compress_ratio
-                )
+                    compressor_start_pos + packed_len
+                ) // compress_ratio - compressor_start_pos // compress_ratio
                 rank_input_count += packed_len
                 for output_offset in range(output_rows):
                     group_idx = compressor_start_pos // compress_ratio + output_offset
@@ -419,8 +420,7 @@ class CompressorSPMetadataBuilder:
         )
         if global_output_rows > global_num_compressed_tokens:
             raise ValueError(
-                f"Compressor valid rows {global_output_rows} exceed global capacity "
-                f"{global_num_compressed_tokens}"
+                f"Compressor valid rows {global_output_rows} exceed global capacity {global_num_compressed_tokens}"
             )
         # Capacity-only rows map to source 0 and later target null slots. No
         # per-rank padding row is selected by this reorder plan.
@@ -763,7 +763,7 @@ class CompressorExecutor:
         target_rows = sp_metadata.gathered_compressed_tokens
         pad_rows = target_rows - compressed_kv.shape[0]
         if pad_rows < 0:
-            raise ValueError(f"Compressed rows {compressed_kv.shape[0]} exceed gather capacity " f"{target_rows}")
+            raise ValueError(f"Compressed rows {compressed_kv.shape[0]} exceed gather capacity {target_rows}")
 
         send_buffer = sp_metadata.compressed_kv_send_buffer
         # The reorder plan never selects unused send-buffer rows, so only the
@@ -795,12 +795,28 @@ class CompressorExecutor:
             raise ValueError("Compressor SP global state slots do not match the padded tokens")
 
         state_view = state_cache.squeeze(-2)
-        sp_metadata.state_send_buffer.copy_(
-            state_view[
+        if state_view.device.type == "npu" and can_use_triton_compressor_state_gather(
+            state_view,
+            sp_metadata.local_block_indices,
+            sp_metadata.local_offset_indices,
+            sp_metadata.state_send_buffer,
+        ):
+            # Read physical state rows directly into the communication
+            # workspace through the shared C128/C4/LI Triton path.
+            triton_compressor_state_gather(
+                state_view,
                 sp_metadata.local_block_indices,
                 sp_metadata.local_offset_indices,
-            ]
-        )
+                sp_metadata.state_send_buffer,
+            )
+        else:
+            # Keep the small-op path as the portable reference and fallback.
+            sp_metadata.state_send_buffer.copy_(
+                state_view[
+                    sp_metadata.local_block_indices,
+                    sp_metadata.local_offset_indices,
+                ]
+            )
 
         gathered_state = sp_metadata.gathered_state_buffer
         dist.all_gather_into_tensor(
