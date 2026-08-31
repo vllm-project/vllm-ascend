@@ -47,13 +47,16 @@ def _dynamic_quant_reference(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
         ),
     ],
 )
+@pytest.mark.parametrize("group_list_type", [0, 1], ids=["cumsum", "count"])
 @torch.inference_mode()
-def test_swiglu_quant_correctness(shape, dtype, group_counts, group_list_dtype):
+def test_swiglu_quant_correctness(shape, dtype, group_counts, group_list_dtype, group_list_type):
     torch.manual_seed(42)
     x = torch.randn(shape, dtype=dtype, device=DEVICE)
     group_list = torch.tensor(group_counts, dtype=group_list_dtype, device=DEVICE)
+    if group_list_type == 0:
+        group_list = group_list.cumsum(dim=0)
 
-    actual, actual_scale = swiglu_quant(x, group_list, group_list_type=1)
+    actual, actual_scale = swiglu_quant(x, group_list, group_list_type=group_list_type)
     swiglu_ref = _swiglu_reference(x)
     expected, expected_scale = _dynamic_quant_reference(swiglu_ref)
     scale_rtol, scale_atol = SCALE_TOLERANCES[dtype]
