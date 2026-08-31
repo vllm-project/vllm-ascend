@@ -27,22 +27,6 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
-    def test_reduce_sum_supports_tensor_method_binding(self):
-        x = MagicMock(spec=torch.Tensor)
-        x.device.type = "npu"
-        expected = MagicMock(spec=torch.Tensor)
-
-        with patch.object(
-            batch_invariant.torch.ops.batch_invariant_ops,
-            "npu_reduce_sum_batch_invariant",
-            return_value=expected,
-        ) as mock_reduce:
-            tensor_sum = batch_invariant.reduce_sum.__get__(x, torch.Tensor)
-            result = tensor_sum(dim=-1, keepdim=True)
-
-        mock_reduce.assert_called_once_with(x, -1, True)
-        assert result is expected
-
     def test_reduce_sum_uses_batch_invariant_operator_for_npu_tensor(self):
         x = MagicMock(spec=torch.Tensor)
         x.device.type = "npu"
@@ -108,6 +92,8 @@ class TestBatchInvariant:
             batch_invariant.torch_npu.npu_fused_infer_attention_score
             == batch_invariant.torch.ops.batch_invariant_ops.npu_fused_infer_attention_score_batch_invariant
         )
+        assert batch_invariant.torch.sum is batch_invariant.reduce_sum
+        assert batch_invariant.torch.Tensor.sum is batch_invariant.reduce_sum
 
     @patch("vllm_ascend.batch_invariant.HAS_TRITON", True)
     @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", False)
