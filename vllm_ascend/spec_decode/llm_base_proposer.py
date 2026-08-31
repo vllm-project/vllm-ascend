@@ -298,14 +298,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_vllm_config = super()._create_draft_vllm_config()
         cache_config = self.vllm_config.cache_config
         model_config = self.vllm_config.model_config
-        model_type = getattr(model_config.hf_text_config, "model_type", None) or getattr(
-            getattr(model_config, "hf_config", None),
-            "model_type",
-            "",
+        model_types = (
+            getattr(model_config.hf_text_config, "model_type", ""),
+            getattr(getattr(model_config, "hf_config", None), "model_type", ""),
         )
         use_minimax_m3_mixed_cache = (
             self.method == "eagle3"
-            and model_type in ("minimax_m3", "minimax_m3_vl")
+            and any(model_type in ("minimax_m3", "minimax_m3_text", "minimax_m3_vl") for model_type in model_types)
             and str(cache_config.cache_dtype) in ("fp8", "fp8_e4m3")
             and bool(cache_config.kv_cache_dtype_skip_layers)
             and getattr(self.speculative_config, "kv_cache_dtype", None) is None
