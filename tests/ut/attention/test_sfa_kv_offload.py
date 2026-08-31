@@ -8,12 +8,15 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+from vllm.config.compilation import CUDAGraphMode  # noqa: E402
+
 from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E402
 from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
     AscendSFAKVOffloadImpl,
     AscendSFAKVOffloadMetadataBuilder,
 )
 from vllm_ascend.attention.sfa_v1 import AscendSFAMetadataBuilder  # noqa: E402
+from vllm_ascend.worker.v2.aclgraph_utils import ModelWithContext  # noqa: E402
 
 
 def _make_boundary_decode_metadata():
@@ -133,3 +136,44 @@ def test_graph_capture_is_false_without_forward_context():
         ),
     ):
         assert AscendSFAKVOffloadImpl._is_graph_capturing() is False
+
+
+@pytest.mark.parametrize(
+    ("runtime_mode", "expected"),
+    [
+        (CUDAGraphMode.NONE, True),
+        (CUDAGraphMode.PIECEWISE, False),
+    ],
+)
+def test_graph_capture_signal_matches_model_runner_v2_wrapper(runtime_mode, expected):
+    extra_context = SimpleNamespace(capturing=False)
+    forward_context = SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
+
+    class CaptureProbe(torch.nn.Module):
+        def forward(self):
+            return AscendSFAKVOffloadImpl._is_graph_capturing()
+
+    model = ModelWithContext(CaptureProbe())
+    with (
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.torch.npu.is_current_stream_capturing",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.get_forward_context",
+            return_value=forward_context,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.aclgraph_utils._EXTRA_CTX",
+            extra_context,
+        ),
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX",
+            extra_context,
+        ),
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.is_forward_context_available",
+            return_value=True,
+        ),
+    ):
+        assert model() is expected
