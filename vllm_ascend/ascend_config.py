@@ -22,7 +22,6 @@ import os
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
-from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -935,6 +934,9 @@ class FinegrainedTPConfig:
         return self
 
     def _validate_preconditions(self, vllm_config: Any):
+        # Local import to avoid a circular import during platform resolution.
+        from vllm.config.compilation import CUDAGraphMode
+
         vc = vllm_config
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
