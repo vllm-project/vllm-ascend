@@ -69,6 +69,7 @@ class DeviceMetadataExecutor:
             if frontier not in self._stage_ready:
                 self._stage_ready[frontier] = torch.npu.Event()
 
+        self._submission_in_flight = True
         self._waited_stages.clear()
         self._inputs_ready.record(torch.npu.current_stream())
         with torch.npu.stream(self.stream):
@@ -83,8 +84,6 @@ class DeviceMetadataExecutor:
                     task.run()
                     self._stage_ready[(stage, task.group_id)].record(self.stream)
                     task_index += 1
-
-        self._submission_in_flight = True
 
     def wait(self, stage: DeviceMetadataStage, group_id: int) -> None:
         if not self._submission_in_flight:
