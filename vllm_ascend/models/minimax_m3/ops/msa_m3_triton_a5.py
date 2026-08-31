@@ -38,56 +38,6 @@ except ImportError:
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
 
-# Prefill score-prepare launch policy. The query axis is tiled so the total
-# program count stays close to the target while each program streams over the
-# score-block range.
-PREP_QUERY_TILE_CANDIDATES = (8, 16, 32, 64)
-PREP_TARGET_PROGRAM_COUNT = 64
-PREP_BLOCK_TILE_SIZE = 256
-
-
-def _choose_prep_query_tile_size(
-    max_query_len: int, batch: int, num_idx_heads: int
-) -> int:
-    """Pick the query tile for prefill score preparation."""
-    total_query_rows = max(1, max_query_len * batch * num_idx_heads)
-    required_tile_size = triton.cdiv(total_query_rows, PREP_TARGET_PROGRAM_COUNT)
-    for tile_size in PREP_QUERY_TILE_CANDIDATES:
-        if required_tile_size <= tile_size:
-            return tile_size
-    return PREP_QUERY_TILE_CANDIDATES[-1]
-
-
-# Bound the two-dimensional [BLOCK_SIZE_Q, topk] invalid-mask tile while also
-# targeting roughly the same program count as score preparation.
-INVALID_MASK_QUERY_TILE_CANDIDATES = (1, 2, 4, 8, 16, 32, 64)
-INVALID_MASK_TARGET_PROGRAM_COUNT = 64
-INVALID_MASK_MAX_TILE_ELEMENTS = 2048
-
-
-def _choose_invalid_mask_query_tile_size(
-    max_query_len: int, batch: int, num_idx_heads: int, topk: int
-) -> int:
-    """Pick the query tile for the prefill invalid-index mask kernel."""
-    total_query_rows = max(1, max_query_len * batch * num_idx_heads)
-    required_tile_size = triton.cdiv(
-        total_query_rows, INVALID_MASK_TARGET_PROGRAM_COUNT
-    )
-    desired_tile_size = INVALID_MASK_QUERY_TILE_CANDIDATES[-1]
-    for tile_size in INVALID_MASK_QUERY_TILE_CANDIDATES:
-        if required_tile_size <= tile_size:
-            desired_tile_size = tile_size
-            break
-
-    topk_tile_size = triton.next_power_of_2(max(1, topk))
-    max_query_tile_size = max(1, INVALID_MASK_MAX_TILE_ELEMENTS // topk_tile_size)
-    bounded_tile_size = INVALID_MASK_QUERY_TILE_CANDIDATES[0]
-    for tile_size in INVALID_MASK_QUERY_TILE_CANDIDATES:
-        if tile_size > max_query_tile_size:
-            break
-        bounded_tile_size = tile_size
-    return min(desired_tile_size, bounded_tile_size)
-
 
 def _as_triton_main_kv_cache(
     kv_cache: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -468,56 +418,51 @@ def _index_topk_postprocess_kernel(
 # ---------------------------------------------------------------------------
 # Prefill top-k: prepare scores (pad tail, force init/local), then torch.topk.
 # ---------------------------------------------------------------------------
-@triton.jit(do_not_specialize=["score_block_count"])
+@triton.jit(do_not_specialize=["max_block", "chunk_blocks", "num_prep_chunks"])
 def _prefill_index_score_prepare_for_topk_kernel(
     score_ptr,  # [num_idx_heads, total_q, score_block_stride] fp32 in/out
     cu_seqlens,  # [batch+1]
     prefix_lens,  # [batch]
-    index_head_count: tl.constexpr,
     init_blocks: tl.constexpr,
     local_blocks: tl.constexpr,
-    score_block_count,
-    score_head_stride,
-    score_token_stride,
-    score_block_stride,
-    sparse_block_size: tl.constexpr,
-    BLOCK_SIZE_Q: tl.constexpr,
+    max_block,
+    chunk_blocks,
+    num_prep_chunks,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    block_size: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
 ):
-    query_tile_id = tl.program_id(0)
-    batch_head_id = tl.program_id(1)
-    batch_id = batch_head_id // index_head_count
-    head_id = batch_head_id % index_head_count
-
-    seq_start = tl.load(cu_seqlens + batch_id)
-    q_len = tl.load(cu_seqlens + batch_id + 1) - seq_start
-    tile_start = query_tile_id * BLOCK_SIZE_Q
-    if tile_start >= q_len:
+    pid_q = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    pid_h = tl.program_id(2)
+    seq_start = tl.load(cu_seqlens + pid_b)
+    q_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
+    if pid_q >= q_len:
         return
-
-    q_lane = tl.arange(0, BLOCK_SIZE_Q)
-    q_pos = tile_start + q_lane
-    q_mask = q_pos < q_len
-    token_idx = seq_start + q_pos
-    prefix_len = tl.load(prefix_lens + batch_id)
-    valid_blocks = (prefix_len + q_pos + sparse_block_size) // sparse_block_size
-    valid_blocks = tl.minimum(valid_blocks, score_block_count)
+    token_idx = seq_start + pid_q
+    prefix_len = tl.load(prefix_lens + pid_b)
+    valid_blocks = (prefix_len + pid_q + block_size) // block_size
     local_start = tl.maximum(0, valid_blocks - local_blocks)
 
-    row_base = score_ptr + head_id * score_head_stride + token_idx * score_token_stride
-    blk_lane = tl.arange(0, BLOCK_SIZE_K)
-    for k_start in tl.range(0, score_block_count, BLOCK_SIZE_K):
-        blk = k_start + blk_lane
-        blk_mask = blk < score_block_count
-        s_ptrs = row_base[:, None] + blk[None, :] * score_block_stride
-        tile_mask = q_mask[:, None] & blk_mask[None, :]
-        score = tl.load(s_ptrs, mask=tile_mask, other=float("-inf"))
-        blk_valid = blk[None, :] < valid_blocks[:, None]
-        score = tl.where(blk_valid, score, float("-inf"))
-        is_init = (blk[None, :] < init_blocks) & blk_valid
-        is_local = (blk[None, :] >= local_start[:, None]) & blk_valid
-        score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
-        tl.store(s_ptrs, score, mask=tile_mask)
+    for pid_chunk in tl.range(0, num_prep_chunks):
+        chunk_start = pid_chunk * chunk_blocks
+        chunk_end = tl.minimum(chunk_start + chunk_blocks, max_block)
+        if chunk_start < chunk_end:
+            num_blks = chunk_end - chunk_start
+            off_k = tl.arange(0, BLOCK_SIZE_K)
+            for i in tl.range(0, num_blks, BLOCK_SIZE_K):
+                blk = chunk_start + i + off_k
+                mask = (i + off_k) < num_blks
+                s_ptrs = score_ptr + pid_h * stride_s_h + token_idx * stride_s_n + blk * stride_s_k
+                score = tl.load(s_ptrs, mask=mask, other=float("-inf"))
+                blk_valid = blk < valid_blocks
+                score = tl.where(blk_valid, score, float("-inf"))
+                is_init = (blk < init_blocks) & blk_valid
+                is_local = (blk >= local_start) & blk_valid
+                score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
+                tl.store(s_ptrs, score, mask=mask)
 
 
 @triton.heuristics({"BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"])})
@@ -526,46 +471,32 @@ def _topk_index_mask_invalid_prefill_kernel(
     ti_ptr,  # [num_idx_heads, total_q, topk] int32 in/out
     cu_seqlens,  # [batch+1]
     prefix_lens,  # [batch]
-    index_head_count: tl.constexpr,
     block_size: tl.constexpr,  # sparse block size (128)
     topk: tl.constexpr,
     stride_ti_h,
     stride_ti_n,
     stride_ti_t,
-    BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_T: tl.constexpr,
 ):
-    query_tile_id = tl.program_id(0)
-    batch_head_id = tl.program_id(1)
-    batch_id = batch_head_id // index_head_count
-    head_id = batch_head_id % index_head_count
-
-    seq_start = tl.load(cu_seqlens + batch_id)
-    q_len = tl.load(cu_seqlens + batch_id + 1) - seq_start
-    tile_start = query_tile_id * BLOCK_SIZE_Q
-    if tile_start >= q_len:
+    pid_q = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    pid_h = tl.program_id(2)
+    seq_start = tl.load(cu_seqlens + pid_b)
+    q_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
+    if pid_q >= q_len:
         return
+    token_idx = seq_start + pid_q
+    prefix_len = tl.load(prefix_lens + pid_b)
+    valid_blocks = (prefix_len + pid_q + block_size) // block_size
 
-    q_lane = tl.arange(0, BLOCK_SIZE_Q)
-    t_lane = tl.arange(0, BLOCK_SIZE_T)
-    q_pos = tile_start + q_lane
-    q_mask = q_pos < q_len
-    token_idx = seq_start + q_pos
-    prefix_len = tl.load(prefix_lens + batch_id)
-    valid_blocks = (prefix_len + q_pos + block_size) // block_size
-
-    ti_ptrs = (
-        ti_ptr
-        + head_id * stride_ti_h
-        + token_idx[:, None] * stride_ti_n
-        + t_lane[None, :] * stride_ti_t
-    )
-    access_mask = q_mask[:, None] & (t_lane[None, :] < topk)
-    idx = tl.load(ti_ptrs, mask=access_mask, other=0)
-    valid_rank = t_lane[None, :] < tl.minimum(topk, valid_blocks[:, None])
-    valid_block = (idx >= 0) & (idx < valid_blocks[:, None])
-    masked_idx = tl.where(valid_rank & valid_block, idx, -1)
-    tl.store(ti_ptrs, masked_idx.to(ti_ptr.dtype.element_ty), mask=access_mask)
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    ti_ptrs = ti_ptr + pid_h * stride_ti_h + token_idx * stride_ti_n + off_t * stride_ti_t
+    store_mask = off_t < topk
+    idx = tl.load(ti_ptrs, mask=store_mask, other=0)
+    valid_slot = off_t < tl.minimum(topk, valid_blocks)
+    valid_idx = (idx >= 0) & (idx < valid_blocks)
+    masked_idx = tl.where(valid_slot & valid_idx, idx, -1)
+    tl.store(ti_ptrs, masked_idx.to(ti_ptr.dtype.element_ty), mask=store_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -750,25 +681,22 @@ def minimax_m3_index_topk(
     batch = cu_seqlens_q.shape[0] - 1
     total_q = score.shape[1]
     max_block = score.shape[2]
-    query_tile_size = _choose_prep_query_tile_size(max_query_len, batch, num_idx_heads)
-    prep_grid = (
-        triton.cdiv(max_query_len, query_tile_size),
-        batch * num_idx_heads,
-    )
-    _prefill_index_score_prepare_for_topk_kernel[prep_grid](
+    prep_chunk_blocks = 2048
+    num_prep_chunks = (max_block + prep_chunk_blocks - 1) // prep_chunk_blocks
+    _prefill_index_score_prepare_for_topk_kernel[(max_query_len, batch, num_idx_heads)](
         score,
         cu_seqlens_q,
         prefix_lens,
-        num_idx_heads,
         init_blocks,
         local_blocks,
         max_block,
+        prep_chunk_blocks,
+        num_prep_chunks,
         score.stride(0),
         score.stride(1),
         score.stride(2),
-        sparse_block_size=SPARSE_BLOCK_SIZE,
-        BLOCK_SIZE_Q=query_tile_size,
-        BLOCK_SIZE_K=PREP_BLOCK_TILE_SIZE,
+        block_size=SPARSE_BLOCK_SIZE,
+        BLOCK_SIZE_K=2048,
     )
     score_rows = score[:, :total_q, :max_block]
     _, topk_idx_raw = torch.topk(score_rows, k=min(topk, max_block), dim=-1)
@@ -787,24 +715,15 @@ def minimax_m3_index_topk(
             topk_idx[..., :max_block].copy_(topk_idx_raw.to(torch.int32))
         else:
             topk_idx = topk_idx_raw.to(torch.int32)
-    mask_tile_size = _choose_invalid_mask_query_tile_size(
-        max_query_len, batch, num_idx_heads, topk
-    )
-    mask_grid = (
-        triton.cdiv(max_query_len, mask_tile_size),
-        batch * num_idx_heads,
-    )
-    _topk_index_mask_invalid_prefill_kernel[mask_grid](
+    _topk_index_mask_invalid_prefill_kernel[(max_query_len, batch, num_idx_heads)](
         topk_idx,
         cu_seqlens_q,
         prefix_lens,
-        num_idx_heads,
         SPARSE_BLOCK_SIZE,
         topk,
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
-        BLOCK_SIZE_Q=mask_tile_size,
     )
     return topk_idx
 
