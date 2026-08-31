@@ -56,10 +56,13 @@ class TestDynamicMxQuantScaleAlg(TestBase):
 
     @patch("vllm.forward_context.get_forward_context")
     @patch("vllm.forward_context.is_forward_context_available", return_value=True)
-    @patch("vllm_ascend.quantization.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch(
+        "vllm_ascend.quantization.utils.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     def test_uses_forward_vllm_config_when_available(
         self,
-        _mock_device_type,
+        _mock_profile,
         _mock_forward_context_available,
         mock_forward_context,
     ):
@@ -70,10 +73,13 @@ class TestDynamicMxQuantScaleAlg(TestBase):
     @patch("vllm.config.get_current_vllm_config")
     @patch("vllm.forward_context.get_forward_context")
     @patch("vllm.forward_context.is_forward_context_available", return_value=True)
-    @patch("vllm_ascend.quantization.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch(
+        "vllm_ascend.quantization.utils.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     def test_falls_back_to_current_config_when_forward_scale_is_missing(
         self,
-        _mock_device_type,
+        _mock_profile,
         _mock_forward_context_available,
         mock_forward_context,
         mock_current_config,
