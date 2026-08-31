@@ -272,7 +272,7 @@ def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch
     num_experts = layer.w13_weight.shape[0]
     ascend_config = SimpleNamespace(enable_fused_mc2=1)
 
-    monkeypatch.setattr(routed_experts_module, "_MEGA_MOE_SUPPORTED", False)
+    monkeypatch.setattr(routed_experts_module, "is_mega_moe_supported", lambda: False)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
     monkeypatch.setattr(routed_experts_module.torch_npu, "npu_format_cast", lambda weight, _: weight)
     monkeypatch.setattr(routed_experts_module.torch.npu, "empty_cache", lambda: None)
