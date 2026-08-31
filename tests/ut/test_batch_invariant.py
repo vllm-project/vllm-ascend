@@ -27,12 +27,18 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
-    def test_tensor_sum_calls_reduce_sum(self):
+    def test_reduce_sum_supports_tensor_method_binding(self):
         x = MagicMock(spec=torch.Tensor)
+        x.device.type = "npu"
         expected = MagicMock(spec=torch.Tensor)
 
-        with patch("vllm_ascend.batch_invariant.reduce_sum", return_value=expected) as mock_reduce:
-            result = batch_invariant.tensor_sum(x, dim=-1, keepdim=True)
+        with patch.object(
+            batch_invariant.torch.ops.batch_invariant_ops,
+            "npu_reduce_sum_batch_invariant",
+            return_value=expected,
+        ) as mock_reduce:
+            tensor_sum = batch_invariant.reduce_sum.__get__(x, torch.Tensor)
+            result = tensor_sum(dim=-1, keepdim=True)
 
         mock_reduce.assert_called_once_with(x, -1, True)
         assert result is expected
