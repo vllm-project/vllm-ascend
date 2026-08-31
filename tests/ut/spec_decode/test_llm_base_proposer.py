@@ -171,8 +171,22 @@ class TestMtpSharesTheTargetLmHead:
 
 
 @pytest.mark.parametrize("cache_dtype", ["fp8", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        SimpleNamespace(
+            hf_text_config=SimpleNamespace(model_type="minimax_m3"),
+        ),
+        SimpleNamespace(
+            hf_text_config=SimpleNamespace(),
+            hf_config=SimpleNamespace(model_type="minimax_m3_vl"),
+        ),
+    ],
+    ids=["text-config", "vl-top-level-config"],
+)
 def test_minimax_m3_eagle3_draft_uses_model_dtype_with_mixed_kv_cache(
     cache_dtype: str,
+    model_config: SimpleNamespace,
 ):
     proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
     base_config = _VllmConfig(
@@ -180,9 +194,7 @@ def test_minimax_m3_eagle3_draft_uses_model_dtype_with_mixed_kv_cache(
             cache_dtype=cache_dtype,
             kv_cache_dtype_skip_layers=["0", "1", "2"],
         ),
-        model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(model_type="minimax_m3"),
-        ),
+        model_config=model_config,
     )
     proposer.vllm_config = base_config
     proposer.speculative_config = SimpleNamespace(kv_cache_dtype=None)

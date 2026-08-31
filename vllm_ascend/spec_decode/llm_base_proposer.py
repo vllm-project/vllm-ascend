@@ -297,8 +297,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def _create_draft_vllm_config(self) -> VllmConfig:
         draft_vllm_config = super()._create_draft_vllm_config()
         cache_config = self.vllm_config.cache_config
-        model_type = getattr(
-            self.vllm_config.model_config.hf_text_config,
+        model_config = self.vllm_config.model_config
+        model_type = getattr(model_config.hf_text_config, "model_type", None) or getattr(
+            getattr(model_config, "hf_config", None),
             "model_type",
             "",
         )
