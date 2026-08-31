@@ -44,11 +44,12 @@ class _NpuAll2AllManager:
         self._ep_world_size = ep_world_size
         self._device = device
         self._dead: set[int] = set()
-        self._num_physical_experts: int = 0
+        self._num_local_experts: int = 0
 
         # elastic_info layout: [is_scaling_down, dense ep world size,
         #  shared_expert_rank_num, num_physical_experts] + table1(orig->dense)
-        #  + table2(dense->orig).
+        #  + table2(dense->orig). num_physical_experts is derived from the
+        #  dead set and num_local_experts on every rebuild.
         size = 4 + 2 * ep_world_size
         self._elastic_info_host = torch.zeros(size, dtype=torch.int32)
         if device is None:
@@ -97,10 +98,15 @@ class _NpuAll2AllManager:
         """The device elastic_info tensor for the next MC2 dispatch/combine."""
         return self._elastic_info
 
-    def set_num_physical_experts(self, num_physical_experts: int) -> None:
-        """Shrink the expert-space width after scale-down and rebuild."""
-        self._num_physical_experts = num_physical_experts
-        self._rebuild_elastic_info()
+    def set_num_local_physical_experts(self, num_local_experts: int) -> None:
+        """Record the physical expert slots per EP rank.
+
+        No rebuild here: the shrunk physical-expert count is derived as
+        ``alive_ranks * num_local_experts`` inside ``_rebuild_elastic_info``,
+        which the ``update_mask`` calls of the upstream retry flow trigger, so
+        the next rebuild already reflects this value.
+        """
+        self._num_local_experts = num_local_experts
 
     def _rebuild_elastic_info(self) -> None:
         """Rebuild elastic_info from the dead set into the existing device
@@ -108,14 +114,13 @@ class _NpuAll2AllManager:
 
         world_size = self._ep_world_size
         alive = sorted(set(range(world_size)) - self._dead)
+        num_physical_experts = len(alive) * self._num_local_experts
         table1 = torch.full((world_size,), -1, dtype=torch.int32)
         table1[alive] = torch.arange(len(alive), dtype=torch.int32)
         table2 = torch.full((world_size,), -1, dtype=torch.int32)
         table2[: len(alive)] = torch.tensor(alive, dtype=torch.int32)
         self._elastic_info_host.copy_(
-            torch.cat(
-                [torch.tensor([1, len(alive), 0, self._num_physical_experts], dtype=torch.int32), table1, table2]
-            )
+            torch.cat([torch.tensor([1, len(alive), 0, num_physical_experts], dtype=torch.int32), table1, table2])
         )
         self._elastic_info.copy_(self._elastic_info_host, non_blocking=True)
 
