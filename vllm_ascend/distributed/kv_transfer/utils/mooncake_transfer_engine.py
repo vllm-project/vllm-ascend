@@ -34,11 +34,25 @@ class GlobalTE:
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
             if self.is_register_buffer:
                 return
+
+            registered_buffers: list[tuple[int, int]] = []
             for ptr, size in zip(ptrs, sizes):
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
-                    raise RuntimeError("Mooncake memory registration failed.")
-            self.registered_buffers = list(zip(ptrs, sizes))
+                    rollback_failures = []
+                    for registered_ptr, registered_size in reversed(registered_buffers):
+                        rollback_ret = self.transfer_engine.unregister_memory(registered_ptr)
+                        if rollback_ret != 0:
+                            rollback_failures.append((registered_ptr, registered_size, rollback_ret))
+                    self.registered_buffers = [(ptr, size) for ptr, size, _ in rollback_failures]
+                    self.is_register_buffer = bool(rollback_failures)
+                    raise RuntimeError(
+                        f"Mooncake memory registration failed for ptr={ptr:#x}, "
+                        f"ret_value={ret_value}, rollback_failures={rollback_failures}"
+                    )
+                registered_buffers.append((ptr, size))
+
+            self.registered_buffers = registered_buffers
             self.is_register_buffer = True
 
     def unregister_buffer(self):

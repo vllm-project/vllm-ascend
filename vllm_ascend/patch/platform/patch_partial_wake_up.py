@@ -18,9 +18,7 @@ from __future__ import annotations
 from vllm.v1.engine.core import EngineCore
 
 
-def _wake_up_without_early_scheduler_resume(
-    self: EngineCore, tags: list[str] | None = None
-) -> None:
+def _wake_up_without_early_scheduler_resume(self: EngineCore, tags: list[str] | None = None) -> None:
     """Keep scheduling paused until all sleep-mode allocations are awake.
 
     vLLM supports waking weights and KV cache in separate stages. The generic

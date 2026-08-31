@@ -228,26 +228,16 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         the expert weights. ``replace_parameter`` also preserves the attached
         expert-aware ``weight_loader``.
         """
-        if self.quant_config is not None or not getattr(
-            self, "_weights_in_execution_layout", False
-        ):
+        if self.quant_config is not None or not getattr(self, "_weights_in_execution_layout", False):
             return
 
         hidden_size = self.hidden_size
         w13_weight = getattr(self, "w13_weight", None)
-        if (
-            w13_weight is not None
-            and w13_weight.ndim == 3
-            and w13_weight.shape[1] == hidden_size
-        ):
+        if w13_weight is not None and w13_weight.ndim == 3 and w13_weight.shape[1] == hidden_size:
             replace_parameter(self, "w13_weight", w13_weight.transpose(1, 2))
 
         w2_weight = getattr(self, "w2_weight", None)
-        if (
-            w2_weight is not None
-            and w2_weight.ndim == 3
-            and w2_weight.shape[2] == hidden_size
-        ):
+        if w2_weight is not None and w2_weight.ndim == 3 and w2_weight.shape[2] == hidden_size:
             replace_parameter(self, "w2_weight", w2_weight.transpose(1, 2))
         self._weights_in_execution_layout = False
 
