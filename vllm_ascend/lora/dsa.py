@@ -37,11 +37,6 @@ class LoRAIntermediate:
     sgmv_metadata: DSASGMVMetadataLike
 
 
-@dataclass
-class _DSALoRAShrinkBuffer:
-    tensor: torch.Tensor | None = None
-
-
 @dataclass(frozen=True)
 class DSALoRAContext:
     """LoRA state published on the original Linear cached by the DSA impl."""
@@ -54,7 +49,6 @@ class DSALoRAContext:
     fully_sharded: bool
     tp_size: int
     tp_rank: int
-    shrink_buffer: _DSALoRAShrinkBuffer | None = None
 
 
 def _is_direct_dsa_projection(source_layer: nn.Module, names: frozenset[str]) -> bool:
@@ -78,16 +72,6 @@ class _AscendDSALoRAContextMixin:
         super().set_mapping(punica_wrapper)
         prefix = getattr(self.base_layer, "prefix", "")
         projection_name = prefix.rsplit(".", 1)[-1]
-        buffer_key = (
-            projection_name,
-            len(self.lora_a_stacked),
-            self.lora_a_stacked[0].shape[-2],
-        )
-        buffer_pool = getattr(punica_wrapper, "_dsa_lora_shrink_buffer_pool", None)
-        if buffer_pool is None:
-            buffer_pool = {}
-            punica_wrapper._dsa_lora_shrink_buffer_pool = buffer_pool
-        shrink_buffer = buffer_pool.setdefault(buffer_key, _DSALoRAShrinkBuffer())
         context = DSALoRAContext(
             punica_wrapper=punica_wrapper,
             lora_a_stacked=self.lora_a_stacked,
@@ -97,7 +81,6 @@ class _AscendDSALoRAContextMixin:
             fully_sharded=(self._dsa_parallel_mode == "column" and bool(self.lora_config.fully_sharded_loras)),
             tp_size=self.tp_size,
             tp_rank=self.tp_rank,
-            shrink_buffer=shrink_buffer,
         )
         if projection_name in _DSA_QKV_PROJECTIONS:
             # Lets the model runner avoid preparing DSA SGMV metadata when a
@@ -189,49 +172,20 @@ DSA_LORA_CLASSES: tuple[type[BaseLinearLayerWithLoRA], ...] = (
 )
 
 
-def _get_reusable_shrink_buffer(
-    linear: nn.Module,
+def _allocate_shrink_buffer(
     context: DSALoRAContext,
     *,
     num_slices: int,
     num_rows: int,
     rank: int,
 ) -> torch.Tensor:
-    """Return a reusable FP32 buffer shared across equal DSA projections.
+    """Allocate a fresh zeroed FP32 scratch buffer for one DSA shrink."""
 
-    DSA executes q and kv projections on different streams, so each
-    projection name owns a separate buffer. Equal projections share the same
-    buffer across transformer layers. The returned tensor is scratch storage;
-    callers of additive shrink kernels must clear its active view before use.
-    """
-
-    state = context.shrink_buffer
-    if state is None:
-        state = getattr(linear, "_ascend_dsa_lora_shrink_buffer", None)
-        if state is None:
-            state = _DSALoRAShrinkBuffer()
-            linear._ascend_dsa_lora_shrink_buffer = state
-
-    mapping_buffer = getattr(context.punica_wrapper, "_token_lora_indices", None)
-    mapping_capacity = mapping_buffer.shape[0] if isinstance(mapping_buffer, torch.Tensor) else num_rows
-    capacity = max(num_rows, mapping_capacity)
-    buffer = state.tensor
-    device = context.lora_a_stacked[0].device
-    if (
-        buffer is None
-        or buffer.device != device
-        or buffer.dtype != torch.float32
-        or buffer.shape[0] != num_slices
-        or buffer.shape[1] < capacity
-        or buffer.shape[2] != rank
-    ):
-        buffer = torch.empty(
-            (num_slices, capacity, rank),
-            dtype=torch.float32,
-            device=device,
-        )
-        state.tensor = buffer
-    return buffer[:, :num_rows]
+    return torch.zeros(
+        (num_slices, num_rows, rank),
+        dtype=torch.float32,
+        device=context.lora_a_stacked[0].device,
+    )
 
 
 def prepare_dsa_lora(
@@ -262,16 +216,12 @@ def prepare_dsa_lora(
         if context.parallel_mode != "column":
             raise ValueError("Only column-parallel DSA CV projections may shard LoRA A.")
         local_rank = context.lora_a_stacked[0].shape[-2]
-        buffers = _get_reusable_shrink_buffer(
-            linear,
+        buffers = _allocate_shrink_buffer(
             context,
             num_slices=len(context.lora_a_stacked),
             num_rows=x_2d.shape[0],
             rank=local_rank,
         )
-        # GroupGEMM shrink adds to the supplied output. Its dispatch predicate
-        # is a live ACLGraph input, so clear the active view unconditionally.
-        buffers.zero_()
         context.punica_wrapper.add_shrink(
             buffers,
             x_2d,
@@ -282,16 +232,13 @@ def prepare_dsa_lora(
         buffers = tensor_model_parallel_all_gather(buffers)
         return LoRAIntermediate(buffers, sgmv_metadata)
 
-    reusable_buffer = _get_reusable_shrink_buffer(
-        linear,
+    shrink_buffer = _allocate_shrink_buffer(
         context,
         num_slices=len(context.lora_a_stacked),
         num_rows=x_2d.shape[0],
         rank=context.lora_a_stacked[0].shape[-2],
     )
-    # See the fully-sharded path above: add_shrink may be additive.
-    reusable_buffer.zero_()
-    buffers = tuple(reusable_buffer[slice_idx] for slice_idx in range(len(context.lora_a_stacked)))
+    buffers = tuple(shrink_buffer[slice_idx] for slice_idx in range(len(context.lora_a_stacked)))
     context.punica_wrapper.add_shrink(
         buffers,
         x_2d,

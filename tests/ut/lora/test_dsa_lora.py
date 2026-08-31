@@ -9,9 +9,7 @@ from vllm_ascend.lora.dsa import (
     DSA_LORA_CONTEXT_ATTR,
     AscendDSAReplicatedLinearWithLoRA,
     DSALoRAContext,
-    apply_grouped_dsa_lora,
     apply_prepared_dsa_lora,
-    forward_with_dsa_lora,
     prepare_dsa_lora,
 )
 from vllm_ascend.lora.utils import refresh_all_lora_classes
@@ -121,6 +119,56 @@ class FakePunica:
             add_inputs,
         )
 
+    def add_shrink(
+        self,
+        y,
+        x,
+        lora_a_stacked,
+        scale,
+        *,
+        sgmv_metadata=None,
+        **kwargs,
+    ):
+        del kwargs
+        assert sgmv_metadata is not None
+        for output, lora_a in zip(y, lora_a_stacked):
+            update = torch.zeros_like(output)
+            self.sgmv_shrink(
+                x,
+                lora_a[:, 0].contiguous(),
+                update,
+                *sgmv_metadata.op_args,
+                scale,
+            )
+            output.add_(update)
+
+    def add_expand(
+        self,
+        y,
+        x,
+        lora_b_stacked,
+        output_slices,
+        offset_start=0,
+        add_inputs=True,
+        *,
+        sgmv_metadata=None,
+        **kwargs,
+    ):
+        del kwargs
+        assert sgmv_metadata is not None
+        offset = offset_start
+        for inputs, lora_b, output_slice in zip(x, lora_b_stacked, output_slices):
+            self.sgmv_expand_slice(
+                inputs,
+                lora_b[:, 0].contiguous(),
+                y,
+                *sgmv_metadata.op_args,
+                offset,
+                output_slice,
+                add_inputs,
+            )
+            offset += output_slice
+
 
 def _attach_context(
     linear,
@@ -169,6 +217,53 @@ def test_replicated_projection_publishes_unsharded_context() -> None:
     assert punica.has_dsa_qkv_lora
 
 
+def test_dsa_lora_wrappers_exclude_wo_projections() -> None:
+    for projection_name in ("wo_a", "wo_b"):
+        source_layer = torch.nn.Module()
+        source_layer.prefix = f"model.layers.0.self_attn.{projection_name}"
+        for wrapper_class in DSA_LORA_CLASSES:
+            assert not wrapper_class.can_replace_layer(
+                source_layer,
+                SimpleNamespace(),
+                [],
+            )
+
+
+def test_equal_projections_allocate_fresh_shrink_buffers() -> None:
+    punica = FakePunica(torch.tensor([0, 0]))
+
+    def make_wrapper(layer_index: int, projection_name: str):
+        wrapper = object.__new__(AscendDSAReplicatedLinearWithLoRA)
+        torch.nn.Module.__init__(wrapper)
+        wrapper.base_layer = torch.nn.Module()
+        wrapper.base_layer.prefix = f"model.layers.{layer_index}.self_attn.{projection_name}"
+        wrapper.lora_config = SimpleNamespace(fully_sharded_loras=False)
+        wrapper.lora_a_stacked = (torch.tensor([[[[1.0, 1.0]]]]),)
+        wrapper.lora_b_stacked = (torch.tensor([[[[2.0], [3.0]]]]),)
+        wrapper.output_slices = (2,)
+        wrapper.tp_size = 1
+        wrapper.tp_rank = 0
+        wrapper.set_mapping(punica)
+        return wrapper.base_layer
+
+    first_wq_a = make_wrapper(0, "wq_a")
+    second_wq_a = make_wrapper(1, "wq_a")
+
+    with patch("vllm_ascend.lora.dsa.torch.zeros", wraps=torch.zeros) as zeros:
+        first = prepare_dsa_lora(first_wq_a, torch.tensor([[1.0, 2.0], [3.0, 4.0]]))
+        assert first is not None
+        first_values = first.buffers[0].clone()
+        first.buffers[0].fill_(123.0)
+        second = prepare_dsa_lora(second_wq_a, torch.tensor([[5.0, 6.0], [7.0, 8.0]]))
+
+    assert second is not None
+    assert first.buffers[0].data_ptr() != second.buffers[0].data_ptr()
+    assert second.buffers[0].shape == (2, 1)
+    assert zeros.call_count == 2
+    torch.testing.assert_close(first_values, torch.tensor([[3.0], [7.0]]))
+    torch.testing.assert_close(second.buffers[0], torch.tensor([[11.0], [15.0]]))
+
+
 def test_dsa_lora_registry_refresh_is_idempotent() -> None:
     class DummyLoRAClass:
         pass
@@ -205,6 +300,8 @@ def test_cv_lora_uses_explicit_multi_adapter_token_indices() -> None:
     x = torch.tensor([[1.0, 10.0], [2.0, 20.0], [3.0, 4.0]])
     output = torch.ones(3, 2)
     with (
+        patch.object(punica, "add_shrink", wraps=punica.add_shrink) as add_shrink,
+        patch.object(punica, "add_expand", wraps=punica.add_expand) as add_expand,
         patch.object(punica, "sgmv_shrink", wraps=punica.sgmv_shrink) as sgmv_shrink,
         patch.object(punica, "sgmv_expand_slice", wraps=punica.sgmv_expand_slice) as sgmv_expand_slice,
     ):
@@ -213,6 +310,10 @@ def test_cv_lora_uses_explicit_multi_adapter_token_indices() -> None:
 
     expected = torch.tensor([[3.0, 4.0], [1.0, 1.0], [17.0, 21.0]])
     torch.testing.assert_close(actual, expected)
+    add_shrink.assert_called_once()
+    add_expand.assert_called_once()
+    assert add_shrink.call_args.kwargs["sgmv_metadata"] is intermediate.sgmv_metadata
+    assert add_expand.call_args.kwargs["sgmv_metadata"] is intermediate.sgmv_metadata
     sgmv_shrink.assert_called_once()
     sgmv_expand_slice.assert_called_once()
 
@@ -301,91 +402,3 @@ def test_fully_sharded_column_gathers_lora_rank_before_expand() -> None:
 
     all_gather.assert_called_once()
     torch.testing.assert_close(actual, torch.tensor([[9.0, 6.0]]))
-
-
-def test_grouped_wo_a_routes_by_adapter_and_group() -> None:
-    linear = torch.nn.Module()
-    token_indices = torch.tensor([0, -1, 1])
-    punica = FakePunica(token_indices)
-    lora_a = torch.tensor(
-        [
-            [[[1.0, 0.0]]],
-            [[[0.0, 1.0]]],
-        ]
-    )
-    lora_b = torch.tensor(
-        [
-            [[[2.0], [3.0]]],
-            [[[4.0], [5.0]]],
-        ]
-    )
-    _attach_context(
-        linear,
-        punica,
-        lora_a,
-        lora_b,
-        parallel_mode="grouped_column",
-    )
-
-    x = torch.tensor(
-        [
-            [[1.0, 10.0], [2.0, 20.0]],
-            [[7.0, 8.0], [9.0, 10.0]],
-            [[3.0, 4.0], [5.0, 6.0]],
-        ]
-    )
-    actual = apply_grouped_dsa_lora(
-        linear,
-        torch.ones(3, 2, 1),
-        x,
-        token_indices,
-    )
-
-    expected = torch.tensor([[[3.0], [7.0]], [[1.0], [1.0]], [[17.0], [31.0]]])
-    torch.testing.assert_close(actual, expected)
-
-
-def test_fully_sharded_wo_b_adds_local_b_slice_before_output_reduce() -> None:
-    class FakeQuantMethod:
-        @staticmethod
-        def apply(layer, x, bias):
-            del layer, bias
-            return torch.ones(x.shape[0], 4)
-
-    linear = torch.nn.Module()
-    linear.input_is_parallel = True
-    linear.tp_rank = 1
-    linear.tp_size = 2
-    linear.skip_bias_add = False
-    linear.bias = None
-    linear.quant_method = FakeQuantMethod()
-    linear.reduce_results = True
-
-    token_indices = torch.tensor([0, -1])
-    punica = FakePunica(token_indices)
-    lora_a = torch.tensor([[[[1.0, 1.0]]]])
-    lora_b = torch.tensor([[[[2.0], [3.0]]]])
-    _attach_context(
-        linear,
-        punica,
-        lora_a,
-        lora_b,
-        parallel_mode="row",
-        fully_sharded=True,
-        tp_size=2,
-        tp_rank=1,
-    )
-
-    with patch(
-        "vllm_ascend.lora.dsa.tensor_model_parallel_all_reduce",
-        side_effect=lambda value: value,
-    ) as all_reduce:
-        actual = forward_with_dsa_lora(
-            linear,
-            torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
-            token_indices,
-        )
-
-    assert all_reduce.call_count == 2
-    expected = torch.tensor([[1.0, 1.0, 7.0, 10.0], [1.0, 1.0, 1.0, 1.0]])
-    torch.testing.assert_close(actual, expected)

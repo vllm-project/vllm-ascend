@@ -137,7 +137,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         self._init_prefill_sgmv_metadata_buffers(max_batches)
         self._init_dsa_sgmv_metadata_buffers(max_batches)
-        self._dsa_lora_shrink_buffer_pool: dict[tuple[str, int, int], object] = {}
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
         if get_ascend_device_type() == AscendDeviceType._310P or (
