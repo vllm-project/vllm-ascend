@@ -163,12 +163,12 @@ class CompressorSPAsyncGather:
 
     plan: CompressorSPMetadata
     full_slot_mapping: torch.Tensor
-    block_size: int
     gathered: torch.Tensor
     gather_input: torch.Tensor
     gather_work: Any
     comm_stream: torch.npu.Stream
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | None = None
+    block_size: int = 0
 
 
 @dataclass
@@ -1944,12 +1944,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
         """
         plan = req_metadata.compressor_sp
         if (
-            coff != 2
-            or not need_gather_q_kv
-            or not self.compressor_sp_hccl_overlap
-            or torch.npu.is_current_stream_capturing()
-            or plan is None
-            or not plan.enabled
+            not self._compressor_sp_async_eligible(coff=coff, need_gather_q_kv=need_gather_q_kv, plan=plan)
             or state_req_metadata.slot_mapping is None
         ):
             return None
@@ -2019,6 +2014,23 @@ class AscendDSACPImpl(DSAAttentionImpl):
             pending.block_size,
         )
 
+    def _compressor_sp_async_eligible(
+        self,
+        *,
+        coff: int,
+        need_gather_q_kv: bool,
+        plan: CompressorSPMetadata | None,
+    ) -> bool:
+        """Shared C4 async-launch eligibility for the main and Indexer SP paths."""
+        return (
+            coff == 2
+            and need_gather_q_kv
+            and bool(self.compressor_sp_hccl_overlap)
+            and not torch.npu.is_current_stream_capturing()
+            and plan is not None
+            and plan.enabled
+        )
+
     def _launch_indexer_cache_sp(
         self,
         *,
@@ -2046,13 +2058,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
         cannot alias local and global cu_seqlens.
         """
         if (
-            coff != 2
-            or not need_gather_q_kv
-            or not self.compressor_sp_hccl_overlap
-            or torch.npu.is_current_stream_capturing()
+            not self._compressor_sp_async_eligible(coff=coff, need_gather_q_kv=need_gather_q_kv, plan=plan)
             or self.compressor_sp_indexer_disabled
-            or plan is None
-            or not plan.enabled
             or plan.gather_compact_slice is None
             or plan.num_input_tokens < self.compressor_sp_hccl_overlap_min_tokens
             or indexer_kv_state_metadata.req_metadata is None
@@ -2064,6 +2071,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
         if expected_global == 0 or indexer_slot_mapping.shape[0] < expected_global:
             return None
 
+        # The Indexer cache group uses one metadata object for both roles, so
+        # req_metadata and state_req_metadata intentionally alias here.
         local_compressed_kv = self._run_local_compressor_sp(
             x=x,
             state_cache=indexer_state_cache,
@@ -2099,10 +2108,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
             norm_weight=self.indexcom_norm.weight,
         )
         return CompressorSPAsyncGather(
-            kv_cache=None,
             plan=plan,
             full_slot_mapping=indexer_slot_mapping,
-            block_size=0,
             gathered=gathered,
             gather_input=gather_input,
             gather_work=gather_work,
@@ -2112,17 +2119,18 @@ class AscendDSACPImpl(DSAAttentionImpl):
     def _finalize_indexer_cache_sp(
         self,
         pending: CompressorSPAsyncGather,
-        kv_cache: tuple[torch.Tensor, ...],
+        indexer_caches: tuple[torch.Tensor, ...],
         hadamard: torch.Tensor | None,
     ) -> None:
-        """Wait for the Indexer AllGather and write the quantized Indexer caches."""
+        """Wait for the Indexer AllGather and write the quantized Indexer caches.
+
+        ``indexer_caches`` is the already-unpacked Indexer cache group tuple;
+        the state cache is consumed by the launch phase and ignored here.
+        """
         pending.gather_work.wait()
         torch.npu.current_stream().wait_stream(pending.comm_stream)
         pending.gather_input = None
-        (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
-            DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
-        )
-        del indexer_state_cache
+        (_, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = indexer_caches
         expected_global = sum(pending.plan.sp_row_counts_per_rank)
         start, length = pending.plan.gather_compact_slice
         kv = pending.gathered.narrow(0, start, length)
@@ -2389,9 +2397,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 indexer_cos, indexer_sin, indexer_slot_mapping = self._compute_compressor_metadata(
                     indexer_kv_scale_metadata.req_metadata,
                 )
+                indexer_caches = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
                 indexer_async_gather = self._launch_indexer_cache_sp(
                     x=hidden_states_cache,
-                    indexer_state_cache=DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)[0],
+                    indexer_state_cache=indexer_caches[0],
                     indexer_kv_state_metadata=indexer_kv_state_metadata,
                     compressed_sin=indexer_sin,
                     compressed_cos=indexer_cos,
@@ -2403,7 +2412,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 if indexer_async_gather is not None:
                     self._finalize_indexer_cache_sp(
                         indexer_async_gather,
-                        kv_cache,
+                        indexer_caches,
                         indexer_kv_scale_metadata.hadamard,
                     )
                 else:
