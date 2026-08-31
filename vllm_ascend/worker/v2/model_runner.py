@@ -223,6 +223,66 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        """Update request state and copy partial prefix-cache blocks.
+
+        Ascend V2 exposes kernel-sized views for some attention caches while
+        Mamba and hybrid caches keep a shared block-major allocation.  The
+        upstream update path copies through those views, which can interpret
+        a logical KV block as several kernel blocks.  Copy the backing storage
+        once using the KV manager's logical block count instead.
+        """
+        kv_cache_block_copies = getattr(scheduler_output, "kv_cache_block_copies", None)
+        if kv_cache_block_copies:
+            scheduler_output.kv_cache_block_copies = None
+        try:
+            super().update_requests(scheduler_output)
+        finally:
+            if kv_cache_block_copies:
+                scheduler_output.kv_cache_block_copies = kv_cache_block_copies
+
+        if kv_cache_block_copies:
+            self._copy_kv_cache_blocks_for_partial_hits(kv_cache_block_copies)
+
+    def _copy_kv_cache_blocks_for_partial_hits(self, kv_cache_block_copies) -> None:
+        """Copy logical KV blocks across Ascend's kernel-sized cache views."""
+        num_blocks = self.kv_cache_config.num_blocks
+        block_copy_pairs = [
+            ((copy.src_block_id, copy.dst_block_id) if hasattr(copy, "src_block_id") else tuple(copy))
+            for copy in kv_cache_block_copies
+        ]
+        cache_tensors = []
+        seen_views = set()
+        for cache in self.kv_caches:
+            tensors = cache if isinstance(cache, (list, tuple)) else (cache,)
+            for tensor in tensors:
+                view_key = (tensor.data_ptr(), tuple(tensor.shape), tuple(tensor.stride()))
+                if view_key in seen_views:
+                    continue
+                seen_views.add(view_key)
+                if tensor.ndim == 0 or tensor.shape[0] % num_blocks:
+                    raise ValueError(
+                        "KV cache view cannot be mapped to logical blocks: "
+                        f"shape={tuple(tensor.shape)}, num_blocks={num_blocks}"
+                    )
+                cache_tensors.append((tensor, tensor.shape[0] // num_blocks))
+
+        for tensor, blocks_per_logical_block in cache_tensors:
+            source_blocks = [
+                tensor.narrow(
+                    0,
+                    src_block_id * blocks_per_logical_block,
+                    blocks_per_logical_block,
+                ).clone()
+                for src_block_id, _ in block_copy_pairs
+            ]
+            for source_block, (_, dst_block_id) in zip(source_blocks, block_copy_pairs):
+                tensor.narrow(
+                    0,
+                    dst_block_id * blocks_per_logical_block,
+                    blocks_per_logical_block,
+                ).copy_(source_block)
+
     @torch.inference_mode()
     def execute_model(
         self,

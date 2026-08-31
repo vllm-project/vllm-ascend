@@ -2056,6 +2056,36 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][1], ([4, 5, 6],))
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][2], ([1, 2, 4, 5, 6],))
 
+    def test_update_state_after_alloc_schedules_zero_byte_completion(self):
+        request = MockRequest(
+            "req1",
+            kv_transfer_params={
+                "do_remote_prefill": True,
+                "remote_block_ids": ([1, 2, 3], [4]),
+                "remote_engine_id": "remote",
+                "remote_request_id": "remote_req1",
+                "remote_host": "localhost",
+                "remote_port": 5000,
+            },
+        )
+        blocks = MagicMock()
+
+        self.scheduler.update_state_after_alloc(request, blocks, 0)
+
+        self.assertIn("req1", self.scheduler._reqs_need_recv)
+        self.assertNotIn("req1", self.scheduler._reqs_in_batch)
+        self.assertEqual(
+            self.scheduler._reqs_need_recv["req1"][1],
+            ([], []),
+        )
+        self.assertEqual(
+            self.scheduler._reqs_need_recv["req1"][2],
+            tuple(),
+        )
+        blocks.get_unhashed_block_ids_all_groups.assert_not_called()
+        blocks.get_block_ids.assert_not_called()
+        self.assertFalse(request.kv_transfer_params["do_remote_prefill"])
+
     def test_request_finished_no_remote_decode(self):
         request = MockRequest("req1")
         delay_free, params = self.scheduler.request_finished(request, [1, 2, 3])
