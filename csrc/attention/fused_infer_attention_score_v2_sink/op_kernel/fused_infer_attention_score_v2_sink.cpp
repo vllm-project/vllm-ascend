@@ -158,9 +158,7 @@ extern "C" __global__ __aicore__ void fused_infer_attention_score_v2_sink(__gm__
                                                                           __gm__ uint8_t *workspace,
                                                                           __gm__ uint8_t *tiling)
 {
-#if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__)
-
-#elif (__CCE_AICORE__ == 200)
+#if (__CCE_AICORE__ == 200)
 
 #else
     TPipe tPipe;

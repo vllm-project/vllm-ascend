@@ -10,6 +10,13 @@
 
 #include "ops_common.h"
 
+namespace vllm_ascend::fia_v2_sink_opapi {
+
+thread_local char g_hash_buf[g_hash_buf_size];
+thread_local int g_hash_offset = 0;
+thread_local char g_hashBuf[kHashBufSize];
+thread_local int g_hashOffset = 0;
+
 const std::vector<std::string> g_custom_lib_path = get_custom_lib_path();
 const std::vector<std::string> g_default_custom_lib_path = get_default_custom_lib_path();
 
@@ -33,3 +40,5 @@ c10::SmallVector<int64_t, SIZE> array_to_small_vector(c10::IntArrayRef shape)
 
     return shape_small_vec;
 }
+
+}  // namespace vllm_ascend::fia_v2_sink_opapi

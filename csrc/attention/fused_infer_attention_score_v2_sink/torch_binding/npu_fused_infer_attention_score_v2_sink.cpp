@@ -11,6 +11,7 @@
 #include "ops_common.h"
 
 namespace custom {
+using namespace vllm_ascend::fia_v2_sink_opapi;
 const static int64_t DIM_0 = 0;
 const static int64_t DIM_1 = 1;
 const static int64_t DIM_2 = 2;

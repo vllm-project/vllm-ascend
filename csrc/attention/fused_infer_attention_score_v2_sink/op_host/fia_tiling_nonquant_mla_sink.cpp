@@ -632,6 +632,10 @@ ge::graphStatus FiaTilingNonQuantMla::DoOpTiling()
 // 3. 个位代表特化模板到泛化模板的优先级排序
 REGISTER_TILING_TEMPLATE_FIA(FusedInferAttentionScoreV2Sink,
                              FiaTilingNonQuantMla,
-                             std::vector<int32_t>({static_cast<int32_t>(platform_ascendc::SocVersion::ASCEND910B), static_cast<int32_t>(platform_ascendc::SocVersion::ASCEND910_93)}),
+                             std::vector<int32_t>({
+                                 static_cast<int32_t>(platform_ascendc::SocVersion::ASCEND910B),
+                                 static_cast<int32_t>(platform_ascendc::SocVersion::ASCEND910_93),
+                                 static_cast<int32_t>(platform_ascendc::SocVersion::ASCEND950),
+                             }),
                              9);
 } // namespace optiling

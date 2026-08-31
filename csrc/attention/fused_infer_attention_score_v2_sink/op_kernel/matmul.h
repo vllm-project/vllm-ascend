@@ -689,6 +689,20 @@ __aicore__ inline void MatmulBase(const LocalTensor<A> &aL1Tensor,
     }
 }
 
+template <typename T, ABLayout AL>
+__aicore__ inline void LoadDataToL0A(LocalTensor<T> &aL0Tensor,
+                                     const LocalTensor<T> &aL1Tensor,
+                                     uint32_t rowSize,
+                                     uint32_t kSplitSize,
+                                     uint32_t mSplitSize);
+
+template <typename T, ABLayout BL>
+__aicore__ inline void LoadDataToL0B(LocalTensor<T> &bL0Tensor,
+                                     const LocalTensor<T> &bL1Tensor,
+                                     uint32_t rowSize,
+                                     uint32_t kSplitSize,
+                                     uint32_t nSplitSize);
+
 template <typename A, typename B, typename C, uint32_t baseM, uint32_t baseN, uint32_t baseK, ABLayout AL, ABLayout BL>
 __aicore__ inline void MatmulKPP(const LocalTensor<A> &aL1Tensor,
                                  const LocalTensor<B> &bL1Tensor,
@@ -710,10 +724,20 @@ __aicore__ inline void MatmulKPP(const LocalTensor<A> &aL1Tensor,
         Buffer<BufferType::L0A> l0aBuffer = aL0BuffsDb.Get();
         l0aBuffer.Wait<HardEvent::M_MTE1>(); // mte1等Matmul:上一轮matmul完成后才能搬运新数据到L0A
         LocalTensor<A> L0ATensor = l0aBuffer.GetTensor<A>();
+#if ((__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || (__NPU_ARCH__ == 5102))
+        LoadDataToL0A<A, AL>(
+            L0ATensor, aL1Tensor[k * L1Aoffset], param.singleM, kSplitSizeAlign, param.singleM);
+#else
         LoadDataToL0A<A, AL>(L0ATensor, aL1Tensor, param, k * L1Aoffset, kSplitSizeAlign, param.singleM);
+#endif
         Buffer<BufferType::L0B> l0bBuffer = bL0BuffsDb.Get();
         LocalTensor<B> L0BTensor = l0bBuffer.GetTensor<B>();
+#if ((__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || (__NPU_ARCH__ == 5102))
+        LoadDataToL0B<B, BL>(
+            L0BTensor, bL1Tensor[k * L1Boffset], kSplitSizeAlign, kSplitSizeAlign, param.singleN);
+#else
         LoadDataToL0B<B, BL>(L0BTensor, bL1Tensor, param, k * L1Boffset, kSplitSizeAlign, param.singleN);
+#endif
 
         l0aBuffer.Set<HardEvent::MTE1_M>(); // mte1搬运完后，通知可以开始matmul
         l0aBuffer.Wait<HardEvent::MTE1_M>(); // matmul等mte1：L0A数据搬运完成后才能开始matmul

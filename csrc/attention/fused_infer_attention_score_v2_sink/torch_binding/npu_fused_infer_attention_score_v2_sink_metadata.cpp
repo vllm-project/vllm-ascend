@@ -10,6 +10,7 @@
 #include "ops_common.h"
 
 namespace custom {
+using namespace vllm_ascend::fia_v2_sink_opapi;
 const int SIZE = 1024;
 using namespace at_npu::native;
 

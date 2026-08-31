@@ -42,6 +42,8 @@
 #include "torch_npu/csrc/flopcount/FlopCounter.h"
 #include "torch_npu/csrc/custom_dtype/Init.h"
 
+namespace vllm_ascend::fia_v2_sink_opapi {
+
 
 typedef struct aclOpExecutor aclOpExecutor;
 typedef struct aclTensor aclTensor;
@@ -2032,5 +2034,7 @@ constexpr auto CopyTypesV2(Ts &...args)
         ReleaseConvertTypes(converted_params);                                                                         \
         return workspace_size;                                                                                         \
     }(#aclnn_api, __VA_ARGS__)
+
+}  // namespace vllm_ascend::fia_v2_sink_opapi
 
 #endif  // TORCHNPU_TORCH_NPU_CSRC_ATEN_OPS_OP_API_PTA_COMMON_H_
