@@ -86,7 +86,6 @@ jobs:
               github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || ''
             }}
           fetch-depth: 0
-
       - name: Resolve refs
         id: resolve-refs
         env:
@@ -115,7 +114,6 @@ jobs:
             echo "main_commit=${main_commit}"
             echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
-
       - name: Select all tests
         id: full-scope
         run: |
@@ -150,20 +148,36 @@ jobs:
   #     base_sha: ${{ needs.select-all-tests.outputs.base_sha }}
   #     test_groups: ${{ needs.select-all-tests.outputs.test_groups }}
   #     upload_timing: ${{ inputs.update_est_times }}
-  
+
   setup-vars:
     name: Resolve daily test matrix
-    needs: [select-all-tests]
+    # 重点：移除 needs: [select-all-tests]，不再受select‑all‑tests失败影响
     runs-on: linux-aarch64-a2b3-0
     outputs:
       a2_image: ${{ steps.export.outputs.a2_image }}
       a3_image: ${{ steps.export.outputs.a3_image }}
-      vllm_ascend_ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
+      vllm_ascend_ref: ${{ steps.resolve-refs-hf.outputs.vllm_ascend_ref }}
       a2_nightly_hf: ${{ steps.set-matrix.outputs.a2_nightly_hf }}
       a3_nightly_hf: ${{ steps.set-matrix.outputs.a3_nightly_hf }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: >-
+            ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
+          fetch-depth: 0
+
+      # 新增：setup‑vars内部独立解析ref，不和select‑all‑tests耦合
+      - name: Resolve refs for hf nightly
+        id: resolve-refs-hf
+        env:
+          WD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          TARGET_BRANCH="${WD_BRANCH:-$GITHUB_REF_NAME}"
+          git fetch origin "$TARGET_BRANCH"
+          echo "vllm_ascend_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -186,6 +200,30 @@ jobs:
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+
+  verify-image:
+    name: Verify nightly-ci image (build gate)
+    needs: [setup-vars]
+    runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 10
+    container:
+      image: ${{ needs.setup-vars.outputs.a2_image }}
+    steps:
+      - name: Smoke import vllm-ascend and vllm
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          python3 -c "import vllm_ascend, vllm; print('import OK ->', vllm_ascend.__file__)"
+      - name: Verify custom ops loadable
+        run: |
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
+          python3 -c "import vllm_ascend.vllm_ascend_C; print('custom ops OK -> vllm_ascend_C loaded')"
+      - name: Report image build provenance
+        run: |
+          echo "Image: ${{ needs.setup-vars.outputs.a2_image }}"
+          echo "=== vllm-ascend ==="
+          (cd /vllm-workspace/vllm-ascend && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
+          echo "=== vllm ==="
+          (cd /vllm-workspace/vllm && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
 
   a2-nightly-hf:
     name: A2 nightly high-freq
@@ -227,30 +265,6 @@ jobs:
       should_run: true
       test_frequency: nightly
       testcase_timeout: "45"
-      
-  verify-image:
-    name: Verify nightly-ci image (build gate)
-    needs: [setup-vars]
-    runs-on: linux-aarch64-a2b3-1
-    timeout-minutes: 10
-    container:
-      image: ${{ needs.setup-vars.outputs.a2_image }}
-    steps:
-      - name: Smoke import vllm-ascend and vllm
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
-          python3 -c "import vllm_ascend, vllm; print('import OK ->', vllm_ascend.__file__)"
-      - name: Verify custom ops loadable
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh || true
-          python3 -c "import vllm_ascend.vllm_ascend_C; print('custom ops OK -> vllm_ascend_C loaded')"
-      - name: Report image build provenance
-        run: |
-          echo "Image: ${{ needs.setup-vars.outputs.a2_image }}"
-          echo "=== vllm-ascend ==="
-          (cd /vllm-workspace/vllm-ascend && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
-          echo "=== vllm ==="
-          (cd /vllm-workspace/vllm && git log -1 --format='%H %s' 2>/dev/null) || echo "(no git info)"
 
   # update-estimated-times:
   #   needs: [run-all-tests]
