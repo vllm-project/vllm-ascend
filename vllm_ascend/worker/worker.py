@@ -264,9 +264,6 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes,
         )
 
-    def disconnect_kv_transfer_peers(self) -> None:
-        global_te.disconnect_all_peers()
-
     def wake_up(self, tags: list[str] | None = None) -> None:
         nz_mode = get_ascend_config().weight_nz_mode
         if nz_mode:

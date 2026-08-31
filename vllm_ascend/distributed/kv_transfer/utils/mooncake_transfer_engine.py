@@ -41,24 +41,11 @@ class GlobalTE:
             self.registered_buffers = list(zip(ptrs, sizes))
             self.is_register_buffer = True
 
-    def _disconnect_all_peers(self):
-        if self.transfer_engine is None:
-            return
-        disconnect_ret = self.transfer_engine.disconnect_all_peers()
-        if disconnect_ret != 0:
-            raise RuntimeError(f"Mooncake peer disconnection failed with ret_value: {disconnect_ret}")
-
-    def disconnect_all_peers(self):
-        with self.register_buffer_lock:
-            self._disconnect_all_peers()
-
     def unregister_buffer(self):
         with self.register_buffer_lock:
             if not self.is_register_buffer or not self.registered_buffers:
                 return
             assert self.transfer_engine is not None, "Transfer engine must be initialized"
-
-            self._disconnect_all_peers()
 
             unregistered_buffers: list[tuple[int, int]] = []
             for ptr, size in self.registered_buffers:
