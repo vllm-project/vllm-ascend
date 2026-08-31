@@ -216,8 +216,9 @@ def test_compute_draft_token_ids_uses_selector_and_anchor(monkeypatch):
     )
 
     hidden_states = torch.randn(num_reqs * num_steps, hidden)
-    tokens = proposer.compute_draft_token_ids(hidden_states)
+    tokens, probs = proposer.compute_draft_token_ids(hidden_states)
 
+    assert probs is None  # DFlash2 always drafts greedily.
     assert tokens.shape == (num_reqs * num_steps,)
     model.compute_candidates.assert_called_once()
     selector_args = model.model.candidate_selector.call_args[0]

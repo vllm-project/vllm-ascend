@@ -376,6 +376,13 @@ CASE_DS_ACLGRAPH_ENPU = {
     "env_vars": {"ENPU_ENABLE": "true"},
 }
 
+CASE_DS_BREAKABLE_ACLGRAPH = {
+    **CASE_DS_ACLGRAPH,
+    "env_vars": {
+        "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
+    },
+}
+
 # inherit from tests/e2e/pull_request/utils.py::compare_logprobs
 ATOL = 0.0689
 
@@ -619,7 +626,9 @@ def check_capture_mem(capture_mem, baseline_capture_mem=0.2, capture_mem_toleran
 
 
 @wait_until_npu_memory_free(0.7)
-@pytest.mark.parametrize("cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU])
+@pytest.mark.parametrize(
+    "cur_case", [CASE_QWEN_ACLGRAPH, CASE_DS_ACLGRAPH, CASE_DS_ACLGRAPH_ENPU, CASE_DS_BREAKABLE_ACLGRAPH]
+)
 def test_aclgraph(cur_case: dict, monkeypatch: pytest.MonkeyPatch):
     # Counter doesn't work in default "spawn" mode
     metrics = None

@@ -25,13 +25,13 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
@@ -111,7 +111,7 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -142,10 +142,7 @@ export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=800
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
-
-vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
   --host 0.0.0.0 \
   --port 8088 \
   --quantization ascend \
@@ -171,14 +168,14 @@ vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--mm-encoder-tp-mode` indicates how to optimize multi-modal encoder inference using tensor parallelism (TP). If you want to test the multimodal inputs, we recommend using `data`.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -271,10 +268,7 @@ Run the following scripts on two nodes respectively.
     export TASK_QUEUE_ENABLE=1
 
     export HCCL_BUFFSIZE=1024
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
-
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -338,10 +332,7 @@ Run the following scripts on two nodes respectively.
     export TASK_QUEUE_ENABLE=1
 
     export HCCL_BUFFSIZE=1024
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
-
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -380,7 +371,7 @@ Key Parameter Descriptions:
 - `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -632,7 +623,6 @@ Parameter descriptions:
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         export HCCL_BUFFSIZE=1100
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
@@ -657,7 +647,7 @@ Parameter descriptions:
             --tool-call-parser kimi_k2 \
             --reasoning-parser kimi_k2 \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
+            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":false,"enable_mlapo":true}' \
             --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
@@ -711,7 +701,6 @@ Parameter descriptions:
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         export HCCL_BUFFSIZE=1100
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
@@ -736,7 +725,7 @@ Parameter descriptions:
             --tool-call-parser kimi_k2 \
             --reasoning-parser kimi_k2 \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
+            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":false,"enable_mlapo":true}' \
             --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
@@ -758,7 +747,7 @@ Parameter descriptions:
 
     Key Parameter Descriptions:
 
-    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `additional_config.enable_mlapo=true`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
     - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 
@@ -893,7 +882,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 }
 ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -1030,7 +1019,7 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: What is the recommended TP/DP configuration for single-node deployment?**
 

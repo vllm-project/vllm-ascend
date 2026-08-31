@@ -18,6 +18,7 @@
 #
 from collections.abc import Callable
 from contextlib import contextmanager
+from functools import partial
 from typing import Any
 
 import torch
@@ -29,6 +30,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import cudagraph_utils
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor, ModelCudaGraphManager
 from vllm.v1.worker.gpu.input_batch import InputBuffers
@@ -37,8 +39,45 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
+from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
+
+
+def _prepare_pcp_inputs_to_capture(
+    num_reqs: int,
+    num_tokens: int,
+    model_state: ModelState,
+    input_buffers: InputBuffers,
+    _block_tables: BlockTables,
+    attn_groups: list[list[AttentionGroup]],
+    kv_cache_config: KVCacheConfig,
+    full_cudagraph: bool,
+    max_query_len: int | None = None,
+    *,
+    pcp_manager: Any,
+) -> cudagraph_utils.AttentionState:
+    """Build graph inputs with the same PCP-local layout used on replay."""
+    if vllm_version_is("0.27.1"):
+        input_batch = cudagraph_utils.InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    else:
+        input_batch = cudagraph_utils.InputBatch.make_dummy(
+            num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+        )
+    input_batch = pcp_manager.partition_batch(input_batch)
+    input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
+    slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
+
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        for_capture=full_cudagraph,
+    )
+    return cudagraph_utils.AttentionState(attn_metadata, slot_mappings_by_layer)
 
 
 def collect_sorted_captured_token_sizes(capture_descs: dict) -> list[int]:
@@ -113,11 +152,16 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 lora_capture_cases=lora_capture_cases,
                 varlen_decode=varlen_decode,
             )
+            self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
             self.model_runner = model_runner
             self.update_stream = self.model_runner.update_stream
             self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
             if super().needs_capture():
                 set_graph_params(self.capture_sizes)
+
+    def init_breakable_cg_runner(self, model: nn.Module) -> None:
+        if self.breakable_cg_runner is None:
+            self.breakable_cg_runner = BreakableACLGraphWrapper(model, self.vllm_config)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
@@ -177,6 +221,12 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
+        pcp_manager = getattr(self.model_runner, "pcp_manager", None)
+        if pcp_manager is not None:
+            cudagraph_utils.prepare_inputs_to_capture = partial(
+                _prepare_pcp_inputs_to_capture,
+                pcp_manager=pcp_manager,
+            )
         with communicator_switch():
             return super().capture(
                 model,
@@ -205,10 +255,13 @@ class ModelWithContext(nn.Module):
         self.is_draft_model_prefill = is_draft_model_prefill
 
     def forward(self, *args, **kwargs):
+        forward_context = get_forward_context()
         # In warmup phase, capturing=False by default.
         # when capturing, we need to set capturing=True in forward context.
-        if torch.npu.is_current_stream_capturing():
-            _EXTRA_CTX.capturing = True
+        _EXTRA_CTX.capturing = (
+            torch.npu.is_current_stream_capturing()
+            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.PIECEWISE
+        )
         if self.is_draft_model:
             _EXTRA_CTX.is_draft_model = True
         if self.is_draft_model_prefill:

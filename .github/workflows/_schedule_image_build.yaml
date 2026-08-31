@@ -171,7 +171,6 @@ jobs:
 
     strategy:
       max-parallel: 2
-      fail-fast: false
       matrix:
         runner_info:
           - {runner: linux-aarch64-cpu-4, tag: arm64}
@@ -516,7 +515,7 @@ jobs:
             latest=false
 
       - name: Login to SWR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ inputs.swr_registry }}
           username: ${{ secrets.SWR_USERNAME }}

@@ -197,9 +197,10 @@ msgstr ""
 
 msgid ""
 "| Expert Parallel               | 🟢 Functional    | Supports MRv1 legacy "
-"EPLB and MRv2 upstream synchronous EPLB; see [EPLB][eplb]. |"
+"EPLB and MRv2 asynchronous EPLB with the upstream default policy; see "
+"[EPLB][eplb]. |"
 msgstr ""
-"| 专家并行               | 🟢 可用    | 支持MRv1传统EPLB和MRv2上游同步EPLB；参见[EPLB][eplb]。 |"
+"| 专家并行               | 🟢 可用    | 支持 MRv1 旧版 EPLB 和采用上游默认策略的 MRv2 异步 EPLB；参见 [EPLB][eplb]。 |"
 
 msgid ""
 "[v1_user_guide]: https://docs.vllm.ai/en/latest/usage/v1_guide/\n"

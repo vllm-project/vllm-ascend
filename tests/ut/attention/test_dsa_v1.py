@@ -44,6 +44,14 @@ from vllm_ascend.models.deepseek_v4.indexer import (
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
+def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
+    plan = MagicMock()
+    plan.layout_kv = "PA_ND"
+    for name, value in method_returns.items():
+        getattr(plan, name).return_value = value
+    return plan
+
+
 def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     model_config = SimpleNamespace(
         hf_config=SimpleNamespace(
@@ -130,22 +138,17 @@ def test_build_sas_metadata_parameters_cache_and_builder_buffer(
     cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
     generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=generated_metadata)
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_op=metadata_op,
+        get_dsa_sparse_attn_metadata_kwargs={"device": "cpu"},
+    )
 
     with (
         patch(
             "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
             return_value=2,
         ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_op",
-            return_value=metadata_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_kwargs",
-            return_value={"device": "cpu"},
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
     ):
         result = builder._build_sas_metadata(
             metadata_cache=metadata_cache,
@@ -264,10 +267,11 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
             "vllm_ascend.attention.dsa_v1.split_decodes_and_prefills",
             return_value=(2, 0, 3, 0) if num_prefills == 0 else (1, 1, 1, 2),
         ),
-        patch.object(
-            DeviceOperator,
-            "format_dsa_slot_mapping",
-            return_value=torch.zeros((3, 2), dtype=torch.int32),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan",
+            return_value=_mock_dsa_kv_plan(
+                format_dsa_slot_mapping=torch.zeros((3, 2), dtype=torch.int32),
+            ),
         ),
         patch.object(
             DeviceOperator,
@@ -376,10 +380,11 @@ def test_build_classifies_short_speculative_extends_as_decodes(
             "vllm_ascend.attention.utils.is_pd_decode_recompute_scheduler_enabled",
             return_value=False,
         ),
-        patch.object(
-            DeviceOperator,
-            "format_dsa_slot_mapping",
-            return_value=torch.zeros((14, 2), dtype=torch.int32),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan",
+            return_value=_mock_dsa_kv_plan(
+                format_dsa_slot_mapping=torch.zeros((14, 2), dtype=torch.int32),
+            ),
         ),
         patch(
             "vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa",
@@ -424,7 +429,7 @@ def test_build_req_metadata_preserves_zero_max_sequence_lengths():
     metadata = builder.build_req_metadata(
         common_attn_metadata=common_attn_metadata,
         seq_lens_cpu=torch.zeros(2, dtype=torch.int32),
-        num_reqs_actual=None,
+        num_actual_reqs=None,
         cos=torch.empty(0),
         sin=torch.empty(0),
     )
@@ -462,12 +467,12 @@ def test_build_req_metadata_clears_graph_padding_rows():
     metadata = builder.build_req_metadata(
         common_attn_metadata=common_attn_metadata,
         seq_lens_cpu=torch.tensor([8, 6, 7], dtype=torch.int32),
-        num_reqs_actual=1,
+        num_actual_reqs=1,
         cos=torch.ones(2),
         sin=torch.zeros(2),
     )
 
-    assert metadata.num_reqs_actual == 1
+    assert metadata.num_actual_reqs == 1
     assert torch.equal(
         metadata.start_pos,
         torch.tensor([6, 0, 0], dtype=torch.int32),
@@ -500,6 +505,10 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     decode_cu_seqlens_cmp_kv = torch.tensor([0, 2, 4], dtype=torch.int32)
     generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
     metadata_op = MagicMock(return_value=generated_metadata)
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_op=metadata_op,
+        get_dsa_sparse_attn_metadata_kwargs={"device": "cpu"},
+    )
     cos = torch.ones((3, 1, 1, 2))
     sin = torch.zeros((3, 1, 1, 2))
 
@@ -514,16 +523,7 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
             "get_dsa_decode_cu_seqlens_cmp_kv",
             return_value=decode_cu_seqlens_cmp_kv,
         ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_op",
-            return_value=metadata_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_kwargs",
-            return_value={"device": "cpu"},
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
     ):
         metadata = builder.build_req_metadata_for_drafting(
             draft_index=1,
@@ -592,6 +592,7 @@ def _make_impl(
             n_local_groups=1,
             window_size=16,
             compress_ratio=1,
+            vllm_config=SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto")),
             wq_a=linear,
             wq_b=linear,
             wkv=linear,
@@ -723,6 +724,12 @@ def test_forward_attention_routes_unified_req_metadata(
     def add_extra_kwargs(extra_kwargs: dict[str, Any], **kwargs) -> None:
         extra_kwargs.update(kwargs)
 
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_op=sparse_attn_op,
+        get_dsa_sparse_attn_base_kwargs={},
+    )
+    plan.add_dsa_sparse_attn_extra_kwargs.side_effect = add_extra_kwargs
+
     with (
         patch.object(
             DeviceOperator,
@@ -741,21 +748,7 @@ def test_forward_attention_routes_unified_req_metadata(
             "_mla_prolog_multistream",
             return_value=(q, torch.empty(0), None),
         ) as mla_prolog,
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_op",
-            return_value=sparse_attn_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_base_kwargs",
-            return_value={},
-        ),
-        patch.object(
-            DeviceOperator,
-            "add_dsa_sparse_attn_extra_kwargs",
-            side_effect=add_extra_kwargs,
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
     ):
@@ -853,8 +846,9 @@ class TestAscendDSACompressedCacheRouting:
         kv_cache = (torch.empty(0),)
         compress_kv_cache = torch.empty(0)
         state_cache = torch.empty(0)
+        plan = _mock_dsa_kv_plan()
 
-        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+        with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
             actual = impl._maybe_update_compressed_caches_and_select_topk(
                 layer_name="model.layers.0.self_attn.attn",
                 hidden_states=hidden_states,
@@ -884,7 +878,7 @@ class TestAscendDSACompressedCacheRouting:
             state_cache=state_cache,
             metadata=compressor_metadata,
         )
-        scatter.assert_called_once_with(
+        plan.dsa_kv_compress_scatter.assert_called_once_with(
             compress_kv_cache,
             compressed_kv,
             compress_slot_mapping,
@@ -909,8 +903,9 @@ class TestAscendDSACompressedCacheRouting:
         hidden_states = torch.ones((1, 4))
         state_cache = torch.empty(0)
         compress_kv_cache = torch.empty(0)
+        plan = _mock_dsa_kv_plan()
 
-        with patch.object(DeviceOperator, "dsa_kv_compress_scatter") as scatter:
+        with patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan):
             actual = impl._maybe_update_compressed_caches_and_select_topk(
                 layer_name="layer",
                 hidden_states=hidden_states,
@@ -930,14 +925,14 @@ class TestAscendDSACompressedCacheRouting:
                 state_cache=state_cache,
                 metadata=compressor_metadata,
             )
-            scatter.assert_called_once_with(
+            plan.dsa_kv_compress_scatter.assert_called_once_with(
                 compress_kv_cache,
                 compressed_kv,
                 compress_slot_mapping,
             )
         else:
             impl.compressor.assert_not_called()
-            scatter.assert_not_called()
+            plan.dsa_kv_compress_scatter.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -997,6 +992,12 @@ def test_forward_attention_sets_compressed_kv_args(
     def add_extra_kwargs(extra_kwargs: dict[str, Any], **kwargs) -> None:
         extra_kwargs.update(kwargs)
 
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_op=sparse_attn_op,
+        get_dsa_sparse_attn_base_kwargs={},
+    )
+    plan.add_dsa_sparse_attn_extra_kwargs.side_effect = add_extra_kwargs
+
     with (
         patch.object(
             DeviceOperator,
@@ -1020,21 +1021,7 @@ def test_forward_attention_sets_compressed_kv_args(
             "_maybe_update_compressed_caches_and_select_topk",
             return_value=topk_indices,
         ) as update_compressed_caches,
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_op",
-            return_value=sparse_attn_op,
-        ),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_base_kwargs",
-            return_value={},
-        ),
-        patch.object(
-            DeviceOperator,
-            "add_dsa_sparse_attn_extra_kwargs",
-            side_effect=add_extra_kwargs,
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
         patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
     ):
@@ -1065,6 +1052,28 @@ def test_forward_attention_sets_compressed_kv_args(
         assert sparse_kwargs["cmp_sparse_indices"] is topk_indices
     else:
         assert "cmp_sparse_indices" not in sparse_kwargs
+
+
+def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
+    impl = _make_impl()
+    impl.support_fp8_attention = True
+    impl.wo_a = SimpleNamespace(weight=torch.randn(1, 2, 2), weight_scale=None)
+    impl.wo_b = lambda x: x
+    o_proj_input = torch.randn(4, 1, 2)
+    output = torch.empty(4, 2)
+    projected = torch.randn(4, 1, 2)
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", return_value=projected) as batched,
+        patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_dynamic_mx_quant") as quant,
+    ):
+        impl._forward_o_proj(o_proj_input, output)
+
+    batched.assert_called_once()
+    quant.assert_not_called()
+    torch.testing.assert_close(output, projected.reshape(4, -1))
 
 
 def test_prepared_cache_rejects_multistream_before_cache_access():
@@ -1191,7 +1200,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
             pcp_context=pcp_context,
             pcp_cache_group_idx=1,
             common_ratio_to_sas_metadata={"local": True},
-            num_reqs_actual=7,
+            num_actual_reqs=7,
         )
 
     assert isinstance(actual, AscendDSAPCPMetadata)
@@ -1213,10 +1222,10 @@ def test_pcp_metadata_builds_from_manager_global_view():
     assert global_common.block_table_tensor is global_block_table
     assert torch.equal(global_common.slot_mapping, global_slot_mapping)
     assert global_common.attn_state is global_batch.attn_state
-    assert global_call.kwargs["num_reqs_actual"] == global_batch.num_reqs
+    assert global_call.kwargs["num_actual_reqs"] == global_batch.num_reqs
     assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
     assert build_local.call_args.args[2] is local_common
-    assert build_local.call_args.kwargs["num_reqs_actual"] == 7
+    assert build_local.call_args.kwargs["num_actual_reqs"] == 7
 
 
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])

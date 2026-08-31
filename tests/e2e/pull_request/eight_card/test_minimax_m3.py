@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import regex as re
@@ -80,6 +81,7 @@ def _configure_jemalloc() -> None:
     quantization="W8A8",
     graph_mode="full_decode_only",
 )
+@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"})
 @wait_until_npu_memory_free()
 def test_minimax_m3_gsm8k_one_case() -> None:
     _configure_jemalloc()
@@ -87,9 +89,9 @@ def test_minimax_m3_gsm8k_one_case() -> None:
     example_prompts = [GSM8K_PROMPT_TEMPLATE.format(question=GSM8K_QUESTION)]
     with VllmRunner(
         MINIMAX_M3_MODEL_PATH,
-        max_model_len=10240,
+        max_model_len=8192,
         max_num_seqs=8,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=2048,
         dtype="auto",
         tensor_parallel_size=8,
         enable_expert_parallel=True,
@@ -103,7 +105,6 @@ def test_minimax_m3_gsm8k_one_case() -> None:
         },
         additional_config={
             "enable_cpu_binding": True,
-            "enable_reduce_sample": True,
             "ascend_compilation_config": {
                 "enable_static_kernel": True,
                 "fuse_norm_quant": False,

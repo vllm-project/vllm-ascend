@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
@@ -168,6 +169,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         return output
 
 
+@eager_break_during_capture
 def dsa_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,

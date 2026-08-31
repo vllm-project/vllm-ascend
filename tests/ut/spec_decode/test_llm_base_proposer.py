@@ -76,16 +76,22 @@ class TestMultimodalImageTokenIndex:
 
         assert image_token_index == 789
 
-    def test_kimi_uses_media_placeholder_token_id(self):
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "KimiK25ForConditionalGeneration",
+            "KimiK3ForConditionalGeneration",
+            "AscendKimiK3ForConditionalGeneration",
+        ],
+    )
+    def test_kimi_uses_media_placeholder_token_id(self, model_name: str):
         config = SimpleNamespace(
             image_token_id=123,
             image_token_index=456,
             media_placeholder_token_id=789,
         )
 
-        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
-            "KimiK25ForConditionalGeneration", config
-        )
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(model_name, config)
 
         assert image_token_index == 789
 
@@ -103,12 +109,14 @@ def test_load_model_reads_validated_draft_window_size():
     proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
     proposer.vllm_config = SimpleNamespace(additional_config={"draft_window_size": 64})
     proposer.maybe_eager_context = nullcontext()
-    proposer._get_model = MagicMock(return_value=MagicMock())
+    draft_model = MagicMock()
+    proposer._get_model = MagicMock(return_value=draft_model)
     proposer.method = "eagle3"
     proposer.num_speculative_tokens = 4
     proposer.runner = SimpleNamespace(max_num_reqs=8)
     proposer.device = "cpu"
     proposer.parallel_drafting = False
+    proposer.supports_mm_inputs = False
     proposer._maybe_share_embeddings = MagicMock()
     proposer._maybe_share_topk_indices = MagicMock()
     proposer._maybe_share_lm_head = MagicMock()
