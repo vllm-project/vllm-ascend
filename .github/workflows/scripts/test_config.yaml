@@ -716,7 +716,16 @@
     - CMakeLists.txt
   tests:
     - tests/ut/
+
 # Single File
+- name: load_balance_proxy_server_example
+  optional: true
+  cpu_only: true
+  source_file_dependencies:
+    - examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py
+  tests:
+    - tests/ut/examples/test_load_balance_proxy_server_example.py
+
 - name: dependency_documentation
   optional: true
   cpu_only: true

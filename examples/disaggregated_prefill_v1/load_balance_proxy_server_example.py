@@ -381,15 +381,11 @@ class SharedProxyScheduler:
         self,
         role: ServerRole,
         load: float,
-        *,
-        active_tokens: bool = False,
-        kv_cache: bool = False,
     ) -> dict[str, Any]:
         key = self._pop_valid(role)
         entry = self._pool(role).servers[key]
-        if active_tokens:
-            entry.active_tokens += load
-        if kv_cache:
+        entry.active_tokens += load
+        if role is ServerRole.PREFILL:
             entry.active_kv_cache += load
         self._push_heap(role, key)
         return {"key": key, "host": entry.host, "port": entry.port}
@@ -407,26 +403,56 @@ class SharedProxyScheduler:
             return
         entry = self._pool(role).servers[key]
         if active_tokens:
-            entry.active_tokens -= load
+            entry.active_tokens = max(0.0, entry.active_tokens - load)
         if kv_cache:
             entry.active_kv_cache = max(0.0, entry.active_kv_cache - load)
         self._push_heap(role, key)
 
     def begin_request(self, load: float) -> dict[str, Any]:
-        """Pick a prefiller, reserve KV pressure, and count this as an active request."""
+        """Pick a prefiller, reserve token/KV pressure, and count this as an active request."""
         with self._lock:
-            picked = self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
+            picked = self._pick_server(ServerRole.PREFILL, load)
             self.request_num += 1
             return picked
 
-    def reserve_prefill_kv(self, load: float) -> dict[str, Any]:
-        """Pick a prefiller for recompute without bumping the active request count."""
+    def reserve_prefill(self, load: float) -> dict[str, Any]:
+        """Pick a prefiller for recompute and reserve its token/KV pressure."""
         with self._lock:
-            return self._pick_server(ServerRole.PREFILL, load, kv_cache=True)
+            return self._pick_server(ServerRole.PREFILL, load)
 
-    def pick_decoder(self, load: float) -> dict[str, Any]:
+    def finish_prefill_and_pick_decoder(
+        self,
+        prefiller_key: str,
+        prefiller_load: float,
+        decoder_load: float,
+    ) -> dict[str, Any]:
+        """Atomically move load accounting from prefill compute to decode."""
         with self._lock:
-            return self._pick_server(ServerRole.DECODE, load, active_tokens=True)
+            decoder = self._pick_server(ServerRole.DECODE, decoder_load)
+            self._release_load(ServerRole.PREFILL, prefiller_key, prefiller_load, active_tokens=True)
+            return decoder
+
+    def abort_prefill(self, key: str, load: float, is_initial_request: bool) -> None:
+        """Release all pressure reserved before decoder selection."""
+        with self._lock:
+            self._release_load(ServerRole.PREFILL, key, load, active_tokens=True, kv_cache=True)
+            if is_initial_request:
+                self.request_num = max(0, self.request_num - 1)
+
+    def abort_assignment(
+        self,
+        prefiller_key: str,
+        prefiller_load: float,
+        decoder_key: str,
+        decoder_load: float,
+        is_initial_request: bool,
+    ) -> None:
+        """Release load reserved by a completed prefill-to-decode assignment."""
+        with self._lock:
+            self._release_load(ServerRole.PREFILL, prefiller_key, prefiller_load, kv_cache=True)
+            self._release_load(ServerRole.DECODE, decoder_key, decoder_load, active_tokens=True)
+            if is_initial_request:
+                self.request_num = max(0, self.request_num - 1)
 
     def release_prefill_kv(self, key: str, load: float) -> None:
         with self._lock:
@@ -914,20 +940,47 @@ async def _abort_prefill_selection(
     *,
     is_initial_request: bool,
 ) -> None:
-    if is_initial_request:
-        await runtime.schedule("finish_request", prefiller_key, prefiller_score, None, 0.0, release_prefill_kv=True)
-    else:
-        await runtime.schedule("release_prefill_kv", prefiller_key, prefiller_score)
+    await asyncio.shield(
+        runtime.schedule(
+            "abort_prefill",
+            prefiller_key,
+            prefiller_score,
+            is_initial_request=is_initial_request,
+        )
+    )
+
+
+async def _abort_assignment(
+    runtime: WorkerRuntime,
+    prefiller_key: str,
+    prefiller_score: float,
+    decoder_key: str,
+    decoder_score: float,
+    *,
+    is_initial_request: bool,
+) -> None:
+    await asyncio.shield(
+        runtime.schedule(
+            "abort_assignment",
+            prefiller_key,
+            prefiller_score,
+            decoder_key,
+            decoder_score,
+            is_initial_request=is_initial_request,
+        )
+    )
 
 
 async def _finish_instance(runtime: WorkerRuntime, info: InstanceInfo, *, release_prefill_kv: bool) -> None:
-    await runtime.schedule(
-        "finish_request",
-        info.prefiller_key,
-        info.prefiller_score,
-        info.decoder_key,
-        info.decoder_score,
-        release_prefill_kv,
+    await asyncio.shield(
+        runtime.schedule(
+            "finish_request",
+            info.prefiller_key,
+            info.prefiller_score,
+            info.decoder_key,
+            info.decoder_score,
+            release_prefill_kv,
+        )
     )
 
 
@@ -943,37 +996,53 @@ async def assign_instances(
     prefiller_score = calculate_prefill_score(request_length)
     decoder_score = calculate_decode_score(request_length)
     request_id = next_req_id()
-    pick_prefill = "begin_request" if is_initial_request else "reserve_prefill_kv"
+    pick_prefill = "begin_request" if is_initial_request else "reserve_prefill"
     prefiller = await runtime.schedule(pick_prefill, prefiller_score)
     prefiller_key = prefiller["key"]
+    decoder = None
 
     try:
+        prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
         response = await send_request_to_service(
-            await runtime.get_client(ServerRole.PREFILL, prefiller_key),
+            prefiller_client,
             api,
             req_data,
             request_id,
             max_retries=args.max_retries,
             base_delay=args.retry_delay,
         )
-    except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
+        response_json = response.json()
+        kv_transfer_params = response_json.get("kv_transfer_params", {})
+        if kv_transfer_params:
+            req_data["kv_transfer_params"] = kv_transfer_params
+        prefiller_cached_tokens = extract_cached_tokens(response_json)
+
+        decoder = await runtime.schedule(
+            "finish_prefill_and_pick_decoder",
+            prefiller_key,
+            prefiller_score,
+            decoder_score,
+        )
+        decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
+    except (asyncio.CancelledError, Exception):
+        if decoder is None:
+            await _abort_prefill_selection(
+                runtime,
+                prefiller_key,
+                prefiller_score,
+                is_initial_request=is_initial_request,
+            )
+        else:
+            await _abort_assignment(
+                runtime,
+                prefiller_key,
+                prefiller_score,
+                decoder["key"],
+                decoder_score,
+                is_initial_request=is_initial_request,
+            )
         raise
 
-    response_json = response.json()
-    kv_transfer_params = response_json.get("kv_transfer_params", {})
-    if kv_transfer_params:
-        req_data["kv_transfer_params"] = kv_transfer_params
-    prefiller_cached_tokens = extract_cached_tokens(response_json)
-
-    try:
-        decoder = await runtime.schedule("pick_decoder", decoder_score)
-    except Exception:
-        await _abort_prefill_selection(runtime, prefiller_key, prefiller_score, is_initial_request=is_initial_request)
-        raise
-
-    prefiller_client = await runtime.get_client(ServerRole.PREFILL, prefiller_key)
-    decoder_client = await runtime.get_client(ServerRole.DECODE, decoder["key"])
     logger.debug("Using %s %s", prefiller_client.base_url, decoder_client.base_url)
     return InstanceInfo(
         request_id=request_id,
