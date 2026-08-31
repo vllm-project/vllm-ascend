@@ -18,11 +18,15 @@ def update_num_computed_tokens_for_batch_change(
     valid_sampled_token_count: torch.Tensor,
     prev_num_draft_tokens: torch.Tensor,
     cpu_num_computed_tokens: torch.Tensor,
+    *,
+    update_num_accepted_tokens: bool = True,
 ) -> None:
     """Correct num_computed_tokens for async spec decode drift.
 
     Requests that had drafts: corrected = prev_gpu + valid_count.
     New requests or non-draft (e.g. prefills): use CPU value directly.
+    Align-mode Mamba can preserve its fused postprocess output by setting
+    ``update_num_accepted_tokens=False``.
     """
     # Clamp because prev_positions can be -1 for new requests
     gather_indices = prev_positions.clamp(min=0)
@@ -36,7 +40,8 @@ def update_num_computed_tokens_for_batch_change(
 
     n = prev_positions.shape[0]
     num_computed_tokens[:n].copy_(torch.where(participating, corrected, cpu_num_computed_tokens))
-    num_accepted_tokens.copy_(torch.where(participating, valid_counts, num_accepted_tokens))
+    if update_num_accepted_tokens:
+        num_accepted_tokens.copy_(torch.where(participating, valid_counts, num_accepted_tokens))
 
 
 def correct_optimistic_seq_lens_cpu(

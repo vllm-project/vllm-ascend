@@ -68,6 +68,8 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
+    AscendDeviceType,
+    get_ascend_device_type,
     maybe_trans_nz,
     vllm_version_is,
     weak_ref_tensors,

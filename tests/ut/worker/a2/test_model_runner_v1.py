@@ -130,9 +130,12 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         def postprocess(**kwargs):
             kwargs["num_accepted_tokens_cpu_tensor"][:3].copy_(kwargs["num_accepted_tokens_gpu"][:3])
 
-        with patch(
-            "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu",
-            side_effect=postprocess,
+        with (
+            patch.object(runner, "_uses_device_mamba_accepted_tokens", return_value=False),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu",
+                side_effect=postprocess,
+            ),
         ):
             runner._update_states_after_model_execute(
                 torch.tensor([[10, 11, -1, -1], [10, 11, 12, -1], [10, 11, 12, 13]]),
@@ -236,6 +239,38 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
+
+    @staticmethod
+    def _make_attn_group(requires_exact_host_seq_lens: bool):
+        attn_group = MagicMock()
+        attn_group.get_metadata_builder.return_value = SimpleNamespace(
+            requires_exact_host_seq_lens=requires_exact_host_seq_lens
+        )
+        return attn_group
+
+    def test_seq_lens_cpu_sync_follows_target_and_draft_builder_capabilities(self):
+        runner = self._build_runner()
+        sink_group = self._make_attn_group(False)
+        fallback_group = self._make_attn_group(True)
+
+        runner.attn_groups = [[sink_group]]
+        runner.drafter = SimpleNamespace(draft_attn_groups=[sink_group])
+        runner._update_seq_lens_cpu_sync_requirement()
+        self.assertFalse(runner._needs_seq_lens_cpu_sync)
+
+        runner.attn_groups = [[fallback_group]]
+        runner._update_seq_lens_cpu_sync_requirement()
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
+
+        runner.attn_groups = [[sink_group]]
+        runner.drafter = SimpleNamespace(draft_attn_groups=[fallback_group])
+        runner._update_seq_lens_cpu_sync_requirement()
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
+
+        runner.use_compress = True
+        runner.drafter = None
+        runner._update_seq_lens_cpu_sync_requirement()
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
@@ -469,13 +504,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             ],
         )
         backend = MagicMock()
-        backend.get_kv_cache_shape.side_effect = (
-            lambda block_count, block_size_, num_heads, head_size: (
-                block_count,
-                block_size_,
-                num_heads,
-                head_size,
-            )
+        backend.get_kv_cache_shape.side_effect = lambda block_count, block_size_, num_heads, head_size: (
+            block_count,
+            block_size_,
+            num_heads,
+            head_size,
         )
         runner._kv_cache_spec_attn_group_iterator = lambda: [
             SimpleNamespace(
@@ -1398,6 +1431,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.synchronize_input_prep = nullcontext
         runner._update_states = MagicMock(return_value=None)
         runner.parallel_config = SimpleNamespace(distributed_executor_backend="external_launcher", data_parallel_size=2)
+        runner.uniform_decode_query_len = 8
         runner._dummy_run = MagicMock()
         runner._start_dump_data = MagicMock()
         runner.requests = {}
@@ -1406,7 +1440,8 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.execute_model(scheduler_output)
 
         runner._dummy_run.assert_called_once_with(
-            1,
+            8,
+            uniform_decode=True,
             skip_gdn_state_update=True,
         )
         runner._start_dump_data.assert_not_called()

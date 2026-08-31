@@ -348,6 +348,16 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
 
+    @property
+    def requires_exact_host_seq_lens(self) -> bool:
+        """Whether async speculative decode must correct host KV lengths.
+
+        Device-side tiling consumes the authoritative NPU sequence lengths.
+        Legacy attention paths still pass Python length lists to CANN and need
+        the host mirror to be corrected before metadata construction.
+        """
+        return self._fia_v2_sink_impl is None and self._flash_attn_impl is None
+
     def _split_decodes_and_prefills(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -507,14 +517,17 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
 
         block_table = common_attn_metadata.block_table_tensor
-        # Prefer _seq_lens_cpu (always available, updated during draft
-        # iterations) over seq_lens_cpu (None in async spec decode mode).
+        # Keep a host mirror for legacy attention paths and bookkeeping. Sink
+        # paths consume common_attn_metadata.seq_lens directly and only use this
+        # mirror as an upper bound, so it does not need an accepted-token D2H.
         if isinstance(common_attn_metadata._seq_lens_cpu, torch.Tensor):
-            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif isinstance(common_attn_metadata.seq_lens_cpu, torch.Tensor):
-            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+            seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+
+        seq_lens = seq_lens_cpu
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
@@ -530,11 +543,11 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
-        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        query_start_loc = common_attn_metadata.query_start_loc[: query_start_loc_cpu.shape[0]]
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
-        seq_lens_list = seq_lens.tolist()
+        host_seq_lens = seq_lens if self.requires_exact_host_seq_lens else seq_lens_cpu
+        seq_lens_list = host_seq_lens.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
         # constraint (sum of q lengths == hidden_states.shape[0]), bumping the
@@ -670,6 +683,10 @@ class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
     """Build GQA metadata while retaining expanded cache slots."""
 
     metadata_cls = AscendAttentionPCPMetadata
+
+    @property
+    def requires_exact_host_seq_lens(self) -> bool:
+        return True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

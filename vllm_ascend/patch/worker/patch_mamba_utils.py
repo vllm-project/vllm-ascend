@@ -247,6 +247,44 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
                     dst_state.copy_(src_state.clone())
 
 
+def postprocess_mamba_align_gpu_npu(
+    *,
+    bufs: "mamba_utils.MambaBuffers",
+    num_reqs: int,
+    num_accepted_tokens_gpu: torch.Tensor,
+    num_accepted_tokens_cpu_tensor: torch.Tensor,
+    input_batch: GPUInputBatch,
+    kv_cache_config: KVCacheConfig,
+    forward_context: dict[str, Any],
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+) -> None:
+    """Keep fused-postprocess accepted counts on device for the next step."""
+    del num_accepted_tokens_cpu_tensor
+    ctx = bufs.postprocess_align
+    assert ctx is not None
+    assert ctx.mamba_state_idx_buf is not None
+    assert ctx.num_scheduled_tokens_buf is not None
+    assert ctx.num_computed_tokens_buf is not None
+    assert ctx.num_draft_tokens_buf is not None
+
+    if not ctx.is_initialized:
+        ctx.initialize_from_forward_context(
+            kv_cache_config,
+            forward_context,
+            mamba_state_copy_funcs,
+            [input_batch.block_table[group_id].get_device_tensor(num_reqs) for group_id in ctx.mamba_group_ids],
+        )
+
+    ctx.run_fused_postprocess(
+        num_reqs=num_reqs,
+        num_accepted_tokens_gpu=num_accepted_tokens_gpu,
+        mamba_state_idx_gpu=ctx.mamba_state_idx_buf.gpu,
+        num_scheduled_tokens_gpu=ctx.num_scheduled_tokens_buf.gpu,
+        num_computed_tokens_gpu=ctx.num_computed_tokens_buf.gpu,
+        num_draft_tokens_gpu=ctx.num_draft_tokens_buf.gpu,
+    )
+
+
 def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
     raise RuntimeError(
         "Pointer-based Mamba batch memcpy requires Triton and is not available "
@@ -299,6 +337,8 @@ def preprocess_mamba(
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     copy_bufs: MambaCopyBuffers,
+    align_ctx: "mamba_utils.MambaSpecDecodeGPUContext | None" = None,
+    num_accepted_tokens_gpu: torch.Tensor | None = None,
 ):
     """
     Copy the mamba state of previous step to the last
@@ -317,6 +357,26 @@ def preprocess_mamba(
         mamba_state_idx.pop(req_id, None)
 
     copy_bufs.offset = 0
+    fused_ctx = align_ctx if align_ctx is not None and _can_launch_triton_batch_memcpy() else None
+    num_reqs = len(input_batch.req_ids)
+    if fused_ctx is not None:
+        assert num_accepted_tokens_gpu is not None
+        assert fused_ctx.mamba_state_idx_buf is not None
+        assert fused_ctx.precopy_src_col_buf is not None
+        assert fused_ctx.precopy_token_bias_buf is not None
+        if not fused_ctx.is_initialized:
+            fused_ctx.initialize_from_forward_context(
+                kv_cache_config,
+                forward_context,
+                mamba_state_copy_funcs,
+                [
+                    input_batch.block_table[group_id].get_device_tensor(num_reqs)
+                    for group_id in fused_ctx.mamba_group_ids
+                ],
+            )
+        fused_ctx.mamba_state_idx_buf.np[:num_reqs] = -1
+        fused_ctx.precopy_src_col_buf.np[:num_reqs] = -1
+
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -351,20 +411,43 @@ def preprocess_mamba(
         # And use block 1 to save the running state.
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         mamba_state_idx[req_id] = curr_state_idx
+        if fused_ctx is not None:
+            fused_ctx.mamba_state_idx_buf.np[i] = curr_state_idx
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-            mamba_utils.collect_mamba_copy_meta(
-                copy_bufs,
-                kv_cache_config,
-                mamba_state_copy_funcs,
-                mamba_group_ids,
-                prev_state_idx,
-                curr_state_idx,
-                input_batch.num_accepted_tokens_cpu[i] - 1,
-                req_state,
-                forward_context,
-            )
-            input_batch.num_accepted_tokens_cpu[i] = 1
-    if _can_launch_triton_batch_memcpy():
+            if fused_ctx is not None:
+                fused_ctx.precopy_src_col_buf.np[i] = prev_state_idx
+            else:
+                mamba_utils.collect_mamba_copy_meta(
+                    copy_bufs,
+                    kv_cache_config,
+                    mamba_state_copy_funcs,
+                    mamba_group_ids,
+                    prev_state_idx,
+                    curr_state_idx,
+                    input_batch.num_accepted_tokens_cpu[i] - 1,
+                    req_state,
+                    forward_context,
+                )
+                input_batch.num_accepted_tokens_cpu[i] = 1
+
+    if fused_ctx is not None:
+        state_idx = fused_ctx.mamba_state_idx_buf
+        src_col = fused_ctx.precopy_src_col_buf
+        token_bias = fused_ctx.precopy_token_bias_buf
+        state_idx.copy_to_gpu(num_reqs)
+        src_col.copy_to_gpu(num_reqs)
+        token_bias.gpu[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])
+        token_bias.gpu[:num_reqs].sub_(1)
+        fused_ctx.run_fused_precopy(
+            num_reqs=num_reqs,
+            state_idx_gpu=state_idx.gpu,
+            src_col_gpu=src_col.gpu,
+            token_bias_gpu=token_bias.gpu,
+            idx_mapping=None,
+        )
+        crossed_block = (src_col.gpu[:num_reqs] >= 0) & (src_col.gpu[:num_reqs] != state_idx.gpu[:num_reqs])
+        num_accepted_tokens_gpu[:num_reqs].masked_fill_(crossed_block, 1)
+    elif _can_launch_triton_batch_memcpy():
         # Only stage the pointer table here. This runs inside the existing
         # input-preparation event scope, so its pinned CPU buffers cannot be
         # reused until the asynchronous H2D copies finish. The state copy must

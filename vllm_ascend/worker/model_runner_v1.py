@@ -113,7 +113,7 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
@@ -150,6 +150,7 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
+from vllm_ascend.patch.worker.patch_mamba_utils import postprocess_mamba_align_gpu_npu
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
@@ -181,6 +182,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_c_env,
     global_stream,
+    is_310p,
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
@@ -455,13 +457,9 @@ class NPUModelRunner(GPUModelRunner):
 
         self._set_up_drafter()
 
-        # Backends that consume CPU seq_lens (AscendAttentionBackend,
-        # AscendMLABackend, and DSV4 compressed attention metadata) need
-        # ``optimistic_seq_lens_cpu`` to match the corrected GPU seq_lens
-        # in async spec decode mode; others (SFA, GDN, etc.) do not.
-        self._needs_seq_lens_cpu_sync = self.use_compress or issubclass(
-            self.attn_backend, (AscendAttentionBackend, AscendMLABackend)
-        )
+        # Refined after per-layer metadata builders are initialized. Compressed
+        # attention always constructs host metadata and therefore remains true.
+        self._needs_seq_lens_cpu_sync = self.use_compress
 
         # kv role
         self.is_kv_producer = False
@@ -852,12 +850,17 @@ class NPUModelRunner(GPUModelRunner):
             return
 
         # InputBatch can be condensed/reordered before the next input preparation.
-        # Keep the asynchronous D2H result in the previous iteration's row order,
-        # independently of InputBatch, until the existing event is synchronized.
+        # Keep the postprocess result in the previous iteration's row order until
+        # the next preparation remaps it to the current batch.
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
         if self.cache_config.mamba_cache_mode == "align":
-            mamba_utils.postprocess_mamba_align_gpu(
+            postprocess = (
+                postprocess_mamba_align_gpu_npu
+                if self._uses_device_mamba_accepted_tokens()
+                else mamba_utils.postprocess_mamba_align_gpu
+            )
+            postprocess(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
@@ -883,7 +886,7 @@ class NPUModelRunner(GPUModelRunner):
         self.num_accepted_tokens_event.record()
 
     def _sync_num_accepted_tokens(self, num_reqs: int, has_prev_mapping: bool) -> None:
-        """Publish accepted counts in current request order after the D2H event."""
+        """Publish CPU-fallback accepted counts in current request order."""
         accepted = self.num_accepted_tokens.np
         if not self.use_async_scheduling:
             # Synchronous scheduling already updates counts in current batch order.
@@ -899,6 +902,15 @@ class NPUModelRunner(GPUModelRunner):
         else:
             accepted[:num_reqs].fill(1)
         self.input_batch.num_accepted_tokens_cpu[:num_reqs] = accepted[:num_reqs]
+
+    def _uses_device_mamba_accepted_tokens(self) -> bool:
+        if (
+            not self.use_async_scheduling
+            or self.cache_config.mamba_cache_mode != "align"
+            or is_310p()
+        ):
+            return False
+        return self._get_mamba_bufs().postprocess_align is not None
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -1337,13 +1349,30 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # Sync num_accepted_tokens from CPU (set by
-        # _update_states_after_model_execute for hybrid models).
+        device_mamba_accepted_tokens = self._uses_device_mamba_accepted_tokens()
         if self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
+            if device_mamba_accepted_tokens:
+                torch.npu.current_stream().wait_event(self.num_accepted_tokens_event)
+                if prev_req_id_to_index:
+                    if prev_positions_gpu is None:
+                        self.prev_positions.copy_to_gpu(num_reqs)
+                        prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+                    gather_indices = prev_positions_gpu.clamp_min(0)
+                    mamba_ctx = self._get_mamba_bufs().postprocess_align
+                    assert mamba_ctx is not None
+                    previous_counts = mamba_ctx.num_accepted_tokens_out
+                    self.num_accepted_tokens.gpu[:num_reqs].copy_(
+                        previous_counts.index_select(0, gather_indices)
+                    )
+                    self.num_accepted_tokens.gpu[:num_reqs].masked_fill_(prev_positions_gpu < 0, 1)
+                else:
+                    self.num_accepted_tokens.gpu[:num_reqs].fill_(1)
+                self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
+            else:
+                self.num_accepted_tokens_event.synchronize()
+                self._sync_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
+                self.num_accepted_tokens.np[num_reqs:].fill(1)
+                self.num_accepted_tokens.copy_to_gpu()
         else:
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
@@ -1372,6 +1401,7 @@ class NPUModelRunner(GPUModelRunner):
                 valid_sampled_token_count_gpu,
                 self.prev_num_draft_tokens.gpu,
                 computed_token_tensor_cpu,
+                update_num_accepted_tokens=not device_mamba_accepted_tokens,
             )
         else:
             self.num_computed_tokens[:num_reqs].copy_(
@@ -2139,8 +2169,14 @@ class NPUModelRunner(GPUModelRunner):
                         # 0, and has_unfinished_requests in the outer loop
                         # returns True. before returning early here we call
                         # dummy run to ensure coordinate_batch_across_dp
-                        # is called into to avoid out of sync issues.
-                        self._dummy_run(1, skip_gdn_state_update=True)
+                        # is called into to avoid out of sync issues. Match the
+                        # active decode descriptor so an idle rank does not
+                        # downgrade graph mode across the DP group.
+                        self._dummy_run(
+                            self.uniform_decode_query_len,
+                            uniform_decode=True,
+                            skip_gdn_state_update=True,
+                        )
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2234,6 +2270,7 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn = None
                     mamba_bufs = self._get_mamba_bufs()
                     preprocess_bufs = mamba_bufs.preprocess
+                    device_mamba_accepted_tokens = self._uses_device_mamba_accepted_tokens()
                     mamba_utils.preprocess_mamba(
                         scheduler_output,
                         self.kv_cache_config,
@@ -2244,15 +2281,16 @@ class NPUModelRunner(GPUModelRunner):
                         self.compilation_config.static_forward_context,
                         self.model.get_mamba_state_copy_func(),
                         preprocess_bufs,
+                        align_ctx=mamba_bufs.postprocess_align if device_mamba_accepted_tokens else None,
+                        num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                     )
-                    # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                    # for requests whose state was copied to a new block.
-                    # Re-sync to GPU so the mamba kernel reads from the
-                    # correct initial state slot (init_token_idx = 0).
-                    self.num_accepted_tokens.np[:num_reqs] = (
-                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                    )
-                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                    if not device_mamba_accepted_tokens:
+                        # The CPU fallback resets accepted counts when state is
+                        # copied to a new block; publish those values to device.
+                        self.num_accepted_tokens.np[:num_reqs] = (
+                            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                        )
+                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
                     if mamba_bufs.postprocess_align is not None:
                         mamba_utils.stage_postprocess_inputs_to_gpu(
@@ -4003,6 +4041,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
             self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
+        self._update_seq_lens_cpu_sync_requirement()
+
         if (
             self.speculative_config
             and self.speculative_config.uses_extract_hidden_states()
@@ -5051,6 +5091,14 @@ class NPUModelRunner(GPUModelRunner):
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
+
+    def _update_seq_lens_cpu_sync_requirement(self) -> None:
+        attn_groups = [group for cache_groups in self.attn_groups for group in cache_groups]
+        draft_attn_groups = getattr(self.drafter, "draft_attn_groups", ()) if self.drafter is not None else ()
+        self._needs_seq_lens_cpu_sync = self.use_compress or any(
+            getattr(attn_group.get_metadata_builder(0), "requires_exact_host_seq_lens", True)
+            for attn_group in (*attn_groups, *draft_attn_groups)
+        )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
