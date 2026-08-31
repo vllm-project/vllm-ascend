@@ -24,6 +24,18 @@
 #include "torch_npu/csrc/aten/common/from_blob.h"
 
 namespace vllm_ascend {
+    extern void dcp_remap_compact_impl(
+        void *stream,
+        void *input,
+        void *output,
+        int64_t rows,
+        int64_t width,
+        int64_t aligned_width,
+        int64_t dcp_rank,
+        int64_t dcp_size,
+        int64_t interleave_size,
+        uint32_t block_dim);
+
   extern void bgmv_shrink_impl(
         AscendType type,
         void *stream,

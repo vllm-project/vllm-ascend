@@ -1001,6 +1001,16 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
             )
 
+        if hasattr(torch.ops._C_ascend, "dcp_remap_compact"):
+            original_dtype = topk_indices.dtype
+            remapped_indices = torch.ops._C_ascend.dcp_remap_compact(
+                topk_indices.to(torch.int32),
+                self.dcp_rank,
+                self.dcp_size,
+                self._dcp_interleave_size,
+            )
+            return remapped_indices.to(original_dtype)
+
         # Remap the topk indices from the replicated view to the DCP-local KV cache view.
         # We use float32 for better performance on Ascend.
         topk_indices_fp32 = topk_indices.to(torch.float32)

@@ -21,6 +21,7 @@
 #include <ATen/core/Formatting.h>
 #include "acl/acl.h"
 #include "acl/acl_rt.h"
+#include "tiling/platform/platform_ascendc.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/framework/utils/OpPreparation.h>
@@ -325,6 +326,66 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
         return AscendType::FP16;
     }
 }
+
+#ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
+at::Tensor dcp_remap_compact(const at::Tensor &topk_indices,
+                             int64_t dcp_rank, int64_t dcp_size,
+                             int64_t interleave_size)
+{
+    TORCH_CHECK(topk_indices.is_privateuseone(),
+                "dcp_remap_compact: topk_indices must be on an NPU");
+    TORCH_CHECK(topk_indices.scalar_type() == at::kInt,
+                "dcp_remap_compact: topk_indices must have dtype int32");
+    TORCH_CHECK(topk_indices.dim() >= 1,
+                "dcp_remap_compact: topk_indices must have at least one dimension");
+    TORCH_CHECK(dcp_size > 0, "dcp_remap_compact: dcp_size must be positive");
+    TORCH_CHECK(dcp_rank >= 0 && dcp_rank < dcp_size,
+                "dcp_remap_compact: dcp_rank must be in [0, dcp_size)");
+    TORCH_CHECK(interleave_size > 0,
+                "dcp_remap_compact: interleave_size must be positive");
+
+    at::Tensor input = topk_indices.contiguous();
+    at::Tensor output = at::empty_like(input);
+    if (input.numel() == 0) {
+        return output;
+    }
+
+    int64_t width = input.size(-1);
+    TORCH_CHECK(width > 0,
+                "dcp_remap_compact: the last dimension must be positive");
+    int64_t rows = input.numel() / width;
+    int64_t aligned_width = (width + 63) / 64 * 64;
+
+    auto platform = platform_ascendc::PlatformAscendCManager::GetInstance();
+    int64_t core_num = static_cast<int64_t>(platform->GetCoreNumAiv());
+    uint64_t ub_size = 0;
+    platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ub_size);
+    int64_t mask_bytes = ((aligned_width + 255) / 256) * 32;
+    uint64_t required_ub = static_cast<uint64_t>(
+        aligned_width * sizeof(int32_t) * 7 + mask_bytes * 3);
+    TORCH_CHECK(required_ub <= ub_size,
+                "dcp_remap_compact: row scratch does not fit in UB; width=",
+                width, ", required bytes=", required_ub,
+                ", UB bytes=", ub_size);
+
+    uint32_t block_dim = static_cast<uint32_t>(rows < core_num ? rows : core_num);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    void *input_ptr = input.data_ptr();
+    void *output_ptr = output.data_ptr();
+    at_npu::native::OpCommand cmd;
+    cmd.Name("dcp_remap_compact");
+    cmd.SetCustomHandler([stream, input_ptr, output_ptr, rows, width,
+                          aligned_width, dcp_rank, dcp_size, interleave_size,
+                          block_dim]() -> int {
+        dcp_remap_compact_impl(stream, input_ptr, output_ptr, rows, width,
+                               aligned_width, dcp_rank, dcp_size,
+                               interleave_size, block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return output;
+}
+#endif
 
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
 {
@@ -2060,6 +2121,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
+    ops.def(
+        "dcp_remap_compact(Tensor topk_indices, int dcp_rank, "
+        "                  int dcp_size, int interleave_size) -> Tensor");
+    ops.impl("dcp_remap_compact", torch::kPrivateUse1,
+             &vllm_ascend::dcp_remap_compact);
+
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 
