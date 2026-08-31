@@ -85,6 +85,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "causal_conv1d_v310"
         "recurrent_gated_delta_rule_v310"
         "chunk_fwd_o"
+        "chunk_gated_delta_rule_compute_wy"
         "chunk_gated_delta_rule_fwd_h"
         "copy_and_expand_dflash_inputs"
     )
