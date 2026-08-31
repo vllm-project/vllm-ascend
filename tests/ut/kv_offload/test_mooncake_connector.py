@@ -3297,6 +3297,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_uses_full_blocks_for_prefix(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.use_sfa_sparse = True
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16
@@ -3319,6 +3320,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_ignores_empty_regular_kv_shard(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.use_sfa_sparse = True
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16
@@ -3341,7 +3343,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_when_only_remote_enables_dcp(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = False
-        worker.vllm_config = MagicMock()
+        worker.use_sfa_sparse = True
         worker.pcp_size = 1
         worker.dcp_size = 1
         worker.block_size = 16
@@ -3356,11 +3358,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             num_computed_tokens=0,
         )
 
-        with patch(
-            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.model_uses_sfa_sparse",
-            return_value=True,
-        ):
-            local_ids, remote_ids = worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
+        local_ids, remote_ids = worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
 
         self.assertEqual(local_ids, ([20, 21],))
         self.assertEqual(remote_ids, ([20, 21],))
@@ -3368,6 +3366,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_requires_full_blocks_for_prefix(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.use_sfa_sparse = True
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16

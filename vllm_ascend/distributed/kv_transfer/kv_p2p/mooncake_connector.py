@@ -2064,6 +2064,7 @@ class MooncakeConnectorWorker:
         self.vllm_config = vllm_config
         self.ascend_config = get_ascend_config()
         self.engine_id = engine_id
+        self.use_sfa_sparse = model_uses_sfa_sparse(vllm_config.model_config)
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
@@ -3467,9 +3468,7 @@ class MooncakeConnectorWorker:
         self,
         meta: ReqMeta,
     ) -> tuple[BlockIds, BlockIds]:
-        remote_uses_replicated_indexer = (
-            model_uses_sfa_sparse(self.vllm_config.model_config) and meta.remote_dcp_size > 1
-        )
+        remote_uses_replicated_indexer = self.use_sfa_sparse and meta.remote_dcp_size > 1
         if not (self.enable_sfa_dcp_replicated_indexer or remote_uses_replicated_indexer):
             return tuple(), tuple()
         if meta.num_external_tokens <= 0 or not meta.remote_block_ids or not meta.local_block_ids:
