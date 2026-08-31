@@ -9,7 +9,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing_extensions import override
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, replace
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -113,7 +112,6 @@ def _is_glm_model(model_config) -> bool:
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
-    @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Expose the validated draft model config during model construction.
 
