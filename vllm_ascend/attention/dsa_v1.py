@@ -607,6 +607,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     ).to(torch.bfloat16)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
         self.start_pos_decode = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
+        self.prefill_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
+        self.prefill_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.decode_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.decode_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
         self.prefill_qli_seqused_k = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
@@ -908,89 +910,41 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-        if self.compressor_ratio <= 1:
+        sas_kwargs = dict(
+            metadata_kwargs,
+            num_heads_q=n_local_heads,
+            num_heads_kv=1,
+            head_dim=self.model_config.get_head_size(),
+            cu_seqlens_q=prefill_query_start_loc,
+            cu_seqlens_ori_kv=prefill_query_start_loc,
+            cu_seqlens_cmp_kv=(cu_c4_cmp_seqlen_list if self.compressor_ratio == 4 else cu_c128_cmp_seqlen_list),
+            seqused_q=self.seqused_q,
+            seqused_kv=self.seq_lens[reqs_start:],
+            max_seqlen_q=seq_lens_q.max(),
+            max_seqlen_kv=self.seq_lens[reqs_start:].max(),
+            batch_size=len(self.seq_lens[reqs_start:]),
+            cmp_ratio=(1 if self.compressor_ratio <= 1 else 4 if self.compressor_ratio == 4 else 128),
+            ori_mask_mode=4,
+            ori_win_left=self.model_config.hf_config.sliding_window - 1,
+            ori_win_right=0,
+            layout_q="TND",
+            layout_kv="PA_ND",
+            has_ori_kv=True,
+            has_cmp_kv=self.compressor_ratio > 1,
+        )
+        if self.compressor_ratio > 1:
+            sas_kwargs["cmp_mask_mode"] = 3
+        if self.compressor_ratio == 4:
+            sas_kwargs["cmp_topk"] = index_topk
+
+        def get_sas_metadata() -> torch.Tensor:
             if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
-                self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(
-                    **metadata_kwargs,
-                    num_heads_q=n_local_heads,
-                    num_heads_kv=1,
-                    head_dim=self.model_config.get_head_size(),
-                    cu_seqlens_q=prefill_query_start_loc,
-                    cu_seqlens_ori_kv=prefill_query_start_loc,
-                    cu_seqlens_cmp_kv=None,
-                    seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[reqs_start:],
-                    max_seqlen_q=seq_lens_q.max(),
-                    max_seqlen_kv=self.seq_lens[reqs_start:].max(),
-                    batch_size=len(self.seq_lens[reqs_start:]),
-                    cmp_ratio=1,
-                    ori_mask_mode=4,  # 4:sliding window
-                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
-                    ori_win_right=0,
-                    layout_q="TND",
-                    layout_kv="PA_ND",
-                    has_ori_kv=True,
-                    has_cmp_kv=False,
-                )
-            sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
-        elif self.compressor_ratio == 4:
-            if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
-                self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(
-                    **metadata_kwargs,
-                    num_heads_q=n_local_heads,
-                    num_heads_kv=1,
-                    head_dim=self.model_config.get_head_size(),
-                    cu_seqlens_q=prefill_query_start_loc,
-                    cu_seqlens_ori_kv=prefill_query_start_loc,
-                    cu_seqlens_cmp_kv=cu_c4_cmp_seqlen_list,
-                    seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[reqs_start:],
-                    max_seqlen_q=seq_lens_q.max(),
-                    max_seqlen_kv=self.seq_lens[reqs_start:].max(),
-                    batch_size=len(self.seq_lens[reqs_start:]),
-                    cmp_topk=index_topk,
-                    # topk=index_topk,
-                    cmp_ratio=4,
-                    ori_mask_mode=4,
-                    cmp_mask_mode=3,
-                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
-                    ori_win_right=0,
-                    layout_q="TND",
-                    layout_kv="PA_ND",
-                    has_ori_kv=True,
-                    has_cmp_kv=True,
-                )
-            sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
-        else:
-            if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
-                self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(
-                    **metadata_kwargs,
-                    num_heads_q=n_local_heads,
-                    num_heads_kv=1,
-                    head_dim=self.model_config.get_head_size(),
-                    cu_seqlens_q=prefill_query_start_loc,
-                    cu_seqlens_ori_kv=prefill_query_start_loc,
-                    cu_seqlens_cmp_kv=cu_c128_cmp_seqlen_list,
-                    seqused_q=self.seqused_q,
-                    seqused_kv=self.seq_lens[reqs_start:],
-                    max_seqlen_q=seq_lens_q.max(),
-                    max_seqlen_kv=self.seq_lens[reqs_start:].max(),
-                    batch_size=len(self.seq_lens[reqs_start:]),
-                    cmp_ratio=128,  #
-                    ori_mask_mode=4,  # 4:sliding window
-                    cmp_mask_mode=3,  # 3:causal
-                    ori_win_left=self.model_config.hf_config.sliding_window - 1,
-                    ori_win_right=0,
-                    layout_q="TND",
-                    layout_kv="PA_ND",
-                    has_ori_kv=True,
-                    has_cmp_kv=True,
-                )
-            sas_metadata = self.prefill_ratio_to_sas_metadata[layer_name]
+                self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(**sas_kwargs)
+            return self.prefill_ratio_to_sas_metadata[layer_name]
+
         qli_cu_seqlens_q = None
         qli_seqused_k = None
         qli_cmp_residual_k = None
-        qli_metadata = None
         if self.compressor_ratio == 4:
             # QLI v2 PA_BBND reads the compressed K length plus the residual
             # from the original length. Write both into persistent builder
@@ -1008,26 +962,54 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 4,
                 out=qli_cmp_residual_k,
             )
+
+        def get_qli_metadata() -> torch.Tensor:
+            assert qli_cu_seqlens_q is not None
+            assert qli_seqused_k is not None
+            assert qli_cmp_residual_k is not None
             if self.prefill_ratio_to_sas_metadata.get("qli") is None:
-                self.prefill_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-                    num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
-                    num_heads_k=1,
-                    head_dim=self.model_config.hf_config.index_head_dim,  # 128
-                    topk=self.model_config.hf_config.index_topk,
-                    quant_mode=2,
-                    cu_seqlens_q=qli_cu_seqlens_q,
-                    seqused_k=qli_seqused_k,
-                    cmp_residual_k=qli_cmp_residual_k,
-                    batch_size=len(self.seq_lens[reqs_start:]),
-                    max_seqlen_q=seq_lens_q.max().item(),
-                    max_seqlen_k=max_seq_lens // 4,
-                    layout_q="TND",
-                    layout_k="PA_BBND",
-                    mask_mode=3,
-                    cmp_ratio=4,
-                    device=str(self.seqused_q.device),
+                self.prefill_ratio_to_sas_metadata["qli"] = (
+                    torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                        num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
+                        num_heads_k=1,
+                        head_dim=self.model_config.hf_config.index_head_dim,  # 128
+                        topk=self.model_config.hf_config.index_topk,
+                        quant_mode=2,
+                        cu_seqlens_q=qli_cu_seqlens_q,
+                        seqused_k=qli_seqused_k,
+                        cmp_residual_k=qli_cmp_residual_k,
+                        batch_size=len(self.seq_lens[reqs_start:]),
+                        max_seqlen_q=max_query_len,
+                        max_seqlen_k=max_seq_lens // 4,
+                        layout_q="TND",
+                        layout_k="PA_BBND",
+                        mask_mode=3,
+                        cmp_ratio=4,
+                        device=str(self.seqused_q.device),
+                    )
                 )
-            qli_metadata = self.prefill_ratio_to_sas_metadata.get("qli")
+            return self.prefill_ratio_to_sas_metadata["qli"]
+
+        if self._device_metadata_enabled:
+
+            def build_sas_metadata() -> None:
+                self.prefill_sas_metadata[:1024] = get_sas_metadata()
+
+            def build_qli_metadata() -> None:
+                self.prefill_qli_metadata[:1024] = get_qli_metadata()
+
+            if self.compressor_ratio == 4:
+                self._device_metadata_tasks += (
+                    DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.prefill_qli_metadata)),
+                )
+            self._device_metadata_tasks += (
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.prefill_sas_metadata)),
+            )
+            sas_metadata = self.prefill_sas_metadata
+            qli_metadata = self.prefill_qli_metadata if self.compressor_ratio == 4 else None
+        else:
+            sas_metadata = get_sas_metadata()
+            qli_metadata = get_qli_metadata() if self.compressor_ratio == 4 else None
 
         return AscendDSAPrefillMetadata(
             attn_mask=None,
@@ -2218,6 +2200,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             if swa_prefill_metadata.dspark_swa_indices is not None:
                 extra_attn_kwargs["ori_sparse_indices"] = swa_prefill_metadata.dspark_swa_indices
             notify_kv_cache_written(layer_name)
+            wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_prefill_metadata.sas_metadata))
             record_attention_compute_start()
             return attn_op(
                 q,
@@ -2312,6 +2295,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                 weights = weights_proj_output * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
                 # lightning_indexer
                 indexer_scale_prefill_metadata = _require_prefill_metadata(indexer_kv_scale_metadata)
+                qli_metadata = indexer_scale_prefill_metadata.qli_metadata
+                assert qli_metadata is not None
+                wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(qli_metadata))
                 compress_topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
                     query=q_quant,
                     key=indexer_k_cache,
@@ -2324,7 +2310,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                     seqused_k=indexer_scale_prefill_metadata.qli_seqused_k,
                     cmp_residual_k=indexer_scale_prefill_metadata.qli_cmp_residual_k,
                     block_table=indexer_scale_prefill_metadata.block_table,
-                    metadata=indexer_scale_prefill_metadata.qli_metadata,
+                    metadata=qli_metadata,
                     layout_q="TND",
                     layout_k="PA_BBND",
                     mask_mode=3,
@@ -2336,6 +2322,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=prefill_offset)
 
             notify_kv_cache_written(layer_name)
+            wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_prefill_metadata.sas_metadata))
             record_attention_compute_start()
 
             if self.compress_ratio == 4:
@@ -2884,9 +2871,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             assert indexer_kv_scale_metadata.decode is not None
             dsa_meta = indexer_kv_scale_metadata.decode
-            qli_metadata = dsa_meta.qli_metadata
-            assert qli_metadata is not None
-            wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(qli_metadata))
+        qli_metadata = dsa_meta.qli_metadata
+        assert qli_metadata is not None
+        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(qli_metadata))
         topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=q,
             key=indexer_k_cache,
@@ -2899,7 +2886,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             seqused_k=dsa_meta.qli_seqused_k,
             cmp_residual_k=dsa_meta.qli_cmp_residual_k,
             block_table=dsa_meta.block_table,
-            metadata=dsa_meta.qli_metadata,
+            metadata=qli_metadata,
             layout_q="TND",
             layout_k="PA_BBND",
             mask_mode=3,
