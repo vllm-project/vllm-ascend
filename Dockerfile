@@ -88,8 +88,7 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
 # Install _rust_tool_parser for the Rust frontend.
 RUN cd /vllm-workspace/vllm && \
     python3 -m pip install setuptools-rust && \
-    ./build_rust.sh && \
-    rm -rf rust/target
+    ./build_rust.sh
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
