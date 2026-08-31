@@ -38,6 +38,7 @@ class TestBatchInvariant:
             batch_invariant.torch.ops.batch_invariant_ops,
             "npu_reduce_sum_batch_invariant",
             return_value=expected,
+            create=True,
         ) as mock_reduce:
             result = batch_invariant.reduce_sum(x, dim=-1, keepdim=True)
 
