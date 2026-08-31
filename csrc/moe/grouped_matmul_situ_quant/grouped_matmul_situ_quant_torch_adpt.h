@@ -56,17 +56,12 @@
  * float8_e8m0fnu (M, ceil((N/2)/64), 2)) — shapes aligned with the
  * golden split chain, so downstream sees the V2 naming/typing contract.
  */
-#include "torch_kernel_helper.h"
-#include "tiling/platform/platform_ascendc.h"
-#include <map>
 #include <mutex>
 #include <tuple>
 
 #include "torch_npu/csrc/aten/NPUNativeFunctions.h"
 #include "torch_npu/csrc/aten/CustomFunctions.h"
 #include "torch_npu/csrc/core/npu/NPUFormat.h"
-
-#include "aclrtlaunch_gmm_situ_vcv_dev.h"
 
 namespace ascend_kernel {
 
@@ -85,71 +80,7 @@ constexpr int64_t kDequantModeMx = 1;
 constexpr int64_t kDequantDtypeBf16 = 0;
 constexpr int64_t kQuantModeMx = 1;
 
-constexpr uint32_t SITU_BASE_M_DEV = 128;
 constexpr uint32_t SITU_MAIN_BLOCK_N2_DEV = 64;
-
-// ---- tiling blob layout (must match op_kernel/gmsq_vcv_controller.h) ----
-struct SituTilingHeaderHostDev { // 64B
-    uint32_t coreNum;
-    uint32_t activeCount; // dev entry: E (full expert count)
-    uint32_t kSize;
-    uint32_t nSize;
-    uint32_t baseM;
-    uint32_t mainBlockSize;
-    uint32_t firstTailBlockSize;
-    uint32_t reserved; // dev entry: groupListType
-    uint64_t mainBlockCount;
-    uint64_t firstTailBlockCount;
-    float beta;
-    float invBeta;
-    float linearBeta;
-    float invLinearBeta;
-};
-
-using TilingKey = std::tuple<int64_t, int64_t, int64_t, double, double, int64_t>; // k, n, e, beta, lbeta, glType
-
-at::Tensor GetStaticTilingDev(int64_t k, int64_t n, int64_t e, double beta, double linearBeta, int64_t glType,
-                              uint32_t coreNum)
-{
-    static std::mutex mu;
-    static std::map<TilingKey, at::Tensor> cache;
-    TilingKey key{k, n, e, beta, linearBeta, glType};
-    {
-        std::lock_guard<std::mutex> lk(mu);
-        auto it = cache.find(key);
-        if (it != cache.end()) {
-            return it->second;
-        }
-    }
-    const int64_t n2 = n / 2;
-    SituTilingHeaderHostDev hdr = {};
-    hdr.coreNum = coreNum;
-    hdr.activeCount = static_cast<uint32_t>(e);
-    hdr.kSize = static_cast<uint32_t>(k);
-    hdr.nSize = static_cast<uint32_t>(n);
-    hdr.baseM = SITU_BASE_M_DEV;
-    hdr.mainBlockSize = SITU_MAIN_BLOCK_N2_DEV;
-    hdr.firstTailBlockSize = 0;
-    hdr.reserved = static_cast<uint32_t>(glType);
-    hdr.mainBlockCount = static_cast<uint64_t>(n2 / SITU_MAIN_BLOCK_N2_DEV);
-    hdr.firstTailBlockCount = 0;
-    hdr.beta = static_cast<float>(beta);
-    hdr.invBeta = 1.0f / static_cast<float>(beta);
-    hdr.linearBeta = static_cast<float>(linearBeta);
-    hdr.invLinearBeta = 1.0f / static_cast<float>(linearBeta);
-
-    auto blobCpu = at::empty({static_cast<int64_t>(sizeof(hdr))},
-                             at::TensorOptions().device(at::kCPU).dtype(at::kByte).pinned_memory(true));
-    memcpy(blobCpu.data_ptr<uint8_t>(), &hdr, sizeof(hdr));
-    auto tilingNpu = blobCpu.to(at::device(at::kPrivateUse1), /*non_blocking=*/false, /*copy=*/true);
-    std::lock_guard<std::mutex> lk(mu);
-    auto it = cache.find(key);
-    if (it != cache.end()) {
-        return it->second;
-    }
-    cache.emplace(key, tilingNpu);
-    return tilingNpu;
-}
 
 bool IsNullOrUndefined(const std::optional<at::Tensor> &t)
 {
@@ -237,7 +168,6 @@ std::tuple<at::Tensor, at::Tensor> RunV2Core(const at::Tensor &x, const at::Tens
     TORCH_CHECK(groupList.scalar_type() == at::kLong, "groupList must be int64");
     TORCH_CHECK(groupList.numel() == e, "groupList length must equal E");
 
-    const int64_t scaleRowBytes = (n2 + 63) / 64 * 2;
     auto dev = at::device(at::kPrivateUse1);
     at::Tensor y = at::empty({mCap, n2}, dev.dtype(at::kFloat8_e4m3fn));
     at::Tensor yScale = at::empty({mCap, (n2 + 63) / 64, 2}, dev.dtype(at::kFloat8_e8m0fnu)); // = (M, ceil(N/128), 2), golden 同形
@@ -249,18 +179,9 @@ std::tuple<at::Tensor, at::Tensor> RunV2Core(const at::Tensor &x, const at::Tens
         return std::make_tuple(y, yScale);
     }
 
-    auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance();
-    const int32_t aicNum = static_cast<int32_t>(ascendcPlatform->GetCoreNumAic());
-    const int64_t sysWs = static_cast<int64_t>(ascendcPlatform->GetLibApiWorkSpaceSize());
-    at::Tensor workspace = at::empty({sysWs > 0 ? sysWs : 32}, dev.dtype(at::kByte));
-
-    auto tilingNpu = GetStaticTilingDev(k, n, e, beta, linearBeta, groupListType,
-                                        static_cast<uint32_t>(aicNum > 0 ? aicNum : 1));
-    uint32_t blockDim = static_cast<uint32_t>(aicNum > 0 ? aicNum : 1);
-
-    EXEC_KERNEL_CMD(gmm_situ_vcv_dev, blockDim, x, xScale, wNzStacked, wScaleStacked, groupList, y, yScale,
-                    workspace, tilingNpu);
-    (void)scaleRowBytes;
+    EXEC_NPU_CMD(aclnnGroupedMatmulSituQuant, x, xScale, wNzStacked,
+                 wScaleStacked, groupList, groupListType, beta, linearBeta,
+                 y, yScale);
     return std::make_tuple(y, yScale);
 }
 

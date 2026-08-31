@@ -21,9 +21,9 @@
 
 #if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
 
-extern "C" __global__ __aicore__ void gmm_situ_vcv_dev(GM_ADDR x, GM_ADDR xScale, GM_ADDR w, GM_ADDR wScale,
-                                                       GM_ADDR groupList, GM_ADDR y, GM_ADDR yScale,
-                                                       GM_ADDR workspace, GM_ADDR tiling)
+extern "C" __global__ __aicore__ void grouped_matmul_situ_quant(
+    GM_ADDR x, GM_ADDR xScale, GM_ADDR w, GM_ADDR wScale, GM_ADDR groupList,
+    GM_ADDR y, GM_ADDR yScale, GM_ADDR workspace, GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     AscendC::AscendCUtils::SetOverflow(1);

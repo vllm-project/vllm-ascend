@@ -13,6 +13,7 @@
  *           block) is shared verbatim by both entries.
  */
 #include "kernel_operator.h"
+#include "grouped_matmul_situ_quant_tiling.h"
 
 #if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
 #include "lib/matmul_intf.h"
@@ -29,24 +30,6 @@ using GQ::BasicBlockOffsetParam;
 using SituBasicBlock =
     GQ::GMMSQWeightQuantVcvBasicBlock<fp8_e4m3fn_t, fp4x2_e2m1_t, fp8_e8m0_t, fp8_e8m0_t, fp8_e4m3fn_t, fp8_e8m0_t,
                                       GQ::MXA8W4_NZNK, GQ::VEC_ANTIQUANT_CONFIG_DYNAMIC>;
-
-// ---- tiling blob layout (must match op_host/{gmm_situ_vcv,gmm_situ_vcv_dev}.cpp) ----
-struct SituTilingHeader { // 64B
-    uint32_t coreNum;
-    uint32_t activeCount; // eager: pruned active-group count; dev entry: E (full expert count)
-    uint32_t kSize;
-    uint32_t nSize;
-    uint32_t baseM;
-    uint32_t mainBlockSize;
-    uint32_t firstTailBlockSize;
-    uint32_t reserved;
-    uint64_t mainBlockCount;
-    uint64_t firstTailBlockCount;
-    float beta;
-    float invBeta;
-    float linearBeta;
-    float invLinearBeta;
-};
 
 struct SituGroupEntry { // 56B
     uint64_t mSize;
