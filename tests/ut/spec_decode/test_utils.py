@@ -189,6 +189,24 @@ def test_cpu_and_gpu_corrections_agree():
     np.testing.assert_array_equal(optimistic, gpu_seq_lens)
 
 
+def test_num_computed_update_preserves_fused_mamba_accepted_counts():
+    num_computed = torch.tensor([100, 200], dtype=torch.int32)
+    mamba_accepted = torch.tensor([1, 4], dtype=torch.int32)
+
+    update_num_computed_tokens_for_batch_change(
+        num_computed,
+        mamba_accepted,
+        torch.tensor([0, 1], dtype=torch.int32),
+        torch.tensor([3, 2], dtype=torch.int32),
+        torch.tensor([2, 3], dtype=torch.int32),
+        torch.tensor([103, 204], dtype=torch.int32),
+        update_num_accepted_tokens=False,
+    )
+
+    torch.testing.assert_close(num_computed, torch.tensor([103, 202], dtype=torch.int32))
+    torch.testing.assert_close(mamba_accepted, torch.tensor([1, 4], dtype=torch.int32))
+
+
 def test_sliding_window_updates_host_length_mirrors():
     adapter = SlidingWindowAdapter(
         window_size=128,

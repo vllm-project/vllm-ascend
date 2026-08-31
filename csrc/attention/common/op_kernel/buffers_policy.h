@@ -51,26 +51,33 @@ private:
 };
 
 // 申请2个buffer，乒乓轮转
-template<BufferType bufferType, SyncType syncType = SyncType::INNER_CORE_SYNC>
+template<BufferType bufferType, SyncType syncType = SyncType::INNER_CORE_SYNC,
+         SyncMode syncMode = SyncMode::SET_WAIT_FLAG, IdSource idSource = IdSource::INTERNAL>
 class BuffersPolicyDB {
 public:
-    __aicore__ inline void Init(BufferManager<bufferType> &bufferManager, uint32_t size){
-        ping_ = bufferManager.template AllocBuffer<syncType>(size);
-        pong_ = bufferManager.template AllocBuffer<syncType>(size);
+    __aicore__ inline void Init(BufferManager<bufferType> &bufferManager, uint32_t size,
+                                uint32_t pingId = 0U, uint32_t pongId = 0U){
+        ping_ = bufferManager.template AllocBuffer<syncType, syncMode>(size);
+        pong_ = bufferManager.template AllocBuffer<syncType, syncMode>(size);
 
-        ping_.Init();
-        pong_.Init();
+        if constexpr (idSource == IdSource::INTERNAL) {
+            ping_.template Init<idSource>();
+            pong_.template Init<idSource>();
+        } else {
+            ping_.template Init<idSource>(pingId);
+            pong_.template Init<idSource>(pongId);
+        }
     }
 
     __aicore__ inline void Uninit(BufferManager<bufferType> &bufferManager){
-        ping_.UnInit();
-        pong_.UnInit();
+        ping_.template UnInit<idSource>();
+        pong_.template UnInit<idSource>();
 
-        bufferManager.FreeBuffer(ping_);
-        bufferManager.FreeBuffer(pong_);
+        bufferManager.template FreeBuffer<syncType, syncMode>(ping_);
+        bufferManager.template FreeBuffer<syncType, syncMode>(pong_);
     }
 
-    __aicore__ inline Buffer<bufferType, syncType> &Get() {
+    __aicore__ inline Buffer<bufferType, syncType, syncMode> &Get() {
         if (flag1_) { // 1
             flag1_ = 0;
             return ping_;
@@ -81,7 +88,7 @@ public:
     }
 
     // 需要与Get联用， 首次调用Get，第二次调用GetPre(Q复用)
-    __aicore__ inline Buffer<bufferType, syncType> &GetPre() {
+    __aicore__ inline Buffer<bufferType, syncType, syncMode> &GetPre() {
         if (flag1_) { // 0->1
             return pong_;
         } else { // 1->0
@@ -90,7 +97,7 @@ public:
     }
 
     // 需要与Get,GetPre联用， 首次调用Get，第二次调用GetPre,第三次复用时GetReused(KV复用)
-    __aicore__ inline Buffer<bufferType, syncType> &GetReused() {
+    __aicore__ inline Buffer<bufferType, syncType, syncMode> &GetReused() {
         if (flag2_ == 0) {
             flag2_ = 1;
             return pong_;
@@ -100,7 +107,7 @@ public:
         }
     }
 
-    __aicore__ inline Buffer<bufferType, syncType> &GetReused(bool isNextS2IdxNoChange) {
+    __aicore__ inline Buffer<bufferType, syncType, syncMode> &GetReused(bool isNextS2IdxNoChange) {
         if (isNextS2IdxNoChange) {
             if (flag2_ == 0) {
                 return pong_;
@@ -113,8 +120,8 @@ public:
     }
 
 private:
-    Buffer<bufferType, syncType> ping_;
-    Buffer<bufferType, syncType> pong_;
+    Buffer<bufferType, syncType, syncMode> ping_;
+    Buffer<bufferType, syncType, syncMode> pong_;
     uint32_t flag1_ = 0;
     uint32_t flag2_ = 0;
 };

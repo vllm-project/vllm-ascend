@@ -38,7 +38,28 @@ using AscendC::HardEvent;
 using AscendC::SetFlag;
 using AscendC::WaitFlag;
 
-enum class LayOutTypeEnum { None = 0, LAYOUT_BSH = 1, LAYOUT_SBH = 2, LAYOUT_BNSD = 3, LAYOUT_TND = 4, LAYOUT_NTD_TND = 5};
+enum class LayOutTypeEnum {
+    None = 0,
+    LAYOUT_BSH = 1,
+    LAYOUT_SBH = 2,
+    LAYOUT_BNSD = 3,
+    LAYOUT_TND = 4,
+    LAYOUT_NTD_TND = 5,
+    LAYOUT_NTD = 6,
+    LAYOUT_NBSD = 7
+};
+
+enum class TransposeLayoutEnum : uint32_t {
+    None = 0,
+    BNSD_BSND = 1,
+    BSND_BNSD = 2,
+    BSH_BNSD = 3,
+    BNSD_NBSD = 4,
+    BSND_NBSD = 5,
+    BSH_NBSD = 6,
+    NTD_TND = 7,
+    TND_NTD = 8
+};
 
 namespace math {
 template <typename T> __aicore__ inline T Ceil(T a, T b)

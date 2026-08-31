@@ -747,9 +747,9 @@ __aicore__ inline void MatmulK(const LocalTensor<A> &aL1Tensor,
 
     for (uint32_t k = 0; k < kLoops; k++) {
         uint32_t tileK = (k == (kLoops - 1)) ? tailK : baseK;
-        Buffer<BufferType::L0A> l0aBuffer = aL0BuffsDb.Get();
-        l0aBuffer.Wait<HardEvent::M_MTE1>(); // mte1等Matmul：上一轮matmul完成后才能搬运新数据到L0A
-        LocalTensor<L0ADType> L0ATensor = l0aBuffer.GetTensor<L0ADType>();
+        auto l0aBuffer = aL0BuffsDb.Get();
+        l0aBuffer.template Wait<HardEvent::M_MTE1>(); // mte1等Matmul：上一轮matmul完成后才能搬运新数据到L0A
+        LocalTensor<L0ADType> L0ATensor = l0aBuffer.template GetTensor<L0ADType>();
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__)
         if constexpr (IsSameType<L0ADType, mx_fp8_e4m3_t>::value) {
             LoadDataToL0AMx<A, L0ADType>(L0ATensor, aL1Tensor, aScaleL1Tensor, param, k * L1Aoffset, tileK, param.singleM); // s2,
@@ -759,9 +759,9 @@ __aicore__ inline void MatmulK(const LocalTensor<A> &aL1Tensor,
             LoadDataToL0A(L0ATensor, aL1Tensor, param, k * L1Aoffset, tileK, param.singleM); // s2*d,d,s2
         }
 
-        Buffer<BufferType::L0B> l0bBuffer = bL0BuffsDb.Get();
-        l0bBuffer.Wait<HardEvent::M_MTE1>(); // mte1等Matmul：上一轮matmul完成后才能搬运新数据到L0B
-        LocalTensor<L0BDType> L0BTensor = l0bBuffer.GetTensor<L0BDType>();
+        auto l0bBuffer = bL0BuffsDb.Get();
+        l0bBuffer.template Wait<HardEvent::M_MTE1>(); // mte1等Matmul：上一轮matmul完成后才能搬运新数据到L0B
+        LocalTensor<L0BDType> L0BTensor = l0bBuffer.template GetTensor<L0BDType>();
         uint64_t loopNum = param.isRightTranspose ? 1 : kLoops;
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__)
         if constexpr (IsSameType<L0BDType, mx_fp8_e4m3_t>::value) {
@@ -771,9 +771,9 @@ __aicore__ inline void MatmulK(const LocalTensor<A> &aL1Tensor,
         {
             LoadDataToL0B(L0BTensor, bL1Tensor, param, k * L1Boffset, tileK, param.singleN, loopNum);
         }
-        l0bBuffer.Set<HardEvent::MTE1_M>(); // mte1搬运完后，通知可以开始matmul
+        l0bBuffer.template Set<HardEvent::MTE1_M>(); // mte1搬运完后，通知可以开始matmul
         // l0aBuffer和l0bBuffer共用MTE1_M，在D=512场景减少同步指令数量，提升性能
-        l0bBuffer.Wait<HardEvent::MTE1_M>(); // matmul等mte1：L0B数据搬运完成后才能开始matmul
+        l0bBuffer.template Wait<HardEvent::MTE1_M>(); // matmul等mte1：L0B数据搬运完成后才能开始matmul
 
         MmadParams mmadParams;
         mmadParams.m = param.singleM;
@@ -793,8 +793,8 @@ __aicore__ inline void MatmulK(const LocalTensor<A> &aL1Tensor,
         }
         Mmad(cL0Tensor, L0ATensor, L0BTensor, mmadParams);
 
-        l0aBuffer.Set<HardEvent::M_MTE1>(); // matmul完成后，通知mte1可以开始搬运新数据到L0A
-        l0bBuffer.Set<HardEvent::M_MTE1>(); // matmul完成后，通知mte1可以开始搬运新数据到L0B
+        l0aBuffer.template Set<HardEvent::M_MTE1>(); // matmul完成后，通知mte1可以开始搬运新数据到L0A
+        l0bBuffer.template Set<HardEvent::M_MTE1>(); // matmul完成后，通知mte1可以开始搬运新数据到L0B
     }
 }
 
@@ -898,9 +898,9 @@ __aicore__ inline void MatmulN(const LocalTensor<A> &aL1Tensor,
         L0Coffset = ((param.realM + 15) >> 4 << 4) * baseN;
     }
 
-    Buffer<BufferType::L0A> l0aBuffer = aL0BuffsDb.Get();
-    l0aBuffer.Wait<HardEvent::M_MTE1>(); // mte1等Matmul：上一轮matmul完成后才能搬运新数据到L0A
-    LocalTensor<L0ADType> L0ATensor = l0aBuffer.GetTensor<L0ADType>();
+    auto l0aBuffer = aL0BuffsDb.Get();
+    l0aBuffer.template Wait<HardEvent::M_MTE1>(); // mte1等Matmul：上一轮matmul完成后才能搬运新数据到L0A
+    LocalTensor<L0ADType> L0ATensor = l0aBuffer.template GetTensor<L0ADType>();
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__)
     if constexpr (IsSameType<L0ADType, mx_fp8_e4m3_t>::value) {
         LoadDataToL0AMx<A, L0ADType>(L0ATensor, aL1Tensor, aScaleL1Tensor, param, 0, param.singleK, param.singleM); // d,s2
@@ -912,9 +912,9 @@ __aicore__ inline void MatmulN(const LocalTensor<A> &aL1Tensor,
     for (uint32_t n = 0; n < nLoops; n++) {
         uint32_t tileN = (n == (nLoops - 1)) ? tailN : baseN;
 
-        Buffer<BufferType::L0B> l0bBuffer = bL0BuffsDb.Get();
-        l0bBuffer.Wait<HardEvent::M_MTE1>(); // mte1等Matmul：上一轮matmul完成后才能搬运新数据到L0B
-        LocalTensor<L0BDType> L0BTensor = l0bBuffer.GetTensor<L0BDType>();
+        auto l0bBuffer = bL0BuffsDb.Get();
+        l0bBuffer.template Wait<HardEvent::M_MTE1>(); // mte1等Matmul：上一轮matmul完成后才能搬运新数据到L0B
+        LocalTensor<L0BDType> L0BTensor = l0bBuffer.template GetTensor<L0BDType>();
         uint64_t loopNum = param.isRightTranspose ? nLoops : 1;
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__)
         if constexpr (IsSameType<L0BDType, mx_fp8_e4m3_t>::value) {
@@ -924,9 +924,9 @@ __aicore__ inline void MatmulN(const LocalTensor<A> &aL1Tensor,
         {
             LoadDataToL0B(L0BTensor, bL1Tensor, param, n * L1Boffset, param.singleK, tileN, loopNum);
         }
-        l0bBuffer.Set<HardEvent::MTE1_M>(); // mte1搬运完后，通知可以开始matmul
+        l0bBuffer.template Set<HardEvent::MTE1_M>(); // mte1搬运完后，通知可以开始matmul
         // l0aBuffer和l0bBuffer共用MTE1_M，在D=512场景减少同步指令数量，提升性能
-        l0bBuffer.Wait<HardEvent::MTE1_M>(); // matmul等mte1：L0B数据搬运完成后才能开始matmul
+        l0bBuffer.template Wait<HardEvent::MTE1_M>(); // matmul等mte1：L0B数据搬运完成后才能开始matmul
 
         MmadParams mmadParams;
         mmadParams.m = param.singleM;
@@ -943,9 +943,9 @@ __aicore__ inline void MatmulN(const LocalTensor<A> &aL1Tensor,
         mmadParams.unitFlag = param.unitFlag;
         Mmad(cL0Tensor[n * L0Coffset], L0ATensor, L0BTensor, mmadParams);
 
-        l0bBuffer.Set<HardEvent::M_MTE1>(); // matmul完成后，通知mte1可以开始搬运新数据到L0B
+        l0bBuffer.template Set<HardEvent::M_MTE1>(); // matmul完成后，通知mte1可以开始搬运新数据到L0B
     }
-    l0aBuffer.Set<HardEvent::M_MTE1>(); // matmul完成后，通知mte1可以开始搬运新数据到L0A
+    l0aBuffer.template Set<HardEvent::M_MTE1>(); // matmul完成后，通知mte1可以开始搬运新数据到L0A
 }
 
 // 切M

@@ -28,3 +28,17 @@ foreach(SUB_DIR ${CURRENT_DIRS})
         endif()
     endif()
 endforeach()
+# FIA v2 sink (vendor-isolated subtree): its carried omni-lineage headers must
+# be visible to the aggregate tiling object target that compiles all ops'
+# tiling sources. Appended LAST so repo-wide header resolution is unaffected
+# (first match wins; these only catch headers otherwise unresolved).
+if(TARGET ophost_transformer_tiling_obj)
+    target_include_directories(ophost_transformer_tiling_obj PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/fused_infer_attention_score_v2_sink_common/omni_common/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/fused_infer_attention_score_v2_sink_common/attention_common
+        ${CMAKE_CURRENT_SOURCE_DIR}/fused_infer_attention_score_v2_sink_common/attention_common/op_host
+        ${CMAKE_CURRENT_SOURCE_DIR}/fused_infer_attention_score_v2_sink_common/attention_common/op_kernel
+        ${CMAKE_CURRENT_SOURCE_DIR}/fused_infer_attention_score_v2_sink/op_host
+        ${CMAKE_CURRENT_SOURCE_DIR}/fused_infer_attention_score_v2_sink/op_api
+    )
+endif()

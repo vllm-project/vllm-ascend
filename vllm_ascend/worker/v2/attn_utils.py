@@ -369,6 +369,33 @@ def _get_attention_kv_cache_dims(
     return kv_cache_spec.head_size, head_size_v
 
 
+def _uses_a5_flash_mla_cache(
+    vllm_config: VllmConfig,
+    layer_name: str,
+    kv_cache_spec: AttentionSpec,
+) -> bool:
+    if (
+        get_ascend_device_type() != AscendDeviceType.A5
+        or not isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+        or enable_fa_quant(vllm_config)
+    ):
+        return False
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    static_forward_context = getattr(compilation_config, "static_forward_context", None)
+    if static_forward_context is None:
+        return False
+    layer = static_forward_context.get(layer_name)
+    impl = getattr(layer, "impl", None)
+    return bool(
+        impl is not None
+        and not getattr(impl, "fa_quant_layer", False)
+        and not getattr(impl, "enable_kv_nz", False)
+        and getattr(impl, "kv_lora_rank", None) == 512
+        and getattr(impl, "qk_rope_head_dim", None) == 64
+        and getattr(impl, "num_kv_heads", None) == 1
+    )
+
+
 def _adjust_dsv4_kv_layout(
     raw_tensor: torch.Tensor,
     cache_shapes: list[tuple[int, ...]],
@@ -663,6 +690,15 @@ def _allocate_kv_cache(
             for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = k_tensor
         else:
+            if _uses_a5_flash_mla_cache(vllm_config, example_layer_name, example_spec):
+                unified_tensor = _allocate_int8_cache_tensor(
+                    kv_cache_tensor.size,
+                    alignment,
+                    device,
+                )
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_cache_raw_tensors[layer_name] = unified_tensor
+                continue
             k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
             if enable_fa_quant(vllm_config):
                 k_factor, v_factor = vllm_config.quant_config.get_kv_quant_split_factor(
@@ -787,6 +823,11 @@ def _reshape_kv_cache_v2(
                 continue
 
             raw_cache = kv_cache_raw_tensors[layer_name]
+            use_flash_mla_cache = _uses_a5_flash_mla_cache(
+                vllm_config,
+                layer_name,
+                kv_cache_spec,
+            )
             if is_dsv4_model and isinstance(
                 kv_cache_spec,
                 (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
@@ -861,6 +902,18 @@ def _reshape_kv_cache_v2(
                 k_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
+            elif use_flash_mla_cache:
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"A5 FlashMLA cache for {layer_name} must use one raw tensor.")
+                unified_shape = (*k_shape[:-1], k_shape[-1] + v_shape[-1])
+                unified_size = torch.empty(unified_shape, device="meta").numel() * get_dtype_size(k_dtype)
+                unified_start = raw_cache.numel() - unified_size
+                if unified_start < 0:
+                    raise ValueError(f"A5 FlashMLA cache view exceeds the allocation for {layer_name}.")
+                unified_cache = raw_cache[unified_start:].view(k_dtype).view(unified_shape)
+                k_cache = unified_cache[..., : k_shape[-1]]
+                v_cache = unified_cache[..., k_shape[-1] :]
+                kv_caches[layer_name] = (k_cache, v_cache, unified_cache)
             elif isinstance(raw_cache, tuple):
                 raw_k_tensor, raw_v_tensor = raw_cache
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)

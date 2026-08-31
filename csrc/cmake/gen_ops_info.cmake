@@ -244,6 +244,19 @@ function(compile_from_config)
     install(FILES ${CONFCMP_OUT_DIR}/bin/config/${CONFCMP_COMPUTE_UNIT}/${CONFCMP_OP_NAME}.json
       DESTINATION ${BIN_KERNEL_CONFIG_INSTALL_DIR}/${CONFCMP_COMPUTE_UNIT} OPTIONAL
     )
+    # CANN 9.1 releases use two legacy snake-case spellings when resolving
+    # the dynamic kernel config for this V2 operator.  Keep the canonical
+    # generated filename and package compatibility copies for both lookups.
+    if(CONFCMP_OP_NAME STREQUAL "fused_infer_attention_score_v2_sink")
+      install(FILES ${CONFCMP_OUT_DIR}/bin/config/${CONFCMP_COMPUTE_UNIT}/${CONFCMP_OP_NAME}.json
+        DESTINATION ${BIN_KERNEL_CONFIG_INSTALL_DIR}/${CONFCMP_COMPUTE_UNIT}
+        RENAME fused_infer_attention_score_v_2_sink.json OPTIONAL
+      )
+      install(FILES ${CONFCMP_OUT_DIR}/bin/config/${CONFCMP_COMPUTE_UNIT}/${CONFCMP_OP_NAME}.json
+        DESTINATION ${BIN_KERNEL_CONFIG_INSTALL_DIR}/${CONFCMP_COMPUTE_UNIT}
+        RENAME fused_infer_attention_score_v2sink.json OPTIONAL
+      )
+    endif()
   endif()
 endfunction()
 

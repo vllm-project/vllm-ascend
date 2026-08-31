@@ -771,6 +771,98 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
     def tearDown(self):
         self.parent_init_patcher.stop()
 
+    def test_flash_attn_metadata_contract_and_stable_buffer(self):
+        builder = AscendMLAMetadataBuilder(
+            kv_cache_spec=self.kv_cache_spec,
+            layer_names=[],
+            vllm_config=self.mock_vllm_config,
+            device=self.mock_device,
+        )
+        builder._flash_attn_impl = SimpleNamespace(num_heads=8)
+        builder._flash_attn_head_dim = 256
+        cu_seqlens = torch.tensor([0, 5, 12], dtype=torch.int32)
+
+        def return_output_buffer(*args, **kwargs):
+            return kwargs["output_buffer"]
+
+        with patch(
+            "vllm_ascend.attention.mla_v1.build_flash_attn_metadata",
+            side_effect=return_output_buffer,
+        ) as mock_build:
+            first = builder._build_flash_attn_metadata(
+                buffer_key=("prefill", 0, 2),
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_kv=cu_seqlens,
+                causal=True,
+            )
+            second = builder._build_flash_attn_metadata(
+                buffer_key=("prefill", 0, 2),
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_kv=cu_seqlens,
+                causal=True,
+            )
+
+        self.assertIs(first, second)
+        args = mock_build.call_args.args
+        kwargs = mock_build.call_args.kwargs
+        self.assertEqual(args[:3], (8, 8, 256))
+        self.assertEqual(kwargs["layout_q"], "TND")
+        self.assertEqual(kwargs["layout_kv"], "TND")
+        self.assertEqual(kwargs["max_seqlen_q"], -1)
+        self.assertEqual(kwargs["max_seqlen_kv"], -1)
+
+    def test_flash_mla_metadata_contract_and_stable_buffers(self):
+        builder = AscendMLAMetadataBuilder(
+            kv_cache_spec=self.kv_cache_spec,
+            layer_names=[],
+            vllm_config=self.mock_vllm_config,
+            device=self.mock_device,
+        )
+        builder._flash_mla_impl = SimpleNamespace(
+            num_heads=8,
+            num_kv_heads=1,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+        )
+
+        def return_output_buffer(*args, **kwargs):
+            return kwargs["output_buffer"]
+
+        with patch(
+            "vllm_ascend.attention.mla_v1.build_flash_mla_metadata",
+            side_effect=return_output_buffer,
+        ) as mock_build:
+            first = builder._build_flash_mla_metadata(
+                actual_seq_lengths_q=[2, 5],
+                seq_lens=[9, 0],
+                causal=True,
+            )
+            second = builder._build_flash_mla_metadata(
+                actual_seq_lengths_q=[2, 5],
+                seq_lens=[11, 0],
+                causal=True,
+            )
+
+        first_cu_seqlens, first_cache_seqlens, first_metadata = first
+        second_cu_seqlens, second_cache_seqlens, second_metadata = second
+        self.assertIs(first_cu_seqlens, second_cu_seqlens)
+        self.assertIs(first_cache_seqlens, second_cache_seqlens)
+        self.assertIs(first_metadata, second_metadata)
+        torch.testing.assert_close(first_cu_seqlens, torch.tensor([0, 2, 5], dtype=torch.int32))
+        torch.testing.assert_close(first_cache_seqlens, torch.tensor([11, 1], dtype=torch.int32))
+
+        args = mock_build.call_args.args
+        kwargs = mock_build.call_args.kwargs
+        self.assertIs(args[0], first_cache_seqlens)
+        self.assertEqual(args[1:3], (8, 1))
+        self.assertIs(kwargs["cu_seqlens_q"], first_cu_seqlens)
+        self.assertEqual(kwargs["head_dim_qk"], 576)
+        self.assertEqual(kwargs["head_dim_v"], 512)
+        self.assertEqual(kwargs["mask_mode"], 3)
+        self.assertEqual(kwargs["layout_q"], "TND")
+        self.assertEqual(kwargs["max_seqlen_q"], -1)
+        self.assertEqual(kwargs["max_seqlen_kv"], -1)
+
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
     @patch("torch.Tensor.npu", new=lambda self: self)
@@ -931,6 +1023,7 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
         common_attn_metadata.query_start_loc_cpu = torch.tensor([0, 1, 2, 3])
         common_attn_metadata.positions = torch.tensor([10, 10, 10])
         common_attn_metadata.decode_token_per_req = 1
+        common_attn_metadata.actual_seq_lengths_q = [1, 2, 3, 4, 5]
 
         builder = AscendMLAMetadataBuilder(
             kv_cache_spec=self.kv_cache_spec,
@@ -1194,6 +1287,133 @@ class TestAscendMLAImpl(TestBase):
         # 256 is power of 2, so padding should be 0
         self.assertEqual(self.impl.num_heads_padded, 256)
         self.assertEqual(self.impl.head_padding, 0)
+
+    def test_flash_attn_qkv_padding_for_mla_192(self):
+        q_nope = torch.randn(3, 8, 128)
+        q_pe = torch.randn(3, 8, 64)
+        k_nope = torch.randn(3, 8, 128)
+        k_pe = torch.randn(3, 8, 64)
+        value = torch.randn(3, 8, 128)
+
+        query, key, padded_value = self.impl._prepare_flash_attn_qkv(
+            q_nope,
+            q_pe,
+            k_nope,
+            k_pe,
+            value,
+            256,
+        )
+
+        self.assertEqual(query.shape[-1], 256)
+        self.assertEqual(key.shape[-1], 256)
+        self.assertEqual(padded_value.shape[-1], 256)
+        self.assertTrue(torch.equal(query[..., :192], torch.cat((q_nope, q_pe), dim=-1)))
+        self.assertTrue(torch.equal(key[..., :192], torch.cat((k_nope, k_pe), dim=-1)))
+        self.assertTrue(torch.count_nonzero(query[..., 192:]) == 0)
+        self.assertTrue(torch.count_nonzero(key[..., 192:]) == 0)
+        self.assertTrue(torch.count_nonzero(padded_value[..., 128:]) == 0)
+
+    @patch("vllm_ascend.attention.mla_v1.run_flash_attn")
+    def test_flash_attn_prefill_main_contract(self, mock_flash_attn):
+        query = torch.randn(3, 8, 256)
+        key = torch.randn_like(query)
+        value = torch.randn_like(query)
+        cu_seqlens = torch.tensor([0, 1, 3], dtype=torch.int32)
+        metadata = torch.empty(4096, dtype=torch.int32)
+        expected = (torch.randn_like(query), torch.randn(3, 8))
+        mock_flash_attn.return_value = expected
+
+        result = self.impl._run_flash_attn_prefill(
+            query,
+            key,
+            value,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            metadata=metadata,
+            causal=True,
+            attn_mask=torch.ones(4, 4, dtype=torch.int8),
+        )
+
+        self.assertIs(result, expected)
+        kwargs = mock_flash_attn.call_args.kwargs
+        self.assertEqual(kwargs["layout_q"], "TND")
+        self.assertEqual(kwargs["layout_kv"], "TND")
+        self.assertEqual(kwargs["max_seqlen_q"], -1)
+        self.assertEqual(kwargs["max_seqlen_kv"], -1)
+        self.assertTrue(kwargs["return_softmax_lse"])
+
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_device_type")
+    @patch("vllm_ascend.attention.mla_v1.run_flash_mla")
+    def test_flash_mla_decode_main_contract(self, mock_flash_mla, mock_device_type):
+        from vllm_ascend.utils import AscendDeviceType
+
+        mock_device_type.return_value = AscendDeviceType.A5
+        num_tokens = 2
+        num_heads = self.impl.num_heads
+        self.impl.kv_lora_rank = 512
+        self.impl.qk_rope_head_dim = 64
+        self.impl.num_kv_heads = 1
+        self.impl.enable_kv_nz = False
+
+        q_nope = torch.randn(num_tokens, num_heads, 512)
+        q_pe = torch.randn(num_tokens, num_heads, 64)
+        unified_cache = torch.randn(4, 128, 1, 576)
+        block_table = torch.zeros(2, 4, dtype=torch.int32)
+        cu_seqlens_q = torch.tensor([0, 1, 2], dtype=torch.int32)
+        cache_seqlens = torch.tensor([16, 32], dtype=torch.int32)
+        metadata_buffer = torch.empty(4096, dtype=torch.int32)
+        attn_mask = torch.ones(2048, 2048, dtype=torch.int8)
+        decode = AscendMLADecodeMetadata(
+            input_positions=torch.empty(0),
+            block_table=block_table,
+            seq_lens=torch.tensor([16, 32], dtype=torch.int32),
+            max_seq_lens=32,
+            seq_lens_list=[16, 32],
+            flash_mla_cu_seqlens_q=cu_seqlens_q,
+            flash_mla_cache_seqlens=cache_seqlens,
+            flash_mla_metadata=metadata_buffer,
+            attn_mask=attn_mask,
+        )
+        attn_metadata = MagicMock()
+        attn_metadata.decode = decode
+        attn_metadata.causal = True
+        partial_output = torch.randn(num_tokens, num_heads, 512)
+        mock_flash_mla.return_value = (partial_output, torch.empty(1))
+        expected = torch.randn(num_tokens, num_heads * self.impl.v_head_dim)
+
+        with patch.object(
+            self.impl,
+            "_v_up_proj_batch_major",
+            return_value=expected,
+        ) as mock_up_proj:
+            result = self.impl._forward_decode(
+                q_nope,
+                q_pe,
+                torch.empty(0),
+                torch.empty(0),
+                128,
+                attn_metadata,
+                unified_kv_cache=unified_cache,
+            )
+
+        self.assertIs(result, expected)
+        mock_up_proj.assert_called_once_with(partial_output)
+        args = mock_flash_mla.call_args.args
+        kwargs = mock_flash_mla.call_args.kwargs
+        torch.testing.assert_close(args[0], torch.cat((q_nope, q_pe), dim=-1))
+        self.assertIs(args[1], unified_cache)
+        self.assertIs(kwargs["block_table"], block_table)
+        self.assertIs(kwargs["cache_seqlens"], cache_seqlens)
+        self.assertIs(kwargs["cu_seqlens_q"], cu_seqlens_q)
+        self.assertIs(kwargs["attn_mask"], attn_mask)
+        self.assertIs(kwargs["metadata"], metadata_buffer)
+        self.assertEqual(kwargs["head_dim_v"], 512)
+        self.assertEqual(kwargs["softmax_scale"], self.impl.scale)
+        self.assertEqual(kwargs["mask_mode"], 3)
+        self.assertEqual(kwargs["layout_q"], "TND")
+        self.assertEqual(kwargs["layout_kv"], "PA_BBND")
+        self.assertEqual(kwargs["layout_out"], "TND")
+        self.assertFalse(kwargs["return_softmax_lse"])
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):

@@ -119,6 +119,7 @@ if (NOT BUILD_OPS_RTY_KERNEL)
                 -DOPS_ADV_CMAKE_DIR=${OPS_ADV_CMAKE_DIR}
                 -DPRODUCT_SIDE=device
                 -DENABLE_BUILT_IN=${ENABLE_BUILT_IN}
+                -DASCEND_COMPUTE_UNIT=${ASCEND_COMPUTE_UNIT}
                 <SOURCE_DIR>
             INSTALL_COMMAND ""
             BUILD_ALWAYS TRUE

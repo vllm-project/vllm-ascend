@@ -130,9 +130,12 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         def postprocess(**kwargs):
             kwargs["num_accepted_tokens_cpu_tensor"][:3].copy_(kwargs["num_accepted_tokens_gpu"][:3])
 
-        with patch(
-            "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu",
-            side_effect=postprocess,
+        with (
+            patch.object(runner, "_uses_device_mamba_accepted_tokens", return_value=False),
+            patch(
+                "vllm_ascend.worker.model_runner_v1.mamba_utils.postprocess_mamba_align_gpu",
+                side_effect=postprocess,
+            ),
         ):
             runner._update_states_after_model_execute(
                 torch.tensor([[10, 11, -1, -1], [10, 11, 12, -1], [10, 11, 12, 13]]),
@@ -236,6 +239,38 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
+
+    @staticmethod
+    def _make_attn_group(requires_exact_host_seq_lens: bool):
+        attn_group = MagicMock()
+        attn_group.get_metadata_builder.return_value = SimpleNamespace(
+            requires_exact_host_seq_lens=requires_exact_host_seq_lens
+        )
+        return attn_group
+
+    def test_seq_lens_cpu_sync_follows_target_and_draft_builder_capabilities(self):
+        runner = self._build_runner()
+        sink_group = self._make_attn_group(False)
+        fallback_group = self._make_attn_group(True)
+
+        runner.attn_groups = [[sink_group]]
+        runner.drafter = SimpleNamespace(draft_attn_groups=[sink_group])
+        runner._update_seq_lens_cpu_sync_requirement()
+        self.assertFalse(runner._needs_seq_lens_cpu_sync)
+
+        runner.attn_groups = [[fallback_group]]
+        runner._update_seq_lens_cpu_sync_requirement()
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
+
+        runner.attn_groups = [[sink_group]]
+        runner.drafter = SimpleNamespace(draft_attn_groups=[fallback_group])
+        runner._update_seq_lens_cpu_sync_requirement()
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
+
+        runner.use_compress = True
+        runner.drafter = None
+        runner._update_seq_lens_cpu_sync_requirement()
+        self.assertTrue(runner._needs_seq_lens_cpu_sync)
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
@@ -438,6 +473,72 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+    @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=False)
+    def test_a5_flash_mla_cache_uses_unified_zero_copy_views(self, _mock_fa_quant):
+        runner = self._build_runner()
+        runner._uses_a5_flash_mla_cache = MagicMock(return_value=True)
+        runner._get_attention_kv_cache_dims = MagicMock(return_value=(512, 64))
+        layer_name = "mla_attn"
+        num_blocks = 2
+        block_size = 128
+        kv_cache_spec = AscendMLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=kv_cache_spec.page_size_bytes * num_blocks,
+                    shared_by=[layer_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+        backend = MagicMock()
+        backend.get_kv_cache_shape.side_effect = lambda block_count, block_size_, num_heads, head_size: (
+            block_count,
+            block_size_,
+            num_heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=kv_cache_spec,
+                backend=backend,
+                layer_names=[layer_name],
+            )
+        ]
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_cache = raw_caches[layer_name]
+        self.assertIsInstance(raw_cache, torch.Tensor)
+        nope_cache, rope_cache, unified_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches,
+        )[layer_name]
+
+        self.assertEqual(nope_cache.shape, (num_blocks, block_size, 1, 512))
+        self.assertEqual(rope_cache.shape, (num_blocks, block_size, 1, 64))
+        self.assertEqual(unified_cache.shape, (num_blocks, block_size, 1, 576))
+        backing_storage = unified_cache.untyped_storage().data_ptr()
+        self.assertEqual(nope_cache.untyped_storage().data_ptr(), backing_storage)
+        self.assertEqual(rope_cache.untyped_storage().data_ptr(), backing_storage)
+        self.assertEqual(nope_cache.stride()[:-1], unified_cache.stride()[:-1])
+        self.assertEqual(rope_cache.stride()[:-1], unified_cache.stride()[:-1])
+
+        nope_cache.fill_(1)
+        rope_cache.fill_(2)
+        self.assertEqual(torch.count_nonzero(unified_cache[..., :512] != 1), 0)
+        self.assertEqual(torch.count_nonzero(unified_cache[..., 512:] != 2), 0)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_hybrid_mla_cache_uses_logical_kernel_block_shape(
@@ -1330,6 +1431,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.synchronize_input_prep = nullcontext
         runner._update_states = MagicMock(return_value=None)
         runner.parallel_config = SimpleNamespace(distributed_executor_backend="external_launcher", data_parallel_size=2)
+        runner.uniform_decode_query_len = 8
         runner._dummy_run = MagicMock()
         runner._start_dump_data = MagicMock()
         runner.requests = {}
@@ -1337,7 +1439,11 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
 
         runner.execute_model(scheduler_output)
 
-        runner._dummy_run.assert_called_once_with(1)
+        runner._dummy_run.assert_called_once_with(
+            8,
+            uniform_decode=True,
+            skip_gdn_state_update=True,
+        )
         runner._start_dump_data.assert_not_called()
 
     @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)

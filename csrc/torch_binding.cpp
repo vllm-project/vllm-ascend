@@ -1927,6 +1927,222 @@ at::Tensor npu_sparse_attention_score_prefill(
     return output;
 }
 
+#ifdef VLLM_ASCEND_ENABLE_FLASH_MLA
+namespace {
+
+constexpr int64_t FLASH_MLA_AIC_CORE_NUM = 36;
+constexpr int64_t FLASH_MLA_AIV_CORE_NUM = 72;
+constexpr int64_t FLASH_MLA_META_WORDS_PER_CORE = 16;
+constexpr int64_t FLASH_MLA_META_ALIGNMENT = 4096;
+
+int64_t flash_mla_metadata_numel(int64_t batch_size)
+{
+    TORCH_CHECK(batch_size > 0, "FlashMLA metadata requires a positive batch size, got ", batch_size);
+    const int64_t words =
+        ((FLASH_MLA_AIC_CORE_NUM + FLASH_MLA_AIV_CORE_NUM) * batch_size + 1) *
+        FLASH_MLA_META_WORDS_PER_CORE;
+    return ((words + FLASH_MLA_META_ALIGNMENT - 1) / FLASH_MLA_META_ALIGNMENT) *
+           FLASH_MLA_META_ALIGNMENT;
+}
+
+std::tuple<at::Tensor, at::Tensor> construct_flash_mla_output(
+    const at::Tensor &query,
+    int64_t head_dim_v,
+    c10::string_view layout_q,
+    const c10::optional<c10::string_view> &layout_out,
+    bool return_softmax_lse)
+{
+    const std::string layout_q_str(layout_q);
+    const std::string layout_out_str = layout_out.has_value()
+        ? std::string(layout_out.value())
+        : layout_q_str;
+    TORCH_CHECK(layout_out_str == layout_q_str,
+                "FlashMLA layout_out must equal layout_q (", layout_q_str,
+                "), got ", layout_out_str);
+    TORCH_CHECK(head_dim_v > 0, "FlashMLA head_dim_v must be positive, got ", head_dim_v);
+
+    at::Tensor output;
+    at::Tensor softmax_lse;
+    const auto float_options = query.options().dtype(at::ScalarType::Float);
+    if (layout_q_str == "TND") {
+        TORCH_CHECK(query.dim() == 3, "FlashMLA TND query must be rank 3, got ", query.dim());
+        output = at::empty_symint(
+            {query.sym_size(0), query.sym_size(1), c10::SymInt(head_dim_v)}, query.options());
+        if (return_softmax_lse) {
+            softmax_lse = at::empty_symint({query.sym_size(1), query.sym_size(0)}, float_options);
+        }
+    } else if (layout_q_str == "BSND") {
+        TORCH_CHECK(query.dim() == 4, "FlashMLA BSND query must be rank 4, got ", query.dim());
+        output = at::empty_symint(
+            {query.sym_size(0), query.sym_size(1), query.sym_size(2), c10::SymInt(head_dim_v)},
+            query.options());
+        if (return_softmax_lse) {
+            softmax_lse = at::empty_symint(
+                {query.sym_size(0), query.sym_size(2), query.sym_size(1)}, float_options);
+        }
+    } else if (layout_q_str == "BNSD") {
+        TORCH_CHECK(query.dim() == 4, "FlashMLA BNSD query must be rank 4, got ", query.dim());
+        output = at::empty_symint(
+            {query.sym_size(0), query.sym_size(1), query.sym_size(2), c10::SymInt(head_dim_v)},
+            query.options());
+        if (return_softmax_lse) {
+            softmax_lse = at::empty_symint(
+                {query.sym_size(0), query.sym_size(1), query.sym_size(2)}, float_options);
+        }
+    } else {
+        TORCH_CHECK(false, "FlashMLA only supports TND, BSND, or BNSD query layout, got ", layout_q_str);
+    }
+    if (!return_softmax_lse) {
+        softmax_lse = at::empty_symint({c10::SymInt(0)}, float_options);
+    }
+    return {output, softmax_lse};
+}
+
+} // namespace
+
+at::Tensor flash_mla_with_kvcache_metadata(
+    const at::Tensor &cache_seqlens,
+    int64_t num_heads_q,
+    int64_t num_heads_kv,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    int64_t head_dim_qk,
+    int64_t head_dim_v,
+    int64_t mask_mode,
+    c10::string_view layout_q)
+{
+    TORCH_CHECK(cache_seqlens.dim() == 1,
+                "FlashMLA cache_seqlens must be rank 1, got ", cache_seqlens.dim());
+    TORCH_CHECK(num_heads_kv == 1,
+                "FlashMLA requires exactly one KV head, got ", num_heads_kv);
+    at::Tensor metadata = at::empty(
+        {flash_mla_metadata_numel(cache_seqlens.size(0))},
+        cache_seqlens.options().dtype(at::ScalarType::Int));
+    std::string layout_q_str(layout_q);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    EXEC_NPU_CMD(aclnnFlashMlaWithKvcacheMetadata,
+                 cu_seqlens_q, cache_seqlens, seqused_q,
+                 max_seqlen_q, max_seqlen_kv, num_heads_q, num_heads_kv,
+                 head_dim_qk, head_dim_v, mask_mode, layout_q_ptr, metadata);
+    return metadata;
+}
+
+at::Tensor flash_mla_with_kvcache_metadata_meta(
+    const at::Tensor &cache_seqlens,
+    int64_t num_heads_q,
+    int64_t num_heads_kv,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    int64_t head_dim_qk,
+    int64_t head_dim_v,
+    int64_t mask_mode,
+    c10::string_view layout_q)
+{
+    (void)num_heads_q;
+    (void)cu_seqlens_q;
+    (void)seqused_q;
+    (void)max_seqlen_q;
+    (void)max_seqlen_kv;
+    (void)head_dim_qk;
+    (void)head_dim_v;
+    (void)mask_mode;
+    (void)layout_q;
+    TORCH_CHECK(num_heads_kv == 1,
+                "FlashMLA requires exactly one KV head, got ", num_heads_kv);
+    return at::empty(
+        {flash_mla_metadata_numel(cache_seqlens.size(0))},
+        cache_seqlens.options().dtype(at::ScalarType::Int));
+}
+
+std::tuple<at::Tensor, at::Tensor> flash_mla_with_kvcache(
+    const at::Tensor &query,
+    const at::Tensor &k_cache,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &cache_seqlens,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t head_dim_v,
+    double softmax_scale,
+    int64_t mask_mode,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    c10::string_view layout_q,
+    c10::string_view layout_kv,
+    const c10::optional<c10::string_view> &layout_out,
+    bool return_softmax_lse)
+{
+    auto outputs = construct_flash_mla_output(
+        query, head_dim_v, layout_q, layout_out, return_softmax_lse);
+    at::Tensor &attention_output = std::get<0>(outputs);
+    at::Tensor &softmax_lse = std::get<1>(outputs);
+
+    if (metadata.has_value() && metadata.value().defined()) {
+        TORCH_CHECK(metadata.value().scalar_type() == at::ScalarType::Int,
+                    "FlashMLA metadata must be int32");
+        TORCH_CHECK(metadata.value().numel() >= FLASH_MLA_META_ALIGNMENT,
+                    "FlashMLA metadata must be produced by flash_mla_with_kvcache_metadata");
+    }
+    std::string layout_q_str(layout_q);
+    std::string layout_kv_str(layout_kv);
+    std::string layout_out_str = layout_out.has_value()
+        ? std::string(layout_out.value())
+        : layout_q_str;
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
+    char *layout_out_ptr = const_cast<char *>(layout_out_str.c_str());
+    int64_t return_softmax_lse_i64 = return_softmax_lse ? 1 : 0;
+
+    EXEC_NPU_CMD(aclnnFlashMlaWithKvcache,
+                 query, k_cache, block_table, cache_seqlens, cu_seqlens_q,
+                 seqused_q, attn_mask, metadata, head_dim_v, softmax_scale,
+                 mask_mode, max_seqlen_q, max_seqlen_kv, layout_q_ptr,
+                 layout_kv_ptr, layout_out_ptr, return_softmax_lse_i64,
+                 attention_output, softmax_lse);
+    return outputs;
+}
+
+std::tuple<at::Tensor, at::Tensor> flash_mla_with_kvcache_meta(
+    const at::Tensor &query,
+    const at::Tensor &k_cache,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &cache_seqlens,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &attn_mask,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t head_dim_v,
+    double softmax_scale,
+    int64_t mask_mode,
+    int64_t max_seqlen_q,
+    int64_t max_seqlen_kv,
+    c10::string_view layout_q,
+    c10::string_view layout_kv,
+    const c10::optional<c10::string_view> &layout_out,
+    bool return_softmax_lse)
+{
+    (void)k_cache;
+    (void)block_table;
+    (void)cache_seqlens;
+    (void)cu_seqlens_q;
+    (void)seqused_q;
+    (void)attn_mask;
+    (void)metadata;
+    (void)softmax_scale;
+    (void)mask_mode;
+    (void)max_seqlen_q;
+    (void)max_seqlen_kv;
+    (void)layout_kv;
+    return construct_flash_mla_output(
+        query, head_dim_v, layout_q, layout_out, return_softmax_lse);
+}
+#endif
+
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 {
     TORCH_CHECK(
@@ -2703,5 +2919,56 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_msa_index_score", torch::kPrivateUse1,
              &vllm_ascend::npu_msa_index_score);
+
+#ifdef VLLM_ASCEND_ENABLE_FLASH_MLA
+    ops.def(
+        "flash_mla_with_kvcache_metadata(Tensor cache_seqlens, int num_heads_q, int num_heads_kv, "
+        "Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, int head_dim_qk=576, int head_dim_v=512, "
+        "int mask_mode=0, str layout_q='BSND') -> Tensor");
+    ops.impl("flash_mla_with_kvcache_metadata", torch::kPrivateUse1,
+             &vllm_ascend::flash_mla_with_kvcache_metadata);
+
+    ops.def(
+        "flash_mla_with_kvcache(Tensor q, Tensor k_cache, Tensor? block_table=None, "
+        "Tensor? cache_seqlens=None, Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, "
+        "Tensor? attn_mask=None, Tensor? metadata=None, int head_dim_v=512, "
+        "float softmax_scale=1.0, int mask_mode=0, int max_seqlen_q=-1, "
+        "int max_seqlen_kv=-1, str layout_q='TND', str layout_kv='PA_NZ', "
+        "str? layout_out=None, bool return_softmax_lse=False) -> (Tensor, Tensor)");
+    ops.impl("flash_mla_with_kvcache", torch::kPrivateUse1,
+             &vllm_ascend::flash_mla_with_kvcache);
+#endif
+}
+#endif
+
+// FIA v2 sink operators. The implementations live under
+// csrc/attention/fused_infer_attention_score_v2_sink/torch_binding/ and are
+// exported through the same vLLM Ascend namespace as the other custom ops.
+#ifdef VLLM_ASCEND_ENABLE_FIA_V2_SINK
+TORCH_LIBRARY_FRAGMENT(_C_ascend, m)
+{
+    m.def("npu_fused_infer_attention_score_v2_sink(Tensor query, Tensor key, Tensor value, *,"
+          "Tensor? query_rope=None, Tensor? key_rope=None, Tensor? pse_shift=None, Tensor? atten_mask=None,"
+          "Tensor? actual_seq_qlen=None, Tensor? actual_seq_kvlen=None, Tensor? block_table=None,"
+          "Tensor? meta_data=None, int num_query_heads=1, int num_key_value_heads=0,"
+          "float softmax_scale=1.0, int pre_tokens=2147483647, int next_tokens=2147483647,"
+          "str input_layout='TND', int sparse_mode=0, int block_size=0, int inner_precise=0,"
+          "bool return_softmax_lse=False) -> (Tensor, Tensor)");
+
+    m.def("_npu_fused_infer_attention_score_v2_sink_metadata(int num_heads_q, int num_heads_kv, "
+          "int head_dim_qk, int head_dim_v, *, Tensor? actual_seq_lengths=None,"
+          "Tensor? actual_seq_lengths_kv=None, int batch_size=0, int sparse_mode=0,"
+          "int pre_tokens=2147483647, int next_tokens=2147483647, str input_layout='TND',"
+          "str input_layout_kv='TND', int sink_num=0, int k_sink_num=0, int rope_head_dim=0,"
+           "int block_size=0, int aic_core_num=24, int aiv_core_num=48, bool batch_invariant=False) -> Tensor");
+}
+#endif
+
+#ifdef VLLM_ASCEND_ENABLE_FLASH_MLA
+TORCH_LIBRARY_IMPL(_C_ascend, Meta, m)
+{
+    m.impl("flash_mla_with_kvcache_metadata", &vllm_ascend::flash_mla_with_kvcache_metadata_meta);
+    m.impl("flash_mla_with_kvcache", &vllm_ascend::flash_mla_with_kvcache_meta);
 }
 #endif
