@@ -1,4 +1,6 @@
-from types import SimpleNamespace
+import sys
+from contextlib import contextmanager
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -96,6 +98,40 @@ def _patch_select_moe_comm_method_deps(
         "get_ascend_config",
         lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_prefill_mc2=enable_prefill_mc2),
     )
+
+
+def test_forward_context_exposes_device_metadata_executor(monkeypatch):
+    forward_context = SimpleNamespace(dp_metadata=None)
+    moe_comm_method = ModuleType("vllm_ascend.ops.fused_moe.moe_comm_method")
+    moe_comm_method.get_moe_comm_method = lambda comm_type: None
+
+    @contextmanager
+    def fake_set_forward_context(**kwargs):
+        yield
+
+    executor = object()
+    monkeypatch.setattr(afc, "set_forward_context", fake_set_forward_context)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *args, **kwargs: None)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda config: False)
+    monkeypatch.setattr(afc, "is_moe_model", lambda config: False)
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(afc, "has_layer_idx", lambda model: False)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm_ascend.ops.fused_moe.moe_comm_method",
+        moe_comm_method,
+    )
+
+    with afc.set_ascend_forward_context(
+        None,
+        _make_vllm_config(),
+        num_tokens=1,
+        device_metadata_executor=executor,
+    ):
+        assert forward_context.device_metadata_executor is executor
 
 
 def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
