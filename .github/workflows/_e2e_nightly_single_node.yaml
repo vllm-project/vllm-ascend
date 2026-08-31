@@ -149,7 +149,8 @@ jobs:
   e2e-nightly:
     name: ${{ inputs.name || inputs.config_file_path || inputs.tests }}
     runs-on: ${{ inputs.runner }}
-    if: ${{ inputs.should_run }}
+    # if: ${{ inputs.should_run }}
+    if: ${{ !(inputs.should_run == false || inputs.should_run == 'false') }}
     timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     container:
       image: ${{ inputs.image }}
