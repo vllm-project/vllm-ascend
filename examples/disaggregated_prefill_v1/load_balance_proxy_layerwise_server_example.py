@@ -638,7 +638,7 @@ async def handle_chat_completions(request: Request):
     return await _handle_completions("/chat/completions", request)
 
 
-async def _handle_get_models():
+async def _handle_get_models(request: Request):
     """Forward the /models request to a backend server.
 
     Both prefiller and decoder servers serve the same model list,
@@ -654,7 +654,8 @@ async def _handle_get_models():
     else:
         raise RuntimeError("No backend servers available")
 
-    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+    auth = request.headers.get("Authorization")
+    headers = {"Authorization": auth} if auth else {}
     try:
         response = await backend.client.get("/models", headers=headers)
         response.raise_for_status()
@@ -665,8 +666,8 @@ async def _handle_get_models():
 
 
 @app.get("/v1/models")
-async def handle_get_models():
-    return await _handle_get_models()
+async def handle_get_models(request: Request):
+    return await _handle_get_models(request)
 
 
 @app.get("/healthcheck")
