@@ -104,6 +104,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Debug gate to run the main Compressor SP path while keeping the C4 Indexer
+    # (LI) Compressor on its full-shape path ("1"), for A/B/A isolation of the
+    # Indexer-SP contribution. Default "0" keeps Indexer SP enabled whenever
+    # Compressor SP is enabled. Must be identical on all TP ranks.
+    "VLLM_ASCEND_COMPRESSOR_SP_DISABLE_INDEXER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_COMPRESSOR_SP_DISABLE_INDEXER", "0"))
+    ),
 }
 
 # end-env-vars-definition

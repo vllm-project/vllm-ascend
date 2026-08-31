@@ -530,10 +530,51 @@ def update_block_cache_rows_(
     cache_rows.index_put_((block_indices, block_offsets), values)
 
 
+@dataclass
+class GatherWorkspace:
+    """Persistent send/receive buffers for one Compressor-SP collective kind.
+
+    Buffers are allocated once at the largest observed element count and only
+    ever grown (never shrunk); per-layer calls consume zero-copy ``narrow``
+    views of the same storage. Padding rows left in the send buffer keep stale
+    content between calls: every consumer compacts through the plan's
+    ``*_gather_compact`` selectors, which never select padded rows, so their
+    content is transmitted but never read.
+    """
+
+    send: torch.Tensor | None = None
+    gathered: torch.Tensor | None = None
+
+
+def gather_workspace_view(
+    workspace: GatherWorkspace,
+    reference: torch.Tensor,
+    elements: int,
+    *,
+    field: str,
+) -> torch.Tensor:
+    """Return a narrow view of a workspace buffer, growing it when needed.
+
+    ``field`` is ``"send"`` (zero-initialized at allocation so a fresh buffer
+    starts deterministic) or ``"gathered"`` (uninitialized receive side).
+    """
+    buffer = getattr(workspace, field)
+    if (
+        buffer is None
+        or buffer.numel() < elements
+        or buffer.dtype != reference.dtype
+        or buffer.device != reference.device
+    ):
+        buffer = reference.new_zeros(elements) if field == "send" else reference.new_empty(elements)
+        setattr(workspace, field, buffer)
+    return buffer.narrow(0, 0, elements)
+
+
 def fused_gather_rows(
     payloads: Sequence[tuple[torch.Tensor, Sequence[int]]],
     tp_size: int,
     all_gather_into_tensor: Callable[[torch.Tensor, torch.Tensor], None],
+    workspace: GatherWorkspace | None = None,
 ) -> list[torch.Tensor] | None:
     """Replicate several rank-local row blocks with a single AllGather.
 
@@ -572,12 +613,19 @@ def fused_gather_rows(
     if elements_per_rank == 0:
         return None
 
-    local_flat = reference.new_zeros(elements_per_rank)
+    if workspace is None:
+        workspace = GatherWorkspace()
+    local_flat = gather_workspace_view(workspace, reference, elements_per_rank, field="send")
     for (rows, _), (_, row_width, _, offset) in zip(payloads, layouts):
         local_elements = rows.shape[0] * row_width
         if local_elements:
             local_flat[offset : offset + local_elements].copy_(rows.reshape(-1))
-    gathered_flat = reference.new_empty(tp_size * elements_per_rank)
+    gathered_flat = gather_workspace_view(
+        workspace,
+        reference,
+        tp_size * elements_per_rank,
+        field="gathered",
+    )
     all_gather_into_tensor(gathered_flat, local_flat)
 
     # Each rank's blocks are interleaved in the flat buffer, so splitting them

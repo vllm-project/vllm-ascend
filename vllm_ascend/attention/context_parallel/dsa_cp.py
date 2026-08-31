@@ -1,3 +1,4 @@
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, ClassVar, TypeVar
@@ -12,15 +13,18 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.compressor_sp import (
     CompressorSPPlan,
+    GatherWorkspace,
     build_compressor_sp_plan,
     build_padded_destination_for_scatter,
     flatten_slot_mapping,
     fused_gather_rows,
+    gather_workspace_view,
     is_block_offset_slot_mapping,
     select_block_cache_rows,
     update_block_cache_rows_,
@@ -54,12 +58,26 @@ from vllm_ascend.utils import (
 
 _COMPRESSOR_SP_COMM_STREAM: torch.npu.Stream | None = None
 
+# Persistent per-process send/receive workspaces, one pair per Compressor kind.
+# "main" serves the main Compressor's async gather and the C128 fused
+# synchronous collective (fenced before it returns, so no overlap); "indexer"
+# serves the Indexer gather so both async AllGathers can be in flight at once.
+_COMPRESSOR_SP_WORKSPACES: dict[str, GatherWorkspace] = {}
+
 
 def _compressor_sp_comm_stream() -> torch.npu.Stream:
     global _COMPRESSOR_SP_COMM_STREAM
     if _COMPRESSOR_SP_COMM_STREAM is None:
         _COMPRESSOR_SP_COMM_STREAM = torch_npu.npu.Stream()
     return _COMPRESSOR_SP_COMM_STREAM
+
+
+def _compressor_sp_workspace(kind: str) -> GatherWorkspace:
+    workspace = _COMPRESSOR_SP_WORKSPACES.get(kind)
+    if workspace is None:
+        workspace = GatherWorkspace()
+        _COMPRESSOR_SP_WORKSPACES[kind] = workspace
+    return workspace
 
 
 def hadamard_transform_ref(
@@ -1332,6 +1350,13 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self.vllm_config = get_current_vllm_config()
         self.compressor_sp_hccl_overlap = get_ascend_config().compressor_sp_hccl_overlap
         self.compressor_sp_hccl_overlap_min_tokens = get_ascend_config().compressor_sp_hccl_overlap_min_tokens
+        self.compressor_sp_indexer_disabled = envs.VLLM_ASCEND_COMPRESSOR_SP_DISABLE_INDEXER
+        if self.compressor_sp_indexer_disabled:
+            # Rank-visible confirmation that the debug gate took effect; all TP
+            # ranks must log this identically or the collectives would hang.
+            logging.getLogger(__name__).info(
+                "Compressor SP: Indexer SP disabled by VLLM_ASCEND_COMPRESSOR_SP_DISABLE_INDEXER"
+            )
         self._compressor_sp_slot_buffer: torch.Tensor | None = None
 
         # indexer param
@@ -1613,18 +1638,30 @@ class AscendDSACPImpl(DSAAttentionImpl):
         local_rows: torch.Tensor,
         row_counts: tuple[int, ...],
         comm_stream: torch.npu.Stream | None = None,
+        workspace_kind: str = "main",
     ) -> tuple[torch.Tensor, torch.Tensor, Any | None]:
         max_rows = max(row_counts)
+        row_elements = local_rows[0].numel() if local_rows.shape[0] else math.prod(local_rows.shape[1:])
+        workspace = _compressor_sp_workspace(workspace_kind)
         # Fixed owners produce global row order directly in rank-major order.
         # Uniform shards therefore take the Megatron-style regular path: the
         # local tensor is gathered without padding and the collective output is
-        # consumed by Scatter as-is.
+        # consumed by Scatter as-is. Ragged shards pad inside the persistent
+        # send buffer; the padding rows keep stale content, which the plan's
+        # compact selectors never select.
         if local_rows.shape[0] < max_rows:
-            padded_local = local_rows.new_zeros((max_rows, *local_rows.shape[1:]))
+            padded_local = gather_workspace_view(workspace, local_rows, max_rows * row_elements, field="send").view(
+                max_rows, *local_rows.shape[1:]
+            )
             padded_local[: local_rows.shape[0]].copy_(local_rows)
         else:
             padded_local = local_rows
-        gathered = local_rows.new_empty((self.tp_size * max_rows, *local_rows.shape[1:]))
+        gathered = gather_workspace_view(
+            workspace,
+            local_rows,
+            self.tp_size * max_rows * row_elements,
+            field="gathered",
+        ).view(self.tp_size * max_rows, *local_rows.shape[1:])
         if comm_stream is None:
             dist.all_gather_into_tensor(gathered, padded_local, group=self.tp_group.device_group)
             return gathered, padded_local, None
@@ -1652,6 +1689,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 local,
                 group=self.tp_group.device_group,
             ),
+            workspace=_compressor_sp_workspace("main"),
         )
 
     def _read_compressor_sp_state_rows(
@@ -2012,6 +2050,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             or not need_gather_q_kv
             or not self.compressor_sp_hccl_overlap
             or torch.npu.is_current_stream_capturing()
+            or self.compressor_sp_indexer_disabled
             or plan is None
             or not plan.enabled
             or plan.gather_compact_slice is None
@@ -2044,6 +2083,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             local_compressed_kv,
             row_counts,
             comm_stream=comm_stream,
+            workspace_kind="indexer",
         )
         self._replay_c4_compressor_sp_state(
             x=x,
@@ -2315,9 +2355,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )
             # Launch the C4 Compressor SP update before the Indexer work: the
             # shape-balanced local Compressor then reaches the AllGather at the
-            # same time on every rank, and TopK covers the collective while the
-            # finalize below only waits and scatters. Ineligible batches return
-            # None and keep the original synchronous position after TopK.
+            # same time on every rank, and the Indexer local Compressor plus
+            # its state replay cover the collective. When Indexer SP is active
+            # the Indexer finalize below joins the communication stream before
+            # TopK, so TopK no longer hides the main AllGather; the coverage
+            # window is the Indexer local compute instead, and the main
+            # finalize after TopK only waits (typically already satisfied) and
+            # scatters. Ineligible batches return None and keep the original
+            # synchronous position after TopK.
             sp_async_gather = (
                 self._launch_compressor_cache_sp(
                     x=hidden_states_cache,
