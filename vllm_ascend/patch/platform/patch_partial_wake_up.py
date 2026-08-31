@@ -30,8 +30,9 @@ def _wake_up_without_early_scheduler_resume(self: EngineCore, tags: list[str] | 
     Preserve the explicit ``scheduling`` wake behavior, but otherwise resume
     only after the executor reports that no allocation tags remain asleep.
     """
-    resume_scheduling = tags is not None and "scheduling" in tags
-    if resume_scheduling:
+    resume_scheduling = False
+    if tags is not None and "scheduling" in tags:
+        resume_scheduling = True
         tags = [tag for tag in tags if tag != "scheduling"]
 
     if tags is None or tags:
