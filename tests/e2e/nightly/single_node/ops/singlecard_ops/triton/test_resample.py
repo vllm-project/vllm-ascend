@@ -1,26 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
-# Numerical test for vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils
-# (`_resample_kernel` and the `_npu_gumbel_block_argmax` device function it
-# calls) against a plain PyTorch fp32 reference.
+# Numerical test for `_resample_kernel` in
+# vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils, against a plain
+# PyTorch fp32 reference.
 # Requires NPU and Triton-Ascend.
 #
 # See vllm_ascend/ops/triton/docs/resample.md for the operator spec.
 #
 # Regression scope: #9155 (main2main import of the MRV2 rejection sampler) and
 # #13470 (probabilistic rejection sampling enabled on NPU) -- neither PR shipped
-# any numerical coverage for these two kernels.
+# any numerical coverage for this kernel.
 #
-# `_npu_gumbel_block_argmax` is a `@triton.jit` *device* function: it cannot be
-# launched from host.  It is exercised two ways here:
-#   * directly, through the thin probe kernel `_gumbel_probe_kernel` below,
-#     which mirrors the real call site in `_resample_kernel`;
-#   * indirectly, through `_resample_kernel` itself.
+# `_npu_gumbel_block_argmax` is a `@triton.jit` device function inlined into
+# `_resample_kernel`, not a separate operator: it has no `tl.program_id` and
+# cannot be launched on its own.  It is covered here only through
+# `_resample_kernel`, which is the sole caller.
+#
 # The Gumbel noise it draws comes from Triton's philox, which has no PyTorch
 # equivalent, so `_gumbel_noise_probe_kernel` re-draws the *same* stream and the
-# reference consumes it.  That pins down everything except the RNG itself
-# (temperature scaling, processed-logits store, masking, the -inf branch, the
-# block-local argmax); the RNG is covered separately and statistically by
-# `test_gumbel_argmax_follows_softmax_distribution`.
+# reference consumes it.  That copy shares a blind spot with the code under
+# test, so the RNG is additionally pinned from the other side, without the probe,
+# by `test_resample_argmax_follows_softmax_distribution`.
 
 import gc
 
@@ -30,11 +29,7 @@ import torch_npu  # noqa: F401  # registers the npu backend / torch.npu namespac
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
-    _npu_gumbel_block_argmax,
-    _resample_kernel,
-    rejection_sample,
-)
+from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import _resample_kernel, rejection_sample
 
 DEVICE = "npu"
 
@@ -63,100 +58,8 @@ def _npu_env():
 
 
 # ---------------------------------------------------------------------------
-# Probe kernels (test-only harness)
+# Probe kernel (test-only harness)
 # ---------------------------------------------------------------------------
-
-
-@triton.jit
-def _gumbel_probe_kernel(
-    out_value_ptr,
-    out_value_stride,
-    out_idx_ptr,
-    out_idx_stride,
-    logits_ptr,
-    logits_stride,
-    expanded_idx_mapping_ptr,
-    temp_ptr,
-    seeds_ptr,
-    pos_ptr,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
-    vocab_size,
-    BLOCK_SIZE: tl.constexpr,
-    APPLY_TEMPERATURE: tl.constexpr,
-    # 0 = no processed_logits (mirrors the real call site in _resample_kernel)
-    # 1 = processed_logits, implicit column 0
-    # 2 = processed_logits, column read from processed_logits_col_ptr
-    PROCESSED_MODE: tl.constexpr,
-):
-    """Thin host-launchable wrapper around the `_npu_gumbel_block_argmax` device function.
-
-    The three `PROCESSED_MODE` variants pass literal `None`s rather than relying
-    on `None` surviving a kernel-argument boundary, so each variant compiles the
-    same way the production call site does.
-    """
-    token_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    logits = tl.load(
-        logits_ptr + token_idx * logits_stride + block,
-        mask=mask,
-        other=float("-inf"),
-    ).to(tl.float32)
-
-    if PROCESSED_MODE == 0:
-        value, idx = _npu_gumbel_block_argmax(
-            logits,
-            block,
-            mask,
-            token_idx,
-            expanded_idx_mapping_ptr,
-            temp_ptr,
-            seeds_ptr,
-            pos_ptr,
-            None,
-            0,
-            None,
-            vocab_size,
-            APPLY_TEMPERATURE=APPLY_TEMPERATURE,
-        )
-    elif PROCESSED_MODE == 1:
-        value, idx = _npu_gumbel_block_argmax(
-            logits,
-            block,
-            mask,
-            token_idx,
-            expanded_idx_mapping_ptr,
-            temp_ptr,
-            seeds_ptr,
-            pos_ptr,
-            processed_logits_ptr,
-            processed_logits_stride,
-            None,
-            vocab_size,
-            APPLY_TEMPERATURE=APPLY_TEMPERATURE,
-        )
-    else:
-        value, idx = _npu_gumbel_block_argmax(
-            logits,
-            block,
-            mask,
-            token_idx,
-            expanded_idx_mapping_ptr,
-            temp_ptr,
-            seeds_ptr,
-            pos_ptr,
-            processed_logits_ptr,
-            processed_logits_stride,
-            processed_logits_col_ptr,
-            vocab_size,
-            APPLY_TEMPERATURE=APPLY_TEMPERATURE,
-        )
-
-    tl.store(out_value_ptr + token_idx * out_value_stride + block_idx, value)
-    tl.store(out_idx_ptr + token_idx * out_idx_stride + block_idx, block_idx * BLOCK_SIZE + idx)
 
 
 @triton.jit
@@ -356,300 +259,6 @@ def _ref_residual_from_draft(target, draft, target_lse_val, draft_lse_val):
     return torch.where(ratio < 1.0, residual, torch.full_like(residual, float("-inf")))
 
 
-# ---------------------------------------------------------------------------
-# _npu_gumbel_block_argmax
-# ---------------------------------------------------------------------------
-
-
-def _gumbel_setup(num_tokens, vocab_size, max_num_reqs, temps, seed=1234, shuffle_rows=True):
-    torch.manual_seed(seed)
-    logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
-    if shuffle_rows:
-        # req_state rows deliberately not equal to the token index, so mixing up
-        # `token_idx` and `req_state_idx` cannot pass by accident.
-        rows = torch.randperm(max_num_reqs)[:num_tokens].to(torch.int32)
-    else:
-        rows = torch.zeros(num_tokens, dtype=torch.int32)
-    expanded_idx_mapping = rows.to(DEVICE)
-    temperature = torch.zeros(max_num_reqs, dtype=torch.float32, device=DEVICE)
-    for i, t in enumerate(temps):
-        temperature[int(rows[i])] = t
-    seeds = torch.randint(1, 2**30, (max_num_reqs,), dtype=torch.int64, device=DEVICE)
-    pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE) * 7 + 3
-    return logits, expanded_idx_mapping, temperature, seeds, pos
-
-
-@torch.inference_mode()
-def test_gumbel_greedy_is_plain_block_argmax():
-    """temp == 0 disables the noise entirely -- the only fully deterministic path.
-
-    This is the branch `_resample_kernel` takes for greedy bonus tokens, and the
-    one the whole greedy spec-decode path depends on, so it is checked exactly
-    rather than through the noise probe.  `vocab_size` is deliberately not a
-    multiple of BLOCK_SIZE so the padded tail (`other=-inf`) is exercised.
-    """
-    num_tokens, vocab_size, max_num_reqs = 6, 3 * RESAMPLE_BLOCK_SIZE + 37, 11
-    logits, mapping, temperature, seeds, pos = _gumbel_setup(num_tokens, vocab_size, max_num_reqs, [0.0] * num_tokens)
-    num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
-
-    values = torch.empty(num_tokens, num_blocks, dtype=torch.float32, device=DEVICE)
-    idxs = torch.empty(num_tokens, num_blocks, dtype=torch.int64, device=DEVICE)
-    dummy = torch.empty(1, dtype=torch.float32, device=DEVICE)
-    dummy_col = torch.zeros(1, dtype=torch.int32, device=DEVICE)
-    _gumbel_probe_kernel[(num_tokens, num_blocks)](
-        values,
-        values.stride(0),
-        idxs,
-        idxs.stride(0),
-        logits,
-        logits.stride(0),
-        mapping,
-        temperature,
-        seeds,
-        pos,
-        dummy,
-        0,
-        dummy_col,
-        vocab_size,
-        BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
-        APPLY_TEMPERATURE=False,
-        PROCESSED_MODE=0,
-    )
-    torch.npu.synchronize()
-
-    ref_val, ref_idx = _ref_block_argmax(logits, vocab_size, RESAMPLE_BLOCK_SIZE)
-    torch.testing.assert_close(values, ref_val, rtol=_RTOL, atol=_ATOL)
-    assert torch.equal(idxs, ref_idx)
-    # The tail block must never point past the vocabulary.
-    assert int(idxs.max()) < vocab_size
-
-
-@pytest.mark.parametrize("apply_temperature", [True, False])
-@torch.inference_mode()
-def test_gumbel_matches_reference_with_noise(apply_temperature):
-    """temp != 0: noise on, and `APPLY_TEMPERATURE` toggled on both sides.
-
-    The `APPLY_TEMPERATURE=True` half is unreachable from `_resample_kernel`
-    (which hardcodes False) but is part of the device function's contract and is
-    what the upstream sampler uses, so both sides of the constexpr are pinned.
-    """
-    num_tokens, vocab_size, max_num_reqs = 5, 2 * RESAMPLE_BLOCK_SIZE + 11, 9
-    temps = [0.5, 1.0, 2.0, 0.7, 1.3]
-    logits, mapping, temperature, seeds, pos = _gumbel_setup(num_tokens, vocab_size, max_num_reqs, temps)
-    num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
-
-    values = torch.empty(num_tokens, num_blocks, dtype=torch.float32, device=DEVICE)
-    idxs = torch.empty(num_tokens, num_blocks, dtype=torch.int64, device=DEVICE)
-    dummy = torch.empty(1, dtype=torch.float32, device=DEVICE)
-    dummy_col = torch.zeros(1, dtype=torch.int32, device=DEVICE)
-    _gumbel_probe_kernel[(num_tokens, num_blocks)](
-        values,
-        values.stride(0),
-        idxs,
-        idxs.stride(0),
-        logits,
-        logits.stride(0),
-        mapping,
-        temperature,
-        seeds,
-        pos,
-        dummy,
-        0,
-        dummy_col,
-        vocab_size,
-        BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
-        APPLY_TEMPERATURE=apply_temperature,
-        PROCESSED_MODE=0,
-    )
-    torch.npu.synchronize()
-
-    noise = _draw_noise(num_tokens, vocab_size, mapping, seeds, pos, RESAMPLE_BLOCK_SIZE)
-    # Guard the guard: a degenerate (constant / all-zero) noise draw would make
-    # this test collapse into the greedy one above.
-    assert float(noise.std()) > 0.1, "gumbel noise probe no longer produces a spread of values"
-
-    scaled = logits.float()
-    if apply_temperature:
-        per_token_temp = temperature[mapping.long()].unsqueeze(1)
-        scaled = scaled / per_token_temp
-    ref_val, ref_idx = _ref_block_argmax(scaled, vocab_size, RESAMPLE_BLOCK_SIZE, noise=noise)
-
-    _assert_block_argmax_close(idxs, values, ref_idx, ref_val, scaled + noise, RESAMPLE_BLOCK_SIZE)
-
-    # Guard the guard: the noise must actually move at least one winner, else
-    # this case proves nothing beyond the greedy path.
-    _, greedy_idx = _ref_block_argmax(scaled, vocab_size, RESAMPLE_BLOCK_SIZE)
-    assert bool((greedy_idx != ref_idx).any()), "noise no longer changes any block winner"
-
-
-@pytest.mark.parametrize("processed_mode", [1, 2], ids=["implicit-col-0", "explicit-col"])
-@torch.inference_mode()
-def test_gumbel_stores_processed_logits(processed_mode):
-    """The `processed_logits` side output: written before the noise, after the temperature.
-
-    Both column modes are covered: `processed_logits_col_ptr is None` (column 0)
-    and an explicit column, which is the branch that makes the write land at
-    `req_state_idx * stride + col * vocab_size`.  Note the row index is
-    `req_state_idx`, *not* `token_idx` -- getting that wrong is silent.
-    """
-    num_tokens, vocab_size, max_num_reqs = 4, RESAMPLE_BLOCK_SIZE + 5, 7
-    num_cols = 3
-    col = 2 if processed_mode == 2 else 0
-    temps = [0.0, 0.5, 2.0, 1.0]
-    logits, mapping, temperature, seeds, pos = _gumbel_setup(num_tokens, vocab_size, max_num_reqs, temps)
-    num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
-
-    processed = torch.full((max_num_reqs, num_cols * vocab_size), float("nan"), dtype=torch.float32, device=DEVICE)
-    col_tensor = torch.tensor([col], dtype=torch.int32, device=DEVICE)
-    values = torch.empty(num_tokens, num_blocks, dtype=torch.float32, device=DEVICE)
-    idxs = torch.empty(num_tokens, num_blocks, dtype=torch.int64, device=DEVICE)
-    _gumbel_probe_kernel[(num_tokens, num_blocks)](
-        values,
-        values.stride(0),
-        idxs,
-        idxs.stride(0),
-        logits,
-        logits.stride(0),
-        mapping,
-        temperature,
-        seeds,
-        pos,
-        processed,
-        processed.stride(0),
-        col_tensor,
-        vocab_size,
-        BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
-        APPLY_TEMPERATURE=True,
-        PROCESSED_MODE=processed_mode,
-    )
-    torch.npu.synchronize()
-
-    for token_idx in range(num_tokens):
-        row = int(mapping[token_idx])
-        temp = float(temperature[row])
-        expected = logits[token_idx].float()
-        if temp != 0.0:
-            expected = expected / temp
-        actual = processed[row, col * vocab_size : col * vocab_size + vocab_size]
-        torch.testing.assert_close(actual, expected, rtol=_RTOL, atol=_ATOL)
-
-    # Rows/columns nobody wrote must still be untouched: the store is masked to
-    # `block < vocab_size`, so no neighbouring column may be clobbered.
-    written_rows = {int(r) for r in mapping}
-    for row in range(max_num_reqs):
-        for c in range(num_cols):
-            if row in written_rows and c == col:
-                continue
-            chunk = processed[row, c * vocab_size : c * vocab_size + vocab_size]
-            assert bool(torch.isnan(chunk).all()), f"row {row} col {c} was overwritten"
-
-
-@torch.inference_mode()
-def test_gumbel_argmax_follows_softmax_distribution():
-    """Gumbel-max must sample proportionally to softmax(logits).
-
-    This is the one check that does *not* reuse the kernel's own RNG, so it is
-    the only thing standing between a broken philox call (wrong seed mixing,
-    a constant draw, a sign error in `-log(-log(u))`) and a silently biased
-    sampler.  8 categories in a single block, 16384 draws, one distinct `pos`
-    per draw.
-    """
-    num_tokens, vocab_size, max_num_reqs = 16384, 8, 1
-    torch.manual_seed(7)
-    row_logits = torch.tensor([2.0, 1.0, 0.5, 0.0, -0.5, -1.0, -1.5, -2.0], dtype=torch.float32)
-    logits = row_logits.to(DEVICE).repeat(num_tokens, 1).contiguous()
-    mapping = torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE)
-    temperature = torch.ones(max_num_reqs, dtype=torch.float32, device=DEVICE)
-    seeds = torch.full((max_num_reqs,), 20260827, dtype=torch.int64, device=DEVICE)
-    pos = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
-
-    values = torch.empty(num_tokens, 1, dtype=torch.float32, device=DEVICE)
-    idxs = torch.empty(num_tokens, 1, dtype=torch.int64, device=DEVICE)
-    dummy = torch.empty(1, dtype=torch.float32, device=DEVICE)
-    dummy_col = torch.zeros(1, dtype=torch.int32, device=DEVICE)
-    _gumbel_probe_kernel[(num_tokens, 1)](
-        values,
-        values.stride(0),
-        idxs,
-        idxs.stride(0),
-        logits,
-        logits.stride(0),
-        mapping,
-        temperature,
-        seeds,
-        pos,
-        dummy,
-        0,
-        dummy_col,
-        vocab_size,
-        BLOCK_SIZE=vocab_size,
-        APPLY_TEMPERATURE=False,
-        PROCESSED_MODE=0,
-    )
-    torch.npu.synchronize()
-
-    counts = torch.bincount(idxs.flatten().cpu(), minlength=vocab_size).float()
-    empirical = counts / num_tokens
-    expected = torch.softmax(row_logits, dim=0)
-    # 16384 draws => per-category std <= 0.004; 0.02 is ~5 sigma and leaves room
-    # for the coarse fp32 tail of `-log(-log(u))` (see the operator doc).
-    assert torch.allclose(empirical, expected, atol=0.02), (
-        f"argmax frequencies {empirical.tolist()} deviate from softmax {expected.tolist()}"
-    )
-
-
-@torch.inference_mode()
-def test_gumbel_is_deterministic_in_seed_and_pos():
-    """Same (seed, pos) must give the same token; a different pos must not.
-
-    Reproducibility across two runs of the same request is a user-visible
-    property (`SamplingParams.seed`), and it is what makes the noise-probe
-    oracle in the tests above legitimate.
-    """
-    num_tokens, vocab_size, max_num_reqs = 8, RESAMPLE_BLOCK_SIZE, 8
-    logits, mapping, temperature, seeds, pos = _gumbel_setup(num_tokens, vocab_size, max_num_reqs, [1.0] * num_tokens)
-
-    def _run(pos_tensor):
-        values = torch.empty(num_tokens, 1, dtype=torch.float32, device=DEVICE)
-        idxs = torch.empty(num_tokens, 1, dtype=torch.int64, device=DEVICE)
-        dummy = torch.empty(1, dtype=torch.float32, device=DEVICE)
-        dummy_col = torch.zeros(1, dtype=torch.int32, device=DEVICE)
-        _gumbel_probe_kernel[(num_tokens, 1)](
-            values,
-            values.stride(0),
-            idxs,
-            idxs.stride(0),
-            logits,
-            logits.stride(0),
-            mapping,
-            temperature,
-            seeds,
-            pos_tensor,
-            dummy,
-            0,
-            dummy_col,
-            vocab_size,
-            BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
-            APPLY_TEMPERATURE=False,
-            PROCESSED_MODE=0,
-        )
-        torch.npu.synchronize()
-        return values, idxs
-
-    v1, i1 = _run(pos)
-    v2, i2 = _run(pos)
-    assert torch.equal(i1, i2)
-    torch.testing.assert_close(v1, v2, rtol=0.0, atol=0.0)
-
-    v3, i3 = _run(pos + 1)
-    assert bool((i3 != i1).any()), "shifting pos no longer changes the draw"
-
-
-# ---------------------------------------------------------------------------
-# _resample_kernel
-# ---------------------------------------------------------------------------
-
-
 def _make_batch(num_logits_per_req, vocab_size, max_num_reqs, temps, seed=99):
     """Build a resample batch.
 
@@ -690,6 +299,11 @@ def _make_batch(num_logits_per_req, vocab_size, max_num_reqs, temps, seed=99):
         "pos": pos,
         "num_logits": num_logits,
     }
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 
 @torch.inference_mode()
@@ -1043,6 +657,62 @@ def test_resample_is_deterministic():
     a2, m2 = _run_resample(**kwargs)
     assert torch.equal(a1, a2)
     torch.testing.assert_close(m1, m2, rtol=0.0, atol=0.0)
+
+
+@torch.inference_mode()
+def test_resample_argmax_follows_softmax_distribution():
+    """The resampled token must follow softmax(residual), not merely "some token".
+
+    Every other sampling case here compares against a reference that consumes
+    the kernel's own Gumbel noise, so a broken philox call -- wrong seed mixing,
+    a constant draw, a sign error in `-log(-log(u))` -- would be reproduced by
+    the reference and compared against itself.  This case closes that blind spot
+    from the other side, using only the mathematical property of Gumbel-max:
+    adding independent Gumbel noise and taking the argmax samples exactly from
+    `softmax(logits)`.  It reads nothing from the noise probe.
+
+    Driven through the bonus branch (residual == target logits) so the expected
+    distribution is the target softmax itself.  One request per draw, each with
+    a distinct `pos`, since the noise is keyed on (seed, pos).
+    """
+    num_draws, vocab_size, max_num_reqs = 16384, 8, 1
+    torch.manual_seed(7)
+    row_logits = torch.tensor([2.0, 1.0, 0.5, 0.0, -0.5, -1.0, -1.5, -2.0], dtype=torch.float32)
+    target_logits = row_logits.to(DEVICE).repeat(num_draws, 1).contiguous()
+
+    # One logit per request => resample_token_idx == end_idx - 1 => bonus branch.
+    cu_num_logits = torch.arange(num_draws + 1, dtype=torch.int32, device=DEVICE)
+    expanded_idx_mapping = torch.zeros(num_draws, dtype=torch.int32, device=DEVICE)
+    rejected_step = torch.zeros(num_draws, dtype=torch.int32, device=DEVICE)
+    draft_sampled = torch.zeros(num_draws, dtype=torch.int32, device=DEVICE)
+    temperature = torch.ones(max_num_reqs, dtype=torch.float32, device=DEVICE)
+    seeds = torch.full((max_num_reqs,), 20260827, dtype=torch.int64, device=DEVICE)
+    pos = torch.arange(num_draws, dtype=torch.int64, device=DEVICE)
+    lse = torch.zeros(num_draws, dtype=torch.float32, device=DEVICE)
+
+    argmax, _ = _run_resample(
+        target_logits=target_logits,
+        draft_logits=None,
+        draft_sampled=draft_sampled,
+        cu_num_logits=cu_num_logits,
+        expanded_idx_mapping=expanded_idx_mapping,
+        rejected_step=rejected_step,
+        temperature=temperature,
+        seeds=seeds,
+        pos=pos,
+        target_lse=lse,
+        draft_lse=lse,
+        block_size=vocab_size,
+    )
+
+    counts = torch.bincount(argmax.flatten().cpu(), minlength=vocab_size).float()
+    empirical = counts / num_draws
+    expected = torch.softmax(row_logits, dim=0)
+    # 16384 draws => per-category std <= 0.004; 0.02 is ~5 sigma and leaves room
+    # for the coarse fp32 tail of `-log(-log(u))` (see the operator doc).
+    assert torch.allclose(empirical, expected, atol=0.02), (
+        f"argmax frequencies {empirical.tolist()} deviate from softmax {expected.tolist()}"
+    )
 
 
 # ---------------------------------------------------------------------------

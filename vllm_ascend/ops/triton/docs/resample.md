@@ -113,6 +113,10 @@
 
 ### Triton device function: `_npu_gumbel_block_argmax`
 
+Not a separately dispatched operator: it has no `tl.program_id` and receives `logits` as a
+value rather than a pointer, so it is inlined into `_resample_kernel`, its only caller in
+this repository. The table below documents the internal contract.
+
 | Parameter | Input/Output/Attribute | Description | Data type | Data format |
 | --- | --- | --- | --- | --- |
 | `logits` | Input | Logit values already loaded for one vocabulary block | fp32 | ND |
@@ -184,16 +188,24 @@
 
 ## Test Cases
 
-The accuracy test uses an independent PyTorch fp32 reference for temperature
-scaling, residual logits, masking, block-local maxima, and argmax indices. Two
-test-only Triton probe kernels make the device function host-launchable and
-replay its Philox noise for deterministic comparison. A separate 16,384-draw
-statistical test compares Gumbel-max frequencies with `softmax(logits)`.
+The accuracy test uses an independent PyTorch fp32 reference for residual
+logits, masking, block-local maxima, and argmax indices. `_npu_gumbel_block_argmax`
+is a device function inlined into `_resample_kernel` and is not tested on its
+own; it is covered through `_resample_kernel`, its only caller. Its
+`processed_logits` store and its `APPLY_TEMPERATURE=True` path are unreachable
+from this repository, because the call site passes `None, 0, None` and `False`,
+and are therefore not covered.
 
-The cases cover greedy and sampling requests, both `APPLY_TEMPERATURE` modes,
-all optional processed-logit output modes, all three residual branches, ragged
-vocabulary tails, shuffled request-state rows, deterministic seeds and
-positions, and an end-to-end greedy call through `rejection_sample`.
+One test-only Triton probe kernel replays the Philox noise stream so the
+reference can compare sampling results deterministically. Because that replay
+shares a blind spot with the code under test, a separate 16,384-draw statistical
+test compares the resampled-token frequencies with `softmax(logits)` without
+using the probe.
+
+The cases cover greedy and sampling requests, all three residual branches, the
+greedy early return, ragged vocabulary tails, shuffled request-state rows,
+deterministic seeds and positions, the sampling distribution, and an end-to-end
+greedy call through `rejection_sample`.
 
 The fp32 score comparison uses `rtol=1e-5` and `atol=1e-5`. Token IDs are
 compared exactly, except that a different argmax is accepted when its reference
