@@ -549,6 +549,8 @@ class NPUWorker(WorkerBase):
         # but skip the memory profiling calculation entirely.
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             self.model_runner.profile_run()
+            if get_ascend_device_type() != AscendDeviceType.A5:
+                self._warm_up_atb()
             logger.info(
                 "Initial free memory %.2f GiB, reserved %.2f GiB for KV Cache "
                 "as specified by kv_cache_memory_bytes, skipping memory profiling. "
@@ -569,6 +571,11 @@ class NPUWorker(WorkerBase):
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
             self.model_runner.profile_run()
+
+            # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
+            # may cause performance degradation at runtime.
+            if get_ascend_device_type() != AscendDeviceType.A5:
+                self._warm_up_atb()
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
             # so that graph pool allocations don't inflate the activation peak.
@@ -820,10 +827,6 @@ class NPUWorker(WorkerBase):
             )
             logger.info(msg)
 
-        # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
-        # may cause performance degradation at runtime.
-        if get_ascend_device_type() != AscendDeviceType.A5:
-            self._warm_up_atb()
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:
