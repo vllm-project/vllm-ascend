@@ -1,4 +1,5 @@
 import contextlib
+import ctypes
 import os
 import typing
 from zlib import adler32
@@ -371,7 +372,7 @@ class SparseKVOffloadManager:
         self.tp_group.barrier()
 
     def _build_cpp(self):
-        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
+        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = os.environ.get("TORCH_EXTENSIONS_ALWAYS_BUILD", "0")
         ascend_home = os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
         npu_include_path = os.path.join(ascend_home, "include")
         npu_lib_path = os.path.join(ascend_home, "lib64")
@@ -380,9 +381,9 @@ class SparseKVOffloadManager:
         torch_npu_path = os.path.dirname(torch_npu.__file__)
         torch_npu_include = os.path.join(torch_npu_path, "include")
         torch_npu_lib_path = os.path.join(torch_npu_path, "lib")
-        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = "1"
-        os.environ["CXX"] = "clang++"
-        os.environ["CC"] = "clang"
+        os.environ["TORCH_EXTENSIONS_ALWAYS_BUILD"] = os.environ.get("TORCH_EXTENSIONS_ALWAYS_BUILD", "0")
+        os.environ["CXX"] = "g++"
+        os.environ["CC"] = "gcc"
         abs_path = os.path.dirname(os.path.abspath(__file__))
         src_path = os.path.join(abs_path, "sparse_kv_offload.cpp")
         logger.info_once(f"Sparse KV offload build cpp utils from src: {src_path}")
@@ -692,6 +693,18 @@ class SparseKVOffloadManager:
             device="cpu",
             pin_memory=True,
         )
+        # v8: new-KV local fill. The host func writes (row, flat_dst) index
+        # pairs for the current step's fresh tokens; captured ops then copy
+        # them from the local K/V activations into the resident buffers.
+        self._new_kv_max = 8  # max fresh tokens per forward (spec tokens * safety)
+        # int32 index descriptors consumed by the fused FillLocalCopy kernel;
+        # valid==0 entries are skipped inside the kernel (strict no-op).
+        self.new_kv_rows_cpu = torch.zeros([self._new_kv_max], dtype=torch.int32, device="cpu", pin_memory=True)
+        self.new_kv_dst_cpu = torch.zeros([self._new_kv_max], dtype=torch.int32, device="cpu", pin_memory=True)
+        self.new_kv_valid_cpu = torch.zeros([self._new_kv_max], dtype=torch.int32, device="cpu", pin_memory=True)
+        self._new_kv_k_rows = None
+        self._new_kv_v_rows = None
+        self._new_kv_pending: list[tuple[int, int]] = []  # [(row_token_id, slot)] filled per step
         self.lru_last_req_ids_cpu_list = [
             torch.full(
                 [self.max_num_topk_rows],
@@ -775,6 +788,18 @@ class SparseKVOffloadManager:
     ) -> None:
         # the has_prefill path (NPU paged cache -> CPU pool D2H) only exists
         # for single-node PD-colocate debug.
+        # v10: publish the new-KV activation rows on EVERY rank before the
+        # tp0-only early return below - the local resident-slot fill runs
+        # per rank (each rank owns its own top-k buffers), while the pool
+        # dump itself stays tp0-only (decode K/V is TP-replicated).
+        if not has_prefill:
+            if k is None or v is None:
+                raise ValueError("decode offload requires current-token K/V")
+            self._new_kv_k_rows = k.reshape(-1, self.token_size_bytes_k // k.element_size())
+            self._new_kv_v_rows = v.reshape(-1, self.token_size_bytes_v // v.element_size())
+        else:
+            self._new_kv_k_rows = None
+            self._new_kv_v_rows = None
         if self.tp_rank != 0:
             # Decode-produced K/V is replicated across TP ranks, so TP0 alone
             # writes new decode tokens. PD pull fills disjoint parts of this
@@ -945,6 +970,12 @@ class SparseKVOffloadManager:
                 self.size_buffer_cpu,
                 self.num_tokens_buffer_cpu,
                 layer_id,
+                # v8: stable-prefix pointer for the engine-descriptor skip.
+                # Only enabled for decode-only forwards where the local-fill
+                # path is active; prefill/mixed forwards must keep the full
+                # engine fetch (their entire query span is "fresh" and the
+                # fill path is disabled there).
+                (self.lru_stable_prefix_lens_ptr if self._new_kv_k_rows is not None else 0),
             )
 
             if capturing:
@@ -963,7 +994,16 @@ class SparseKVOffloadManager:
 
             self.sparse_copy_args_buffer_npu.copy_(self.sparse_copy_args_buffer_cpu, non_blocking=capturing)
 
-        if self.tp_size > 1:
+        # v11: with the new-KV local fill active (decode-only forwards),
+        # the only pool fetches left are for tokens from EARLIER forwards,
+        # whose tp0 dumps are fully ordered before this forward on tp0's
+        # stream. One broadcast at the first leader layer of each forward
+        # therefore flushes every in-flight dump that any later fetch in
+        # this forward could race with. Prefill/mixed forwards (fill
+        # disabled) keep the per-layer sync.
+        fresh_fill_active = self._new_kv_k_rows is not None
+        first_leader = (not skip_topk) and (layer_id == 0 or layer_id == self.mtp_layer_id)
+        if self.tp_size > 1 and (not fresh_fill_active or first_leader):
             # Make sure that tp0 d2h is finished before other tp's h2d.
             # NOTE we can't use barrier since it can't be captured in graph.
             self.tp_group.broadcast(torch.empty([], dtype=torch.int8, device="npu"), src=0)
@@ -974,9 +1014,76 @@ class SparseKVOffloadManager:
             self.num_tokens_buffer_npu,
             self.topk_buffers_k[0].device,
         )
+        # v13: the resident-slot fill for the current step's fresh tokens runs
+        # as one fused AscendC kernel per layer (FillLocalCopy, bisheng-built).
+        # The kernel reads the small index descriptor arrays (rows/slots/valid)
+        # from device memory at execution time, so under graph replay the same
+        # captured launch follows the per-forward indices refreshed through
+        # the pinned->NPU copies below. Bases are kernel arguments and are
+        # fixed at capture time (static tensors under FULL_DECODE_ONLY graphs).
+        # Invalid entries (valid==0) are skipped inside the kernel, so each
+        # descriptor slot is either filled or strictly untouched.
+        if self._new_kv_k_rows is not None and self._new_kv_v_rows is not None:
+            if not hasattr(self, "_fill_kernel_ready"):
+                dev = self.topk_buffers_k[0].device
+                self.fill_rows_npu = torch.zeros([self._new_kv_max], dtype=torch.int32, device=dev)
+                self.fill_dst_npu = torch.zeros([self._new_kv_max], dtype=torch.int32, device=dev)
+                self.fill_valid_npu = torch.zeros([self._new_kv_max], dtype=torch.int32, device=dev)
+                # static kernel params: [maxN, kRowBytes, vRowBytes]
+                self.fill_params_npu = torch.tensor(
+                    [self._new_kv_max, self.token_size_bytes_k, self.token_size_bytes_v], dtype=torch.int32, device=dev
+                )
+                fill_so = os.environ.get(
+                    "VLLM_ASCEND_FILL_KERNEL_SO",
+                    os.path.join(os.path.dirname(os.path.abspath(__file__)), "fill_kernel", "libfill_local_copy.so"),
+                )
+                self._fill_kernel = ctypes.CDLL(fill_so)
+                self._fill_kernel.FillLocalCopy.argtypes = [ctypes.c_uint64] * 8 + [ctypes.c_void_p]
+                self._fill_kernel_ready = True
+                self._fill_copy_done = -1
+            # Re-upload the indices on EVERY first-leader call: under graph
+            # replay this executes via the host func (which runs per replay
+            # and refreshes the pinned buffers), and eager warmup must also
+            # refresh them per forward - a "layer_id only" guard would skip
+            # the draft->verify transition because both forwards hit the
+            # same leader layers with stale indices in between.
+            first_fill = self._fill_copy_done != id(self._new_kv_k_rows)
+            if first_fill:
+                self._fill_copy_done = id(self._new_kv_k_rows)
+                self.fill_rows_npu.copy_(self.new_kv_rows_cpu, non_blocking=True)
+                self.fill_dst_npu.copy_(self.new_kv_dst_cpu, non_blocking=True)
+                self.fill_valid_npu.copy_(self.new_kv_valid_cpu, non_blocking=True)
+            stream = torch_npu.npu.current_stream().npu_stream
+            self._fill_kernel.FillLocalCopy(
+                self.fill_rows_npu.data_ptr(),
+                self.fill_dst_npu.data_ptr(),
+                self.fill_valid_npu.data_ptr(),
+                self.fill_params_npu.data_ptr(),
+                self._new_kv_k_rows.data_ptr(),
+                self.topk_buffers_k[layer_id].data_ptr(),
+                self._new_kv_v_rows.data_ptr(),
+                self.topk_buffers_v[layer_id].data_ptr(),
+                ctypes.c_void_p(stream),
+            )
 
         current_slots_cpu = self.lru_current_slots_cpu[:num_tokens]
         current_slots_npu[:num_tokens].copy_(current_slots_cpu, non_blocking=capturing)
+
+    # ------------------------------------------------------------------
+    # Draft-Indexer Prefetch (see design.md).
+    #
+    # Idea: the MTP draft model and the target verify step share the same
+    # indexer top-k (`topk_indices_buffer`). The draft's top-k highly overlaps
+    # the target verify top-k. We capture the draft top-k during the draft
+    # forward; then, just before the target's ``onload_topk_kv`` LRU runs, we
+    # identify the target tokens that (a) are predicted by the draft and (b)
+    # are NOT already resident (i.e. would-be DRAM H2D misses). For each such
+    # *new* token we H2D its K/V from the CPU DRAM pool straight into the
+    # resident buffer and stamp ``slot_to_token`` so the LRU reports it as a
+    # resident hit (skipping onload's DRAM H2D for it). This converts onload
+    # misses into onload hits -> the onload_topk_kv hit rate goes up and the
+    # residual DRAM H2D traffic drops.
+    # ------------------------------------------------------------------
 
     def _onload_topk_kv_cpu(self, args):
         # code that is incompatible with graph mode, compute here outside graph
@@ -1013,6 +1120,7 @@ class SparseKVOffloadManager:
             size_buffer,
             num_tokens_buffer,
             layer_id,
+            stable_prefix_lens_ptr_arg,
         ) = args
         self.sparse_kv_offload_cpp.lru_resident_compact(
             lru_req_ids_ptr,
@@ -1055,7 +1163,41 @@ class SparseKVOffloadManager:
             addr_buffer,
             size_buffer,
             num_tokens_buffer,
+            stable_prefix_lens_ptr_arg,
         )
+        # v8: collect this forward's fresh-token fills (miss rows whose
+        # token >= stable prefix). row = token - stable (query-order index
+        # into the local K/V activation rows); dst = req*capacity + slot
+        # (flat index into the layer's resident top-k buffers). The captured
+        # copy ops below consume these via the pinned buffers.
+        try:
+            mc = miss_count.numpy()
+            mt = miss_tokens.numpy()
+            ms = miss_slots.numpy()
+            stable = self.lru_stable_prefix_lens_cpu[:num_reqs].numpy()
+            rows_out = self.new_kv_rows_cpu.numpy()
+            dst_out = self.new_kv_dst_cpu.numpy()
+            valid_out = self.new_kv_valid_cpu.numpy()
+            rows_out[:] = 0
+            dst_out[:] = 0  # unused entries carry valid==0; the kernel skips them
+            valid_out[:] = 0
+            w = 0
+            for r in range(num_reqs):
+                cnt = int(mc[r])
+                s = int(stable[r])
+                for i in range(cnt):
+                    t = int(mt[r][i])
+                    sl = int(ms[r][i])
+                    if t >= s and w < len(rows_out):
+                        rows_out[w] = t - s
+                        dst_out[w] = r * self.topk_buffer_size + sl
+                        valid_out[w] = 1
+                        w += 1
+        except Exception as _e:
+            logger.warning("new-kv fill index collection failed: %s", _e)
+        # Stats live inside the host func so they fire on graph replays too
+        # (during replay the Python call site in onload_topk_kv never runs).
+        # Wrapped: a stats failure must never break inference.
 
 
 _SPARSE_KV_OFFLOAD_MANAGER: SparseKVOffloadManager | None = None
