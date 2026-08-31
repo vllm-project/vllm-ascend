@@ -335,9 +335,9 @@ def _get_kv_cache_config_deepseek_v4(
     """DeepseekV4 KV cache tensor layout planning.
 
     Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
-    every layer's page_size matches one of the full-MLA bucket sizes.
+    define the canonical bucket set. Non-full-MLA groups are page-size-padded
+    upstream, except for the intentionally oversized TQ4 compressor-state
+    page, which is added to the buckets below.
 
     For each group, bucket its layers by page_size_bytes and place each
     layer at tuple_idx = position-within-bucket. Emit one KVCacheTensor
@@ -347,6 +347,20 @@ def _get_kv_cache_config_deepseek_v4(
     full_mla_spec = kv_cache_groups[0].kv_cache_spec
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
     page_sizes = sorted(full_mla_spec.get_page_sizes())
+    if any(
+        _is_dsa_tq4_spec(spec)
+        for group in kv_cache_groups
+        for spec in group.kv_cache_spec.kv_cache_specs.values()
+    ):
+        # TQ4 may leave compressor-state pages larger than full-MLA pages.
+        page_sizes = sorted(
+            set(page_sizes).union(
+                spec.page_size_bytes
+                for group in kv_cache_groups
+                for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+                if "mtp" not in name
+            )
+        )
     layer_tuple_page_bytes = sum(page_sizes)
 
     # Pre-bucket each group's layers by page_size (registration order within
