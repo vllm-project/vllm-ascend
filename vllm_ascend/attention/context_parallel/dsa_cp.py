@@ -12,6 +12,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
@@ -36,6 +37,13 @@ from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_fu
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin, TPWeightSwitchState
+from vllm_ascend.turboquant.dsa import (
+    DSA_TQ_KV_QUANT_MODE,
+    restore_dsa_output,
+    transform_dsa_query,
+    validate_dsa_tq,
+    write_dsa_kv_cache,
+)
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_dsa_cp_with_o_proj_tp,
@@ -1117,6 +1125,8 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.attn_sink = kwargs["attn_sink"]
 
         self.vllm_config = get_current_vllm_config()
+        self.use_tq_latent = get_ascend_config().enable_dsa_tq_latent and self.compress_ratio == 4
+        validate_dsa_tq(self.use_tq_latent, self.head_dim, self.rope_head_dim)
 
         # indexer param
         if self.indexer is not None:
@@ -1604,6 +1614,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+        q = transform_dsa_query(self.use_tq_latent, q)
 
         self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
@@ -1618,7 +1629,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
+        write_dsa_kv_cache(self.use_tq_latent, swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
@@ -1676,12 +1687,14 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+            write_dsa_kv_cache(self.use_tq_latent, compress_kv_cache, compressed_kv, compress_slot_mapping)
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
-        attn_op = DeviceOperator.get_dsa_sparse_attn_op()
+        attn_op = DeviceOperator.get_dsa_sparse_attn_op(self.use_tq_latent)
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
+        if self.use_tq_latent:
+            extra_attn_kwargs["kv_quant_mode"] = DSA_TQ_KV_QUANT_MODE
         if has_prefill:
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query
@@ -1762,6 +1775,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
         num_tokens = local_attn_output.shape[0]
+        local_attn_output = restore_dsa_output(self.use_tq_latent, local_attn_output)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],

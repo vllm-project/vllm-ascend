@@ -19,12 +19,14 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC128Backend,
     AscendDSASWABackend,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.turboquant.dsa import DSA_TQ_SLOT_SIZE
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -177,6 +179,21 @@ class DSAAttention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
+        if get_ascend_config().enable_dsa_tq_latent and self.compress_ratio == 4:
+            if get_ascend_device_type() not in {AscendDeviceType.A2, AscendDeviceType.A3}:
+                raise RuntimeError(
+                    "DeepSeek V4 TurboQuant KV cache is only supported on Ascend A2/A3, "
+                    f"got {get_ascend_device_type()}."
+                )
+            return AscendMLAAttentionSpec(
+                block_size=DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0],
+                num_kv_heads=1,
+                head_size=DSA_TQ_SLOT_SIZE,
+                dtype=torch.uint8,
+                model_version="deepseek_v4",
+                compress_ratio=self.compress_ratio,
+                cache_dtype_str="turboquant_4bit_nc",
+            )
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
         if get_ascend_device_type() in {AscendDeviceType.A5}:
             kv_cache_dtype = torch.float8_e4m3fn

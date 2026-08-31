@@ -34,6 +34,11 @@ if TYPE_CHECKING:
 _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
 
 
+def _is_deepseek_v4_dsa_model(model_config: Any) -> bool:
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    return hf_text_config is not None and getattr(hf_text_config, "model_type", None) == "deepseek_v4"
+
+
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
     try:
@@ -286,6 +291,8 @@ class AscendConfig:
     enable_sp_by_pass: bool = False
     enable_sparse_sfa_c8: bool = False
     enable_sparse_li_c8: bool = False
+    enable_tq_latent: bool = False
+    enable_dsa_tq_latent: bool = False
     pd_tp_ratio: int = 1
     pd_head_ratio: int = 1
     num_head_replica: int = 1
@@ -486,6 +493,13 @@ class AscendConfig:
         use_sparse = model_uses_sfa_sparse(vc.model_config)
         self.enable_sparse_sfa_c8 = self.enable_sparse_sfa_c8 and use_sparse
         self.enable_sparse_li_c8 = self.enable_sparse_li_c8 and use_sparse
+        # TurboQuant latent KV cache: requested via additional_config (or the
+        # turboquant_4bit_nc cache dtype, see platform.py). enable_tq_latent
+        # requires a sparse model; enable_dsa_tq_latent is further scoped to
+        # DeepSeek V4 DSA models.
+        tq_latent_requested = self.enable_tq_latent
+        self.enable_tq_latent = tq_latent_requested and use_sparse
+        self.enable_dsa_tq_latent = tq_latent_requested and _is_deepseek_v4_dsa_model(vc.model_config)
         # c8_enable_reshape_optim is a user input field now; keep the original
         # semantics: only meaningful when enable_sparse_li_c8 is true.
         self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and self.c8_enable_reshape_optim
@@ -1249,6 +1263,7 @@ def init_ascend_config(vllm_config):
         # derive_and_validate *augments* (self.x = self.x and condition), so the user
         # must be able to pass them. Only pure-derived fields (no user input) are stripped.
         "enable_sp_by_pass",
+        "enable_dsa_tq_latent",
         "pd_tp_ratio",
         "pd_head_ratio",
         "num_head_replica",

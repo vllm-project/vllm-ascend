@@ -437,6 +437,13 @@ class NPUPlatform(Platform):
         # 4.Make sure the config is compatible with Ascend
         _fix_incompatible_config(vllm_config)
 
+        # The turboquant_4bit_nc KV cache dtype implies the TurboQuant latent
+        # switch; surface it in additional_config before AscendConfig init.
+        if vllm_config.cache_config.cache_dtype == "turboquant_4bit_nc":
+            if vllm_config.additional_config is None:
+                vllm_config.additional_config = {}
+            vllm_config.additional_config["enable_tq_latent"] = True
+
         # 5.Initialize Ascend config and validate Ascend-specific options
         # (fused MC2 exclusivity + scheduler extension policies)
         # ascend_config is only used for verification, this object must NOT be modified here
@@ -877,6 +884,12 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
     dyntra_lb_config / recompute_scheduler_enable). Reads from the AscendConfig singleton
     initialized from vllm_config; env fallbacks are handled inside AscendConfig.
     """
+    if ascend_config.enable_dsa_tq_latent and vllm_config.parallel_config.decode_context_parallel_size > 1:
+        raise NotImplementedError(
+            "DeepSeek V4 TurboQuant KV cache does not support vLLM DCP. "
+            "Use DSA-CP through additional_config.enable_dsa_cp instead."
+        )
+
     # Validate scheduler extension policies (read ascend_config.scheduler_config)
     from vllm_ascend.core.recompute_scheduler import RecomputeSchedulerConfig
 
@@ -1026,7 +1039,8 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             else ascend_compilation_config
         )
 
-    if model_config and hasattr(model_config.hf_text_config, "index_topk"):
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if hf_text_config is not None and (hasattr(hf_text_config, "index_topk") or ascend_config.enable_dsa_tq_latent):
         vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
     # Update compilation mode in some cases

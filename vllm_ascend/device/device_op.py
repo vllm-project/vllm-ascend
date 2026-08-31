@@ -523,8 +523,10 @@ class BaseDeviceAdaptor:
         return {"device": str(device)}
 
     @staticmethod
-    def get_dsa_sparse_attn_op():
+    def get_dsa_sparse_attn_op(use_tq_latent=False):
         """Returns the sparse attention operator."""
+        if use_tq_latent:
+            return torch.ops._C_ascend.npu_turbo_quant_sparse_attn_sharedkv
         return torch.ops._C_ascend.npu_sparse_attn_sharedkv
 
     @staticmethod
@@ -542,7 +544,9 @@ class BaseDeviceAdaptor:
     @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+        scatter_cache = cache.view(torch.int8) if cache.dtype == torch.uint8 else cache
+        scatter_x = x.view(torch.int8) if x.dtype == torch.uint8 else x
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(scatter_cache, slot_mapping, scatter_x)
 
     # ===== Indexer Quant + Scatter =====
 
@@ -1258,7 +1262,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return {"kv_quant_mode": 1}
 
     @staticmethod
-    def get_dsa_sparse_attn_op():
+    def get_dsa_sparse_attn_op(use_tq_latent=False):
         return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
 
     @staticmethod
