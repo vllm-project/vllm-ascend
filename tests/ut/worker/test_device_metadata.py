@@ -172,6 +172,29 @@ def test_executor_rejects_overlapping_submissions(executor_env):
         executor.submit(tasks)
 
 
+def test_submit_failure_keeps_partial_submission_in_flight(executor_env):
+    executor, calls, _ = executor_env
+
+    def fail_task() -> None:
+        raise RuntimeError("task failed")
+
+    tasks = (
+        DeviceMetadataTask(
+            DeviceMetadataStage.COMPRESSOR,
+            lambda: calls.append(("task", "started")),
+            1,
+        ),
+        DeviceMetadataTask(DeviceMetadataStage.INDEXER, fail_task, 2),
+    )
+
+    with pytest.raises(RuntimeError, match="task failed"):
+        executor.submit(tasks)
+
+    assert executor.submission_in_flight
+    with pytest.raises(RuntimeError, match="has not been released"):
+        executor.submit(tasks)
+
+
 def test_submit_orders_tasks_by_stage(executor_env):
     executor, calls, _ = executor_env
     tasks = tuple(reversed(_tasks(calls)))
