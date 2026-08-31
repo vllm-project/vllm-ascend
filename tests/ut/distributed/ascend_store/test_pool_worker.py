@@ -1696,6 +1696,79 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                     self.assertEqual(len(worker.m_store.put.call_args.args[0]), 1)
                 send_thread.dec_stored_request.assert_called_once_with("r1")
 
+    def _make_event_worker(self, hash_block_size):
+        worker = self._make_strided_worker()
+        worker.token_database.hash_block_size = hash_block_size
+        worker.enable_kv_events = True
+        worker.m_store = MagicMock()
+        send_thread = MagicMock()
+        send_thread.is_stored_request.return_value = True
+        worker.kv_send_thread = send_thread
+        return worker, send_thread
+
+    def test_store_kv_tp_mismatch_event_chain_uses_grouped_hashes(self):
+        # Regression test for issue #12002: request hashes may be finer than
+        # the transfer granularity. Events must carry the grouped (terminal)
+        # hash of each chunk and link parents across the grouped chain, so
+        # the Conductor can walk the prefix even when only some blocks are
+        # newly stored.
+        worker, send_thread = self._make_event_worker(hash_block_size=2)
+        # 4 fine-grained hashes (2 tokens each) over 8 tokens -> 2 chunks of
+        # 4 tokens; grouped hashes are [h1, h3].
+        send_thread.lookup.return_value = [False, False, True, True]
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=8,
+            block_ids_by_group=[[5, 6]],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+            current_event=None,
+            token_ids=list(range(8)),
+            original_block_size=16,
+        )
+
+        worker._store_kv_tp_mismatch(req)
+
+        # Only the missing chunk's sub-keys are put.
+        self.assertEqual(len(worker.m_store.put.call_args.args[0]), 2)
+        send_thread.update_kv_event.assert_called_once()
+        events = send_thread.update_kv_event.call_args.args[0]
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0].block_hashes, [b"h1"])
+        self.assertIsNone(events[0].parent_block_hash)
+        self.assertEqual(events[0].token_ids, [0, 1, 2, 3])
+        self.assertEqual(events[1].block_hashes, [b"h3"])
+        self.assertEqual(events[1].parent_block_hash, b"h1")
+        self.assertEqual(events[1].token_ids, [4, 5, 6, 7])
+        send_thread.dec_stored_request.assert_called_once_with("r1")
+
+    def test_store_kv_tp_mismatch_event_chain_equal_granularity(self):
+        # With hash granularity equal to the transfer block size the chain
+        # follows the raw block hashes in sequence order.
+        worker, send_thread = self._make_event_worker(hash_block_size=4)
+        send_thread.lookup.return_value = [False] * 6
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=12,
+            block_ids_by_group=[[5, 6, 7]],
+            block_hashes=[b"a", b"b", b"c"],
+            current_event=None,
+            token_ids=list(range(12)),
+            original_block_size=16,
+        )
+
+        worker._store_kv_tp_mismatch(req)
+
+        send_thread.update_kv_event.assert_called_once()
+        events = send_thread.update_kv_event.call_args.args[0]
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0].block_hashes, [b"a"])
+        self.assertIsNone(events[0].parent_block_hash)
+        self.assertEqual(events[1].block_hashes, [b"b"])
+        self.assertEqual(events[1].parent_block_hash, b"a")
+        self.assertEqual(events[2].block_hashes, [b"c"])
+        self.assertEqual(events[2].parent_block_hash, b"b")
+        send_thread.dec_stored_request.assert_called_once_with("r1")
+
 
 if __name__ == "__main__":
     unittest.main()
