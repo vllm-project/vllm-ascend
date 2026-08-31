@@ -242,7 +242,6 @@ class ACLGraphWrapper:
                     optimize_options={
                         "dcci_after_kernel_end": [".*"],
                     },
-                    debug_options={},
                 )
 
             # here we always use weak ref for the workspaces
