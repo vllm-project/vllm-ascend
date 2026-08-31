@@ -45,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     infer_cache_family_ratio,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    resolve_request_hash_block_size,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -70,7 +71,6 @@ from vllm_ascend.memcache_comm_fence import (
     get_attention_compute_start_gate,
     reset_attention_compute_start_gate,
 )
-from vllm_ascend.utils import vllm_version_is
 
 # Read lease TTL (ms) for the layerwise load path. batch_add_lease acquires a
 # read lease before batch_copy(G2L); the lease must cover the asynchronous
@@ -145,16 +145,11 @@ class KVPoolWorker:
         self.original_block_size = self._infer_group_block_sizes(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
-        requested_hash_block_size = (
-            vllm_config.cache_config.hash_block_size
-            if vllm_version_is("0.25.1")
-            else vllm_config.cache_config.prefix_match_unit
+        self.hash_block_size = resolve_request_hash_block_size(
+            vllm_config,
+            kv_cache_config,
+            self.grouped_block_size[0],
         )
-        if not isinstance(requested_hash_block_size, int):
-            requested_hash_block_size = None
-        self.hash_block_size = (
-            requested_hash_block_size if requested_hash_block_size is not None else min(self.original_block_size)
-        ) * cp_scale
         for group_block_size in self.grouped_block_size:
             assert group_block_size % self.hash_block_size == 0, "block_size must be divisible by hash_block_size"
         self.block_size = self.grouped_block_size[0]
