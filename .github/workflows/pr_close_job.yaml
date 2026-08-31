@@ -98,15 +98,6 @@ jobs:
             echo "No new or moved tests to upload"
           fi
 
-      - name: Upload collected tests as artifact
-        if: ${{ steps.collect.outputs.has_tests == 'true' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: merged-new-tests-pr-${{ github.event.pull_request.number }}
-          path: merged_new_tests.yaml
-          if-no-files-found: error
-          retention-days: 14
-
       - name: Merge into OBS extra_recommended_tests.yaml
         id: merge
         if: ${{ steps.collect.outputs.has_tests == 'true' }}
