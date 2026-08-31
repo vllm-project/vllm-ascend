@@ -37,6 +37,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
     _get_kv_cache_config_deepseek_v4,
+    _get_kv_cache_config_deepseek_v4_main,
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
@@ -376,6 +377,7 @@ def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> No
     assert scheduler_config.needs_kv_cache_zeroing
 
 
+@pytest.mark.skipif(not vllm_version_is("0.27.1"), reason="shared_by planner is only installed on v0.27.1")
 def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> None:
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
     assert groups is not None
@@ -457,7 +459,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     )
 
     planner = MagicMock(return_value=(7, [planned_tensor]))
-    monkeypatch.setattr(kv_cache_utils_patch, "_get_kv_cache_config_deepseek_v4", planner)
+    monkeypatch.setattr(kv_cache_utils_patch, "_get_kv_cache_config_deepseek_v4_main", planner)
 
     result = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
         vllm_config,
@@ -487,6 +489,40 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )
     assert needed_memory == expected_memory
+
+
+@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #51718 introduced shared backing on main")
+def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> None:
+    kv_cache_config = _make_deepseek_v4_kv_cache_config()
+    groups = kv_cache_config.kv_cache_groups
+    first_group_spec = groups[0].kv_cache_spec
+    assert isinstance(first_group_spec, UniformTypeKVCacheSpecs)
+    page_size = next(iter(first_group_spec.kv_cache_specs.values())).page_size_bytes
+    assert all(
+        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        and {spec.page_size_bytes for spec in group.kv_cache_spec.kv_cache_specs.values()} == {page_size}
+        for group in groups
+    )
+    expected_num_blocks = 7
+    available_memory = page_size * expected_num_blocks
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, num_blocks: num_blocks,
+    )
+
+    num_blocks, tensors = _get_kv_cache_config_deepseek_v4_main(
+        SimpleNamespace(),
+        groups,
+        available_memory,
+    )
+
+    assert num_blocks == expected_num_blocks
+    assert [tensor.layers for tensor in tensors] == [["c4_attn"], ["c128_attn"]]
+    assert {tensor.size for tensor in tensors} == {available_memory}
+    for tensor in tensors:
+        assert tensor.offset == 0
+        assert tensor.layer_stride == available_memory
+        assert tensor.block_stride == page_size
 
 
 @pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #51718 only re-plans ranks on main")
@@ -541,6 +577,27 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     )
 
     assert replanned_config.num_blocks == expected_num_blocks
+    tuple_stride = (small_page_spec.page_size_bytes + large_page_spec.page_size_bytes) * expected_num_blocks
+    backing_size = tuple_stride * 2
+    tensors_by_layers = {tuple(tensor.layers): tensor for tensor in replanned_config.kv_cache_tensors}
+    assert set(tensors_by_layers) == {("small_attn",), ("large_attn",), ("mtp_attn",)}
+    assert {tensor.size for tensor in tensors_by_layers.values()} == {backing_size}
+
+    small_tensor = tensors_by_layers[("small_attn",)]
+    assert small_tensor.offset == 0
+    assert small_tensor.layer_stride == tuple_stride
+    assert small_tensor.block_stride == small_page_spec.page_size_bytes
+
+    large_page_offset = small_page_spec.page_size_bytes * expected_num_blocks
+    large_tensor = tensors_by_layers[("large_attn",)]
+    assert large_tensor.offset == large_page_offset
+    assert large_tensor.layer_stride == tuple_stride
+    assert large_tensor.block_stride == large_page_spec.page_size_bytes
+
+    mtp_tensor = tensors_by_layers[("mtp_attn",)]
+    assert mtp_tensor.offset == tuple_stride + large_page_offset
+    assert mtp_tensor.layer_stride == 0
+    assert mtp_tensor.block_stride == large_page_spec.page_size_bytes
 
 
 @pytest.mark.parametrize(
