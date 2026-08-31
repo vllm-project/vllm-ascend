@@ -1,0 +1,128 @@
+_envs: &envs
+  SERVER_PORT: "DEFAULT_PORT"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  HCCL_BUFFSIZE: "512"
+  VLLM_ASCEND_BALANCE_SCHEDULING: "1"
+_server_cmd: &server_cmd
+  - "--quantization"
+  - "ascend"
+  - "--tool-call-parser"
+  - "kimi_k2"
+  - "--reasoning-parser"
+  - "kimi_k2"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--trust-remote-code"
+  - "--tensor-parallel-size"
+  - "16"
+  - "--data-parallel-size"
+  - "1"
+  - "--no-enable-prefix-caching"
+  - "--enable-expert-parallel"
+  - "--port"
+  - "$SERVER_PORT"
+  - "--max-model-len"
+  - "262144"
+  - "--max-num-batched-tokens"
+  - "8192"
+  - "--gpu-memory-utilization"
+  - "0.95"
+  - "--seed"
+  - "42"
+  - "--async-scheduling"
+  - "--compilation-config"
+  - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  - "--profiler-config"
+  - '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": true}'
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--mm-encoder-tp-mode"
+  - "data"
+_benchmarks_perf: &benchmarks_perf
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 1500
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+# ===========leng=5000==============================
+test_cases:
+  - name: "kimi-k2.6-w4a8_5000"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-num-seqs"
+      - "8"
+    benchmarks:
+      <<: *benchmarks_perf
+    test_content:
+      - chat_completion
+    prompts:
+      - seed: "x "
+        target_tokens: 3487
+    api_keyword_args:
+      max_tokens: 1500
+      temperature: 0.0
+    expected_response:
+      prompt_tokens: 3487
+      completion_tokens: 1500
+# # ===========leng=262143==============================
+  - name: "kimi-k2.6-w4a8_262143"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-num-seqs"
+      - "1"
+    benchmarks:
+      <<: *benchmarks_perf
+    test_content:
+      - chat_completion
+    prompts:
+      - seed: "x "
+        target_tokens: 262013
+    api_keyword_args:
+      max_tokens: 128
+      temperature: 0.0
+    expected_response:
+      prompt_tokens: 262013
+      completion_tokens: 128
+# # ===========leng=262144==============================
+  - name: "kimi-k2.6-w4a8_262143"
+    model: "Eco-Tech/Kimi-K2.6-w4a8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-num-seqs"
+      - "1"
+    benchmarks:
+      <<: *benchmarks_perf
+    test_content:
+      - chat_completion
+    prompts:
+      - seed: "x "
+        target_tokens: 262015
+    api_keyword_args:
+      max_tokens: 129
+      temperature: 0.0
+    expected_response:
+      prompt_tokens: 262015
+      completion_tokens: 129
