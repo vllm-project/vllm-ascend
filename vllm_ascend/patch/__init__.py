@@ -252,6 +252,22 @@
 #    Future Plan:
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
+#   2. `vllm.v1.core.block_pool.BlockPool.get_new_blocks`
+#    Why:
+#       vLLM PR #52707 fixed a path where external computed-token allocation
+#       could request a negative number of KV blocks after speculative
+#       over-allocation. In affected vLLM versions this inflates the free-list
+#       counter without popping linked-list entries, which can later crash in
+#       `FreeKVCacheBlockQueue.popleft_n`.
+#    How：
+#       Monkey-patch `BlockPool.get_new_blocks` to return an empty list for
+#       negative allocation requests, preserving the existing zero-allocation
+#       behavior and keeping the free-list counter unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/52707
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #52707
+#       or an equivalent allocator-side guard.
 #
 # ** 10ab. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
