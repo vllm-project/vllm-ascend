@@ -100,6 +100,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         parallel_config = replace(
             self.vllm_config.parallel_config,
             pipeline_parallel_size=1,
+            enable_expert_parallel=False,
+            enable_eplb=False,
         )
         return replace(
             self.vllm_config,
