@@ -609,7 +609,6 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 | FlashComm1 | `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` or `--additional-config '{"enable_flashcomm1":true}'` | Reduces communication overhead in large TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Fused MC2 | `VLLM_ASCEND_ENABLE_FUSED_MC2=1` | Enables MoE fused operators to improve MoE efficiency. | Compare with disabled state if accuracy or performance regresses. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Validate HBM usage first. For PD, start with prefix caching disabled. |
-| Asynchronous scheduling | `--async-scheduling` | Can improve high-concurrency throughput. | Disable and compare for latency-sensitive workloads. |
 | PD disaggregation | `--kv-transfer-config` | Separates prefill and decode resources. | Ensure producer/consumer DP and TP sizes match the actual topology. |
 
 ## 10 FAQ

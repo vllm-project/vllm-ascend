@@ -201,8 +201,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --gpu-memory-utilization 0.90 \
       --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert": true}' \
-      --async-scheduling
+      --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert": true}'
     ```
 
     **Key parameters:**
@@ -217,7 +216,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
     - `--additional-config` enables Ascend-specific optimizations. `enable_flashcomm1` enables FlashComm1, `multistream_overlap_shared_expert` overlaps shared expert computation, and `enable_cpu_binding` enables Ascend-native CPU binding.
-    - `--async-scheduling` enables asynchronous scheduling, which can improve high-concurrency throughput.
 
 === "Atlas inference products"
 
@@ -364,7 +362,6 @@ Recommended tuning order:
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
 | FlashComm1 | `--additional-config '{"enable_flashcomm1": true}'` | Reduces communication overhead in TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
-| Asynchronous scheduling | `--async-scheduling` | Improves high-concurrency throughput by using non-blocking scheduling. | Disable it and compare if the workload is latency-sensitive. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads. |
 | Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | Validate stability, TTFT, TPOT, and throughput for your workload. |
 
@@ -387,11 +384,3 @@ For common environment, installation, and general parameter issues, refer to [FA
 **Cause:** Prefix caching only helps when requests share reusable prefixes. For random prompts or low cache hit rates, it may add memory pressure without visible gains.
 
 **Solution:** Enable prefix caching for repeated-prefix workloads. For random benchmark datasets or memory-constrained long-context workloads, compare with `--no-enable-prefix-caching`.
-
-### Q3: How should I tune async scheduling for Qwen3.6?
-
-**Phenomenon:** Throughput improves in high-concurrency scenarios, but some latency-sensitive workloads may not benefit.
-
-**Cause:** Asynchronous scheduling reduces blocking overhead, but the benefit depends on concurrency, prompt/output length, and graph capture shape.
-
-**Solution:** Use `--async-scheduling` for high-throughput serving. For low-latency serving, compare TTFT and TPOT with and without this option.

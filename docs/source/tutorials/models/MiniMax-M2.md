@@ -187,7 +187,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --trust-remote-code \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --async-scheduling \
     --additional-config '{"enable_cpu_binding":true,
                           "enable_fused_mc2":true,
                           "enable_flashcomm1":true,
@@ -419,7 +418,6 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.75 \
     --quantization ascend \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
     --additional-config '{"enable_cpu_binding":true}' \

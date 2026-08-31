@@ -354,7 +354,6 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
 | Expert parallelism | `--enable-expert-parallel` | Improves MoE serving throughput. | Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Random prompts or unique media may not benefit. |
-| Asynchronous scheduling | `--async-scheduling` | Can improve high-concurrency throughput. | Disable and compare for latency-sensitive workloads. |
 | Pipeline parallel validation | `--pipeline-parallel-size 2` | Provides another two-card validation layout. | Use shorter context and lower batch tokens for functional tests. |
 
 ## 10 FAQ
