@@ -138,38 +138,28 @@ jobs:
             echo "No new paths to upload"
           fi
 
-      # TODO: restore OBS upload after artifact verification.
-      # - name: Upload extra_recommended_tests.yaml to OBS
-      #   if: ${{ steps.merge.outputs.has_new_paths == 'true' }}
-      #   run: |
-      #     set -euo pipefail
-      #     if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
-      #       echo "::error::OBS credentials are missing"
-      #       exit 1
-      #     fi
-      #     python3 -m pip install esdk-obs-python --quiet
-      #     python3 - <<'EOF'
-      #     import os
-      #     from obs import ObsClient
-      #
-      #     obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
-      #     client = ObsClient(
-      #         access_key_id=os.environ['OBS_ACCESS_KEY'],
-      #         secret_access_key=os.environ['OBS_SECRET_KEY'],
-      #         server='https://obs.cn-north-4.myhuaweicloud.com',
-      #     )
-      #     resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
-      #     if resp.status >= 300:
-      #         raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
-      #     print(f'Uploaded extra_recommended_tests.yaml -> {obs_path}')
-      #     print('https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/' + obs_path)
-      #     EOF
+      - name: Upload extra_recommended_tests.yaml to OBS
+        if: ${{ steps.merge.outputs.has_new_paths == 'true' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
+            echo "::error::OBS credentials are missing"
+            exit 1
+          fi
+          python3 -m pip install esdk-obs-python --quiet
+          python3 - <<'EOF'
+          import os
+          from obs import ObsClient
 
-      - name: Upload extra_recommended_tests.yaml as artifact
-        if: ${{ steps.collect.outputs.has_tests == 'true' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: extra-recommended-tests-pr-${{ github.event.pull_request.number }}
-          path: extra_recommended_tests.yaml
-          if-no-files-found: ignore
-          retention-days: 14
+          obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+          client = ObsClient(
+              access_key_id=os.environ['OBS_ACCESS_KEY'],
+              secret_access_key=os.environ['OBS_SECRET_KEY'],
+              server='https://obs.cn-north-4.myhuaweicloud.com',
+          )
+          resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
+          if resp.status >= 300:
+              raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
+          print(f'Uploaded extra_recommended_tests.yaml -> {obs_path}')
+          print('https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/' + obs_path)
+          EOF
