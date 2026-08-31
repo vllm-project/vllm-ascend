@@ -52,7 +52,7 @@ NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 def _extract_answer(text: str) -> str:
     matches = ANSWER_RE.findall(text) or NUMBER_RE.findall(text)
     assert matches, f"No numeric answer found in model output: {text!r}"
-    normalized = matches[-1].strip().replace(",", "").rstrip(".")
+    normalized = matches[0].strip().replace(",", "").rstrip(".")
     if "." in normalized:
         normalized = normalized.rstrip("0").rstrip(".")
     return normalized
