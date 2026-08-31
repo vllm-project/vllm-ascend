@@ -24,6 +24,8 @@ from vllm_ascend.device.hardware_profile import (
 _STANDARD_CAPABILITIES = frozenset(
     {
         HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+        HardwareCapability.ATB_EXTENSIONS,
+        HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
@@ -31,7 +33,9 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
+        HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
+        HardwareCapability.TRITON_BATCH_MEMCPY,
     }
 )
 
@@ -41,6 +45,8 @@ _EXPECTED_CAPABILITIES = {
     AscendDeviceType._310P: frozenset(
         {
             HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
+            HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
+            HardwareCapability.GDN_COMPATIBILITY,
             HardwareCapability.IRQ_CPU_RESERVATION,
             HardwareCapability.RC_DEVICE_DISCOVERY,
             HardwareCapability.RUNTIME_CUSTOM_OPS,
@@ -52,10 +58,14 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.BGMV_SGMV_META_REGISTRATION,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+            HardwareCapability.FP8_ATTENTION,
+            HardwareCapability.LOCAL_KV_COMM_RESOURCE,
             HardwareCapability.LORA_CUSTOM_OPS,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+            HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
+            HardwareCapability.TRITON_BATCH_MEMCPY,
         }
     ),
 }
