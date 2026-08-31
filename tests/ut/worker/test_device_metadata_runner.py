@@ -112,12 +112,13 @@ def _make_dummy_runner(executor, trace, mode, forward_error=None):
         max_num_batched_tokens=4,
         max_num_seqs=4,
     )
+    runner.max_num_tokens = 4
     runner.dynamic_eplb = False
     batch_desc = SimpleNamespace(num_tokens=1, num_reqs=1)
     runner._determine_batch_execution_and_padding = MagicMock(
         return_value=(mode, batch_desc, False, None, None)
     )
-    runner.use_dcp = False
+    runner.dcp_size = 1
     runner.speculative_config = None
     runner.synchronize_input_prep = nullcontext
     runner.optimistic_seq_lens_cpu = torch.zeros(4, dtype=torch.int32)
@@ -167,6 +168,7 @@ def _make_dummy_runner(executor, trace, mode, forward_error=None):
     runner.use_aux_hidden_state_outputs = False
     runner.drafter = None
     runner.use_compress = False
+    runner._finalize_dump_data = MagicMock()
     return runner
 
 
