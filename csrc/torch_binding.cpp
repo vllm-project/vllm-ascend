@@ -1912,6 +1912,9 @@ at::Tensor npu_sparse_attention_score_prefill(
     // ACLNN output. Prefill does not consume it, so keep the flag disabled and
     // pass the empty FP32 placeholder required by the operator interface.
     at::Tensor softmax_lse = at::empty({0}, query.options().dtype(at::kFloat));
+    bool softmax_lse_flag = false;
+    std::string input_layout = "TND";
+    char *input_layout_ptr = const_cast<char *>(input_layout.c_str());
 
     EXEC_NPU_CMD(
         aclnnMinimaxSparseAttentionSplitKv,
@@ -1929,8 +1932,8 @@ at::Tensor npu_sparse_attention_score_prefill(
         block_size,
         top_k,
         inner_precise,
-        false,
-        "TND",
+        softmax_lse_flag,
+        input_layout_ptr,
         output,
         softmax_lse
     );
