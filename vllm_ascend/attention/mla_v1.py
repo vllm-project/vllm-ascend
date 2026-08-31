@@ -553,9 +553,10 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             prefill_metadata = metadata.prefill
             assert prefill_metadata is not None
             prefill_metadata.pcp_local_num_input_tokens = local_num_input_tokens
-            prefill_metadata.pcp_local_prefill_start = self.pcp_rank * local_prefill_capacity
+            local_prefill_start = self.pcp_rank * local_prefill_capacity
+            prefill_metadata.pcp_local_prefill_start = local_prefill_start
             prefill_metadata.pcp_local_prefill_end = (
-                prefill_metadata.pcp_local_prefill_start + metadata.num_actual_tokens - metadata.num_decode_tokens
+                local_prefill_start + metadata.num_actual_tokens - metadata.num_decode_tokens
             )
             # PCP partitions prefill tokens into rank-local chunks, including
             # continued prefills whose uncached suffix contains only one token.
