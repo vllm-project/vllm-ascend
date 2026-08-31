@@ -259,9 +259,12 @@ def _apply_top_k_top_p_torch_npu(
             gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, k=k, p=p)
         return gathered_vals, gathered_idx
 
+    # Non-reduce_sample mode: use sort-based pytorch implementation.
+    # npu_top_k_top_p degrades severely (5-28ms) when k is large or batch
+    # contains mixed k values, while sort+mask is consistently ~1ms.
     if p is None and k is None:
         return logits
-    return torch_npu.npu_top_k_top_p(logits, k=k, p=p)
+    return _apply_top_k_top_p_pytorch(logits, k, p)
 
 
 apply_top_k_top_p = (

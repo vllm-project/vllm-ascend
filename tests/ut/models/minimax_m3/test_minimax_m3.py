@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from torch import nn
@@ -126,11 +126,23 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
         )
         gate = nn.Identity()
         gate.out_dtype = torch.float32
+        experts = nn.Identity()
+        experts.moe_config = Mock()
+        parallel_config = Mock()
+        parallel_config.enable_eplb = False
+        parallel_config.eplb_config.num_redundant_experts = 0
+        ep_group = Mock()
+        ep_group.device_group.size.return_value = 1
+        ep_group.rank_in_group = 0
 
         with (
             patch(
                 "vllm_ascend.models.minimax_m3.minimax_m3.get_tensor_model_parallel_world_size",
                 return_value=1,
+            ),
+            patch(
+                "vllm_ascend.models.minimax_m3.minimax_m3.get_ep_group",
+                return_value=ep_group,
             ),
             patch(
                 "vllm_ascend.models.minimax_m3.minimax_m3.MiniMaxM3MLP",
@@ -142,10 +154,14 @@ class TestMiniMaxM3Modeling(unittest.TestCase):
             ),
             patch(
                 "vllm_ascend.models.minimax_m3.minimax_m3.FusedMoEFactory",
-                return_value=nn.Identity(),
+                return_value=experts,
             ) as fused_moe,
         ):
-            MiniMaxM3MoE(config=config, prefix="model.layers.0.block_sparse_moe")
+            MiniMaxM3MoE(
+                config=config,
+                parallel_config=parallel_config,
+                prefix="model.layers.0.block_sparse_moe",
+            )
 
         kwargs = fused_moe.call_args.kwargs
         self.assertEqual(kwargs["activation"], "swigluoai_uninterleave")

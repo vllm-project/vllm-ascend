@@ -37,7 +37,7 @@ from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.layers.utils import _get_lora_device
 
-import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all
 
@@ -173,11 +173,11 @@ def _assert_ascend_moe_lora_supported(base_layer: nn.Module) -> None:
             "Ascend MoE LoRA is incompatible with dynamic EPLB "
             "(expert migration would break the per-expert LoRA layout)."
         )
-    if int(envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2) != 0:
+    if get_ascend_config().enable_fused_mc2 != 0:
         raise AssertionError(
             "Ascend MoE LoRA cannot patch FusedMC2 path "
             "(dispatch_ffn_combine/mega_moe is a single fused C++ op). "
-            "Set VLLM_ASCEND_ENABLE_FUSED_MC2=0."
+            "Set additional_config.enable_fused_mc2 to 0."
         )
     if getattr(base_layer, "_shared_experts", None) is not None:
         logger.warning_once(

@@ -23,10 +23,11 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSASWABackend,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
-from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 
@@ -280,8 +281,8 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
 ):
     monkeypatch.setattr(
         dsa_v1,
-        "get_ascend_device_type",
-        lambda: device_type,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
     )
 
     assert AscendDSAC4Backend.get_supported_kernel_block_sizes() == [128, 256, 512]
@@ -343,6 +344,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.max_model_len = 8
+        model_state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
         input_batch = SimpleNamespace(
             num_reqs=2,
             num_reqs_after_padding=4,
@@ -381,3 +383,39 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     cache_name = "common_ratio_to_sas_metadata"
     assert calls[0][cache_name] is calls[1][cache_name]
     assert calls[1][cache_name]["first_group"] is True
+
+
+class _PrefillStateBuilder:
+    def build(self, common_prefix_len, common_attn_metadata):
+        assert common_prefix_len == 0
+        return common_attn_metadata.is_prefilling
+
+
+def test_build_attn_metadata_propagates_prefill_state():
+    attn_group = SimpleNamespace(
+        layer_names=["layer.0"],
+        get_metadata_builder=lambda _: _PrefillStateBuilder(),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
+    )
+    is_prefilling = torch.tensor([True])
+
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[[attn_group]],
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([1], dtype=torch.int32),
+        max_seq_len=1,
+        block_tables=(torch.zeros((1, 1), dtype=torch.int32),),
+        slot_mappings=(torch.zeros(1, dtype=torch.int64),),
+        kv_cache_config=kv_cache_config,
+        is_prefilling=is_prefilling,
+        seq_lens_np=np.array([1], dtype=np.int32),
+        positions=torch.tensor([0], dtype=torch.int64),
+    )
+
+    assert metadata["layer.0"] is is_prefilling

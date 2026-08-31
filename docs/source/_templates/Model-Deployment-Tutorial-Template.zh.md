@@ -68,7 +68,7 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 **示例：**
 
-若需部署多节点环境，请依据[验证多节点通信环境](../installation.md#verify-multi-node-communication)指南进行通信验证。
+若需部署多节点环境，请依据[验证多节点通信环境](../getting_started/installation.md#installation-multi-node-interconnect)指南进行通信验证。
 
 ## 4 安装
 

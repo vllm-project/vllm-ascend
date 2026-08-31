@@ -28,8 +28,11 @@ logger = logging.getLogger(__name__)
 
 _FEATURE_ENVS: dict[str, str] = {
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "topk_optimize",
-    "VLLM_ASCEND_ENABLE_MLAPO": "mlapo",
-    "VLLM_ASCEND_ENABLE_FUSED_MC2": "fused_mc2",
+}
+
+_FEATURE_CONFIGS: dict[str, str] = {
+    "enable_fused_mc2": "fused_mc2",
+    "enable_mlapo": "mlapo",
 }
 
 
@@ -76,7 +79,10 @@ def _extract_features(server_cmd: list[str] | str, envs: dict[str, Any]) -> list
     features: list[str] = []
 
     # Features from --additional-config JSON
-    additional = _parse_json_flag(cmd_list, "--additional-config")
+    additional = _parse_json_flag(cmd_list, "--additional-config") or _parse_json_flag(cmd_list, "--additional_config")
+    for config_key, feature_name in _FEATURE_CONFIGS.items():
+        if additional.get(config_key):
+            features.append(feature_name)
     if additional.get("enable_weight_nz_layout"):
         features.append("weight_nz_layout")
     tc = additional.get("torchair_graph_config") or {}

@@ -39,8 +39,6 @@ env_common: &env_common
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_SERVER_DEV_MODE: "1"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   VLLM_USE_MODELSCOPE: "true"
@@ -92,6 +90,8 @@ templates:
       - '{"method": "dflash","model": "z-lab/Kimi-K2.5-DFlash", "num_speculative_tokens": 1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1","kv_role": "kv_producer","kv_port": "30000","engine_id": "0","kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2,"tp_size": 8},"decode": {"dp_size": 4,"tp_size": 4}}}'
+      - --additional-config
+      - '{"enable_fused_mc2":1,"enable_mlapo":true}'
   - node_index: 1
     envs:
       <<: *env_decode
@@ -131,7 +131,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}'
+      - '{"recompute_scheduler_enable":true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1","kv_role": "kv_consumer","kv_port": "30100","engine_id": "1","kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2,"tp_size": 8},"decode": {"dp_size": 4,"tp_size": 4}}}'
 

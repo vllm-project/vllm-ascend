@@ -18,7 +18,6 @@ test_cases:
       ASCEND_A3_ENABLE: "1"
       VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
       SERVER_PORT: "DEFAULT_PORT"
       VLLM_ENGINE_READY_TIMEOUT_S: "3000"
     server_cmd:
@@ -52,6 +51,8 @@ test_cases:
       - "deepseek_v3"
       - "--tokenizer_mode"
       - "deepseek_v32"
+      - --additional-config
+      - '{"enable_mlapo":true}'
     benchmarks:
       acc_aime2025:
         case_type: accuracy
@@ -75,5 +76,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 4
         request_rate: 0
-        baseline: 192.0481
+        baseline: 186.35295
         threshold: 0.97

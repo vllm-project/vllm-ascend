@@ -33,7 +33,7 @@ class TestCompressorMetadata:
             block_table=block_table,
             storage_block_size=128,
             num_compressed_tokens=3,
-            num_reqs_actual=2,
+            num_actual_reqs=2,
         )
         result_cos = torch.ones((3, 4))
         result_sin = torch.zeros((3, 4))
