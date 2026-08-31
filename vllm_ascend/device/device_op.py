@@ -522,6 +522,7 @@ class BaseDeviceAdaptor:
         """Returns kwargs for sparse attention metadata builder."""
         return {"device": str(device)}
 
+    # 真正报错的算子
     @staticmethod
     def get_dsa_sparse_attn_op():
         """Returns the sparse attention operator."""

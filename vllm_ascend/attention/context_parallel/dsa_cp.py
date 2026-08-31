@@ -1707,6 +1707,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         )
 
         if self.compress_ratio <= 1:
+            # 传参
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,

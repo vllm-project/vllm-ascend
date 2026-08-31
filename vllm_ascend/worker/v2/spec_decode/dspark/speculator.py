@@ -145,13 +145,15 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
+        torch.npu.synchronize()
+        print("DRAFTING INFO", flush=True)
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
                 self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
             ),
         ):
-            return super().propose(
+            output = super().propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings,
@@ -169,3 +171,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 mm_inputs,
                 is_profile=is_profile,
             )
+        torch.npu.synchronize()
+        print("DRAFTING FINISHED", flush=True)
+        return output

@@ -58,6 +58,8 @@ if HAS_TRITON:
 else:
     triton_q_rms = None  # type: ignore
 
+from vllm_ascend.utils import device_print
+
 
 # The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
 DSA_METADATA_BUFFER_SIZE = 1024
@@ -1613,6 +1615,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         notify_kv_cache_written(layer_name)
         record_attention_compute_start()
+        # 调用
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
         if has_prefill:
@@ -1655,5 +1658,32 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             if self.compress_ratio == 4:
                 assert compress_topk_idxs is not None
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs
+        device_print(layer_name)
+        if torch.distributed.get_rank() == 0 and layer_name == "mtp.0.self_attn.attn":
+            device_print(f"{swa_kv_cache.shape=}")
+            if swa_req_metadata.block_table is not None:
+                device_print(f"{swa_req_metadata.block_table.shape=}")
+                device_print("swa_req_metadata.block_table=")
+                device_print(swa_req_metadata.block_table)
+            device_print("actual_seq_lengths_query=")
+            device_print(actual_seq_lengths_query)
+            device_print("actual_seq_lengths_key=")
+            device_print(actual_seq_lengths_key)
+            device_print("self.attn_sink=")
+            device_print(self.attn_sink)
+            device_print(f"{common_metadata.sas_metadata.shape=}")
+            device_print(f"{common_metadata.sas_metadata.data_ptr()=}")
+            device_print("common_metadata.sas_metadata=")
+            device_print(common_metadata.sas_metadata)
+            device_print(f"{self.softmax_scale=}")
+            device_print(f"{ori_win_left=}")
+            device_print(f"{ori_win_right}")
+            
+            # 这里打印的是捕获时的地址
+            if swa_req_metadata.dspark_swa_indices is not None:
+                device_print(f"{swa_req_metadata.dspark_swa_indices.shape=}")
+                device_print(f"{swa_req_metadata.dspark_swa_indices.data_ptr()=}")
+                device_print("swa_req_metadata.dspark_swa_indices=")
+                device_print(swa_req_metadata.dspark_swa_indices)
 
         return attn_op(q, **attn_kwargs)[0]
