@@ -6,11 +6,13 @@ Device-agnostic placement math is imported from the upstream
 ``vllm.v1.worker.sentinel.eplb_redistribute``; this module only carries the
 Ascend-specific pieces:
 
-- ``build_local_reload_plan``: which local slots received a new logical expert.
 - ``reload_experts_from_disk``: reload reassigned experts from checkpoint and
   write them back in place, mirroring the runtime layout produced by
   ``process_weights_after_loading`` (transpose / NZ cast / per-slot lists /
-  quant scales), so captured graphs keep working.
+  quant scales), so captured graphs keep working. It mirrors the upstream
+  signature (a set of ``(layer, logical)`` reassignments) so the shared
+  sentinel flow can drive it directly; the destination local slot on this rank
+  is recovered from the rebuilt ``logical_to_physical_map``.
 
 The EPLB structures (physical_to_logical / logical_to_physical /
 logical_replica_count) keep the upstream slot model end to end: full width,
@@ -37,6 +39,7 @@ from collections.abc import Callable, Generator
 import torch
 import torch_npu
 from vllm.config import VllmConfig
+from vllm.distributed import get_ep_group
 from vllm.logger import logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 
@@ -58,7 +61,6 @@ from vllm_ascend.quantization.methods.w8a8_dynamic import (
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 __all__ = [
-    "build_local_reload_plan",
     "build_orig_to_dense_rank_table",
     "check_redundancy_sufficient",
     "compute_dead_ep_ranks",
@@ -134,46 +136,6 @@ def densify_routing_table_physical_ids(
         )
     dense_ids = dense_rank * num_local_experts + ids % num_local_experts
     routing_table.copy_(dense_ids.to(routing_table.dtype))
-
-
-def build_local_reload_plan(
-    p2l_before: torch.Tensor,
-    p2l_after: torch.Tensor,
-    ep_rank: int,
-    num_local_experts: int,
-) -> dict[int, list[tuple[int, int]]]:
-    """Find this rank's slots whose logical expert changed after redistribution.
-
-    A surviving rank keeps its physical slot block, but some slots may now host
-    a different logical expert. This diffs this rank's block of
-    ``physical_to_logical_map`` before/after and reports the changed slots.
-
-    Args:
-        p2l_before/p2l_after: full ``physical_to_logical_map`` snapshots
-            (``[num_layers, ep_world_size * num_local_experts]``, CPU).
-        ep_rank: this rank's original EP rank; selects the slot block.
-        num_local_experts: physical slots per EP rank.
-
-    Returns:
-        ``{moe_layer_idx: [(local_slot, new_logical_expert_id), ...]}`` of the
-        changed slots, for ``reload_experts_from_disk``.
-    """
-    start = ep_rank * num_local_experts
-    block_before = p2l_before[:, start : start + num_local_experts]
-    block_after = p2l_after[:, start : start + num_local_experts]
-    plan: dict[int, list[tuple[int, int]]] = {}
-    num_layers = p2l_before.shape[0]
-    for layer_idx in range(num_layers):
-        for slot in range(num_local_experts):
-            before = int(block_before[layer_idx, slot])
-            after = int(block_after[layer_idx, slot])
-            if before != after:
-                assert after >= 0, (
-                    f"Layer {layer_idx} slot {slot} on ep_rank {ep_rank} lost "
-                    "its expert without a replacement; redistribution is broken."
-                )
-                plan.setdefault(layer_idx, []).append((slot, after))
-    return plan
 
 
 def _tp_shard_info(layer) -> tuple[int, int]:
@@ -294,30 +256,54 @@ _RELOADERS: dict[type, Callable[[torch.nn.Module, int, dict[str, torch.Tensor]],
 def reload_experts_from_disk(
     model: torch.nn.Module,
     vllm_config: VllmConfig,
-    reload_plan: dict[int, list[tuple[int, int]]],
+    reassignments: set[tuple[int, int]],
 ) -> int:
-    """Reload reassigned (layer, slot, logical) expert weights from disk.
+    """Reload reassigned (layer, logical) expert weights from disk.
 
-    Ascend keeps expert weights in runtime layout (transposed, NZ-cast, split
-    into per-slot lists, with derived quant scales), so the standard
-    ``model.load_weights`` path cannot write them back; checkpoint tensors are
-    read via DefaultModelLoader and converted per quant method, then copied
-    into the existing slot storage in place.
+    Mirrors the upstream ``reload_experts_from_disk`` signature (a set of
+    ``(moe_layer_idx, logical_expert_id)`` reassignments produced by
+    ``redistribute_expert_placement``), so the shared sentinel flow can drive
+    it unchanged. Ascend keeps expert weights in runtime layout (transposed,
+    NZ-cast, split into per-slot lists, with derived quant scales), so the
+    standard ``model.load_weights`` path cannot write them back; checkpoint
+    tensors are read via DefaultModelLoader and converted per quant method,
+    then copied into the existing slot storage in place.
+
+    The destination local slot of each reassigned logical expert is recovered
+    from the freshly rebuilt per-layer ``logical_to_physical_map`` (rebuilt by
+    the upstream flow before this is called). Only reassigned experts whose
+    replica falls in this rank's physical block are reloaded.
 
     Returns:
         Number of (layer, slot) pairs reloaded.
     """
-    if not reload_plan:
+    if not reassignments:
         return 0
 
     moe_layers = list(model.moe_layers)
     routed_layers = [getattr(layer, "routed_experts", layer) for layer in moe_layers]
+    ep_rank = get_ep_group().rank_in_group
 
-    prefixes: dict[str, tuple[int, int]] = {}
-    for layer_idx, assignments in reload_plan.items():
-        layer_name = routed_layers[layer_idx].layer_name
-        for _, logical_id in assignments:
-            prefixes[f"{layer_name}.{logical_id}."] = (layer_idx, logical_id)
+    local_slots: dict[tuple[int, int], int] = {}
+    for layer_idx, logical_id in reassignments:
+        layer_state = getattr(moe_layers[layer_idx], "eplb_state", None)
+        l2p = getattr(layer_state, "logical_to_physical_map", None)
+        if l2p is None:
+            continue
+        num_local = routed_layers[layer_idx].moe_config.num_local_experts
+        start = ep_rank * num_local
+        for physical_id in l2p[logical_id].tolist():
+            if start <= physical_id < start + num_local:
+                local_slots[(layer_idx, logical_id)] = physical_id - start
+                break
+
+    if not local_slots:
+        return 0
+
+    prefixes: dict[str, tuple[int, int]] = {
+        f"{routed_layers[layer_idx].layer_name}.{logical_id}.": (layer_idx, logical_id)
+        for layer_idx, logical_id in local_slots
+    }
 
     loader = DefaultModelLoader(vllm_config.load_config)
     # Produce every expert, not just the ones local at startup.
@@ -341,7 +327,7 @@ def reload_experts_from_disk(
                         yield key, suffix, tensor
                     break
 
-    logger.info("[FT] Reloading experts for %d layer(s) from disk.", len(reload_plan))
+    logger.info("[FT] Reloading %d reassigned (layer, expert) pair(s) on this rank from disk.", len(local_slots))
     for key, suffix, tensor in filtered_iter():
         buckets.setdefault(key, {})[suffix] = tensor
 
@@ -355,7 +341,7 @@ def reload_experts_from_disk(
         )
 
     reloaded = 0
-    for layer_idx, assignments in sorted(reload_plan.items()):
+    for (layer_idx, logical_id), slot in sorted(local_slots.items()):
         routed = routed_layers[layer_idx]
         # Quantized layers carry the AscendFusedMoEMethod wrapper; the actual
         # scheme (the _RELOADERS key) lives in its .quant_method attribute.
@@ -367,10 +353,9 @@ def reload_experts_from_disk(
             raise NotImplementedError(
                 f"[FT] scale_down weight reload is not implemented for quant method {type(quant_method).__name__}."
             )
-        for slot, logical_id in assignments:
-            tensors = buckets[(layer_idx, logical_id)]
-            reloader(routed, slot, tensors)
-            reloaded += 1
+        tensors = buckets[(layer_idx, logical_id)]
+        reloader(routed, slot, tensors)
+        reloaded += 1
 
     logger.info("[FT] Expert weight reload complete: %d (layer, slot) pair(s).", reloaded)
     return reloaded
