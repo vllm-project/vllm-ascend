@@ -27,9 +27,6 @@ msgstr "## 支持场景"
 msgid "## Constraints"
 msgstr "## 约束条件"
 
-msgid "# Decode Context Parallel Guide"
-msgstr "# 解码上下文并行指南"
-
 msgid ""
 "Decode Context Parallel (DCP) shards the KV cache along the sequence "
 "dimension across devices in a Tensor Parallel (TP) group. It removes "
@@ -112,12 +109,6 @@ msgstr ""
 msgid "## Usage"
 msgstr "## 使用方法"
 
-msgid "Offline example:"
-msgstr "离线示例："
-
-msgid "Online example:"
-msgstr "在线示例："
-
 msgid "DCP reuses the TP devices and does not increase the world size."
 msgstr "DCP复用TP设备，不会增加世界大小。"
 
@@ -138,8 +129,28 @@ msgstr ""
 "    - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`\n"
 "- 在KV缓存传输场景（如KV池化或P/D分离）中，将`cp_kv_cache_interleave_size`设置为KV缓存的`block_size`（默认值：128）："
 
+msgid "# Context Parallel Guide"
+msgstr "# 上下文并行指南"
+
 msgid ""
-"For implementation details, see the [Decode Context Parallel design "
+"The context parallel features include Decode Context Parallel (DCP) and DSA-"
+"CP."
+msgstr "上下文并行功能包括解码上下文并行（DCP）和DSA-CP。"
+
+msgid ""
+"DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D "
+"disaggregation on the model and hardware combinations documented by vLLM "
+"Ascend."
+msgstr "DSA-CP支持vLLM Ascend文档中记录的模型和硬件组合上的前缀缓存、分块预填充、推测解码和P/D分离。"
+
+msgid "### DCP"
+msgstr "### DCP"
+
+msgid "### DSA-CP"
+msgstr "### DSA-CP"
+
+msgid ""
+"For implementation details, see the [Context Parallel design "
 "document](../../developer_guide/Design_Documents/context_parallel.md)."
 msgstr ""
-"有关实现细节，请参阅[解码上下文并行设计文档](../../developer_guide/Design_Documents/context_parallel.md)。"
+"有关实现细节，请参阅[上下文并行设计文档](../../developer_guide/Design_Documents/context_parallel.md)。"

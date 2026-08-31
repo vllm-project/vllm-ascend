@@ -46,9 +46,9 @@ TITLES = {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",
     },
-    "developer_guide/Design_Documents/eplb_swift_balancer.md": {
-        "en": "EPLB Swift Balancer",
-        "zh": "EPLB 快速均衡器",
+    "developer_guide/Design_Documents/model_runner_v1_eplb.md": {
+        "en": "Model Runner V1 EPLB Architecture",
+        "zh": "Model Runner V1 EPLB 架构",
     },
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
@@ -119,10 +119,12 @@ TITLES = {
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
+    "tutorials/models/Hy4-preview.md": {"en": "Hy4-preview (Experimental)", "zh": "Hy4-preview (Experimental)"},
     "tutorials/models/InternVL3.5.md": {"en": "InternVL3.5(38B/241B-A28B)", "zh": "InternVL3.5(38B/241B-A28B)"},
     "tutorials/models/Kimi-K2-Thinking.md": {"en": "Kimi-K2-Thinking", "zh": "Kimi-K2-Thinking"},
     "tutorials/models/Kimi-K2.5.md": {"en": "Kimi-K2.5", "zh": "Kimi-K2.5"},
     "tutorials/models/Kimi-K2.6.md": {"en": "Kimi-K2.6", "zh": "Kimi-K2.6"},
+    "tutorials/models/Kimi-K3.md": {"en": "Kimi-K3", "zh": "Kimi-K3"},
     "tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md": {
         "en": "LLaVA-OneVision-Qwen2-0.5B-OV",
         "zh": "LLaVA-OneVision-Qwen2-0.5B-OV",
@@ -174,6 +176,10 @@ TITLES = {
     "tutorials/models/Qwen3-Reranker.md": {"en": "Qwen3-Reranker", "zh": "Qwen3-Reranker"},
     "tutorials/models/gpt-oss-120b.md": {"en": "gpt-oss-120b", "zh": "gpt-oss-120b"},
     "user_guide/configuration/additional_config.md": {"en": "Additional Configuration", "zh": "附加配置"},
+    "user_guide/configuration/encoder_cache_manager.md": {
+        "en": "Score Encoder Cache Manager",
+        "zh": "Score 编码器缓存管理器",
+    },
     "user_guide/configuration/env_vars.md": {"en": "Environment Variables", "zh": "环境变量"},
     "user_guide/deployment_guide/using_mindie_motor.md": {"en": "Using MindIE Motor", "zh": "使用 MindIE Motor"},
     "user_guide/deployment_guide/using_volcano_kthena.md": {"en": "Using Volcano Kthena", "zh": "使用 Volcano Kthena"},

@@ -18,7 +18,12 @@
 #
 from vllm.v1.worker.gpu import model_runner
 
-from vllm_ascend.worker.v2.block_table import AscendBlockTables
+from vllm_ascend.utils import is_310p
+
+if is_310p():
+    from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables as AscendBlockTables
+else:
+    from vllm_ascend.worker.v2.block_table import AscendBlockTables
 
 # vllm-ascend need to initialize slot mapping as torch.int32 dtype,
 # but vllm default is torch.int64 dtype.

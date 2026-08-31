@@ -18,6 +18,7 @@
 import json
 from pathlib import Path
 
+import torch
 import torch_npu  # noqa: F401
 from vllm import envs
 from vllm.logger import logger
@@ -37,6 +38,12 @@ QUANT_DTYPES = (torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8)
 SCALE_DTYPES = (torch_npu.float8_e8m0fnu,)
 
 
+def is_fused_moe_layer(layer: torch.nn.Module) -> bool:
+    from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
+
+    return isinstance(layer, (MoERunner, RoutedExperts))
+
+
 def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     """Select the MX scale algorithm used by DynamicMxQuantV3.
 
@@ -49,6 +56,13 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
         return 0
 
     if vllm_config is None:
+        from vllm.forward_context import get_forward_context, is_forward_context_available
+
+        if is_forward_context_available():
+            scale_alg = get_forward_context().additional_kwargs.get("dynamic_mx_quant_scale_alg")
+            if scale_alg is not None:
+                return scale_alg
+
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
@@ -146,7 +160,7 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
         ``"compressed-tensors"`` for LLM-Compressor models,
         or ``None`` if no quantization signature is found.
     """
-    from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+    from vllm_ascend.quantization.configs.modelslim_config import MODELSLIM_CONFIG_FILENAME
 
     # Case 1: ModelSlim — look for quant_model_description.json
     modelslim_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)

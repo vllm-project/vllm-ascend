@@ -131,10 +131,9 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
 --host 0.0.0.0 \
 --port 8000 \
 --data-parallel-size 2 \
@@ -183,10 +182,9 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=10
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --data-parallel-size 2 \
@@ -229,10 +227,9 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=10
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -279,13 +276,12 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=100
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --data-parallel-size 2 \
@@ -329,13 +325,12 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=100
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -734,7 +729,7 @@ Parameter descriptions:
     bash proxy.sh
     ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -833,4 +828,4 @@ Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/la
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

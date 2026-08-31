@@ -37,7 +37,7 @@ from vllm_ascend.models.deepseek_v4.indexer import AscendIndexerMetadata, Indexe
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
-from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -215,7 +215,7 @@ class AscendDSAReqMetadata:
     full_compress_sin: torch.Tensor = None
     full_compress_cos: torch.Tensor = None
     start_pos: torch.Tensor | None = None
-    num_reqs_actual: int | None = None
+    num_actual_reqs: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
     attn_mask: torch.Tensor | None = None
@@ -499,6 +499,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_tokens = self.num_actual_tokens
         return min(num_tokens, num_tokens // self.compressor_ratio + num_reqs)
 
+    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata) -> AscendDSAMetadata:
+        """Delegate to build() because DSA needs shared request metadata."""
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            num_actual_reqs=common_attn_metadata.num_reqs,
+            common_ratio_to_sas_metadata={},
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -507,7 +516,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ) -> AscendDSAMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        num_reqs_actual = kwargs.get("num_reqs_actual")
+        num_actual_reqs = kwargs.get("num_actual_reqs")
         self.common_ratio_to_sas_metadata = kwargs.get("common_ratio_to_sas_metadata")
         assert self.common_ratio_to_sas_metadata is not None
         self.set_num_actual_tokens(common_attn_metadata)
@@ -569,7 +578,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         req_metadata = self.build_req_metadata(
             common_attn_metadata=common_attn_metadata,
             seq_lens_cpu=seq_lens_cpu,
-            num_reqs_actual=num_reqs_actual,
+            num_actual_reqs=num_actual_reqs,
             cos=cos,
             sin=sin,
         )
@@ -672,7 +681,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         seq_lens_cpu: torch.Tensor,
-        num_reqs_actual: int | None,
+        num_actual_reqs: int | None,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> AscendDSAReqMetadata:
@@ -689,13 +698,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         self.start_pos_prefill.fill_(0)
         self.start_pos_prefill[:num_reqs] = seq_lens - seq_lens_q
-        if num_reqs_actual is None:
-            num_reqs_actual = num_reqs
+        if num_actual_reqs is None:
+            num_actual_reqs = num_reqs
         else:
-            num_reqs_actual = min(num_reqs_actual, num_reqs)
-            if num_reqs_actual < num_reqs:
-                self.start_pos_prefill[num_reqs_actual:num_reqs].fill_(0)
-                self.block_table[num_reqs_actual:num_reqs, ...].fill_(0)
+            num_actual_reqs = min(num_actual_reqs, num_reqs)
+            if num_actual_reqs < num_reqs:
+                self.start_pos_prefill[num_actual_reqs:num_reqs].fill_(0)
+                self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
 
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
@@ -772,7 +781,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             full_compress_sin=full_compress_sin,
             full_compress_cos=full_compress_cos,
             start_pos=self.start_pos_prefill[:num_reqs],
-            num_reqs_actual=num_reqs_actual,
+            num_actual_reqs=num_actual_reqs,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
             attn_mask=None,
@@ -930,7 +939,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             sin=sin,
             cos=cos,
             start_pos=self.seq_lens[:num_reqs] - seq_lens_q,
-            num_reqs_actual=num_reqs,
+            num_actual_reqs=num_reqs,
             sas_metadata=sas_metadata,
             qli_metadata=None,
             attn_mask=None,

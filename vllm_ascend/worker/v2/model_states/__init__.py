@@ -22,6 +22,8 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
+from vllm_ascend.device.device_config import is_310p
+
 
 def init_asecnd_model_state(
     vllm_config: VllmConfig,
@@ -40,6 +42,18 @@ def init_asecnd_model_state(
         )
 
         return AscendMambaHybridModelState(
+            vllm_config,
+            model,
+            encoder_cache,
+            device,
+        )
+
+    if is_310p():
+        from vllm_ascend._310p.worker.v2.model_state import (
+            Ascend310PModelState,
+        )
+
+        return Ascend310PModelState(
             vllm_config,
             model,
             encoder_cache,

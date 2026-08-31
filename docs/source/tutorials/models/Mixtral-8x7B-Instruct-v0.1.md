@@ -76,13 +76,12 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 ```
 
 ``` bash
 
-vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" \
+vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" --additional-config '{"enable_mlapo":true}' \
   --tensor-parallel-size 4 \
   --max-model-len 4096 \
   --dtype bfloat16 \
@@ -95,7 +94,7 @@ vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" \
 **Notice:**
 The parameters are explained as follows:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For testing purposes, a value of `4096` is used here.
 - `--dtype float16` specifies the data type for model weights and computations.
 - `--trust-remote-code` allows loading models with custom code.

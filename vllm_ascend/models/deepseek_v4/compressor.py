@@ -176,7 +176,7 @@ class Compressor(nn.Module):
         assert metadata.full_compress_sin is not None
         assert metadata.num_compressed_tokens is not None
         assert metadata.start_pos is not None
-        assert metadata.num_reqs_actual is not None
+        assert metadata.num_actual_reqs is not None
         full_compress_cos = metadata.full_compress_cos.view(
             metadata.full_compress_cos.shape[0],
             metadata.full_compress_cos.shape[-1],
@@ -195,7 +195,7 @@ class Compressor(nn.Module):
             DeviceOperator.get_dsa_compressor_slot_mapping_format(),
             self.compress_ratio,
             metadata.num_compressed_tokens,
-            metadata.num_reqs_actual,
+            metadata.num_actual_reqs,
         )
 
     def forward(

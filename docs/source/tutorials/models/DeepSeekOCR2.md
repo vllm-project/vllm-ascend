@@ -124,7 +124,6 @@ Run the following script to execute online inference.
 #!/bin/sh
 
 export VLLM_USE_V1=1
-export VLLM_ASCEND_ENABLE_NZ=0
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export TASK_QUEUE_ENABLE=1
@@ -140,6 +139,7 @@ vllm serve /root/.cache/DeepSeek-OCR-2 \
     --gpu-memory-utilization 0.8 \
     --allowed-local-media-path / \
     --additional-config '{
+      "weight_nz_mode": 0,
       "enable_cpu_binding": true,
       "multistream_overlap_shared_expert": true,
       "ascend_compilation_config": {"fuse_qknorm_rope": false}
@@ -236,7 +236,7 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).
 
 - **Q: Startup fails with HCCL port conflicts (address already bound). What should I do?**
 

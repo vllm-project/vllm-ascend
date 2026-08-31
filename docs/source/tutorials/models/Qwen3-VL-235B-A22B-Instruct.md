@@ -260,10 +260,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The W8A8 v
     export OMP_NUM_THREADS=1
     export OMP_PROC_BIND=false
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
-
-    vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
+    vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot --additional-config '{"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true}}' \
       --host 0.0.0.0 \
       --port 8000 \
       --served-model-name qwen3-vl-235b \
@@ -288,7 +285,7 @@ Single-node deployment runs both Prefill and Decode on the same node. The W8A8 v
 
     For W8A8 deployment on A2, 2 Atlas 800 A2 (64G x 8) nodes are required. Refer to [Section 5.2](#52-multi-node-deployment-with-mp-recommended-for-bf16) for multi-node MP deployment.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 **Key parameters:**
 
@@ -544,7 +541,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, first validate the service without prefix caching before enabling additional cache features.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` is recommended on decode nodes to reduce decode dispatch overhead.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -690,7 +687,6 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 | Multimodal prompt limits | `--limit-mm-per-prompt.image`, `--limit-mm-per-prompt.video` | Avoids reserving memory for unused media types. | Disable video for image-only serving. |
 | Multimodal processor cache | `--mm-processor-cache-gb` | Caches processed media features when repeated media appears. | Set to 0 for memory-constrained validation. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| Fused MC2 | `VLLM_ASCEND_ENABLE_FUSED_MC2=1` | Enables MoE fused operators to improve MoE efficiency. | Compare with disabled state if accuracy or performance regresses. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Validate HBM usage first. For PD, start with prefix caching disabled. |
 | PD disaggregation | `--kv-transfer-config` | Separates prefill and decode resources. | Ensure producer/consumer DP and TP sizes match the actual topology. |
 

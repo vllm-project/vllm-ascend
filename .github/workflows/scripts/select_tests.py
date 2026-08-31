@@ -37,9 +37,10 @@ Pipeline (PR-driven mode):
   1. Diff       -- get changed files from git.
   2. Match      -- identify affected modules via test_config.yaml.
   3. Collect    -- gather test paths (always resolved to individual files).
-  4. Route      -- determine runner via config-driven runner_mapping.
-  5. Partition  -- split test groups across parallel runners by estimated time.
-  6. Output     -- write test_groups / has_tests / matched_modules.
+  4. Route      -- map tests to logical partitions via runner_mapping.
+  5. Pin        -- move configured files to dedicated logical partitions.
+  6. Partition  -- select exact runner labels and split groups by estimated time.
+  7. Output     -- write test_groups / has_tests / matched_modules.
 
 Test/tool-scoped optimization:
   In PR-driven mode, the workflow passes both the full diff and the changed
@@ -56,7 +57,8 @@ Bisect-tool optimization:
   from triggering the full CPU and NPU regression suite.
 
 Routing is driven by ``test_config.yaml`` ``runner_mapping:`` (regex patterns).
-Partition sizing by ``partition:`` config block.
+Each entry in ``partition:`` selects an exact label from runner_label.json and
+defines the number of load-balanced groups.
 See ``test_config.yaml`` for details.
 """
 
@@ -97,8 +99,14 @@ class RunnerInfo:
     csrc_cache_target: str = ""
 
 
-RunnerKey = tuple[int, NpuType]
-_DEFAULT_KEY: RunnerKey = (0, NpuType.CPU)
+@dataclass(frozen=True)
+class PartitionInfo:
+    runner_label: str
+    count: int
+
+
+PartitionKey = str
+_DEFAULT_KEY: PartitionKey = "cpu-0"
 
 # The always-on CPU UT module. In test-only changes, only this module
 # is selected for UT runs (along with the changed test files).
@@ -119,19 +127,9 @@ _BISECT_TOOL_SUPPORT_FILES = {
     "tests/ut/tools/__init__.py",
 }
 
-# Populated by _load_runner_mapping(). Ordered list of (regex, {key: RunnerKey}).
-_RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, RunnerKey]]] = []
-
-
-def _parse_runner_key(runner_key: str) -> RunnerKey:
-    """Parse ``a2_x1`` → ``(1, NpuType.A2)``, ``310p_x4`` → ``(4, NpuType._310P)``."""
-    parts = runner_key.rsplit("_x", 1)
-    if len(parts) != 2:
-        raise ValueError(f"Invalid runner key: {runner_key!r}")
-    raw_type, raw_npus = parts
-    npu_type = NpuType(raw_type)
-    num_npus = int(raw_npus)
-    return (num_npus, npu_type)
+# Populated by _load_runner_mapping(). Ordered list of
+# (regex, {variant: logical partition key}).
+_RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, PartitionKey]]] = []
 
 
 def _load_runner_mapping(meta: dict) -> None:
@@ -141,8 +139,8 @@ def _load_runner_mapping(meta: dict) -> None:
 
         runner_mapping:
           <regex_pattern>:
-            default: <runner_key>
-            "310p": <runner_key>   # optional override for 310P files
+            default: <partition_key>
+            "310p": <partition_key>   # optional override for 310P files
 
     Patterns are sorted longest first so more specific patterns match first.
     """
@@ -151,16 +149,16 @@ def _load_runner_mapping(meta: dict) -> None:
     raw = list((meta.get("runner_mapping", {}) or {}).items())
     raw.sort(key=lambda x: -len(x[0]))
     for pattern_str, runner_config in raw:
-        runners: dict[str, RunnerKey] = {}
+        runners: dict[str, PartitionKey] = {}
         for key, val in runner_config.items():
-            runners[key] = _parse_runner_key(val)
+            runners[key] = str(val)
         _RUNNER_MAPPING.append((re.compile(pattern_str), runners))
 
 
-def _resolve_runner(file_path: str) -> RunnerKey | None:
+def _resolve_partition(file_path: str) -> PartitionKey | None:
     """Match *file_path* against ``_RUNNER_MAPPING``.
 
-    Returns the ``default`` runner for the first matching pattern.
+    Returns the ``default`` logical partition for the first matching pattern.
     If the filename contains ``_310p`` and the matched pattern has
     a ``"310p"`` entry, that entry is returned instead.
     """
@@ -173,17 +171,17 @@ def _resolve_runner(file_path: str) -> RunnerKey | None:
     return None
 
 
-def _route_ut_dir(dir_path: str) -> RunnerKey:
-    result = _resolve_runner(dir_path)
+def _route_ut_dir(dir_path: str) -> PartitionKey:
+    result = _resolve_partition(dir_path)
     return result if result is not None else _DEFAULT_KEY
 
 
-def _route_e2e_dir(dir_path: str) -> RunnerKey | None:
-    return _resolve_runner(dir_path)
+def _route_e2e_dir(dir_path: str) -> PartitionKey | None:
+    return _resolve_partition(dir_path)
 
 
-def _route_e2e_file(file_path: str) -> RunnerKey | None:
-    return _resolve_runner(file_path)
+def _route_e2e_file(file_path: str) -> PartitionKey | None:
+    return _resolve_partition(file_path)
 
 
 def _as_posix_path(path: str) -> str:
@@ -195,11 +193,11 @@ def _pytest_node_file_path(path: str) -> str:
     return path.split("::", 1)[0]
 
 
-def _load_runners() -> list[RunnerInfo]:
+def _load_runners() -> dict[str, RunnerInfo]:
     with open(_RUNNER_LABEL_PATH) as f:
         raw = json.load(f)
-    return [
-        RunnerInfo(
+    return {
+        label: RunnerInfo(
             num_npus=info["npu_num"],
             npu_type=NpuType(info["chip"]),
             label=label,
@@ -207,7 +205,7 @@ def _load_runners() -> list[RunnerInfo]:
             csrc_cache_target=info.get("csrc_cache_target", ""),
         )
         for label, info in raw.items()
-    ]
+    }
 
 
 def _get_changed_files(base_ref: str) -> list[str]:
@@ -433,7 +431,7 @@ def _is_bisect_tool_scoped_change(changed_files: list[str]) -> bool:
 
 def _scan_ut_test_dir(
     dir_path: str,
-    groups: dict[RunnerKey, list[str]],
+    groups: dict[PartitionKey, list[str]],
     cpu_only: bool = False,
 ) -> None:
     """Scan a UT directory and route tests by directory convention.
@@ -475,7 +473,7 @@ def _scan_ut_test_dir(
 
 def _scan_e2e_test_dir(
     dir_path: str,
-    groups: dict[RunnerKey, list[str]],
+    groups: dict[PartitionKey, list[str]],
 ) -> None:
     """Scan an E2E directory or single file and route by directory convention.
 
@@ -537,7 +535,7 @@ def _load_test_list_file(path: Path) -> list[str]:
 
 def _route_explicit_test_target(
     target: str,
-    groups: dict[RunnerKey, list[str]],
+    groups: dict[PartitionKey, list[str]],
 ) -> None:
     """Route a single explicit UT/E2E target to the appropriate runner group."""
     # The coverage recommender emits "cpu-ut" (the batch label of the
@@ -593,27 +591,27 @@ def _route_explicit_test_target(
     )
 
 
-def _dedup_groups(groups: dict[RunnerKey, list[str]]) -> None:
+def _dedup_groups(groups: dict[PartitionKey, list[str]]) -> None:
+    """Deduplicate exact targets and file/nodeid containment across groups.
+
+    A bare file target already executes every test in that file, so any
+    ``file.py::nodeid`` target for the same file must be discarded. This is
+    intentionally global: selection paths can add the two targets to different
+    logical partitions before pinned routes are applied.
+    """
+    bare_files = {_as_posix_path(target) for tests in groups.values() for target in tests if "::" not in target}
+    seen: set[str] = set()
     for key in groups:
-        seen: set[str] = set()
         deduped: list[str] = []
         for target in groups[key]:
-            if target not in seen:
-                deduped.append(target)
-                seen.add(target)
+            normalized = _as_posix_path(target)
+            if "::" in normalized and _pytest_node_file_path(normalized) in bare_files:
+                continue
+            if normalized in seen:
+                continue
+            deduped.append(target)
+            seen.add(normalized)
         groups[key] = deduped
-
-
-def _find_runner(
-    num_npus: int,
-    npu_type: NpuType,
-    runners: list[RunnerInfo],
-) -> RunnerInfo | None:
-    if npu_type == NpuType.CPU:
-        candidates = [r for r in runners if r.npu_type == NpuType.CPU]
-    else:
-        candidates = [r for r in runners if r.npu_type == npu_type and r.num_npus == num_npus]
-    return candidates[0] if candidates else None
 
 
 def _load_estimated_times(meta: dict) -> dict[str, float]:
@@ -624,13 +622,129 @@ def _load_estimated_times(meta: dict) -> dict[str, float]:
     return {k: float(v) for k, v in meta.get("estimated_times", {}).items()}
 
 
-def _load_partition_config(meta: dict) -> dict[str, int]:
+def _load_partition_config(meta: dict) -> dict[PartitionKey, PartitionInfo]:
     """Load partition configuration from the config meta dict.
 
-    Returns a dict mapping runner keys (e.g. ``a2_x1``) to partition
-    counts.  Runner keys not listed default to 1.
+    Each logical partition key selects an exact label from runner_label.json
+    and declares how many load-balanced groups to create.
     """
-    return {k: int(v) for k, v in meta.get("partition", {}).items()}
+    result: dict[PartitionKey, PartitionInfo] = {}
+    for key, value in (meta.get("partition", {}) or {}).items():
+        if not isinstance(value, dict):
+            raise ValueError(f"Partition {key!r} must be a mapping with runner_label and count")
+        runner_label = value.get("runner_label")
+        if not isinstance(runner_label, str) or not runner_label:
+            raise ValueError(f"Partition {key!r} must define a non-empty runner_label")
+        count = int(value.get("count", 1))
+        if count < 1:
+            raise ValueError(f"Partition {key!r} count must be at least 1")
+        result[str(key)] = PartitionInfo(
+            runner_label=runner_label,
+            count=count,
+        )
+    return result
+
+
+def _load_pinned_routes(meta: dict) -> dict[str, PartitionKey]:
+    """Load file-level routes applied after normal test selection.
+
+    Each ``pinned_routes`` key is a destination logical partition. Tests stay
+    classified by their existing technical directory and are moved only when
+    they were actually selected by the normal module/explicit-test flow.
+    """
+    result: dict[str, PartitionKey] = {}
+    for target_partition, value in (meta.get("pinned_routes", {}) or {}).items():
+        if not isinstance(value, dict):
+            raise ValueError(f"Pinned route {target_partition!r} must be a mapping")
+        tests = value.get("tests")
+        if not isinstance(tests, list) or not tests:
+            raise ValueError(f"Pinned route {target_partition!r} must define a non-empty tests list")
+        for test in tests:
+            if not isinstance(test, str) or not test:
+                raise ValueError(f"Pinned route {target_partition!r} contains an invalid test path")
+            normalized = _as_posix_path(test.rstrip("/"))
+            if "::" in normalized:
+                raise ValueError(f"Pinned route {target_partition!r} must use file-level paths, not nodeids: {test}")
+            if normalized in result:
+                raise ValueError(f"Test path is configured in more than one pinned route: {normalized}")
+            result[normalized] = str(target_partition)
+    return result
+
+
+def _validate_runner_config(
+    runners: dict[str, RunnerInfo],
+    partition_config: dict[PartitionKey, PartitionInfo],
+    pinned_routes: dict[str, PartitionKey],
+) -> None:
+    unknown_labels = sorted(
+        {info.runner_label for info in partition_config.values() if info.runner_label not in runners}
+    )
+    if unknown_labels:
+        raise ValueError("Partition configuration references unknown runner label(s): " + ", ".join(unknown_labels))
+
+    referenced_partitions = {partition_key for _, variants in _RUNNER_MAPPING for partition_key in variants.values()}
+    referenced_partitions.update(pinned_routes.values())
+    unknown_partitions = sorted(referenced_partitions - partition_config.keys())
+    if unknown_partitions:
+        raise ValueError(
+            "Routing configuration references undefined logical partition(s): " + ", ".join(unknown_partitions)
+        )
+
+
+def _apply_pinned_routes(
+    all_groups: dict[PartitionKey, list[str]],
+    pinned_routes: dict[str, PartitionKey],
+) -> dict[PartitionKey, list[str]]:
+    """Move selected files (including selected nodeids) to pinned partitions."""
+    if not pinned_routes:
+        return all_groups
+
+    result: dict[PartitionKey, list[str]] = defaultdict(list)
+    for partition_key, tests in all_groups.items():
+        for target in tests:
+            file_path = _as_posix_path(_pytest_node_file_path(target))
+            target_partition = pinned_routes.get(file_path)
+            if target_partition is None:
+                result[partition_key].append(target)
+                continue
+            result[target_partition].append(target)
+
+    return result
+
+
+def _apply_runner_label_override(
+    all_groups: dict[PartitionKey, list[str]],
+    runner_label: str,
+    runners: dict[str, RunnerInfo],
+    partition_config: dict[PartitionKey, PartitionInfo],
+) -> tuple[dict[PartitionKey, list[str]], dict[PartitionKey, PartitionInfo]]:
+    """Route every non-CPU group to an exact runner label.
+
+    The override is intentionally transient: it does not need a static entry
+    in ``test_config.yaml``. CPU groups retain their configured partitions.
+    """
+    override_runner = runners.get(runner_label)
+    if override_runner is None:
+        raise ValueError(f"Unknown runner label for --runner-label-override: {runner_label}")
+    if override_runner.npu_type == NpuType.CPU:
+        raise ValueError("--runner-label-override requires a non-CPU runner label")
+
+    override_key = f"{override_runner.npu_type.value}-{override_runner.num_npus}"
+    overridden: dict[PartitionKey, list[str]] = {}
+    for partition_key, tests in all_groups.items():
+        partition_info = partition_config.get(partition_key)
+        runner = runners.get(partition_info.runner_label) if partition_info else None
+        if runner is not None and runner.npu_type == NpuType.CPU:
+            overridden[partition_key] = tests
+        else:
+            overridden.setdefault(override_key, []).extend(tests)
+
+    updated_partition_config = dict(partition_config)
+    updated_partition_config[override_key] = PartitionInfo(
+        runner_label=runner_label,
+        count=1,
+    )
+    return overridden, updated_partition_config
 
 
 def _lookup_estimated_time(
@@ -644,9 +758,8 @@ def _lookup_estimated_time(
     2. Strip any ``::nodeid`` suffix and try again.
     3. Otherwise use *default*.
 
-    Note: when both a file-level path and a ``::nodeid`` path for the same
-    file exist in module ``tests:`` lists, that method executes twice.
-    Avoid mixing levels for the same file in ``tests:``.
+    File/nodeid containment is resolved by :func:`_dedup_groups` before this
+    lookup is used. A nodeid selected on its own retains its exact estimate.
     """
     val = estimated_times.get(test_name)
     if val is not None:
@@ -697,17 +810,17 @@ def _partition_tests(
 
 
 def _build_test_group(
-    num_npus: int,
-    npu_type: NpuType,
     runner: RunnerInfo,
     tests: list[str],
+    partition_name: str,
     partition: str,
 ) -> dict:
     group: dict = {
-        "num_npus": num_npus,
-        "npu_type": npu_type.value,
+        "num_npus": runner.num_npus,
+        "npu_type": runner.npu_type.value,
         "runner": runner.label,
         "tests": " ".join(sorted(tests)),
+        "partition_name": partition_name,
         "partition": partition,
     }
     if runner.image_tag:
@@ -718,54 +831,42 @@ def _build_test_group(
 
 
 def _resolve_to_runners(
-    all_groups: dict[RunnerKey, list[str]],
-    runners: list[RunnerInfo],
-    partition_config: dict[str, int] | None = None,
+    all_groups: dict[PartitionKey, list[str]],
+    runners: dict[str, RunnerInfo],
+    partition_config: dict[PartitionKey, PartitionInfo],
     estimated_times: dict[str, float] | None = None,
 ) -> list[dict]:
     result: list[dict] = []
-    errors: list[str] = []
-    partition_config = partition_config or {}
     estimated_times = estimated_times or {}
 
-    for (num_npus, npu_type), tests in sorted(all_groups.items()):
-        if not tests:
-            continue
-        runner = _find_runner(num_npus, npu_type, runners)
-        if runner is None:
-            available = [f"{r.label} ({r.npu_type.value} x{r.num_npus})" for r in runners if r.npu_type == npu_type]
-            header = f"\n  Runner key ({npu_type.value} x{num_npus}) -- no runner available."
-            runners_line = (
-                f"\n    Available {npu_type.value} runners: {', '.join(available)}"
-                if available
-                else f'\n    No runners defined for chip type "{npu_type.value}".'
-            )
-            tests_line = "\n    Affected tests:\n" + "\n".join(f"      - {t}" for t in sorted(tests))
-            errors.append(header + runners_line + tests_line)
-            continue
+    def partition_sort_key(item: tuple[PartitionKey, list[str]]) -> tuple[int, str, str]:
+        partition_key = item[0]
+        partition_info = partition_config[partition_key]
+        runner = runners[partition_info.runner_label]
+        return (runner.num_npus, runner.npu_type.value, partition_key)
 
-        partition_key = f"{npu_type.value}_x{num_npus}"
-        psize = partition_config.get(partition_key, 1)
+    nonempty_groups = (item for item in all_groups.items() if item[1])
+    for partition_key, tests in sorted(nonempty_groups, key=partition_sort_key):
+        partition_info = partition_config[partition_key]
+        runner = runners[partition_info.runner_label]
+
+        psize = partition_info.count
 
         if psize > 1:
             buckets = _partition_tests(sorted(tests), psize, estimated_times)
             for i, bucket in enumerate(buckets):
                 if not bucket:
                     continue
-                result.append(_build_test_group(num_npus, npu_type, runner, bucket, f"{i + 1}-{psize}"))
+                result.append(
+                    _build_test_group(
+                        runner,
+                        bucket,
+                        partition_key,
+                        f"{i + 1}-{psize}",
+                    )
+                )
         else:
-            result.append(_build_test_group(num_npus, npu_type, runner, tests, "1-1"))
-
-    if errors:
-        details = "".join(errors)
-        print(
-            f"\nERROR: The following test groups cannot be routed to any runner"
-            f" in runner_label.json:\n{details}\n\n"
-            "Please fix the directory structure or add the missing runner"
-            " to runner_label.json.\n",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+            result.append(_build_test_group(runner, tests, partition_key, "1-1"))
 
     return result
 
@@ -810,15 +911,11 @@ def _print_summary(
     print(f"Has tests to run: {has_tests}", file=sys.stderr)
 
     for group in test_groups:
-        npu_type = group["npu_type"]
-        num_npus = group["num_npus"]
         runner = group["runner"]
         tests = group["tests"].split()
+        partition_name = group["partition_name"]
         partition_info = group.get("partition", "full")
-        if npu_type == "cpu":
-            header = f"### CPU ({len(tests)} tests) part {partition_info} -> `{runner}`"
-        else:
-            header = f"### {npu_type.upper()} x{num_npus} ({len(tests)} tests) part {partition_info} -> `{runner}`"
+        header = f"### {partition_name} ({len(tests)} tests) part {partition_info} -> `{runner}`"
         print(f"\n  {header}", file=sys.stderr)
         for t in tests:
             print(f"    - {t}", file=sys.stderr)
@@ -882,10 +979,10 @@ def main():
         help="Force-select specific modules (comma-separated), bypassing file-change matching",
     )
     parser.add_argument(
-        "--runner-override",
+        "--runner-label-override",
         type=str,
         default=None,
-        help="Force route all non-CPU tests to the specified runner key (e.g. a5_x4)",
+        help="Force route all non-CPU tests to an exact label from runner_label.json",
     )
     parser.add_argument(
         "--pr-labels",
@@ -898,7 +995,12 @@ def main():
     docs = list(yaml.safe_load_all(args.config.read_text()))
     config = _resolve_config_inheritance(docs[0])
     meta = docs[1] if len(docs) >= 2 and docs[1] else {}
+    runners = _load_runners()
+    partition_config = _load_partition_config(meta)
+    estimated_times = _load_estimated_times(meta)
     _load_runner_mapping(meta)
+    pinned_routes = _load_pinned_routes(meta)
+    _validate_runner_config(runners, partition_config, pinned_routes)
     config, gated_test_targets = _filter_label_gated_modules(config, args.pr_labels)
 
     skip_tests: set[str] = set()
@@ -908,7 +1010,7 @@ def main():
 
     if args.explicit_e2e_tests:
         matched_modules: list[str] = []
-        all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
+        all_groups: dict[PartitionKey, list[str]] = defaultdict(list)
         for path in args.explicit_e2e_tests:
             if not _is_e2e_path(_pytest_node_file_path(path)):
                 print(
@@ -994,7 +1096,7 @@ def main():
         cpu_only_ut_dirs = [d for d in cpu_only_dirs if _is_ut_path(d)]
         e2e_dirs = [d for d in test_dirs if _is_e2e_path(d)]
 
-        all_groups: dict[RunnerKey, list[str]] = defaultdict(list)
+        all_groups: dict[PartitionKey, list[str]] = defaultdict(list)
 
         for dir_path in ut_dirs:
             p = Path(_pytest_node_file_path(dir_path))
@@ -1035,16 +1137,6 @@ def main():
 
         _dedup_groups(all_groups)
 
-    if args.runner_override:
-        override_key = _parse_runner_key(args.runner_override)
-        overridden: dict[RunnerKey, list[str]] = {}
-        for (num_npus, npu_type), tests in all_groups.items():
-            if npu_type == NpuType.CPU:
-                overridden[(num_npus, npu_type)] = tests
-            else:
-                overridden.setdefault(override_key, []).extend(tests)
-        all_groups = overridden
-
     if skip_tests:
         for key in list(all_groups.keys()):
             filtered: list[str] = []
@@ -1063,9 +1155,24 @@ def main():
             all_groups[key] = filtered
         _dedup_groups(all_groups)
 
-    runners = _load_runners()
-    estimated_times = _load_estimated_times(meta)
-    partition_config = _load_partition_config(meta)
+    # Normalize every input mode before pinning. A bare file contains all of
+    # its nodeids, even when the targets came from different module lists.
+    _dedup_groups(all_groups)
+    all_groups = _apply_pinned_routes(all_groups, pinned_routes)
+
+    # A command-line override is an explicit, transient choice and therefore
+    # has higher priority than static pinned routes.
+    if args.runner_label_override:
+        try:
+            all_groups, partition_config = _apply_runner_label_override(
+                all_groups,
+                args.runner_label_override,
+                runners,
+                partition_config,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+
     test_groups = _resolve_to_runners(all_groups, runners, partition_config, estimated_times)
 
     _write_output(test_groups, matched_modules)

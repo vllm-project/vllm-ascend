@@ -11,7 +11,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1024"
-      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -41,7 +40,7 @@ test_cases:
       - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"scheduler_config":{"enable_balance_scheduling":true}}'
       - "--profiler-config"
       - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
       - "--mm-processor-cache-gb"
