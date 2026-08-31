@@ -746,13 +746,11 @@ class KVPoolWorker:
         for cache_or_caches in kv_caches.values():
             for cache in self._as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
-                _, _, region_len, _ = self._get_cache_block_metadata(cache)
-                if not isinstance(region_len, int):
-                    region_len = 0
                 self.kv_caches_base_addr.append(base_addr)
                 storage_key = self._get_storage_key(cache)
+                storage = cache.untyped_storage()
                 start = base_addr
-                end = base_addr + region_len
+                end = storage_key + storage.nbytes()
                 if storage_key in registered_regions:
                     old_start, old_end = registered_regions[storage_key]
                     registered_regions[storage_key] = (min(old_start, start), max(old_end, end))

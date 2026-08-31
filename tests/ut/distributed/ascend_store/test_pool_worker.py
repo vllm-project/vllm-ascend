@@ -584,6 +584,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         fake_cache.shape = [100, 16, 8, 64]
         fake_cache.element_size.return_value = 2
         fake_cache.data_ptr.return_value = 10000
+        storage = fake_cache.untyped_storage.return_value
+        storage.data_ptr.return_value = 10000
+        storage.nbytes.return_value = 100 * 16 * 8 * 64 * 2
         kv_caches = {"layer.0": (fake_cache, fake_cache)}
         # init_store + register_buffer now happen directly in register_kv_caches
         # (no separate init_backend handshake). Mark threads as already started
@@ -606,12 +609,79 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(recv_thread.call_args.args[2], worker.grouped_block_size)
         event.return_value.wait.assert_called()
 
+    def test_register_kv_caches_uses_storage_extent_for_all_backends(self):
+        for backend_name in ("mooncake", "memcache", "yuanrong"):
+            with self.subTest(backend=backend_name):
+                try:
+                    worker = self._make_worker(extra_config={"backend": backend_name})
+                    fake_cache = MagicMock()
+                    fake_cache.shape = [100, 16, 8, 64]
+                    fake_cache.__getitem__.return_value.numel.return_value = 16 * 8 * 64
+                    fake_cache.element_size.return_value = 2
+                    fake_cache.stride.return_value = 16 * 8 * 64
+
+                    cache_base_addr = 0x200000
+                    storage_base_addr = 0x100000
+                    logical_region_len = 100 * 16 * 8 * 64 * 2
+                    storage_len = logical_region_len + 2 * 1024 * 1024
+                    expected_register_len = logical_region_len + 1024 * 1024
+                    fake_cache.data_ptr.return_value = cache_base_addr
+                    storage = fake_cache.untyped_storage.return_value
+                    storage.data_ptr.return_value = storage_base_addr
+                    storage.nbytes.return_value = storage_len
+                    worker._transfer_threads_started = True
+
+                    worker.register_kv_caches({"layer.0": (fake_cache, fake_cache)})
+
+                    worker.m_store.register_buffer.assert_called_once_with(
+                        [cache_base_addr],
+                        [expected_register_len],
+                    )
+                finally:
+                    self._stop_all()
+                    self._patches = {}
+
+    def test_register_kv_caches_uses_lowest_view_address_for_shared_storage(self):
+        worker = self._make_worker()
+        storage = MagicMock()
+        storage_base_addr = 0x100000
+        storage_end = 0x500000
+        storage.data_ptr.return_value = storage_base_addr
+        storage.nbytes.return_value = storage_end - storage_base_addr
+
+        high_cache = MagicMock()
+        high_cache.shape = [100, 16, 8, 64]
+        high_cache.__getitem__.return_value.numel.return_value = 16 * 8 * 64
+        high_cache.element_size.return_value = 2
+        high_cache.stride.return_value = 16 * 8 * 64
+        high_cache.data_ptr.return_value = 0x300000
+        high_cache.untyped_storage.return_value = storage
+
+        low_cache = MagicMock()
+        low_cache.shape = [100, 16, 8, 64]
+        low_cache.__getitem__.return_value.numel.return_value = 16 * 8 * 64
+        low_cache.element_size.return_value = 2
+        low_cache.stride.return_value = 16 * 8 * 64
+        low_cache.data_ptr.return_value = 0x200000
+        low_cache.untyped_storage.return_value = storage
+        worker._transfer_threads_started = True
+
+        worker.register_kv_caches({"layer.0": (high_cache, low_cache)})
+
+        worker.m_store.register_buffer.assert_called_once_with(
+            [0x200000],
+            [storage_end - 0x200000],
+        )
+
     def test_register_kv_caches_initializes_layerwise_memcache(self):
         worker = self._make_worker(extra_config={"backend": "memcache"}, use_layerwise=True)
         fake_cache = MagicMock()
         fake_cache.shape = [100, 16, 8, 64]
         fake_cache.element_size.return_value = 2
         fake_cache.data_ptr.return_value = 10000
+        storage = fake_cache.untyped_storage.return_value
+        storage.data_ptr.return_value = 10000
+        storage.nbytes.return_value = 100 * 16 * 8 * 64 * 2
         worker._transfer_threads_started = True
 
         worker.register_kv_caches({"layer.0": (fake_cache, fake_cache)})
@@ -1587,6 +1657,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         fake_cache.stride.return_value = 16 * 4 * 64
         fake_cache.data_ptr.return_value = 10000
         fake_cache.untyped_storage.return_value.data_ptr.return_value = 10000
+        fake_cache.untyped_storage.return_value.nbytes.return_value = 100 * 16 * 4 * 64 * 2
         worker._transfer_threads_started = True
 
         worker.register_kv_caches({"layers.0": (fake_cache, fake_cache)})
