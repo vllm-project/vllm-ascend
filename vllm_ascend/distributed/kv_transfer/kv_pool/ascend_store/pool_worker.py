@@ -949,9 +949,8 @@ class KVPoolWorker:
                     continue
 
                 request.current_event = current_event
-                self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
-                    request.req_id
-                )
+                if not self.kv_send_thread.add_stored_request(request.req_id):  # type: ignore[union-attr]
+                    continue
                 layerwise_storer = self.store_layer(request, current_event)
                 self.layerwise_storers.append(layerwise_storer)
         for layerwise_storer in self.layerwise_storers:
@@ -979,9 +978,8 @@ class KVPoolWorker:
 
             request.skip_null_blocks_by_group = self.group_uses_align_state
             request.current_event = current_event
-            self.kv_send_thread.add_stored_request(  # type: ignore[union-attr]
-                request.req_id
-            )
+            if not self.kv_send_thread.add_stored_request(request.req_id):  # type: ignore[union-attr]
+                continue
             self.kv_send_thread.add_request(  # type: ignore[union-attr]
                 request,
             )
@@ -1477,7 +1475,7 @@ class KVPoolWorker:
                     return 0
                 max_hit_position = min(max_hit_position, group_hits[-1])
                 hits.append(group_hits)
-                logger.debug(
+                logger.info(
                     "KV pool scheduler lookup group=%d keys=%d hit=%d token_len=%d",
                     group_id,
                     len(keys),
