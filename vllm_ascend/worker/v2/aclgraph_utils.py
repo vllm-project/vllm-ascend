@@ -100,12 +100,9 @@ def _get_graph_update_backend(
     for groups in attn_groups:
         for group in groups:
             backend = group.backend
-            impl_cls = backend.get_impl_cls()
-            # Hybrid models may expose executable indexer backends which do
-            # not own the attention parameters updated during graph replay.
-            if impl_cls is not None and callable(getattr(impl_cls, "update_graph_params", None)):
+            if backend.get_impl_cls() is not None:
                 return backend
-    raise RuntimeError("No attention backend supports full-graph parameter updates.")
+    raise RuntimeError("No executable attention backend is available for full-graph parameter updates.")
 
 
 class ModelAclGraphManager(ModelCudaGraphManager):
