@@ -19,11 +19,21 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    _BACKEND_CAPABILITIES,
+    backend_map,
+    backend_supports,
+    use_gva_layerwise,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    Backend,
+    GVALayerwiseCapable,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     DEFAULT_TENANT_ID,
     MooncakeBackend,
@@ -49,6 +59,119 @@ class TestBackendABC(unittest.TestCase):
     def test_cannot_instantiate(self):
         with self.assertRaises(TypeError):
             Backend(MagicMock())  # type: ignore[abstract]
+
+
+# =========================================================================
+# Backend capability registry
+# =========================================================================
+class TestBackendCapabilities(unittest.TestCase):
+    def test_use_gva_layerwise_truth_table(self):
+        cases = [
+            (True, "memcache", True),
+            (False, "memcache", False),
+            (True, "mooncake", False),
+            (True, "yuanrong", False),
+            (True, "unknown", False),
+            (True, "Memcache", False),
+        ]
+        for use_layerwise, backend_name, expected in cases:
+            with self.subTest(use_layerwise=use_layerwise, backend_name=backend_name):
+                self.assertEqual(use_gva_layerwise(use_layerwise, backend_name), expected)
+
+    def test_backend_supports(self):
+        self.assertTrue(backend_supports("memcache", "gva_layerwise"))
+        self.assertFalse(backend_supports("mooncake", "gva_layerwise"))
+        self.assertFalse(backend_supports("yuanrong", "gva_layerwise"))
+        self.assertFalse(backend_supports("memcache", "nonexistent_capability"))
+        self.assertFalse(backend_supports("unknown", "gva_layerwise"))
+
+    def test_every_registered_backend_has_capabilities_entry(self):
+        # Every backend in backend_map must have an explicit capabilities
+        # entry so that adding a new backend without updating the registry
+        # is caught here instead of silently degrading to "no capabilities".
+        for backend_name in backend_map:
+            with self.subTest(backend_name=backend_name):
+                self.assertIn(backend_name, _BACKEND_CAPABILITIES)
+
+    def test_capability_table_matches_gva_interface(self):
+        # The capability registry and the GVALayerwiseCapable class hierarchy
+        # must agree: a backend advertises "gva_layerwise" if and only if
+        # its class implements the interface.
+        for backend_name, entry in backend_map.items():
+            with self.subTest(backend_name=backend_name):
+                module = __import__(entry["path"], fromlist=[entry["name"]])
+                backend_cls = getattr(module, entry["name"])
+                self.assertEqual(
+                    backend_supports(backend_name, "gva_layerwise"),
+                    issubclass(backend_cls, GVALayerwiseCapable),
+                )
+
+
+# =========================================================================
+# on_worker_ready lifecycle hook
+# =========================================================================
+class TestOnWorkerReady(unittest.TestCase):
+    def _make_memcache(self, lazy_init: bool, store_initialized: bool):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+            MemcacheBackend,
+        )
+
+        backend = MemcacheBackend.__new__(MemcacheBackend)
+        backend._lazy_init = lazy_init
+        backend._store_initialized = store_initialized
+        backend._store_init_lock = threading.Lock()
+        backend._pending_buffers = None
+        backend.local_rank = 0
+        return backend
+
+    def test_default_is_noop_for_plain_backends(self):
+        # mooncake / yuanrong inherit the Backend default and must not raise
+        # even without any internal state set up.
+        with patch.object(MooncakeBackend, "__init__", lambda self, pc: None):
+            mooncake = MooncakeBackend.__new__(MooncakeBackend)
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
+            YuanrongBackend,
+        )
+
+        with patch.object(YuanrongBackend, "__init__", lambda self, pc: None):
+            yuanrong = YuanrongBackend.__new__(YuanrongBackend)
+        mooncake.on_worker_ready()
+        yuanrong.on_worker_ready()
+
+    def test_lazy_init_skips_eager_initialization(self):
+        # UT 1: lazy_init (compress + device_sdma) must keep deferring store
+        # setup — exists/batch_get_key_info rely on the "uninitialized means
+        # all-miss" short circuit, so an eager init here would break it.
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+            MemcacheBackend,
+        )
+
+        backend = self._make_memcache(lazy_init=True, store_initialized=False)
+        with patch.object(MemcacheBackend, "_setup_store") as mock_setup:
+            backend.on_worker_ready()
+        mock_setup.assert_not_called()
+        self.assertFalse(backend._store_initialized)
+
+    def test_non_lazy_ensures_initialization(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+            MemcacheBackend,
+        )
+
+        backend = self._make_memcache(lazy_init=False, store_initialized=False)
+        with patch.object(MemcacheBackend, "_setup_store", return_value=object()) as mock_setup:
+            backend.on_worker_ready()
+        mock_setup.assert_called_once()
+        self.assertTrue(backend._store_initialized)
+
+    def test_already_initialized_is_idempotent(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+            MemcacheBackend,
+        )
+
+        backend = self._make_memcache(lazy_init=False, store_initialized=True)
+        with patch.object(MemcacheBackend, "_setup_store") as mock_setup:
+            backend.on_worker_ready()
+        mock_setup.assert_not_called()
 
 
 def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
@@ -616,6 +739,21 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store.batch_is_exist.return_value = [1]
         self.assertEqual(b.exists(["k1"]), [1])
 
+    def test_exists_short_circuits_all_miss_when_lazy_uninitialized(self):
+        # UT 3: under lazy_init the uninitialized store must report every key
+        # as missing instead of touching self.store (which is None at that
+        # point). This short circuit is the load-path degradation contract —
+        # do not "fix" it into an eager init.
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+            MemcacheBackend,
+        )
+
+        b = MemcacheBackend.__new__(MemcacheBackend)
+        b._lazy_init = True
+        b._store_initialized = False
+        b.store = None
+        self.assertEqual(b.exists(["k1", "k2", "k3"]), [0, 0, 0])
+
     def test_register_buffer(self):
         b = self._make_backend()
         b.register_buffer([100], [200])
@@ -633,6 +771,13 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         b.store = object()
 
         self.assertEqual(b.batch_write_finish(["k1"], [0]), [0])
+
+    def test_batch_copy_forwards_to_store(self):
+        b = self._make_backend()
+        b.store.batch_copy.return_value = 0
+
+        self.assertEqual(b.batch_copy([1, 2], [100, 200], [16, 16], 0), 0)
+        b.store.batch_copy.assert_called_once_with([1, 2], [100, 200], [16, 16], 0)
 
     def test_get(self):
         b = self._make_backend()
