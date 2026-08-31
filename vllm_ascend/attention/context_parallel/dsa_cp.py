@@ -2042,20 +2042,20 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         common_prefix_len: int,
         local_common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool,
-        **kwargs,
+        num_actual_reqs: int | None,
+        common_ratio_to_sas_metadata: dict[Any, Any],
     ) -> dsa_v1.AscendDSAMetadata:
         if local_common_attn_metadata.num_actual_tokens > 0:
             return super().build(
                 common_prefix_len,
                 local_common_attn_metadata,
                 fast_build,
-                **kwargs,
+                num_actual_reqs=num_actual_reqs,
+                common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
             )
 
         # Empty ranks still participate in the global cache update collectives.
-        self.common_ratio_to_sas_metadata = kwargs.get(
-            "common_ratio_to_sas_metadata",
-        )
+        self.common_ratio_to_sas_metadata = common_ratio_to_sas_metadata
         return self.metadata_cls(  # type: ignore[call-arg]
             num_actual_tokens=0,
             head_dim=self.model_config.get_head_size(),
@@ -2067,25 +2067,6 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
         )
 
-    def _build_global_dsa_metadata(
-        self,
-        common_prefix_len: int,
-        global_common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool,
-        **kwargs,
-    ) -> dsa_v1.AscendDSAMetadata:
-        global_build_kwargs = {
-            **kwargs,
-            "common_ratio_to_sas_metadata": {},
-            "num_actual_reqs": global_common_attn_metadata.num_reqs,
-        }
-        return self._global_metadata_builder.build(
-            common_prefix_len,
-            global_common_attn_metadata,
-            fast_build,
-            **global_build_kwargs,
-        )
-
     def build(
         self,
         common_prefix_len: int,
@@ -2093,20 +2074,24 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         fast_build: bool = False,
         pcp_context: "AscendPCPAttentionContext | None" = None,
         pcp_cache_group_idx: int | None = None,
-        **kwargs,
+        num_actual_reqs: int | None = None,
+        common_ratio_to_sas_metadata: dict[Any, Any] | None = None,
+        **kwargs: Any,
     ) -> AscendDSAPCPMetadata:
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
+        assert common_ratio_to_sas_metadata is not None
         global_common_attn_metadata = self._build_global_common_attn_metadata(
             pcp_context,
             pcp_cache_group_idx,
             common_attn_metadata,
         )
-        global_dsa_metadata = self._build_global_dsa_metadata(
+        global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,
             fast_build,
-            **kwargs,
+            num_actual_reqs=global_common_attn_metadata.num_reqs,
+            common_ratio_to_sas_metadata={},
         )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
@@ -2116,7 +2101,8 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             common_prefix_len,
             local_common_attn_metadata,
             fast_build,
-            **kwargs,
+            num_actual_reqs=num_actual_reqs,
+            common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
         )
         return AscendDSAPCPMetadata.from_local_metadata(
             local_dsa_metadata,
