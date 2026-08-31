@@ -74,6 +74,7 @@ class TestGetZmqRpcPathLookup(unittest.TestCase):
 class TestKVPoolScheduler(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         config = MagicMock()
+        config.kv_events_config = None
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
@@ -322,6 +323,7 @@ class TestKVPoolScheduler(unittest.TestCase):
 class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", block_size=16, extra_config=None, num_layers=2):
         config = MagicMock()
+        config.kv_events_config = None
         config.kv_transfer_config.kv_role = kv_role
         config.kv_transfer_config.kv_connector_extra_config = extra_config or {}
         config.kv_transfer_config.get_from_extra_config.return_value = True
@@ -405,6 +407,41 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
 
         meta = scheduler.build_connector_meta(sched_output)
         self.assertTrue(len(meta.requests) >= 1)
+        self.assertIsNone(meta.requests[0].token_ids)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_build_connector_meta_new_req_with_kv_events(self, mock_client_cls):
+        config = self._make_config()
+        config.kv_events_config = MagicMock(enable_kv_cache_events=True)
+        scheduler = KVPoolScheduler(config, use_layerwise=False)
+
+        request = MagicMock()
+        request.request_id = "r1"
+        request.prompt_token_ids = list(range(32))
+        request.num_tokens = 32
+        request.num_computed_tokens = 0
+        request.block_hashes = [b"h0", b"h1"]
+        request.all_token_ids = list(range(32))
+        blocks = MagicMock()
+        blocks.get_block_ids.return_value = [[0, 1]]
+        scheduler.update_state_after_alloc(request, blocks, 0)
+
+        new_req_data = MagicMock()
+        new_req_data.req_id = "r1"
+        new_req_data.num_computed_tokens = 0
+        new_req_data.block_ids = [0, 1]
+        new_req_data.prompt_token_ids = list(range(32))
+
+        sched_output = MagicMock()
+        sched_output.finished_req_ids = set()
+        sched_output.preempted_req_ids = set()
+        sched_output.scheduled_new_reqs = [new_req_data]
+        sched_output.num_scheduled_tokens = {"r1": 32}
+        sched_output.scheduled_cached_reqs = MagicMock()
+        sched_output.scheduled_cached_reqs.req_ids = []
+
+        meta = scheduler.build_connector_meta(sched_output)
+        self.assertEqual(meta.requests[0].token_ids, list(range(32)))
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_running_chunk_reloads_prefix_with_layer_reuse(self, mock_client_cls):

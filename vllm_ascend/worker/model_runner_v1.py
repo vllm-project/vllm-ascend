@@ -1828,19 +1828,12 @@ class NPUModelRunner(GPUModelRunner):
                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
             )
 
-        # self._draft_token_ids is None when `input_fits_in_drafter=False`
-        # and there is no draft tokens scheduled. so it need to update the
-        # spec_decoding info in scheduler_output with async_scheduling.
-        # use deepcopy to avoid the modification has influence on the
-        # scheduler_output in engine core process.
-        # TODO(Ronald1995): deepcopy is expensive when there is a large
-        # number of requests, optimize it later.
-        if (
-            self.use_async_scheduling
-            and self.num_spec_tokens
-            and self._draft_token_ids is None  # type: ignore[has-type]
-        ):
-            scheduler_output = deepcopy(scheduler_output)
+        # NOTE: The async-scheduling deepcopy was removed in
+        # vllm-project/vllm#29821. Draft token ids are now propagated via
+        # _copy_draft_token_ids_to_cpu()/take_draft_token_ids(), and the
+        # scheduler output is updated by EngineCore in its own process
+        # (Scheduler.update_draft_token_ids_in_output). Nothing below mutates
+        # scheduler_output in the worker, so no copy is needed.
         pp_group = get_pp_group()
         if pp_group.world_size > 1 and not pp_group.is_last_rank:
             new_token_ids = scheduler_output.scheduled_cached_reqs.new_token_ids
