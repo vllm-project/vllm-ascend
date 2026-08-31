@@ -260,7 +260,7 @@ class AscendConfig:
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 131072,
+            "mega_moe_max_tokens": 65536,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "c8_enable_reshape_optim": false,
             "enable_fused_mc2": 0,
