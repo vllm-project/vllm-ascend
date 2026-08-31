@@ -192,7 +192,15 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
-        kv_cache_tensors=[SimpleNamespace(size=128, shared_by=[layer_name])],
+        # vLLM #51718 renamed shared_by to layers; expose both fields so this
+        # focused 310P fixture stays valid on main and v0.27.1.
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=128,
+                shared_by=[layer_name],
+                layers=[layer_name],
+            )
+        ],
     )
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
