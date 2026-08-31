@@ -9,11 +9,9 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
-    AscendAttentionPCPImpl,
-    AscendAttentionPCPMetadata,
-    AscendAttentionPCPMetadataBuilder,
     AscendAttentionState,
     AscendC8AttentionBackendImpl,
+    AscendMetadata,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -91,13 +89,23 @@ class TestAscendAttentionBackend(TestBase):
     def test_get_builder_cls(self):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(), AscendAttentionMetadataBuilder)
 
+    def test_supports_pcp_only_for_main_implementation(self):
+        self.assertTrue(AscendAttentionBackend.supports_pcp())
+
+        class OtherAttentionBackend(AscendAttentionBackend):
+            @staticmethod
+            def get_impl_cls():
+                return AscendC8AttentionBackendImpl
+
+        self.assertFalse(OtherAttentionBackend.supports_pcp())
+
     def test_get_impl_cls_with_pcp(self):
         self.mock_config.parallel_config.prefill_context_parallel_size = 2
         self.enable_pcp.cache_clear()
 
         self.assertIs(
             AscendAttentionBackend.get_impl_cls(),
-            AscendAttentionPCPImpl,
+            AscendAttentionBackendImpl,
         )
 
     def test_get_builder_cls_with_pcp(self):
@@ -106,7 +114,7 @@ class TestAscendAttentionBackend(TestBase):
 
         self.assertIs(
             AscendAttentionBackend.get_builder_cls(),
-            AscendAttentionPCPMetadataBuilder,
+            AscendAttentionMetadataBuilder,
         )
 
     def test_pcp_and_dcp_are_rejected_together(self):
@@ -144,6 +152,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
     def setUp(self):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.mock_vllm_config.model_config.max_model_len = 640
         self.mock_vllm_config.model_config.hf_text_config.sliding_window = None
         self.mock_vllm_config.cache_config.block_size = 64
@@ -161,6 +170,16 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         result = self.builder.reorder_batch(mock_input_batch, mock_scheduler_output)
 
         self.assertFalse(result)
+
+    def test_pcp_mode_is_initialized_from_config(self):
+        self.assertFalse(self.builder.pcp_enabled)
+        self.assertIs(self.builder.metadata_cls, AscendMetadata)
+
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
+        pcp_builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
+
+        self.assertTrue(pcp_builder.pcp_enabled)
+        self.assertIs(pcp_builder.metadata_cls, AscendMetadata)
 
     def test_unpadded_preserves_internal_seq_lens_cpu(self):
         internal_seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
@@ -213,35 +232,28 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
-    builder = AscendAttentionPCPMetadataBuilder.__new__(AscendAttentionPCPMetadataBuilder)
+    builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
     builder.pcp_size = 2
-    common_metadata = SimpleNamespace(
-        slot_mapping=torch.tensor(
-            [10, 11, -1, -1, 20, 21, -1, -1],
-            dtype=torch.int64,
-        )
+    expanded_slot_mapping = torch.tensor(
+        [10, 11, -1, -1, 20, 21, -1, -1],
+        dtype=torch.int64,
     )
-    metadata = AscendAttentionPCPMetadata(
+    metadata = AscendMetadata(
         num_actual_tokens=3,
         num_decode_tokens=1,
         num_prefills=1,
         attn_state=AscendAttentionState.PrefillCacheHit,
     )
 
-    with patch.object(
-        AscendAttentionMetadataBuilder,
-        "build",
-        return_value=metadata,
-    ):
-        result = builder.build(0, common_metadata)
+    builder._finalize_pcp_metadata(metadata, expanded_slot_mapping)
 
-    assert result.slot_mapping is common_metadata.slot_mapping
-    assert result.pcp_local_num_input_tokens == 4
-    assert result.attn_state == AscendAttentionState.ChunkedPrefill
+    assert metadata.slot_mapping is expanded_slot_mapping
+    assert metadata.pcp_local_num_input_tokens == 4
+    assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
 def test_pcp_cache_write_uses_gathered_inputs() -> None:
-    impl = AscendAttentionPCPImpl.__new__(AscendAttentionPCPImpl)
+    impl = AscendAttentionBackendImpl.__new__(AscendAttentionBackendImpl)
     impl.attn_type = attn_module.AttentionType.DECODER
     impl.key_cache = None
     impl.value_cache = None
@@ -256,7 +268,7 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
     gathered_value = torch.arange(30, 37).reshape(7, 1, 1)
     gathered_slots = torch.tensor([10, 11, -1, -1, 21, -1, -1])
     slot_mapping = torch.tensor([10, 11, -1, -1, 20, 21, -1, -1])
-    metadata = AscendAttentionPCPMetadata(
+    metadata = AscendMetadata(
         num_actual_tokens=3,
         num_decode_tokens=1,
         pcp_local_num_input_tokens=4,
@@ -276,7 +288,7 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
         patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache") as reshape_and_cache,
         patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written"),
     ):
-        result = impl.reshape_and_cache(
+        result = impl._reshape_and_cache_pcp(
             query,
             key,
             value,
@@ -304,8 +316,9 @@ def test_pcp_cache_write_uses_gathered_inputs() -> None:
 
 
 def test_pcp_builder_keeps_short_extend_in_prefill() -> None:
-    builder = AscendAttentionPCPMetadataBuilder.__new__(AscendAttentionPCPMetadataBuilder)
+    builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
     builder.decode_threshold = 1
+    builder.pcp_enabled = True
     common_metadata = SimpleNamespace(
         context_parallel_metadata=None,
         max_query_len=4,
@@ -345,6 +358,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.layer_no_quant._k_scale_float = 1.0
         self.layer_no_quant._v_scale_float = 1.0
         self.mock_vllm_config = MagicMock()
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
