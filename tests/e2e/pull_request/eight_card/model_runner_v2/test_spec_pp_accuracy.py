@@ -26,9 +26,18 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
-DEEPSEEK_V4_MODEL = "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"
-MINIMAX_M3_MODEL = "Eco-Tech/MiniMax-M3-w8a8-0626"
-MINIMAX_M3_DRAFT_MODEL = "Inferact/MiniMax-M3-EAGLE3-GQA"
+DEEPSEEK_V4_MODEL = os.environ.get(
+    "DEEPSEEK_V4_DSPARK_MODEL_PATH",
+    "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test",
+)
+MINIMAX_M3_MODEL = os.environ.get(
+    "MINIMAX_M3_MODEL_PATH",
+    "Eco-Tech/MiniMax-M3-w8a8-0626",
+)
+MINIMAX_M3_DRAFT_MODEL = os.environ.get(
+    "MINIMAX_M3_DRAFT_MODEL_PATH",
+    "Inferact/MiniMax-M3-EAGLE3-GQA",
+)
 
 GSM8K_PROMPT = (
     'Answer the following question. The last line of the response should follow this format: "answer:$ANSWER" '
@@ -98,23 +107,30 @@ def _configure_jemalloc() -> None:
 def test_deepseek_v4_dspark_pp_accuracy() -> None:
     with VllmRunner(
         DEEPSEEK_V4_MODEL,
-        max_model_len=8192,
-        max_num_seqs=8,
-        max_num_batched_tokens=4096,
+        max_model_len=4096,
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
         tensor_parallel_size=4,
         pipeline_parallel_size=2,
         enable_expert_parallel=True,
         distributed_executor_backend="mp",
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=0.8,
+        quantization="ascend",
+        tokenizer_mode="deepseek_v4",
+        block_size=128,
+        enable_prefix_caching=False,
         disable_log_stats=False,
-        async_scheduling=True,
         compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": 5,
             "enforce_eager": True,
         },
-        additional_config={"enable_dsa_cp": False},
+        additional_config={
+            "enable_dsa_cp": False,
+            "enable_fused_mc2": 0,
+            "enable_flashcomm1": False,
+        },
     ) as runner:
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
         metrics = runner.model.get_metrics()
@@ -155,12 +171,16 @@ def test_minimax_m3_eagle3_pp_accuracy() -> None:
         pipeline_parallel_size=2,
         enable_expert_parallel=True,
         distributed_executor_backend="mp",
-        gpu_memory_utilization=0.95,
+        gpu_memory_utilization=0.92,
         quantization="ascend",
-        long_prefill_token_threshold=2048,
-        limit_mm_per_prompt={"image": 1},
+        long_prefill_token_threshold=1024,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+        enable_prefix_caching=False,
         disable_log_stats=False,
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        compilation_config={
+            "mode": 3,
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+        },
         speculative_config={
             "model": MINIMAX_M3_DRAFT_MODEL,
             "method": "eagle3",
@@ -170,12 +190,13 @@ def test_minimax_m3_eagle3_pp_accuracy() -> None:
         additional_config={
             "enable_cpu_binding": True,
             "ascend_compilation_config": {
-                "enable_static_kernel": True,
+                "enable_static_kernel": False,
                 "fuse_norm_quant": False,
             },
             "multistream_overlap_shared_expert": False,
+            "enable_fused_mc2": 0,
             "weight_nz_mode": 2,
-            "enable_shared_expert_dp": True,
+            "enable_flashcomm1": False,
         },
     ) as runner:
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
