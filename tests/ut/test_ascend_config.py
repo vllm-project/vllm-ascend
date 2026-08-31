@@ -1238,3 +1238,28 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             "Please remove them if they are not needed for your use case.",
             ["vllm_omni_option"],
         )
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_combine_quant_mode_defaults_zero(self, mock_fix):
+        vc = VllmConfig()
+        self.assertEqual(init_ascend_config(vc).combine_quant_mode, 0)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_combine_quant_mode_int_lax(self, mock_fix):
+        # Pydantic lax int coercion must resolve int strings ("4") to int 4,
+        # matching the other top-level integer switches.
+        vc = VllmConfig()
+        vc.additional_config = {"combine_quant_mode": "4"}
+        self.assertEqual(init_ascend_config(vc).combine_quant_mode, 4)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_combine_quant_mode_rejects_non_integer(self, mock_fix):
+        # A non-integer (e.g. bool string "true") must be rejected rather than
+        # silently coerced into an unexpected quant mode.
+        vc = VllmConfig()
+        vc.additional_config = {"combine_quant_mode": "true"}
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
