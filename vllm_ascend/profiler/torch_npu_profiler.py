@@ -59,7 +59,7 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
             gc_detect_threshold=None,
         )
 
-        return torch_npu.profiler.profile(
+        kwargs = dict(
             activities=[
                 torch_npu.profiler.ProfilerActivity.CPU,
                 torch_npu.profiler.ProfilerActivity.NPU,
@@ -75,6 +75,19 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
                 worker_name=trace_name,
             ),
         )
+        # GLM53 diagnostic: schedule-based auto-export. With a schedule the
+        # profiler exports via on_trace_ready during normal step() calls, so
+        # the fragile stop-path export (known to crash the worker on this
+        # build) is never exercised. GLM53_PROF_SCHEDULE=1 enables it.
+        import os as _os
+        if _os.environ.get("GLM53_PROF_SCHEDULE") == "1":
+            kwargs["schedule"] = torch_npu.profiler.schedule(
+                wait=0,
+                warmup=int(_os.environ.get("GLM53_PROF_WARMUP", "3")),
+                active=int(_os.environ.get("GLM53_PROF_ACTIVE", "2")),
+                repeat=1,
+            )
+        return torch_npu.profiler.profile(**kwargs)
 
     def _start(self) -> None:
         self.profiler.start()
@@ -84,3 +97,17 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
 
     def _profiler_step(self) -> bool:
         return True
+
+    def step(self) -> None:
+        # GLM53 diagnostic: with GLM53_PROF_SCHEDULE=1 the underlying
+        # torch_npu profiler owns a schedule (wait/warmup/active) and exports
+        # via on_trace_ready during normal stepping. The base WorkerProfiler
+        # never advances the underlying profiler, so drive it directly here
+        # and skip the base state machine (whose stop path crashes the worker
+        # on this build).
+        import os as _os
+
+        if _os.environ.get("GLM53_PROF_SCHEDULE") == "1" and self.profiler is not None:
+            self.profiler.step()
+            return
+        super().step()

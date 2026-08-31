@@ -553,11 +553,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 # carries no draft tokens. Treat it as ordinary decode unless a
                 # stateful spec-width prompt chunk must use the spec branch.
                 spec_sequence_masks_cpu.zero_()
-            spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
-                m,
-                spec_sequence_masks_cpu,
-                num_accepted_tokens,
-            )
+            # A3 18c483e0 removed this fold: spec-sized prefill chunks must
+            # stay on the prefill path; folding them into the spec batch
+            # corrupts spec_state_indices / query_start_loc (garbled replay).
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
