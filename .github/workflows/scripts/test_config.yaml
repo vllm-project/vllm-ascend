@@ -349,7 +349,7 @@
     - vllm_ascend/patch/platform/patch_speculative_config.py
     - vllm_ascend/distributed/kv_transfer/kv_p2p/mooncake_connector.py
   tests:
-    - tests/e2e/pull_request/sixteen_card/test_kimi_k3.py
+    - tests/e2e/pull_request/four_card/test_kimi_k3.py
 
 # Ops
 - name: ops_basic
@@ -910,7 +910,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
-  tests/e2e/pull_request/sixteen_card/test_kimi_k3.py: 360
+  tests/e2e/pull_request/four_card/test_kimi_k3.py: 360
   tests/ut/attention/a2/test_attention_cp.py: 30
   tests/ut/attention/a2/test_attention_cp_precision.py: 30
   tests/ut/attention/a2/test_attention_v1.py: 30
