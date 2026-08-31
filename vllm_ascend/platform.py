@@ -1201,8 +1201,14 @@ def _setup_worker_and_scheduler(
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
         additional_config = vllm_config.additional_config or {}
-        if ("enable_flashcomm1" not in additional_config) and (not os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1")):
-            parallel_config.all2all_backend = "flashinfer_all2allv"  # a trikky way to disable SP moe.
+        if (
+            not additional_config.get("enable_flashcomm1", False)
+            and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
+        ):
+            parallel_config.all2all_backend = (
+                "flashinfer_all2allv"  # TODO: a triky way to disable SP moe. Disable this when SP is supported.
+            )
+            logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         hardware_profile = get_current_hardware_profile()
         if ascend_config.xlite_graph_config.enabled and hardware_profile.supports(
             HardwareCapability.STANDARD_WORKER_PATCHES
