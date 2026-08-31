@@ -89,17 +89,39 @@ jobs:
       - name: Resolve refs
         id: resolve-refs
         env:
-          WD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
+          WD_BRANCH: ${{ if: github.event_name == 'workflow_dispatch', inputs.vllm_ascend_branch, '' }}
+          PR_SHA: ${{ if: github.event_name == 'pull_request', github.sha, '' }}
+          PR_BASE_SHA: ${{ if: github.event_name == 'pull_request', github.base_sha, '' }}
+          PR_BASE_REF: ${{ if: github.event_name == 'pull_request', github.base_ref, '' }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
-          TARGET_BRANCH="${WD_BRANCH:-$GITHUB_REF_NAME}"
-          git fetch origin "$TARGET_BRANCH"
-          {
-            echo "vllm_ascend_ref=$(git rev-parse HEAD)"
-            echo "base_sha=$(git rev-parse FETCH_HEAD)"
-            echo "base_ref=${TARGET_BRANCH}"
-          } >> "$GITHUB_OUTPUT"
+          if [[ -n "${PR_SHA}" ]]; then
+            # pull_request
+            git fetch origin "${PR_SHA}"
+            echo "vllm_ascend_ref=${PR_SHA}" >> "$GITHUB_OUTPUT"
+            echo "base_sha=${PR_BASE_SHA}" >> "$GITHUB_OUTPUT"
+            echo "base_ref=${PR_BASE_REF}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${WD_BRANCH}" ]]; then
+            # workflow_dispatch
+            TARGET_BRANCH="${WD_BRANCH}"
+            git fetch origin "$TARGET_BRANCH"
+            {
+              echo "vllm_ascend_ref=$(git rev-parse HEAD)"
+              echo "base_sha=$(git rev-parse FETCH_HEAD)"
+              echo "base_ref=${TARGET_BRANCH}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            # schedule(cron) / push
+            TARGET_BRANCH="${GITHUB_REF_NAME}"
+            git fetch origin "$TARGET_BRANCH"
+            {
+              echo "vllm_ascend_ref=$(git rev-parse HEAD)"
+              echo "base_sha=$(git rev-parse FETCH_HEAD)"
+              echo "base_ref=${TARGET_BRANCH}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
@@ -172,12 +194,27 @@ jobs:
         id: resolve-refs-hf
         env:
           WD_BRANCH: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_branch || '' }}
+          PR_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
-          TARGET_BRANCH="${WD_BRANCH:-$GITHUB_REF_NAME}"
-          git fetch origin "$TARGET_BRANCH"
-          echo "vllm_ascend_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+          if [[ -n "${PR_SHA}" ]]; then
+            # pull_request事件：直接checkout PR head commit，不要fetch 14458/merge
+            git fetch origin "${PR_SHA}"
+            git checkout "${PR_SHA}"
+            echo "vllm_ascend_ref=${PR_SHA}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${WD_BRANCH}" ]]; then
+            # workflow_dispatch手动触发
+            git fetch origin "${WD_BRANCH}"
+            git checkout "${WD_BRANCH}"
+            echo "vllm_ascend_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          else
+            # 普通分支触发
+            TARGET_BRANCH="${GITHUB_REF_NAME}"
+            git fetch origin "${TARGET_BRANCH}"
+            echo "vllm_ascend_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
