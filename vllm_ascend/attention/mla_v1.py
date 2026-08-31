@@ -873,6 +873,19 @@ class AscendMLAImpl(MLAAttentionImpl):
         # next power of 2.
         self.num_heads_padded = 1 << (self.num_heads - 1).bit_length()
         self.head_padding = self.num_heads_padded - self.num_heads
+
+        # HYV4-style MLA has ``qk_nope_head_dim < v_head_dim`` (192 vs 256).
+        # The NPU's ``npu_fused_infer_attention_score`` kernel rejects layouts
+        # where the query's head dim is smaller than the value's head dim. The
+        # existing head-padding path concatenates ``q_nope`` and ``q_pe`` along
+        # the head dim to make ``qk_nope + qk_rope == v_head_dim`` and matches
+        # the kernel's constraint. We force that path on whenever the concat
+        # dimensions align, padding to the next power of 2 (so the kernel
+        # accepts ``num_query_heads``) and slicing the output back to the real
+        # ``num_heads``.
+        if self.qk_nope_head_dim + self.qk_rope_head_dim == self.v_head_dim and self.head_padding == 0:
+            self.num_heads_padded = 1 << self.num_heads.bit_length()
+            self.head_padding = self.num_heads_padded - self.num_heads
         self.mlapo_num_heads = self.num_heads
         self.mlapo_weight_quant_mode = 3
         self._mlapo_uses_native_weights = False
@@ -993,6 +1006,19 @@ class AscendMLAImpl(MLAAttentionImpl):
                 event.record(update_stream)
 
     def _v_up_proj(self, x):
+        # ``npu_transpose_batchmatmul`` does not accept empty tensors
+        # (raises aclnnTransposeBatchMatMul EZ1001). When the scheduler
+        # forwards a decode batch whose tokens were already merged into
+        # a different op, ``x`` may be a 0-row tensor. Return a
+        # correctly-shaped empty tensor so the caller's slice/pad logic
+        # can align the result to ``num_decode_tokens``.
+        if x.numel() == 0:
+            return torch.empty(
+                0,
+                self.num_heads * self.v_head_dim,
+                dtype=x.dtype,
+                device=x.device,
+            )
         # Convert from (N, B, L)/(N, B, 1, L) to (N, B, L)
         x = x.view(self.num_heads, -1, self.kv_lora_rank)
         # Multiply (N, B, L) x (N, L, V) -> (B, N, V)
@@ -1307,8 +1333,21 @@ class AscendMLAImpl(MLAAttentionImpl):
             out_list.append(chunk_out.reshape(num_tokens * H, D))
             lse_list.append(chunk_lse.reshape(num_tokens * H))
 
+        # The NPU's ``npu_attention_update`` performs the log-sum-exp
+        # merge: ``out_final = sum_i exp(lse_i - lse_max) * out_i /
+        # sum_i exp(lse_i - lse_max)``. The merged log-sum-exp is
+        # therefore ``lse_merged = lse_max + log(sum_i exp(lse_i -
+        # lse_max))``. We compute it explicitly so callers can apply
+        # downstream per-head rescale (e.g. HYV4 ``learnable_sink``)
+        # using the correct lse of the merged result. The
+        # ``prefix_lse`` from the pre-merge attention op is itself a
+        # valid ``lse_i`` for the merge, so we keep it in ``lse_list``
+        # unchanged.
         output_final, _ = torch_npu.npu_attention_update(tuple(lse_list), tuple(out_list), 0)
-        return output_final.view(num_tokens, H, D), None
+        stacked_lse = torch.stack(lse_list, dim=0)  # [num_chunks, num_tokens * H]
+        lse_max = stacked_lse.max(dim=0).values  # [num_tokens * H]
+        lse_merged = lse_max + torch.log(torch.sum(torch.exp(stacked_lse - lse_max.unsqueeze(0)), dim=0))
+        return output_final.view(num_tokens, H, D), lse_merged.view(num_tokens, H)
 
     def _forward_prefill(
         self,
@@ -1370,9 +1409,38 @@ class AscendMLAImpl(MLAAttentionImpl):
             query, key.contiguous(), value.contiguous(), **common_kwargs
         )
 
-        attn_output, attn_lse = self._compute_prefill_context(
+        # NOTE: HYV4 learnable_sink rescale is INTENTIONALLY deferred
+        # to AFTER ``_compute_prefill_context`` (the chunked-context
+        # merge). Applying the per-head rescale ``sigmoid(lse -
+        # sink)`` here would corrupt the output because
+        # ``_compute_prefill_context`` re-normalises the per-chunk
+        # contributions via ``npu_attention_update`` (which uses a
+        # merged lse). Rescaling with the un-merged per-chunk lse and
+        # then merging discards the sink semantics: the
+        # ``sigmoid(lse - sink)`` factor was computed against a
+        # quantity that no longer represents the merged attention
+        # distribution.
+        attn_output, merged_lse = self._compute_prefill_context(
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
         )
+
+        # Apply the HYV4 learnable_sink rescale AFTER the chunked
+        # merge, using the merged per-head log-sum-exp. The GPU kernel
+        # formula ``O = O * rL / (rL + exp(sink - rM))`` simplifies to
+        # ``O = O * sigmoid(lse - sink)`` for the un-normalised
+        # attention output, and to ``O = O * rL * sigmoid(lse - sink)``
+        # for the normalised output (which is what ``npu_attention_update``
+        # returns). We use the normalised form here.
+        sink = getattr(self, "learnable_sink_param", None)
+        if sink is not None and merged_lse is not None:
+            lse = merged_lse.to(torch.float32)
+            if lse.dim() == 3:
+                lse = lse.squeeze(-1)
+            # lse is [num_tokens, num_heads] from the merge.
+            sink_per_head = sink.to(torch.float32).view(1, -1)
+            rescale = torch.sigmoid(lse - sink_per_head)  # [num_tokens, num_heads]
+            attn_output = attn_output.to(torch.float32) * rescale.unsqueeze(-1)
+            attn_output = attn_output.to(q_nope.dtype)
 
         attn_output = attn_output.reshape([num_tokens, self.num_heads * self.v_head_dim])
 
@@ -1708,10 +1776,58 @@ class AscendMLAImpl(MLAAttentionImpl):
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
+            attn_output, softmax_lse = torch_npu.npu_fused_infer_attention_score_v2(
+                q_nope, k_nope, k_nope, **common_kwargs
+            )
 
         if self.head_padding > 0:
             attn_output = attn_output[: self.num_heads]
+        # Apply HYV4 learnable_sink rescale on the decode path. The
+        # NPU's ``npu_fused_infer_attention_score_v2`` does not accept a
+        # per-head ``attn_sink`` like the GPU's ``flash_mla_sparse_fwd``
+        # kernel, and the v2 operator only returns a per-token
+        # ``softmax_lse`` (shape ``[num_tokens]``), not a per-head lse.
+        # The GPU kernel formula ``O = O * rL / (rL + exp(sink - rM))``
+        # simplifies to ``O = O * sigmoid(lse - sink)`` when ``lse =
+        # log(rL) + rM`` (log-sum-exp). We must rescale PER-HEAD because
+        # HYV4's ``learnable_sink_param`` is a per-head learned
+        # parameter; collapsing it to a single mean sink dilutes the
+        # signal whenever heads disagree. We approximate the missing
+        # per-head lse with the (single) per-token lse and apply a
+        # per-head rescale factor ``sigmoid(lse_t - sink_h)`` to the
+        # ``[num_heads, num_tokens, kv_lora_rank]`` tensor BEFORE
+        # ``_v_up_proj`` (after which the per-head dim is mixed into
+        # the hidden dim and can no longer be rescaled independently).
+        sink = getattr(self, "learnable_sink_param", None)
+        if sink is not None and softmax_lse is not None:
+            lse = softmax_lse.to(torch.float32)  # [num_tokens]
+            sink_per_head = sink.to(torch.float32).view(-1)  # [num_heads]
+            # Broadcast: [num_heads, 1] - [1, num_tokens] -> [num_heads, num_tokens]
+            rescale = torch.sigmoid(lse.unsqueeze(0) - sink_per_head.unsqueeze(1))
+            # ``attn_output`` shape is one of:
+            #   * [num_heads, num_tokens, kv_lora_rank]
+            #   * [num_heads, num_tokens, 1, kv_lora_rank]
+            #   * [num_tokens, num_heads, 1, kv_lora_rank]
+            # Pick the broadcast axes accordingly.
+            if attn_output.dim() == 3:
+                # [num_heads, num_tokens, kv_lora_rank]
+                attn_output = attn_output * rescale.unsqueeze(-1)
+            elif attn_output.shape[0] == self.num_heads and attn_output.dim() == 4:
+                # [num_heads, num_tokens, 1, kv_lora_rank]
+                attn_output = attn_output * rescale.unsqueeze(-1).unsqueeze(-1)
+            elif attn_output.shape[1] == self.num_heads and attn_output.dim() == 4:
+                # [num_tokens, num_heads, 1, kv_lora_rank]
+                attn_output = attn_output * rescale.transpose(0, 1).unsqueeze(-1).unsqueeze(-1)
+            else:
+                # Unknown layout; fall back to no rescale to avoid
+                # silently corrupting the output.
+                from vllm.logger import logger as _vllm_logger
+
+                _vllm_logger.warning_once(
+                    "HYV4 NPU decode sink rescale skipped: unexpected attn_output shape=%s (num_heads=%s).",
+                    tuple(attn_output.shape),
+                    self.num_heads,
+                )
         return self._v_up_proj(attn_output)
 
     def reorg_decode_q(self, decode_q_nope, decode_q_pe):
@@ -1993,6 +2109,23 @@ class AscendMLAImpl(MLAAttentionImpl):
                 decode_preprocess_res.dequant_scale_q_nope,
             )
 
+            # The NPU MLA path can hand back an ``output_decode`` whose
+            # row count disagrees with ``num_decode_tokens`` (for example
+            # in the first decode after a chunked prefill, or when the
+            # scheduler reserves a decode slot but the operator ends up
+            # with no rows). Without this padding the slice assignment
+            # raises ``RuntimeError: The expanded size of the tensor (1)
+            # must match the existing size (0) at non-singleton dimension
+            # 0`` and the entire engine core dies. We therefore align
+            # ``output_decode`` to ``num_decode_tokens`` before the slice
+            # assignment so the rest of the pipeline keeps running.
+            if output_decode.shape[0] != num_decode_tokens:
+                if output_decode.shape[0] < num_decode_tokens:
+                    pad_rows = num_decode_tokens - output_decode.shape[0]
+                    output_decode = torch.nn.functional.pad(output_decode, (0, 0, 0, pad_rows), "constant", 0)
+                else:
+                    output_decode = output_decode[:num_decode_tokens]
+
             o_proj_input[:num_decode_tokens] = output_decode
 
         if prefill_preprocess_res is not None:
@@ -2012,6 +2145,38 @@ class AscendMLAImpl(MLAAttentionImpl):
             o_proj_input[num_decode_tokens:num_actual_tokens] = output_prefill
         if gate is not None:
             o_proj_input.mul_(torch.sigmoid(gate))
+
+        # Apply HYV4 ``gated_mla`` (when bound by the NPU model code in
+        # ``hy_v4.py``): the GPU's ``HYV4MLAAttention.forward`` multiplies
+        # the pre-o_proj attention output by ``sigmoid(linear_gate(x))``
+        # with a headwise or elementwise shape. The NPU's MLA impl bakes
+        # ``o_proj`` into its forward and returns the post-projection
+        # tensor, so the gate is applied here to the pre-projection
+        # ``o_proj_input`` instead, before the o_proj matmul. See
+        # ``FlashMLA``/GPU sink kernel and ``HYV4MLAAttention.forward``
+        # for the reference formula.
+        #
+        # NOTE: ``o_proj_input`` is padded to ``_EXTRA_CTX.num_tokens``
+        # (for CUDA graphs) but ``hidden_states`` here has only
+        # ``num_actual_tokens`` rows. We therefore apply the gate to the
+        # ``[:num_actual_tokens]`` slice so the broadcasting matches;
+        # the padded tail is left at zero (it will be sliced off by the
+        # downstream o_proj + output copy).
+        linear_gate = getattr(self, "gated_mla_linear_gate", None)
+        if linear_gate is not None:
+            gate_score = linear_gate(hidden_states)[0]
+            actual = gate_score.shape[0]
+            if getattr(self, "gated_mla_gating_type", "headwise") == "headwise":
+                # gate_score: [N, num_local_heads * 1] -> [N, num_local_heads, 1]
+                gate_score = gate_score.view(-1, self.num_heads, 1)
+                gated = o_proj_input[:actual].view(-1, self.num_heads, self.v_head_dim)
+                gated = gated * torch.sigmoid(gate_score)
+                o_proj_input[:actual] = gated.view(-1, self.num_heads * self.v_head_dim)
+            else:  # elementwise
+                # ``gate_score`` from ``ColumnParallelLinear`` is already
+                # ``[N, num_local_heads * v_head_dim]`` so it broadcasts
+                # directly against the pre-projection slice.
+                o_proj_input[:actual] = o_proj_input[:actual] * torch.sigmoid(gate_score)
         # O proj
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 

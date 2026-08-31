@@ -287,6 +287,19 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
     },
+    # HyV4 (Hy4): MLA + DSA + indexer + MoE. Attention and dense MLP weights
+    # stay FP; only the MoE experts (gate_proj / up_proj / down_proj) are
+    # quantized to W8A8_DYNAMIC. The fused_qkv_a_proj mapping mirrors
+    # deepseek_v2 so the vLLM Ascend MLA preprocessing can concatenate
+    # q_a_proj and kv_a_proj_with_mqa. The gate_up_proj mapping is needed so
+    # dense-MLP layers whose vLLM name is ``mlp.gate_up_proj`` can resolve
+    # quant type via the underlying ``mlp.gate_proj`` / ``mlp.up_proj``
+    # keys (which are FLOAT for layer 0 and any other dense layer).
+    "hy_v4": {
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    },
     "minimax_m2": {
         "qkv_proj": [
             "q_proj",
@@ -851,7 +864,11 @@ class AscendModelSlimConfig(QuantizationConfig):
                 # k_eq_v case where v_proj is replicated from k_proj.
                 if shard_key not in self.quant_description and _is_missing_v_shard(shard_key, self.quant_description):
                     continue
-                is_shard_skipped = self.quant_description[shard_key] == "FLOAT"
+                # A shard missing from the description file (e.g. unquantized
+                # layer-0 / shared_experts shards of Hy4) is treated as FLOAT,
+                # keeping the same semantics as the else branch below.
+                shard_state = self.quant_description.get(shard_key, "FLOAT")
+                is_shard_skipped = shard_state == "FLOAT"
 
                 if is_skipped is None:
                     is_skipped = is_shard_skipped
@@ -866,6 +883,15 @@ class AscendModelSlimConfig(QuantizationConfig):
                 key.startswith(prefix) and key.endswith(".weight") and value == "FLOAT"
                 for key, value in self.quant_description.items()
             )
+            # MTP draft layers (e.g. model.layers.78.* for hy_v4 with
+            # n_predict=1) are stored under the `model.mtp_layers.*`
+            # namespace in the checkpoint, so the runtime prefix
+            # `model.layers.<idx>.*` does not match any key in
+            # `quant_description`. Treat such unknown layers as unquantized
+            # (FLOAT) instead of letting the lookup in
+            # `get_linear_quant_type` raise `KeyError`.
+            if not is_skipped and not any(key.startswith(prefix) for key in self.quant_description):
+                is_skipped = True
 
         assert is_skipped is not None
         return is_skipped
