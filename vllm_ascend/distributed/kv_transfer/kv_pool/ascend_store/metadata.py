@@ -624,19 +624,50 @@ class ChunkedTokenDatabase:
         new_size = []
 
         group_num_layers = self.group_num_layers.get(cache_role, {}).get(kv_cache_group_id, 0)
+        # Prefer precise per-physical-layer cache entry offsets so that
+        # heterogeneous layers (e.g. DeepSeek-V4 DSA layers carrying multiple
+        # cache specs, MTP tail layers) are split exactly on layer boundaries
+        # instead of the legacy uniform caches-per-layer assumption.
+        entry_offsets = self.group_layer_cache_entry_offsets.get(kv_cache_group_id)
+        split_bounds: list[tuple[int, int]] | None = None
+        if (
+            entry_offsets
+            and group_num_layers
+            and len(entry_offsets) == group_num_layers + 1
+        ):
+            layer_bounds = [0]
+            acc = 0
+            for part in self.partitions:
+                acc += part
+                layer_bounds.append(min(acc, group_num_layers))
+            # Trailing layers not covered by partitions (e.g. MTP) go to the
+            # last partition.
+            layer_bounds[-1] = group_num_layers
+            split_bounds = [
+                (entry_offsets[layer_bounds[j]], entry_offsets[layer_bounds[j + 1]])
+                for j in range(len(self.partitions))
+            ]
+
         for i, (addr_list, size_list) in enumerate(zip(addr, size)):
-            caches_per_layer = len(addr_list) // group_num_layers if group_num_layers else 2
-            caches_per_layer = max(caches_per_layer, 1)
-            start = 0
-            for j, part in enumerate(self.partitions):
-                end = len(addr_list) if j == len(self.partitions) - 1 else start + part * caches_per_layer
+            n = len(addr_list)
+            if split_bounds is not None:
+                bounds = [(min(s, n), min(e, n)) for s, e in split_bounds]
+            else:
+                caches_per_layer = n // group_num_layers if group_num_layers else 2
+                caches_per_layer = max(caches_per_layer, 1)
+                bounds = []
+                start = 0
+                for j, part in enumerate(self.partitions):
+                    end = n if j == len(self.partitions) - 1 else start + part * caches_per_layer
+                    bounds.append((start, end))
+                    start = end
+            for j, (s, e) in enumerate(bounds):
                 new_str = key[i].replace(  # type: ignore[attr-defined]
                     "@pp_rank:0", f"@pp_rank:{j}", 1
                 )
                 new_key.append(new_str)
-                new_addr.append(addr_list[start:end])
-                new_size.append(size_list[start:end])
-                start = end
+                new_addr.append(addr_list[s:e])
+                new_size.append(size_list[s:e])
         return new_key, new_addr, new_size
 
 
