@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 
 from vllm_ascend.attention.context_parallel.dsa_cp import (
@@ -45,6 +46,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    build_compressor_metadata_out,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
@@ -79,6 +81,7 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
             index_topk=512,
             index_n_heads=64,
             index_head_dim=128,
+            qk_rope_head_dim=4,
             sliding_window=4096,
         ),
         enable_sleep_mode=False,
@@ -91,6 +94,7 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
             max_num_seqs=4,
         ),
         speculative_config=None,
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
         parallel_config=SimpleNamespace(tensor_parallel_size=2),
     )
     physical_block_size = 128
@@ -367,8 +371,8 @@ def test_build_req_metadata_uses_for_prefill_and_decode(
 @pytest.mark.parametrize(
     ("compressor_ratio", "expected_stages"),
     [
-        (4, [DeviceMetadataStage.INDEXER, DeviceMetadataStage.ATTENTION]),
-        (128, [DeviceMetadataStage.ATTENTION]),
+        (4, list(DeviceMetadataStage)),
+        (128, [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.ATTENTION]),
     ],
 )
 def test_build_req_metadata_defers_device_work_to_fixed_buffers(
@@ -376,6 +380,7 @@ def test_build_req_metadata_defers_device_work_to_fixed_buffers(
     expected_stages: list[DeviceMetadataStage],
 ):
     builder = _make_builder(compressor_ratio)
+    assert builder.compressor_metadata_buffers is None
     builder.enable_device_metadata()
     builder.num_actual_tokens = 3
     builder.num_prefills = 1
@@ -414,9 +419,19 @@ def test_build_req_metadata_defers_device_work_to_fixed_buffers(
     tasks = builder.take_device_metadata_tasks()
     assert builder.take_device_metadata_tasks() == ()
     assert [task.stage for task in tasks] == expected_stages
-    assert all(task.group_id in (id(builder.qli_metadata_buffer), id(builder.sas_metadata_buffer)) for task in tasks)
-    for task in tasks:
-        task.run()
+    assert builder.compressor_metadata_buffers is not None
+    assert req_metadata.compressor_metadata is not None
+    assert req_metadata.compressor_metadata_group_id == id(builder.compressor_metadata_buffers[0])
+    group_ids = (
+        id(builder.compressor_metadata_buffers[0]),
+        id(builder.qli_metadata_buffer),
+        id(builder.sas_metadata_buffer),
+    )
+    assert all(task.group_id in group_ids for task in tasks)
+    with patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out") as build_compressor:
+        for task in tasks:
+            task.run()
+    build_compressor.assert_called_once()
     builder._build_sas_metadata.assert_called_once()
     if compressor_ratio == 4:
         builder._build_qli_metadata.assert_called_once()
@@ -424,17 +439,100 @@ def test_build_req_metadata_defers_device_work_to_fixed_buffers(
         builder._build_qli_metadata.assert_not_called()
 
 
+def test_full_graph_compressor_metadata_uses_capture_bucket_extent():
+    builder = _make_builder(4)
+    builder.enable_device_metadata()
+    builder.num_actual_tokens = 4
+    builder.num_prefills = 0
+    builder.seq_lens = torch.tensor([8, 8, 8, 0], dtype=torch.int32)
+    builder.block_table = torch.ones((4, 2), dtype=torch.int32)
+    builder.common_ratio_to_sas_metadata = {}
+    query_start_loc = torch.arange(5, dtype=torch.int32)
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=4,
+        num_input_tokens=4,
+        positions=torch.arange(4),
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        causal=True,
+    )
+    builder._build_sas_metadata = MagicMock()
+    builder._build_qli_metadata = MagicMock()
+
+    with patch(
+        "vllm_ascend.attention.dsa_v1.get_full_cos_and_sin_dsa",
+        return_value=(torch.ones(1), torch.zeros(1)),
+    ):
+        capture_metadata = builder.build_req_metadata(
+            common_attn_metadata,
+            builder.seq_lens,
+            num_actual_reqs=4,
+            cos=torch.ones(4),
+            sin=torch.zeros(4),
+            full_graph_mode=True,
+        )
+        builder.num_actual_tokens = 3
+        metadata = builder.build_req_metadata(
+            common_attn_metadata,
+            builder.seq_lens,
+            num_actual_reqs=3,
+            cos=torch.ones(4),
+            sin=torch.zeros(4),
+            full_graph_mode=True,
+        )
+
+    assert metadata.num_compressed_tokens == 4
+    assert metadata.num_actual_reqs == 4
+    assert metadata.compressor_metadata is not None
+    assert metadata.compressor_metadata[0].shape[0] == 4
+    assert capture_metadata.compressor_metadata is not None
+    assert capture_metadata.compressor_metadata[0].shape == metadata.compressor_metadata[0].shape
+    assert capture_metadata.compressor_metadata[0].data_ptr() == metadata.compressor_metadata[0].data_ptr()
+
+
+def test_pure_full_graph_keeps_compressor_metadata_on_legacy_path():
+    builder = _make_builder(128)
+    builder.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+
+    builder.enable_device_metadata()
+
+    assert builder.compressor_metadata_buffers is None
+
+    cp_builder = AscendDSACPMetadataBuilder.__new__(AscendDSACPMetadataBuilder)
+    cp_builder._device_metadata_enabled = False
+    cp_builder.compressor_ratio = 128
+    cp_builder.compressor_metadata_buffers = None
+    cp_builder.vllm_config = builder.vllm_config
+    cp_builder.enable_device_metadata()
+
+    assert cp_builder._device_metadata_enabled
+    assert cp_builder.compressor_metadata_buffers is None
+
+
 @pytest.mark.parametrize(
-    ("compressor_ratio", "device_metadata_enabled", "expected_stages"),
+    (
+        "compressor_ratio",
+        "device_metadata_enabled",
+        "full_graph_mode",
+        "num_input_tokens",
+        "num_actual_reqs",
+        "expected_rows",
+        "expected_stages",
+    ),
     [
-        (4, True, [DeviceMetadataStage.INDEXER, DeviceMetadataStage.ATTENTION]),
-        (128, True, [DeviceMetadataStage.ATTENTION]),
-        (4, False, []),
+        (4, True, False, 3, None, 2, list(DeviceMetadataStage)),
+        (128, True, False, 3, None, 2, [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.ATTENTION]),
+        (4, True, True, 4, 1, 3, list(DeviceMetadataStage)),
+        (4, False, False, 3, None, 2, []),
     ],
 )
 def test_dsa_cp_device_metadata_tasks(
     compressor_ratio: int,
     device_metadata_enabled: bool,
+    full_graph_mode: bool,
+    num_input_tokens: int,
+    num_actual_reqs: int | None,
+    expected_rows: int,
     expected_stages: list[DeviceMetadataStage],
 ):
     builder = AscendDSACPMetadataBuilder.__new__(AscendDSACPMetadataBuilder)
@@ -447,6 +545,11 @@ def test_dsa_cp_device_metadata_tasks(
     builder.block_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
     builder.start_pos_prefill = torch.zeros(2, dtype=torch.int32)
     builder.slot_mapping = torch.zeros((3, 2), dtype=torch.int32)
+    builder.compressor_metadata_buffers = (
+        torch.empty((3, 1, 1, 4)),
+        torch.empty((3, 1, 1, 4)),
+        builder.slot_mapping,
+    )
     builder.req_sas_metadata = torch.zeros(1024, dtype=torch.int32)
     builder.req_qli_metadata = torch.zeros(1024, dtype=torch.int32)
     builder._device_metadata_enabled = device_metadata_enabled
@@ -455,7 +558,7 @@ def test_dsa_cp_device_metadata_tasks(
         hf_config=SimpleNamespace(num_attention_heads=64, index_topk=512),
         get_head_size=lambda: 512,
     )
-    query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 2, num_input_tokens], dtype=torch.int32)
     builder.common_ratio_to_sas_metadata = {
         "_cpu_local": {
             "qsl_cpu": query_start_loc,
@@ -464,7 +567,6 @@ def test_dsa_cp_device_metadata_tasks(
     }
     builder._ensure_device_local_metadata = MagicMock(return_value=(0, 3, 3, 3, query_start_loc, builder.seq_lens))
     builder._get_cmp_seqlens_for_metadata = MagicMock(return_value=None)
-    builder._num_compressor_metadata_rows = MagicMock(return_value=2)
     builder._build_sas_metadata = MagicMock(return_value=builder.req_sas_metadata)
     builder._build_qli_metadata = MagicMock(return_value=builder.req_qli_metadata)
     common_attn_metadata = SimpleNamespace(
@@ -477,27 +579,56 @@ def test_dsa_cp_device_metadata_tasks(
         "vllm_ascend.attention.context_parallel.dsa_cp.get_full_cos_and_sin_dsa",
         return_value=(torch.ones(1), torch.zeros(1)),
     ):
+        capture_metadata = None
+        if full_graph_mode:
+            builder.num_actual_tokens = num_input_tokens
+            capture_metadata = builder.build_req_metadata(
+                common_attn_metadata,
+                input_positions=None,
+                num_input_tokens=num_input_tokens,
+                num_actual_reqs=2,
+                attn_state=MagicMock(),
+                cos=MagicMock(),
+                sin=MagicMock(),
+                full_graph_mode=True,
+            )
+            builder.num_actual_tokens = 3
         req_metadata = builder.build_req_metadata(
             common_attn_metadata,
             input_positions=None,
-            num_input_tokens=3,
-            num_actual_reqs=None,
+            num_input_tokens=num_input_tokens,
+            num_actual_reqs=num_actual_reqs,
             attn_state=MagicMock(),
             cos=MagicMock(),
             sin=MagicMock(),
+            full_graph_mode=full_graph_mode,
         )
 
     tasks = builder.take_device_metadata_tasks()
     assert builder.take_device_metadata_tasks() == ()
     assert [task.stage for task in tasks] == expected_stages
-    assert all(task.group_id in (id(builder.req_qli_metadata), id(builder.req_sas_metadata)) for task in tasks)
+    group_ids = (
+        id(builder.compressor_metadata_buffers[0]),
+        id(builder.req_qli_metadata),
+        id(builder.req_sas_metadata),
+    )
+    assert all(task.group_id in group_ids for task in tasks)
     assert req_metadata.sas_metadata is builder.req_sas_metadata
+    assert req_metadata.num_compressed_tokens == expected_rows
+    assert req_metadata.num_actual_reqs == (2 if full_graph_mode else num_actual_reqs or 2)
+    if capture_metadata is not None:
+        assert capture_metadata.compressor_metadata is not None
+        assert req_metadata.compressor_metadata is not None
+        assert capture_metadata.compressor_metadata[0].shape == req_metadata.compressor_metadata[0].shape
+        assert capture_metadata.compressor_metadata[0].data_ptr() == req_metadata.compressor_metadata[0].data_ptr()
     assert (req_metadata.qli_metadata is builder.req_qli_metadata) is (compressor_ratio == 4)
     if device_metadata_enabled:
         builder._build_sas_metadata.assert_not_called()
         builder._build_qli_metadata.assert_not_called()
-        for task in tasks:
-            task.run()
+        with patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out") as build_compressor:
+            for task in tasks:
+                task.run()
+        build_compressor.assert_called_once()
     builder._build_sas_metadata.assert_called_once()
     if compressor_ratio == 4:
         builder._build_qli_metadata.assert_called_once()
@@ -541,6 +672,45 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
     seq_lens.max.assert_not_called()
     assert metadata_op.call_args.kwargs["max_seqlen_q"] == 2
     assert metadata_op.call_args.kwargs["max_seqlen_k"] == 8
+
+
+def test_build_compressor_metadata_out_uses_fixed_outputs():
+    metadata = SimpleNamespace(
+        full_compress_cos=torch.ones((8, 1, 1, 4)),
+        full_compress_sin=torch.zeros((8, 1, 1, 4)),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        start_pos=torch.tensor([1], dtype=torch.int32),
+        block_table=torch.tensor([[3]], dtype=torch.int32),
+        storage_block_size=128,
+        num_actual_reqs=1,
+    )
+    outputs = (
+        torch.empty((2, 1, 1, 4)),
+        torch.empty((2, 1, 1, 4)),
+        torch.empty((2, 2), dtype=torch.int32),
+    )
+
+    with (
+        patch.object(DeviceOperator, "get_dsa_compressor_slot_mapping_format", return_value=2),
+        patch.object(torch.ops._C_ascend, "compressor_metadata_out", create=True) as metadata_out,
+    ):
+        build_compressor_metadata_out(metadata, 4, outputs)
+
+    assert metadata_out.call_args.args[-3:] == outputs
+
+
+def test_dsa_cp_compressor_waits_for_precomputed_metadata():
+    impl = AscendDSACPImpl.__new__(AscendDSACPImpl)
+    outputs = (torch.ones(1), torch.zeros(1), torch.zeros(1, dtype=torch.int32))
+    metadata = SimpleNamespace(
+        compressor_metadata=outputs,
+        compressor_metadata_group_id=17,
+    )
+
+    with patch("vllm_ascend.attention.context_parallel.dsa_cp.wait_for_device_metadata") as wait:
+        assert impl._compute_compressor_metadata(metadata) is outputs
+
+    wait.assert_called_once_with(DeviceMetadataStage.COMPRESSOR, 17)
 
 
 def _make_dsa_cp_metadata(sas_metadata: torch.Tensor) -> AscendDSACPMetadata:
@@ -1795,13 +1965,14 @@ def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
 def test_pcp_metadata_provider_discards_unused_global_tasks():
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
     local_task = DeviceMetadataTask(DeviceMetadataStage.INDEXER, MagicMock(), 1)
-    global_task = DeviceMetadataTask(DeviceMetadataStage.ATTENTION, MagicMock(), 2)
+    global_compressor_task = DeviceMetadataTask(DeviceMetadataStage.COMPRESSOR, MagicMock(), 2)
+    global_attention_task = DeviceMetadataTask(DeviceMetadataStage.ATTENTION, MagicMock(), 3)
     builder._device_metadata_tasks = (local_task,)
     builder._global_metadata_builder = SimpleNamespace(
-        take_device_metadata_tasks=MagicMock(return_value=(global_task,)),
+        take_device_metadata_tasks=MagicMock(return_value=(global_compressor_task, global_attention_task)),
     )
 
-    assert builder.take_device_metadata_tasks() == (local_task,)
+    assert builder.take_device_metadata_tasks() == (global_compressor_task, local_task)
     assert builder._device_metadata_tasks == ()
     builder._global_metadata_builder.take_device_metadata_tasks.assert_called_once_with()
 
@@ -1809,11 +1980,13 @@ def test_pcp_metadata_provider_discards_unused_global_tasks():
 def test_pcp_metadata_provider_enables_local_and_global_builders():
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
     builder._device_metadata_enabled = False
+    builder.compressor_metadata_buffers = None
     builder._global_metadata_builder = SimpleNamespace(enable_device_metadata=MagicMock())
 
     builder.enable_device_metadata()
 
     assert builder._device_metadata_enabled
+    assert builder.compressor_metadata_buffers is None
     builder._global_metadata_builder.enable_device_metadata.assert_called_once_with()
 
 

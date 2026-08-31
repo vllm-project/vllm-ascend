@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 import torch_npu
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pcp_group, get_tp_group
 from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, triton
@@ -125,6 +125,8 @@ class AscendDSAReqMetadata:
     num_actual_reqs: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
+    compressor_metadata: dsa_v1.CompressorMetadataOutput | None = None
+    compressor_metadata_group_id: int | None = None
     cu_cmp_seqlen_list: torch.Tensor = None
     attn_mask: torch.Tensor | None = None
     ori_win_left: int | None = None
@@ -284,6 +286,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Note(qcs): we use two dimension slot_mapping for kvcache with shape
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
+        self.compressor_metadata_buffers: dsa_v1.CompressorMetadataOutput | None = None
 
     @classmethod
     def get_cudagraph_support(
@@ -373,6 +376,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             attn_state,
             cos=cos,
             sin=sin,
+            full_graph_mode=kwargs.get("full_graph_mode", False),
         )
 
         return self.metadata_cls(  # type: ignore
@@ -781,6 +785,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         attn_state: AscendAttentionState,
         cos: RopeDataProxy,
         sin: RopeDataProxy,
+        full_graph_mode: bool = False,
     ) -> AscendDSAReqMetadata:
         """Build a single unified metadata for all requests (prefill + decode)."""
         num_reqs = common_attn_metadata.num_reqs
@@ -847,7 +852,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             if num_actual_reqs < num_reqs:
                 self.start_pos_prefill[num_actual_reqs:].fill_(0)
                 self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
-
         # --- Compressed positions ---
         full_compress_cos, full_compress_sin = None, None
         cu_cmp_seqlens = self._get_cmp_seqlens_for_metadata(has_prefill)
@@ -856,7 +860,14 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             layer_name = f"c{self.compressor_ratio}"
             # Keep only graph inputs here. The compressor metadata op itself is
             # launched in forward at the real compressor consumer.
-            num_compressed_tokens = self._num_compressor_metadata_rows(common_attn_metadata)
+            if full_graph_mode:
+                num_compressed_tokens = min(
+                    num_input_tokens,
+                    num_input_tokens // self.compressor_ratio + num_reqs,
+                )
+                num_actual_reqs = num_reqs
+            else:
+                num_compressed_tokens = self._num_compressor_metadata_rows(common_attn_metadata)
             full_compress_cos, full_compress_sin = get_full_cos_and_sin_dsa(layer_name)
             slot_mapping = None
         else:
@@ -936,7 +947,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_cos=local_cos,
         )
 
-        return AscendDSAReqMetadata(
+        req_metadata = AscendDSAReqMetadata(
             input_positions=input_positions,
             block_table=self.block_table[:num_reqs, ...],
             slot_mapping=slot_mapping,
@@ -955,9 +966,37 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata=qli_metadata,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
         )
+        if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
+            assert num_compressed_tokens is not None
+            buffers = self.compressor_metadata_buffers
+            outputs = (
+                buffers[0][:num_compressed_tokens],
+                buffers[1][:num_compressed_tokens],
+                buffers[2][:num_compressed_tokens],
+            )
+            group_id = id(buffers[0])
+            req_metadata.compressor_metadata = outputs
+            req_metadata.compressor_metadata_group_id = group_id
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(
+                    DeviceMetadataStage.COMPRESSOR,
+                    lambda: dsa_v1.build_compressor_metadata_out(req_metadata, self.compressor_ratio, outputs),
+                    group_id,
+                ),
+                *self._device_metadata_tasks,
+            )
+        return req_metadata
 
     def enable_device_metadata(self) -> None:
         self._device_metadata_enabled = True
+        if self.compressor_ratio > 1 and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL:
+            max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+            output_shape = (max_tokens, 1, 1, self.model_config.hf_config.qk_rope_head_dim)
+            self.compressor_metadata_buffers = (
+                torch.empty(output_shape, dtype=torch.float32, device=self.device),
+                torch.empty(output_shape, dtype=torch.float32, device=self.device),
+                self.slot_mapping,
+            )
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
         tasks = self._device_metadata_tasks
@@ -1340,6 +1379,15 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self,
         metadata: AscendDSAReqMetadata,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        precomputed = getattr(metadata, "compressor_metadata", None)
+        if precomputed is not None:
+            assert metadata.compressor_metadata_group_id is not None
+            wait_for_device_metadata(
+                DeviceMetadataStage.COMPRESSOR,
+                metadata.compressor_metadata_group_id,
+            )
+            return precomputed
+
         assert metadata.full_compress_cos is not None
         assert metadata.full_compress_sin is not None
         assert metadata.num_compressed_tokens is not None
@@ -2369,12 +2417,15 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
 
     def enable_device_metadata(self) -> None:
-        super().enable_device_metadata()
+        self._device_metadata_enabled = True
         self._global_metadata_builder.enable_device_metadata()
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
-        self._global_metadata_builder.take_device_metadata_tasks()
-        return super().take_device_metadata_tasks()
+        global_tasks = self._global_metadata_builder.take_device_metadata_tasks()
+        return (
+            tuple(task for task in global_tasks if task.stage == DeviceMetadataStage.COMPRESSOR)
+            + super().take_device_metadata_tasks()
+        )
 
 
 class AscendDSAPCPImpl(dsa_v1.AscendDSAImpl):
