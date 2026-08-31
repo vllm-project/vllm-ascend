@@ -100,6 +100,44 @@ class PleShortConvAttentionBackend(ShortConvAttentionBackend):
         return PleShortConvAttentionMetadataBuilder
 
 
+def _ple_request_phase_masks(
+    is_prefilling: torch.Tensor | None,
+    num_reqs_actual: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return authoritative decode/prefill masks for real requests only."""
+    if is_prefilling is None:
+        raise ValueError("PLE requires authoritative per-request phase metadata")
+    if not 0 <= num_reqs_actual <= is_prefilling.numel():
+        raise ValueError(
+            "PLE actual request count must fit the phase metadata: "
+            f"actual={num_reqs_actual}, phase_rows={is_prefilling.numel()}"
+        )
+
+    prefill_mask = is_prefilling[:num_reqs_actual].to(dtype=torch.bool)
+    decode_mask = ~prefill_mask
+    if torch.any(decode_mask & prefill_mask).item():
+        raise AssertionError("PLE decode/prefill phase masks must be disjoint")
+    if int(decode_mask.sum().item()) + int(prefill_mask.sum().item()) != num_reqs_actual:
+        raise AssertionError("PLE phase masks must cover every real request")
+    return decode_mask, prefill_mask
+
+
+def _ple_decode_execution_masks(
+    decode_phase_mask: torch.Tensor,
+    query_lens: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split known decode rows into regular and variable-length execution."""
+    if decode_phase_mask.shape != query_lens.shape:
+        raise ValueError(
+            "PLE decode phase and query lengths must have the same shape: "
+            f"phase={tuple(decode_phase_mask.shape)}, "
+            f"query_lens={tuple(query_lens.shape)}"
+        )
+    variable_decode_mask = decode_phase_mask & (query_lens > 1)
+    regular_decode_mask = decode_phase_mask & ~variable_decode_mask
+    return regular_decode_mask, variable_decode_mask
+
+
 class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
     metadata_cls = PleShortConvAttentionMetadata
     # Spec-decode requires a uniform (multi-token) decode batch for full
@@ -247,19 +285,38 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         *,
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        num_reqs_actual: int | None = None,
         **kwargs: Any,
     ) -> PleShortConvAttentionMetadata:
         m = common_attn_metadata
-        spec_sequence_masks_cpu: torch.Tensor | None = None
-        # Detect speculative-decode requests. We use -1 to mark prefill and
-        # plain-decode requests, so any value >= 0 is a (multi-query)
-        # spec-decode request.
-        if self.use_spec_decode and num_decode_draft_tokens_cpu is not None:
-            candidate_mask = num_decode_draft_tokens_cpu[: m.num_reqs] >= 0
-            if bool(candidate_mask.any().item()):
-                spec_sequence_masks_cpu = candidate_mask
+        num_reqs_padded = m.num_reqs
+        if num_reqs_actual is None:
+            num_reqs_actual = m.num_reqs
+        decode_phase_mask_cpu, prefill_mask_cpu = _ple_request_phase_masks(
+            m.is_prefilling,
+            num_reqs_actual,
+        )
+        query_lens_cpu = torch.diff(m.query_start_loc_cpu[: num_reqs_actual + 1])
+        if query_lens_cpu.numel() != num_reqs_actual:
+            raise AssertionError("PLE query lengths must cover every real request")
 
-        if spec_sequence_masks_cpu is None:
+        # Request phase comes exclusively from ``is_prefilling``. Query length
+        # is used only after that classification to route an already-known
+        # decode request to the variable-length MTP execution path.
+        decode_mask_cpu, spec_sequence_masks_cpu = _ple_decode_execution_masks(
+            decode_phase_mask_cpu,
+            query_lens_cpu,
+        )
+        num_spec_decodes = int(spec_sequence_masks_cpu.sum().item())
+        if num_spec_decodes > 0 and not self.use_spec_decode:
+            raise ValueError("PLE received multi-token decode rows without spec decode")
+
+        # Preserve the existing graph-safe single-token decode path. Any
+        # prefill (including a one-token chunked prefill) or multi-token decode
+        # uses the existing explicit mixed/spec metadata path below.
+        if num_spec_decodes == 0 and not bool(prefill_mask_cpu.any().item()):
+            if not bool(torch.all(query_lens_cpu == 1).item()):
+                raise AssertionError("PLE regular decode rows must contain one token")
             return self._build_non_spec_metadata(
                 common_prefix_len,
                 common_attn_metadata,
@@ -269,9 +326,8 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             )
 
         del common_prefix_len, fast_build, kwargs
+        m = m.unpadded(m.num_actual_tokens, num_reqs_actual)
         query_start_loc = m.query_start_loc
-        query_start_loc_cpu = m.query_start_loc_cpu
-        query_lens_cpu = torch.diff(query_start_loc_cpu)
         block_table_tensor = mamba_get_block_table_tensor(
             m.block_table_tensor,
             m.seq_lens,
@@ -279,12 +335,15 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             self.vllm_config.cache_config.mamba_cache_mode,
         )
 
-        if query_start_loc.device.type == "cpu":
-            spec_sequence_masks = spec_sequence_masks_cpu
-        else:
-            spec_sequence_masks = async_tensor_h2d(
-                spec_sequence_masks_cpu, device=query_start_loc.device
-            )
+        has_spec_decode = num_spec_decodes > 0
+        spec_sequence_masks = None
+        if has_spec_decode:
+            if query_start_loc.device.type == "cpu":
+                spec_sequence_masks = spec_sequence_masks_cpu
+            else:
+                spec_sequence_masks = async_tensor_h2d(
+                    spec_sequence_masks_cpu, device=query_start_loc.device
+                )
 
         # For causal_conv1d (non-spec prefill Triton kernel metadata).
         nums_dict = None
@@ -302,11 +361,6 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         # spec-decode, the front decode group can contain both spec-decode
         # requests and plain non-spec single-token decodes. Spec requests are
         # therefore not guaranteed to occupy the first num_spec_decodes slots.
-        non_spec_mask_cpu = ~spec_sequence_masks_cpu
-        decode_mask_cpu = non_spec_mask_cpu & (query_lens_cpu == 1)
-        prefill_mask_cpu = non_spec_mask_cpu & (query_lens_cpu > 1)
-
-        num_spec_decodes = int(spec_sequence_masks_cpu.sum().item())
         num_decodes = int(decode_mask_cpu.sum().item())
         num_prefills = int(prefill_mask_cpu.sum().item())
         num_decode_tokens = num_decodes
@@ -393,12 +447,14 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
                 out=non_spec_query_start_loc_cpu[1:],
             )
 
-        assert num_accepted_tokens is not None
-        # Accepted-token counts must follow the same request order as the
-        # speculative state indices.
-        num_accepted_tokens = num_accepted_tokens[
-            spec_req_idx_cpu.to(num_accepted_tokens.device)
-        ]
+        if num_spec_decodes > 0:
+            if num_accepted_tokens is None:
+                raise ValueError("PLE multi-token decode requires accepted-token metadata")
+            # Accepted-token counts must follow the same request order as the
+            # speculative state indices.
+            num_accepted_tokens = num_accepted_tokens[
+                spec_req_idx_cpu.to(num_accepted_tokens.device)
+            ]
 
         # Compute the conv-state slots for the non-spec decode/prefill split,
         # plus the initial-state masks and Triton causal_conv1d metadata.
@@ -452,7 +508,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
         # ``m.num_actual_tokens`` is already padded by the model runner.
         # Request-level buffers use ``m.num_reqs`` while token-level buffers
         # use their independently bounded token count.
-        batch_size = m.num_reqs
+        batch_size = num_reqs_padded
         if (
             self.use_full_cuda_graph
             and num_prefills == 0
@@ -468,9 +524,10 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
             spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
 
-            self.spec_sequence_masks[:batch_size].copy_(
-                spec_sequence_masks[:batch_size], non_blocking=True
+            self.spec_sequence_masks[:num_spec_decodes].copy_(
+                spec_sequence_masks, non_blocking=True
             )
+            self.spec_sequence_masks[num_spec_decodes:batch_size].fill_(False)
             spec_sequence_masks = self.spec_sequence_masks[:batch_size]
 
             assert spec_query_start_loc is not None
@@ -493,7 +550,7 @@ class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            num_reqs=m.num_reqs,
+            num_reqs=num_reqs_actual,
             num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,

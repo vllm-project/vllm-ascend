@@ -727,22 +727,39 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
                 * conv_weights.float().view(1, history.size(1), kernel_size)
             ).sum(dim=-1, keepdim=True).to(history.dtype)
 
-        # Prefill/speculative paths can have multiple output positions. Each
-        # slice is a normal contiguous-range view; stack immediately owns a
-        # dense copy and no view stride survives into the multiply kernel.
-        windows = torch.stack(
-            [
-                history[
-                    ..., kernel_idx * dilation : kernel_idx * dilation + output_len
-                ]
-                for kernel_idx in range(kernel_size)
-            ],
-            dim=-1,
-        ).contiguous()
-        return (
-            windows.float()
-            * conv_weights.float().view(1, history.size(1), 1, kernel_size)
-        ).sum(dim=-1).to(history.dtype)
+        # Prefill/speculative paths can have multiple output positions. Do not
+        # materialize every kernel window for the full padded request matrix:
+        # a 16,384-row-position padded matrix, 10,240 channels and a four-tap
+        # kernel make that temporary alone 1.25 GiB in BF16. Build the same
+        # dense windows in bounded position chunks and write each result into
+        # a preallocated output. This preserves the FP32 multiply/reduce
+        # semantics and graph-safe contiguous slices while bounding the peak
+        # temporary independently of output_len.
+        output = history.new_empty((*history.shape[:-1], output_len))
+        chunk_size = 16
+        float_weights = conv_weights.float().view(
+            1, history.size(1), 1, kernel_size
+        )
+        for output_start in range(0, output_len, chunk_size):
+            output_end = min(output_start + chunk_size, output_len)
+            chunk_len = output_end - output_start
+            windows = torch.stack(
+                [
+                    history[
+                        ...,
+                        output_start
+                        + kernel_idx * dilation : output_start
+                        + kernel_idx * dilation
+                        + chunk_len,
+                    ]
+                    for kernel_idx in range(kernel_size)
+                ],
+                dim=-1,
+            ).contiguous()
+            output[..., output_start:output_end].copy_(
+                (windows.float() * float_weights).sum(dim=-1).to(history.dtype)
+            )
+        return output
 
     def _short_conv_dilated_decode_batched(
         self,

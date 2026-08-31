@@ -35,6 +35,14 @@ def _method(path: Path, cls_name: str, method_name: str) -> ast.FunctionDef:
     raise AssertionError(f"method {cls_name}.{method_name} not found")
 
 
+def _function(path: Path, name: str) -> ast.FunctionDef:
+    tree = ast.parse(path.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"function {name} not found in {path}")
+
+
 def test_qwen4_exp_mtp_uses_local_drafter_inputs_on_last_pp_stage() -> None:
     source = ast.unparse(_method(MTP, "AscendQwen4ExpMultiTokenPredictor", "forward"))
     assert "get_pp_group().is_first_rank or intermediate_tensors is None" in source
@@ -168,6 +176,16 @@ def test_qsa_triton_cache_write_uses_aligned_static_prefix() -> None:
     assert "rows = rows[:num_updates]" in source
     assert "slot_mapping.numel()" not in source
     assert ".item()" not in source
+
+
+def test_qsa_triton_attention_loads_k_in_source_contiguous_order() -> None:
+    source = ast.unparse(_function(TRITON_QSA, "_qsa_sparse_paged_gqa_splitk_kernel"))
+    key_load = source[source.index("key_rows = tl.load") : source.index("values = tl.load")]
+    assert "safe_page[:, None] * stride_k_block" in key_load
+    assert "page_offset[:, None] * stride_k_token" in key_load
+    assert "dim_offsets[None, :]" in key_load
+    assert "mask=valid[:, None]" in key_load
+    assert "keys = tl.trans(key_rows)" in key_load
 
 
 def test_qsa_ascend_backend_uses_six_slab_kv_views() -> None:

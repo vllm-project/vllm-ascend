@@ -154,6 +154,9 @@ from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
+from vllm_ascend.models.qwen4_exp.short_conv_attn import (
+    PleShortConvAttentionMetadataBuilder,
+)
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
 from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
@@ -3309,6 +3312,17 @@ class NPUModelRunner(GPUModelRunner):
             extra_attn_metadata_args = {}
             if isinstance(builder, QSAMetadataBuilder):
                 extra_attn_metadata_args["num_reqs_actual"] = num_reqs
+            if isinstance(builder, PleShortConvAttentionMetadataBuilder):
+                extra_attn_metadata_args["num_reqs_actual"] = num_reqs
+                if use_spec_decode:
+                    extra_attn_metadata_args.update(
+                        num_accepted_tokens=self.num_accepted_tokens.gpu[
+                            :num_reqs_padded
+                        ],
+                        num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[
+                            :num_reqs_padded
+                        ],
+                    )
             if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder) and not is_gdn_noop:
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
@@ -3671,6 +3685,30 @@ class NPUModelRunner(GPUModelRunner):
                         blk_table = self.input_batch.block_table[kv_cache_gid]
                         blk_table.slot_mapping.gpu.fill_(-1)
 
+                # Dummy MTP warmups bypass _prepare_inputs(), which normally
+                # populates these per-request tensors for real execution.
+                # Mirror the real metadata contract so PLE can keep the
+                # authoritative decode phase while routing variable-length
+                # decode rows through its MTP path.
+                dummy_use_spec_decode = (
+                    self.speculative_config is not None
+                    and uniform_decode
+                    and max_query_len > 1
+                )
+                if dummy_use_spec_decode:
+                    dummy_accepted_tokens = np.asarray(
+                        num_scheduled_tokens_list,
+                        dtype=np.int32,
+                    )
+                    self.num_accepted_tokens.np[:num_reqs] = dummy_accepted_tokens
+                    self.num_accepted_tokens.np[num_reqs:].fill(1)
+                    self.num_accepted_tokens.copy_to_gpu()
+                    self.num_decode_draft_tokens.np[:num_reqs] = (
+                        dummy_accepted_tokens - 1
+                    )
+                    self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
+                    self.num_decode_draft_tokens.copy_to_gpu()
+
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 # check how to build dummy
                 if self.use_compress:
@@ -3683,6 +3721,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded=num_reqs_padded,
                     max_query_len=max_query_len,
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
+                    use_spec_decode=dummy_use_spec_decode,
                     for_cudagraph_capture=is_graph_capturing,
                     num_scheduled_tokens_np=num_scheduled_tokens,
                     skip_gdn_state_update=skip_gdn_state_update,

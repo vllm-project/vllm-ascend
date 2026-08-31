@@ -256,15 +256,21 @@ def _qsa_sparse_paged_gqa_splitk_kernel(
         valid &= (physical_page >= 0) & (physical_page < num_cache_blocks)
         # physical_page * block stride can overflow int32 for large caches.
         safe_page = tl.maximum(physical_page, 0).to(tl.int64)
-        keys = tl.load(
+        # Load K in its source-contiguous [token, head_dim] layout.  Loading
+        # it directly as [head_dim, token] makes the scattered token axis the
+        # innermost address expression, which Triton-Ascend lowers to costly
+        # scalarized gathers and UB reformats.  The transpose stays in UB and
+        # preserves the [head_dim, token] layout expected by the QK dot.
+        key_rows = tl.load(
             k_cache_ptr
-            + safe_page[None, :] * stride_k_block
-            + page_offset[None, :] * stride_k_token
+            + safe_page[:, None] * stride_k_block
+            + page_offset[:, None] * stride_k_token
             + kv_head * stride_k_head
-            + dim_offsets[:, None],
-            mask=valid[None, :],
+            + dim_offsets[None, :],
+            mask=valid[:, None],
             other=0.0,
         )
+        keys = tl.trans(key_rows)
         values = tl.load(
             v_cache_ptr
             + safe_page[:, None] * stride_v_block
