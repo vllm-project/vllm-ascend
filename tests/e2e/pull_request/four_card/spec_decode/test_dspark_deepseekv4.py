@@ -48,10 +48,10 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
 @pytest.mark.parametrize(
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
     [
-        pytest.param(4.10, 5, {"enable_dsa_cp": False}, id="dspark"),
-        pytest.param(4.43, 7, {"enable_dsa_cp": True}, id="dsa-cp-dspark"),
+        pytest.param(3.33, 5, {"enable_dsa_cp": False}, id="dspark"),
+        pytest.param(3.45, 7, {"enable_dsa_cp": True}, id="dsa-cp-dspark"),
         pytest.param(
-            4.09,
+            3.35,
             5,
             {
                 "enable_flashcomm1": False,
