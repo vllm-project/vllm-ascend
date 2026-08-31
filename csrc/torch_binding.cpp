@@ -1908,6 +1908,10 @@ at::Tensor npu_sparse_attention_score_prefill(
         out_dtype = at::kBFloat16;
     }
     at::Tensor output = at::empty(query.sizes(), query.options().dtype(out_dtype));
+    // MinimaxSparseAttentionSplitKv always exposes softmaxLse as its second
+    // ACLNN output. Prefill does not consume it, so keep the flag disabled and
+    // pass the empty FP32 placeholder required by the operator interface.
+    at::Tensor softmax_lse = at::empty({0}, query.options().dtype(at::kFloat));
 
     EXEC_NPU_CMD(
         aclnnMinimaxSparseAttentionSplitKv,
@@ -1925,7 +1929,10 @@ at::Tensor npu_sparse_attention_score_prefill(
         block_size,
         top_k,
         inner_precise,
-        output
+        false,
+        "TND",
+        output,
+        softmax_lse
     );
 
     return output;
