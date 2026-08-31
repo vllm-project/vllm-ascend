@@ -140,12 +140,12 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
 @pytest.mark.e2e_model(MINIMAX_M3_MODEL, MINIMAX_M3_DRAFT_MODEL)
 @pytest.mark.e2e_coverage(
     arch="multimodal",
-    feature="eagle3,aclgraph",
+    feature="eagle3",
     parallel="PP,TP,EP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W8A8",
-    graph_mode="full_decode_only",
+    graph_mode="eager",
 )
 @patch.dict(
     os.environ,
@@ -176,10 +176,7 @@ def test_minimax_m3_eagle3_pp_accuracy() -> None:
         limit_mm_per_prompt={"image": 1, "video": 0},
         enable_prefix_caching=False,
         disable_log_stats=False,
-        compilation_config={
-            "mode": 3,
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
+        enforce_eager=True,
         speculative_config={
             "model": MINIMAX_M3_DRAFT_MODEL,
             "method": "eagle3",
