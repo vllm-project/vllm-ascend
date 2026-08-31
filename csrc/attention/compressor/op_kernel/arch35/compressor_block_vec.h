@@ -755,10 +755,15 @@ CompressorBlockVector<COMP>::ReadFromCacheState(const LocalTensor<T> &output, co
         uint32_t curSeqIdx = startSeqIdx;
         uint32_t copyFinishRowCnt = 0;
         uint32_t seqCnt = endSeqIdx - startSeqIdx;
-        uint64_t idInBlockTable = blockTableGm.GetValue(batchIdx);
+        uint64_t blockTablebaseOffset = batchIdx * constInfo_.maxBlockNumPerBatch;
+        uint32_t ringTokenCount = coff_ * cmpRatio_;
         while (copyFinishRowCnt < seqCnt) {
-            uint64_t remainRowCnt = curSeqIdx % constInfo_.blockSize;
-            uint32_t copyRowCount = constInfo_.blockSize - remainRowCnt;
+            uint32_t ringTokenIdx = curSeqIdx % ringTokenCount;
+            uint32_t blockIdOffset = ringTokenIdx / constInfo_.blockSize;
+            uint32_t remainRowCnt = ringTokenIdx % constInfo_.blockSize;
+            uint64_t idInBlockTable = blockTableGm.GetValue(blockTablebaseOffset + blockIdOffset);
+            uint32_t copyRowCount = min(constInfo_.blockSize - remainRowCnt,
+                                        ringTokenCount - ringTokenIdx);
             if (copyFinishRowCnt + copyRowCount > seqCnt) {
                 copyRowCount = seqCnt - copyFinishRowCnt;
             }
@@ -809,10 +814,15 @@ CompressorBlockVector<COMP>::WriteToCacheState(const GlobalTensor<T> &state, con
         uint32_t curSeqIdx = startSeqIdx;
         uint32_t copyFinishRowCnt = 0;
         uint32_t seqCnt = endSeqIdx - startSeqIdx;
-        uint64_t idInBlockTable = blockTableGm.GetValue(batchIdx);
+        uint64_t blockTablebaseOffset = batchIdx * constInfo_.maxBlockNumPerBatch;
+        uint32_t ringTokenCount = coff_ * cmpRatio_;
         while (copyFinishRowCnt < seqCnt) {
-            uint64_t remainRowCnt = curSeqIdx % constInfo_.blockSize;
-            uint32_t copyRowCount = constInfo_.blockSize - remainRowCnt;
+            uint32_t ringTokenIdx = curSeqIdx % ringTokenCount;
+            uint32_t blockIdOffset = ringTokenIdx / constInfo_.blockSize;
+            uint32_t remainRowCnt = ringTokenIdx % constInfo_.blockSize;
+            uint64_t idInBlockTable = blockTableGm.GetValue(blockTablebaseOffset + blockIdOffset);
+            uint32_t copyRowCount = min(constInfo_.blockSize - remainRowCnt,
+                                        ringTokenCount - ringTokenIdx);
             if (copyFinishRowCnt + copyRowCount > seqCnt) {
                 copyRowCount = seqCnt - copyFinishRowCnt;
             }

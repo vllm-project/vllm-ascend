@@ -31,14 +31,24 @@ class BlockTable:
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
         compress_ratio = 1
+        is_compressor_tail_group = False
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
             and isinstance(kv_cache_group.kv_cache_spec, UniformTypeKVCacheSpecs)
         ):
-            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()), None)
+            nested_specs = tuple(kv_cache_group.kv_cache_spec.kv_cache_specs.values())
+            kv_cache_spec = next(iter(nested_specs), None)
             if kv_cache_spec is not None and hasattr(kv_cache_spec, "compress_ratio"):
                 compress_ratio = kv_cache_spec.compress_ratio
+            is_compressor_tail_group = bool(nested_specs) and all(
+                hasattr(spec, "ring_blocks_per_request") for spec in nested_specs
+            )
+        elif kv_cache_group is not None and hasattr(
+            kv_cache_group.kv_cache_spec,
+            "ring_blocks_per_request",
+        ):
+            is_compressor_tail_group = True
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
@@ -46,7 +56,9 @@ class BlockTable:
             and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
         ):
             max_num_blocks_per_req = max_num_blocks_per_req * self.dcp_world_size
-        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
+        if not is_compressor_tail_group:
+            max_num_blocks_per_req = cdiv(max_num_blocks_per_req, compress_ratio)
+        max_num_blocks_per_req = max(max_num_blocks_per_req, 1)
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory

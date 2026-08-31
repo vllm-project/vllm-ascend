@@ -70,6 +70,7 @@
 | coff | 可选属性 | 默认值1，支持1/2。当coff=1时，无需进行overlap数据重排。当coff=2时，需要进行overlap数据重排。  | INT32          | -         |
 | norm\_eps | 可选属性 | 表示RmsNorm计算的权重系数。默认值1e-6。 | FLOAT32          | -         |
 | rotary\_mode | 可选属性 | 表示Rop计算的模式。默认值1，支持1/2。rotary\_mode为1时，代表half模式。rotary\_mode为2时，代表interleave模式。 | INT32          | -         |
+| cache\_mode | 可选属性 | 状态缓存模式。1为按绝对token连续分页；2为persistent tail循环分页，当前chunk中间结果使用算子workspace。默认值1。 | INT32          | -         |
 | enabled\_grad | 可选属性 | 训练场景使用，表示是否参与反向更新。默认值false，支持false/true。**目前暂不支持输入true**。 | BOOL          | -         |
 | cmp\_kv | 输出 | 表示压缩后的数据。 | FLOAT16、BFLOAT16         | ND          |
 | wkv\_proj | 可选输出 | 训练反向使用，表示wkv权重Matmul的计算结果，**目前暂不支持返回wkv\_proj**。 | FLOAT16、BFLOAT16         | ND          |
@@ -151,6 +152,12 @@
         - C4Li: D=128, coff=2, cmp_ratio=4；
         - C128A: D=512, coff=1, cmp_ratio=128。
     - 支持rotary_mode为2，Rope计算模式为interleave。
+    - `cache_mode=2`时，每个batch的block table行前
+      `ceil(coff * cmp_ratio / block_size)`项组成tail ring。绝对token位置先对
+      `coff * cmp_ratio`取模，再映射到ring block和block内offset。C4A/C4Li在
+      `block_size=8`时使用1个block，C128A在`block_size=32`时使用4个block。
+      该模式只保存跨chunk所需tail，当前chunk的FP32 partial states保存在算子
+      workspace中。
 
 ## Atlas A3 推理系列产品 调用说明
 

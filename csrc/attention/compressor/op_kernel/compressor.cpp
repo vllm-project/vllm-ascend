@@ -68,14 +68,13 @@ __global__ __aicore__ void compressor(
 #endif
     constexpr auto coff = static_cast<COFF>(Coff);
     constexpr auto rotaryMode = static_cast<ROTARY_MODE>(RotaryMode);
-#if (__CCE_AICORE__ != 220)
     constexpr auto cacheMode = static_cast<CACHE_MODE>(CacheMode);
-#endif
 #if (__CCE_AICORE__ == 220)
     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::PERF) {
-        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, ropeDtype, coff, rotaryMode);
+        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, ropeDtype, coff, rotaryMode,
+                                          cacheMode);
     } else {
-        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, ropeDtype, coff, rotaryMode);
+        INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, ropeDtype, coff, rotaryMode, cacheMode);
     }
 #else
     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::FULL_LOAD) {

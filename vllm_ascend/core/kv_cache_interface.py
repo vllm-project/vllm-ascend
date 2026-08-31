@@ -12,7 +12,10 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, Slid
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowMLASpec
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
+from vllm_ascend.core.single_type_kv_cache_manager import (
+    CompressorTailManager,
+    CompressAttentionManager,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -217,6 +220,75 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendCompressorTailSpec(AscendSlidingWindowMLASpec):
+    """Persistent DeepSeek-V4 compressor tail stored as a page ring.
+
+    The compressor operator materializes current-chunk partial states in its
+    CANN workspace. Only the incomplete compression group (and the previous
+    group for C4 overlap) must survive across forwards, so scheduler-managed
+    pages are constant per request rather than proportional to chunk length.
+    """
+
+    tail_tokens: int
+    ring_blocks_per_request: int
+    state_dim: int
+
+    def max_admission_blocks_per_request(
+        self,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int:
+        del max_in_flight_tokens, max_model_len
+        return self.ring_blocks_per_request
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        del vllm_config
+        return self.ring_blocks_per_request * self.page_size_bytes
+
+    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
+        del vllm_config, max_len
+        return self.ring_blocks_per_request
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) for spec in specs), (
+            "All layers in a compressor-tail group must use "
+            "AscendCompressorTailSpec."
+        )
+        first = specs[0]
+        assert all(
+            (
+                spec.block_size,
+                spec.num_kv_heads,
+                spec.head_size,
+                spec.dtype,
+                spec.page_size_padded,
+                spec.sliding_window,
+                spec.compress_ratio,
+                spec.model_version,
+                spec.tail_tokens,
+                spec.ring_blocks_per_request,
+                spec.state_dim,
+            )
+            == (
+                first.block_size,
+                first.num_kv_heads,
+                first.head_size,
+                first.dtype,
+                first.page_size_padded,
+                first.sliding_window,
+                first.compress_ratio,
+                first.model_version,
+                first.tail_tokens,
+                first.ring_blocks_per_request,
+                first.state_dim,
+            )
+            for spec in specs[1:]
+        ), "All layers in a compressor-tail group must use the same layout."
+        return first
+
+
 def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
@@ -231,5 +303,10 @@ def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
         manager_class=SlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendCompressorTailSpec,
+        manager_class=CompressorTailManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
