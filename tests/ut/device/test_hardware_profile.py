@@ -37,6 +37,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TURBOQUANT_4BIT_NC_CACHE,
     }
 )
 

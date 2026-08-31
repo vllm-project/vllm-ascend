@@ -41,11 +41,15 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     scale_dim: int = 0
     scale_dtype: torch.dtype = torch.int8
-    # Sparse C8 changes the main cache into one packed byte tensor. Keep that
-    # main-cache property here; indexer-specific C8 properties belong to the
-    # indexer spec.
+    # This field selects the C8 codec only. Use
+    # ``uses_packed_sfa_main_cache`` when the tensor layout is what matters.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
+
+    @property
+    def uses_packed_sfa_main_cache(self) -> bool:
+        """Whether the main SFA KV cache is stored as one packed tensor."""
+        return self.cache_sparse_sfa_c8 or self.cache_dtype_str == "turboquant_4bit_nc"
 
     @property
     def storage_block_size(self) -> int:

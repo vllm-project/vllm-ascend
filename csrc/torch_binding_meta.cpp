@@ -38,6 +38,9 @@ namespace meta {
 const int64_t INT4_NUMS_IN_INT32 = 8;
 constexpr int64_t DSA_SLOT_MAPPING_FLAT = 1;
 constexpr int64_t DSA_SLOT_MAPPING_BLOCK_OFFSET = 2;
+// TurboQuant compress slot: 256 packed nibble bytes + 2 bytes of fp16 norm, padded
+// to 64 B. Keep in sync with SLOT_PAD in turbo_quant_compress_latent.h.
+constexpr int64_t TQ_COMPRESS_SLOT_BYTES = 320;
 
 c10::SymInt ceil_div(const c10::SymInt& value, int64_t divisor)
 {
@@ -1903,6 +1906,175 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+// TurboQuant SFA is TND-query only; the packed rope bytes are dropped from the
+// output, so the last dim shrinks by rope_head_dim. The softmax_lse shape mirrors
+// the kv_quant sibling so the DCP decode merge can consume it.
+std::tuple<at::Tensor, at::Tensor, at::Tensor> turboquant_sparse_flash_attention_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &sparse_indices,
+    const c10::optional<at::Tensor> &key_dequant_scale,
+    const c10::optional<at::Tensor> &value_dequant_scale,
+    const at::Tensor &block_table,
+    const at::Tensor &actual_seq_lengths_query,
+    const at::Tensor &actual_seq_lengths_kv,
+    double scale_value, int64_t key_quant_mode, int64_t value_quant_mode,
+    int64_t sparse_block_size, c10::string_view layout_query, c10::string_view layout_kv,
+    int64_t sparse_mode, int64_t attention_mode,
+    int64_t quant_scale_repo_mode, int64_t tile_size, int64_t rope_head_dim,
+    bool return_softmax_lse)
+{
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t DIM_3 = 3;
+    constexpr int64_t DIM_4 = 4;
+    constexpr int64_t TQ_QUERY_HEAD_DIM = 576;
+    constexpr int64_t TQ_KV_SLOT_BYTES = 386;
+    constexpr int64_t TQ_MAX_QUERY_HEADS = 128;
+    constexpr int64_t TQ_MAX_BLOCK_SIZE = 1024;
+    constexpr int64_t TQ_BLOCK_ALIGNMENT = 16;
+    constexpr int64_t TQ_MAX_SPARSE_BLOCK_SIZE = 16;
+
+    const auto query_sizes = query.sym_sizes();
+    const auto key_sizes = key.sym_sizes();
+    const auto value_sizes = value.sym_sizes();
+    const auto sparse_sizes = sparse_indices.sym_sizes();
+    const auto block_sizes = block_table.sym_sizes();
+    const auto query_length_sizes = actual_seq_lengths_query.sym_sizes();
+    const auto kv_length_sizes = actual_seq_lengths_kv.sym_sizes();
+
+    TORCH_CHECK(std::string(layout_query) == "TND",
+                "TurboQuant sparse flash attention only supports the TND query layout, but got ",
+                std::string(layout_query));
+    TORCH_CHECK(std::string(layout_kv) == "PA_BSND",
+                "TurboQuant sparse flash attention only supports the PA_BSND KV layout, but got ",
+                std::string(layout_kv));
+    TORCH_CHECK(query.dim() == DIM_3, "The query dimension must be 3, but got ", query.dim());
+    TORCH_CHECK(key.dim() == DIM_4, "The key dimension must be 4, but got ", key.dim());
+    TORCH_CHECK(value.dim() == DIM_4, "The value dimension must be 4, but got ", value.dim());
+    TORCH_CHECK(sparse_indices.dim() == DIM_3,
+                "The sparse_indices dimension must be 3, but got ", sparse_indices.dim());
+    TORCH_CHECK(block_table.dim() == DIM_2, "The block_table dimension must be 2, but got ", block_table.dim());
+    TORCH_CHECK(actual_seq_lengths_query.dim() == DIM_1,
+                "The actual_seq_lengths_query dimension must be 1, but got ", actual_seq_lengths_query.dim());
+    TORCH_CHECK(actual_seq_lengths_kv.dim() == DIM_1,
+                "The actual_seq_lengths_kv dimension must be 1, but got ", actual_seq_lengths_kv.dim());
+
+    TORCH_CHECK(query.scalar_type() == at::kBFloat16, "TurboQuant query must have bfloat16 dtype");
+    TORCH_CHECK(key.scalar_type() == at::kChar && value.scalar_type() == at::kChar,
+                "TurboQuant key and value must have int8 dtype");
+    TORCH_CHECK(sparse_indices.scalar_type() == at::kInt && block_table.scalar_type() == at::kInt &&
+                    actual_seq_lengths_query.scalar_type() == at::kInt &&
+                    actual_seq_lengths_kv.scalar_type() == at::kInt,
+                "TurboQuant sparse indices, block table, and sequence lengths must have int32 dtype");
+    TORCH_CHECK(!key_dequant_scale.has_value() || key_dequant_scale->scalar_type() == at::kFloat,
+                "TurboQuant key_dequant_scale must have float32 dtype");
+    TORCH_CHECK(!value_dequant_scale.has_value() || value_dequant_scale->scalar_type() == at::kFloat,
+                "TurboQuant value_dequant_scale must have float32 dtype");
+    if (const auto query_tokens = query_sizes[DIM_0].maybe_as_int()) {
+        TORCH_CHECK(*query_tokens > 0, "TurboQuant query token and head dimensions must be non-zero");
+    }
+    if (const auto query_heads = query_sizes[DIM_1].maybe_as_int()) {
+        TORCH_CHECK(*query_heads > 0, "TurboQuant query token and head dimensions must be non-zero");
+        TORCH_CHECK(*query_heads <= TQ_MAX_QUERY_HEADS && (*query_heads & (*query_heads - 1)) == 0,
+                    "TurboQuant query head count must be a supported power of two");
+    }
+    if (const auto query_head_dim = query_sizes[DIM_2].maybe_as_int()) {
+        TORCH_CHECK(*query_head_dim == TQ_QUERY_HEAD_DIM,
+                    "TurboQuant query head dimension must be ", TQ_QUERY_HEAD_DIM);
+    }
+    if (const auto kv_blocks = key_sizes[DIM_0].maybe_as_int()) {
+        TORCH_CHECK(*kv_blocks > 0, "TurboQuant KV block count and block size must be non-zero");
+    }
+    const auto kv_block_size = key_sizes[DIM_1].maybe_as_int();
+    if (kv_block_size) {
+        TORCH_CHECK(*kv_block_size > 0, "TurboQuant KV block count and block size must be non-zero");
+    }
+    if (const auto kv_heads = key_sizes[DIM_2].maybe_as_int()) {
+        TORCH_CHECK(*kv_heads == 1, "TurboQuant key must contain exactly one KV head");
+    }
+    if (const auto kv_slot_bytes = key_sizes[DIM_3].maybe_as_int()) {
+        TORCH_CHECK(*kv_slot_bytes == TQ_KV_SLOT_BYTES,
+                    "TurboQuant KV slot width must be ", TQ_KV_SLOT_BYTES);
+    }
+    for (int64_t dim = 0; dim < DIM_4; ++dim) {
+        const auto key_dim = key_sizes[dim].maybe_as_int();
+        const auto value_dim = value_sizes[dim].maybe_as_int();
+        TORCH_CHECK(!key_dim || !value_dim || *key_dim == *value_dim,
+                    "TurboQuant key and value shapes must match");
+    }
+    const auto sparse_tokens = sparse_sizes[DIM_0].maybe_as_int();
+    const auto query_tokens = query_sizes[DIM_0].maybe_as_int();
+    const auto sparse_heads = sparse_sizes[DIM_1].maybe_as_int();
+    const auto kv_heads = key_sizes[DIM_2].maybe_as_int();
+    TORCH_CHECK(!sparse_tokens || !query_tokens || *sparse_tokens == *query_tokens,
+                "TurboQuant sparse_indices token/KV-head dimensions must match query and key");
+    TORCH_CHECK(!sparse_heads || !kv_heads || *sparse_heads == *kv_heads,
+                "TurboQuant sparse_indices token/KV-head dimensions must match query and key");
+    const auto query_length_batch = query_length_sizes[DIM_0].maybe_as_int();
+    const auto kv_length_batch = kv_length_sizes[DIM_0].maybe_as_int();
+    const auto block_batch = block_sizes[DIM_0].maybe_as_int();
+    const auto block_columns = block_sizes[DIM_1].maybe_as_int();
+    TORCH_CHECK(!query_length_batch || *query_length_batch > 0,
+                "TurboQuant actual_seq_lengths_query must be non-empty");
+    TORCH_CHECK(!query_length_batch || !kv_length_batch || *query_length_batch == *kv_length_batch,
+                "TurboQuant query and KV sequence-length tensors must have the same batch size");
+    TORCH_CHECK(!query_length_batch || !block_batch || *query_length_batch == *block_batch,
+                "TurboQuant block_table must match the sequence batch and contain at least one block column");
+    TORCH_CHECK(!block_columns || *block_columns > 0,
+                "TurboQuant block_table must match the sequence batch and contain at least one block column");
+    TORCH_CHECK(key_quant_mode == 3 && value_quant_mode == 3,
+                "TurboQuant key/value quant modes must both be 3");
+    TORCH_CHECK(sparse_block_size > 0 && sparse_block_size <= TQ_MAX_SPARSE_BLOCK_SIZE &&
+                    (sparse_block_size & (sparse_block_size - 1)) == 0,
+                "TurboQuant sparse_block_size must be a supported power of two");
+    if (kv_block_size) {
+        TORCH_CHECK(*kv_block_size <= TQ_MAX_BLOCK_SIZE && *kv_block_size % TQ_BLOCK_ALIGNMENT == 0 &&
+                        *kv_block_size % sparse_block_size == 0,
+                    "TurboQuant KV block size must be aligned and divisible by sparse_block_size");
+    }
+    TORCH_CHECK(sparse_mode == 0 || sparse_mode == 3, "TurboQuant sparse_mode must be 0 or 3");
+    TORCH_CHECK(attention_mode == 2, "TurboQuant attention_mode must be 2");
+    TORCH_CHECK(quant_scale_repo_mode == 1, "TurboQuant quant_scale_repo_mode must be 1");
+    TORCH_CHECK(tile_size == 128, "TurboQuant tile_size must be 128");
+    TORCH_CHECK(rope_head_dim == 64, "TurboQuant rope_head_dim must be 64");
+
+    c10::SymDimVector output_size = {
+        query.sym_size(DIM_0), query.sym_size(DIM_1), query.sym_size(DIM_2) - rope_head_dim};
+    at::Tensor output = at::empty_symint(output_size, query.options());
+
+    c10::SymDimVector softmax_size;
+    if (return_softmax_lse) {
+        const c10::SymInt kv_head_num = key.sym_size(DIM_2);
+        softmax_size = {kv_head_num, query.sym_size(DIM_0), query.sym_size(DIM_1) / kv_head_num};
+    } else {
+        softmax_size = {0};
+    }
+    at::Tensor softmax_max = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
+    at::Tensor softmax_sum = at::empty_symint(softmax_size, query.options().dtype(at::kFloat));
+    return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
+}
+
+at::Tensor turbo_quant_compress_latent_meta(const at::Tensor &latent, const at::Tensor &centroids)
+{
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_2 = 2;
+    constexpr int64_t TQ_COMPRESS_HEAD_DIM = 512;
+    constexpr int64_t TQ_COMPRESS_CENTROID_COUNT = 16;
+    const auto latent_sizes = latent.sym_sizes();
+    const auto centroid_count = centroids.sym_numel().maybe_as_int();
+    TORCH_CHECK(latent.dim() == DIM_2, "turbo_quant_compress_latent expects a [N, 512] latent");
+    if (const auto latent_head_dim = latent_sizes[1].maybe_as_int()) {
+        TORCH_CHECK(*latent_head_dim == TQ_COMPRESS_HEAD_DIM,
+                    "turbo_quant_compress_latent expects a [N, 512] latent");
+    }
+    TORCH_CHECK(latent.scalar_type() == at::kFloat && centroids.scalar_type() == at::kFloat,
+                "turbo_quant_compress_latent expects float32 inputs");
+    TORCH_CHECK(!centroid_count || *centroid_count == TQ_COMPRESS_CENTROID_COUNT,
+                "turbo_quant_compress_latent expects exactly 16 centroids");
+    c10::SymDimVector slot_size = {latent.sym_size(DIM_0), TQ_COMPRESS_SLOT_BYTES};
+    return at::empty_symint(slot_size, latent.options().dtype(at::kByte));
+}
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1971,6 +2143,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
     ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);
+    // TurboQuant 4-bit MLA latent
+    ops.impl("turboquant_sparse_flash_attention", &vllm_ascend::meta::turboquant_sparse_flash_attention_meta);
+    ops.impl("turbo_quant_compress_latent", &vllm_ascend::meta::turbo_quant_compress_latent_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine

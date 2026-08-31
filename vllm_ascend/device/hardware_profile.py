@@ -46,6 +46,7 @@ class HardwareCapability(Enum):
     STANDARD_WORKER_PATCHES = auto()
     STANDARD_MAMBA_PATCH = auto()
     TRITON_BATCH_MEMCPY = auto()
+    TURBOQUANT_4BIT_NC_CACHE = auto()
     UNRESTRICTED_MLAPO = auto()
 
 
@@ -128,6 +129,7 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
         HardwareCapability.TRITON_BATCH_MEMCPY,
+        HardwareCapability.TURBOQUANT_4BIT_NC_CACHE,
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}

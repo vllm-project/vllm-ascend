@@ -106,11 +106,16 @@
     - vllm_ascend/attention/indexer.py
     - vllm_ascend/attention/sfa_v1.py
     - vllm_ascend/attention/sfa_kv_offload.py
+    - vllm_ascend/ops/tq_latent_store.py
+    - csrc/attention/turbo_quant_compress_latent
+    - csrc/attention/turbo_quant_sparse_flash_attention
   tests:
     - tests/ut/attention/test_indexer.py
     - tests/ut/attention/test_sfa_kv_offload.py
     - tests/ut/attention/a2/test_sfa_v1.py
     - tests/ut/attention/a2/test_sfa_v1_precision.py
+    - tests/ut/attention/a2/test_turboquant_custom_ops.py
+    - tests/ut/ops/test_tq_latent_store.py
     - tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py
 
 - name: attention_dsa
@@ -738,6 +743,7 @@
     - setup.py
   tests:
     - tests/ut/test_ascend_config.py
+    - tests/ut/test_turboquant_config.py
     - tests/ut/test_ascend_forward_context.py
     - tests/ut/test_cpu_binding.py
     - tests/ut/test_envs.py
@@ -927,6 +933,7 @@ estimated_times:
   tests/ut/attention/a2/test_mla_v1.py: 60
   tests/ut/attention/a2/test_sfa_v1.py: 30
   tests/ut/attention/a2/test_sfa_v1_precision.py: 120
+  tests/ut/attention/a2/test_turboquant_custom_ops.py: 30
   tests/ut/compilation/a2/test_acl_graph.py: 40
   tests/ut/device_allocator/a2/test_find_loaded_library.py: 30
   tests/ut/eplb/core/a2/test_eplb_utils.py: 30

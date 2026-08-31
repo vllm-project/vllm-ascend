@@ -70,7 +70,11 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
-from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
+from vllm_ascend.utils import (
+    kv_cache_spec_uses_packed_sfa_main_cache,
+    npu_stream_switch,
+    trans_nd_to_nz,
+)
 
 # isort: off
 if TYPE_CHECKING:
@@ -1398,9 +1402,9 @@ class MooncakeLayerwiseConnectorWorker:
             layer_kv_cache_spec = kv_cache_groups[layer_kv_group_id].kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                 layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
-            if getattr(layer_kv_cache_spec, "cache_sparse_sfa_c8", False) is True:
+            if kv_cache_spec_uses_packed_sfa_main_cache(layer_kv_cache_spec):
                 raise NotImplementedError(
-                    "Mooncake layerwise connector does not support sparse SFA C8 packed main KV cache yet."
+                    "Mooncake layerwise connector does not support packed SFA main KV caches yet."
                 )
             if (
                 (self.pd_head_ratio > 1 and (isinstance(layer_kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))))
