@@ -92,7 +92,7 @@ def test_adapter_switches_mismatched_vllm_and_torch_npu(
     monkeypatch.setattr(
         VersionAdapter,
         "_run",
-        staticmethod(lambda command, log_file, label: commands.append(command)),
+        staticmethod(lambda command, log_file, label, env=None: commands.append(command)),
     )
     options = BisectOptions(repo_dir=tmp_path, vllm_dir=tmp_path / "missing-vllm")
     adapter = VersionAdapter(options)
@@ -120,3 +120,28 @@ def test_adapter_switches_mismatched_vllm_and_torch_npu(
             "--disable-pip-version-check",
         ],
     ]
+
+
+def test_adapter_sets_empty_target_device_for_editable_vllm_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    runs: list[tuple[list[str], dict[str, str] | None]] = []
+    vllm_dir = tmp_path / "vllm"
+    vllm_dir.mkdir()
+    monkeypatch.setattr("tools.bisect.version_compat.installed_vllm_version", lambda: "0.24.0")
+    monkeypatch.setattr(git_ops, "resolve_commit", lambda repo, ref: "a" * 40)
+    monkeypatch.setattr(git_ops, "checkout", lambda repo, commit: None)
+    monkeypatch.setattr(
+        VersionAdapter,
+        "_run",
+        staticmethod(lambda command, log_file, label, env=None: runs.append((command, env))),
+    )
+    adapter = VersionAdapter(BisectOptions(repo_dir=tmp_path, vllm_dir=vllm_dir))
+
+    adapter.ensure_targets({"vllm": "v0.25.1"}, ("vllm",))
+
+    command, env = runs[0]
+    assert command[:4] == ["pip", "install", "-e", str(vllm_dir)]
+    assert env is not None
+    assert env["VLLM_TARGET_DEVICE"] == "empty"
