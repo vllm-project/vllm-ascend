@@ -88,6 +88,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
+        backend_name = str(extra_config.get("backend", "mooncake")).lower()
+        self.use_gva_layerwise = self.use_layerwise and backend_name == "memcache"
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector

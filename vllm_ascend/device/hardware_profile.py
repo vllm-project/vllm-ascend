@@ -17,11 +17,17 @@ class HardwareCapability(Enum):
     """Independent SoC capabilities consumed by shared business logic."""
 
     AUTO_ENABLE_CUSTOM_OPS = auto()
+    ATB_EXTENSIONS = auto()
+    ATB_WARMUP = auto()
     BGMV_SGMV_META_REGISTRATION = auto()
     CLUSTER_CPU_TOPOLOGY = auto()
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
+    DISTRIBUTED_COMMUNICATION_ADAPTATION = auto()
     DYNAMIC_MX_QUANT_FUSION = auto()
+    FP8_ATTENTION = auto()
+    GDN_COMPATIBILITY = auto()
     IRQ_CPU_RESERVATION = auto()
+    LOCAL_KV_COMM_RESOURCE = auto()
     LORA_CUSTOM_OPS = auto()
     MC2_FULLMESH_V2_COMM = auto()
     MC2_HIERARCHY_COMM = auto()
@@ -31,6 +37,8 @@ class HardwareCapability(Enum):
     RUNTIME_CUSTOM_OPS = auto()
     SFA_DCP_REPLICATED_INDEXER = auto()
     STANDARD_WORKER_PATCHES = auto()
+    STANDARD_MAMBA_PATCH = auto()
+    TRITON_BATCH_MEMCPY = auto()
 
 
 class AttentionBackendFamily(Enum):
@@ -99,6 +107,8 @@ class HardwareProfile:
 _STANDARD_CAPABILITIES = frozenset(
     {
         HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+        HardwareCapability.ATB_EXTENSIONS,
+        HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
@@ -106,7 +116,9 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.NPUGRAPH_EX,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
+        HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
+        HardwareCapability.TRITON_BATCH_MEMCPY,
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}
@@ -147,6 +159,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=frozenset(
                 {
                     HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
+                    HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
+                    HardwareCapability.GDN_COMPATIBILITY,
                     HardwareCapability.IRQ_CPU_RESERVATION,
                     HardwareCapability.RC_DEVICE_DISCOVERY,
                     HardwareCapability.RUNTIME_CUSTOM_OPS,
@@ -168,10 +182,14 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+                    HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+                    HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
+                    HardwareCapability.TRITON_BATCH_MEMCPY,
                 }
             ),
         ),
