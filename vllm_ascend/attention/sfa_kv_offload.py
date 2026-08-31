@@ -241,6 +241,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
 
     @staticmethod
     def _in_graph_runtime() -> bool:
+        if torch.npu.is_current_stream_capturing():
+            return True
         if not is_forward_context_available():
             return False
         forward_context = get_forward_context()

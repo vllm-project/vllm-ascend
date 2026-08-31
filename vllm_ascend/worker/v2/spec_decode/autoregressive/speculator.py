@@ -94,6 +94,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
+        self._offload_draft_token_to_req: torch.Tensor | None = None
+        self._offload_draft_metadata_logged = False
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
@@ -187,6 +189,15 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             target_input_buffers,
             target_attn_groups,
         )
+
+        if getattr(model_state, "_offload_req_ids_tensor", None) is not None:
+            # Draft decode always has one token per request. Keep the mapping
+            # at a stable address so captured graphs can reuse it at replay.
+            self._offload_draft_token_to_req = torch.arange(
+                self.max_num_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
 
         # Use the first executable draft attention layer as the architecture
         # discriminator and cache it for ACL graph parameter updates.
@@ -366,7 +377,45 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 if metadata is None:
                     continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
+            self._populate_sparse_kv_offload_draft_metadata(
+                attn_metadata,
+                num_reqs_padded,
+                num_tokens_padded,
+                num_query_per_req,
+            )
         return attn_metadata
+
+    def _populate_sparse_kv_offload_draft_metadata(
+        self,
+        attn_metadata: dict[str, Any],
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        num_query_per_req: int,
+    ) -> None:
+        req_ids_tensor = getattr(self.model_state, "_offload_req_ids_tensor", None)
+        if req_ids_tensor is None:
+            return
+        if num_query_per_req != 1 or num_tokens_padded > num_reqs_padded:
+            raise RuntimeError(
+                "Sparse KV offload MTP draft decode requires one token per request: "
+                f"num_query_per_req={num_query_per_req}, "
+                f"num_tokens_padded={num_tokens_padded}, "
+                f"num_reqs_padded={num_reqs_padded}"
+            )
+        if self._offload_draft_token_to_req is None:
+            raise RuntimeError("Sparse KV offload MTP draft metadata buffer is not initialized")
+
+        req_ids_tensor = req_ids_tensor[:num_reqs_padded]
+        token_to_req = self._offload_draft_token_to_req[:num_tokens_padded]
+        for metadata in attn_metadata.values():
+            if metadata is None:
+                continue
+            metadata.req_ids_tensor = req_ids_tensor
+            metadata.token_to_req = token_to_req
+
+        if not self._offload_draft_metadata_logged:
+            logger.info("Sparse KV offload MTP draft metadata uses ModelRunner V2 model state.")
+            self._offload_draft_metadata_logged = True
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""

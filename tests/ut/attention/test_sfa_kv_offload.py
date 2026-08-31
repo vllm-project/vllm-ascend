@@ -116,6 +116,10 @@ def test_graph_runtime_supports_forward_context_without_capturing(runtime_mode, 
     forward_context = SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
     with (
         patch(
+            "vllm_ascend.attention.sfa_kv_offload.torch.npu.is_current_stream_capturing",
+            return_value=False,
+        ),
+        patch(
             "vllm_ascend.attention.sfa_kv_offload.is_forward_context_available",
             return_value=True,
         ),
@@ -125,3 +129,22 @@ def test_graph_runtime_supports_forward_context_without_capturing(runtime_mode, 
         ),
     ):
         assert AscendSFAKVOffloadImpl._in_graph_runtime() is expected
+
+
+def test_graph_runtime_prefers_actual_stream_capture():
+    forward_context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
+    with (
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.torch.npu.is_current_stream_capturing",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.is_forward_context_available",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.get_forward_context",
+            return_value=forward_context,
+        ),
+    ):
+        assert AscendSFAKVOffloadImpl._in_graph_runtime() is True
