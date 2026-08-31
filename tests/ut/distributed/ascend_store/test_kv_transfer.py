@@ -24,6 +24,9 @@ import numpy as np
 # isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm.distributed.kv_events import BlockStored
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+    MemcacheBackend,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
@@ -219,8 +222,11 @@ class TestKVTransferThread(unittest.TestCase):
 
 class TestGVALayerTransferFailures(unittest.TestCase):
     def _make_sending_thread(self):
-        store = MagicMock()
-        store.store.batch_copy.return_value = 0
+        # spec=MemcacheBackend lets the mock pass the thread-entry
+        # isinstance assert; `.store` is an instance attribute, so it must
+        # be attached explicitly (spec restricts attribute access).
+        store = MagicMock(spec=MemcacheBackend)
+        store.store = MagicMock(batch_copy=MagicMock(return_value=0))
         store.batch_write_finish.return_value = [0]
         builder = MagicMock()
         builder.build_addrs.return_value = LayerBatchReqMeta(
@@ -283,8 +289,11 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
     def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
-        store = MagicMock()
-        store.store.batch_copy.return_value = 0
+        # spec=MemcacheBackend lets the mock pass the thread-entry
+        # isinstance assert; `.store` is an instance attribute, so it must
+        # be attached explicitly (spec restricts attribute access).
+        store = MagicMock(spec=MemcacheBackend)
+        store.store = MagicMock(batch_copy=MagicMock(return_value=0))
         load_finished = [threading.Event(), threading.Event()]
         save_finished = [threading.Event(), threading.Event()]
         sync_events = [MagicMock(), MagicMock()]
