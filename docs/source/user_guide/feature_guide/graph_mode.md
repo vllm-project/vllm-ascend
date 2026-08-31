@@ -183,6 +183,8 @@ Static kernel compilation is an **optional** feature that pre-compiles operator 
 
     Enabling static kernel triggers a compilation pass during the graph capture phase at service startup. This may add **several minutes to tens of minutes** to the startup time depending on the number of operators to compile and model complexity. Once completed, subsequent request processing is not affected.
 
+    Super Kernel optimization follows `enable_static_kernel` by default. To use static kernel without Super Kernel, set `enable_super_kernel` to `false` explicitly. Super Kernel cannot be enabled when static kernel is disabled.
+
 Offline example:
 
 ```python
@@ -205,6 +207,13 @@ Online example:
 ```bash
 vllm serve Qwen/Qwen2-7B-Instruct \
   --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true}}'
+```
+
+To keep static kernel enabled while disabling Super Kernel explicitly:
+
+```bash
+vllm serve Qwen/Qwen2-7B-Instruct \
+  --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true, "enable_static_kernel":true, "enable_super_kernel":false}}'
 ```
 
 #### Verifying static kernel is active
