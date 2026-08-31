@@ -18,9 +18,9 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
-from vllm_ascend.utils import is_310p
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend
@@ -32,7 +32,7 @@ mamba_utils._TEMPORAL_TILES = 1
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
-    return not is_310p()
+    return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
 
 
 def _get_mamba_groups(
@@ -207,7 +207,10 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
     # block. Preserve that default so the next preprocess keeps the right
     # accept_token_bias when multiple draft tokens were accepted.
     num_accepted_tokens_cpu_tensor[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])
-    num_accepted_tokens = input_batch.num_accepted_tokens_cpu
+    # InputBatch rows may be condensed/reused by async scheduling before this
+    # fallback consumes the snapshot. Keep this step's accepted counts
+    # independent from those mutable request rows.
+    num_accepted_tokens = num_accepted_tokens_cpu_tensor
     for i in range(num_reqs):
         num_tokens_running_state = num_computed_tokens[i] + num_scheduled_tokens[i] - num_draft_tokens[i]
         new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens[i] - 1

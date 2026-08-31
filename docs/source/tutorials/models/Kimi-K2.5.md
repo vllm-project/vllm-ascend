@@ -142,9 +142,7 @@ export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=800
-export VLLM_ASCEND_ENABLE_MLAPO=1
-
-vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
+vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
   --host 0.0.0.0 \
   --port 8088 \
   --quantization ascend \
@@ -270,9 +268,7 @@ Run the following scripts on two nodes respectively.
     export TASK_QUEUE_ENABLE=1
 
     export HCCL_BUFFSIZE=1024
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -336,9 +332,7 @@ Run the following scripts on two nodes respectively.
     export TASK_QUEUE_ENABLE=1
 
     export HCCL_BUFFSIZE=1024
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-
-    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
+    vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8088 \
     --quantization ascend \
@@ -629,7 +623,6 @@ Parameter descriptions:
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         export HCCL_BUFFSIZE=1100
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
@@ -654,7 +647,7 @@ Parameter descriptions:
             --tool-call-parser kimi_k2 \
             --reasoning-parser kimi_k2 \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
+            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":false,"enable_mlapo":true}' \
             --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
@@ -708,7 +701,6 @@ Parameter descriptions:
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
         export HCCL_BUFFSIZE=1100
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
@@ -733,7 +725,7 @@ Parameter descriptions:
             --tool-call-parser kimi_k2 \
             --reasoning-parser kimi_k2 \
             --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": false}' \
+            --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":false,"enable_mlapo":true}' \
             --speculative-config '{"method": "eagle3", "model":"lightseekorg/kimi-k2.5-eagle3", "num_speculative_tokens": 3}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
@@ -755,7 +747,7 @@ Parameter descriptions:
 
     Key Parameter Descriptions:
 
-    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `additional_config.enable_mlapo=true`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
     - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
     - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
 

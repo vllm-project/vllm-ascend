@@ -17,7 +17,64 @@ class HardwareCapability(Enum):
     """Independent SoC capabilities consumed by shared business logic."""
 
     AUTO_ENABLE_CUSTOM_OPS = auto()
+    ATB_EXTENSIONS = auto()
+    ATB_WARMUP = auto()
+    BGMV_SGMV_META_REGISTRATION = auto()
+    CLUSTER_CPU_TOPOLOGY = auto()
+    COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
+    DISTRIBUTED_COMMUNICATION_ADAPTATION = auto()
     DYNAMIC_MX_QUANT_FUSION = auto()
+    FP8_ATTENTION = auto()
+    GDN_COMPATIBILITY = auto()
+    IRQ_CPU_RESERVATION = auto()
+    LOCAL_KV_COMM_RESOURCE = auto()
+    LORA_CUSTOM_OPS = auto()
+    MC2_FULLMESH_V2_COMM = auto()
+    MC2_HIERARCHY_COMM = auto()
+    NPUGRAPH_EX = auto()
+    RC_DEVICE_DISCOVERY = auto()
+    REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
+    RUNTIME_CUSTOM_OPS = auto()
+    SFA_DCP_REPLICATED_INDEXER = auto()
+    STANDARD_WORKER_PATCHES = auto()
+    STANDARD_MAMBA_PATCH = auto()
+    TRITON_BATCH_MEMCPY = auto()
+
+
+class AttentionBackendFamily(Enum):
+    """Attention backend implementation families selected by the platform."""
+
+    STANDARD = auto()
+    COMPATIBILITY = auto()
+
+
+class CPUBindingMode(Enum):
+    """CPU binding policies selected for worker processes."""
+
+    TOPO_AFFINITY = "topo_affinity"
+    GLOBAL_SLICE = "global_slice"
+
+
+class DeviceAdaptorFamily(Enum):
+    """Device operation adaptor implementation families."""
+
+    STANDARD = auto()
+    FP8_OPTIMIZED = auto()
+    COMPATIBILITY = auto()
+
+
+class DeviceAddressingMode(Enum):
+    """PCIe device addressing policies used by CPU binding."""
+
+    DIRECT = auto()
+    DUAL_CHIP_CARD = auto()
+
+
+class QuantizationBackendFamily(Enum):
+    """Quantization configuration implementation families."""
+
+    STANDARD = auto()
+    COMPATIBILITY = auto()
 
 
 class WeightLayoutPolicy(Enum):
@@ -32,7 +89,13 @@ class HardwareProfile:
     """Immutable capabilities and implementation choices for one SoC family."""
 
     _device_type: AscendDeviceType
+    attention_backend_family: AttentionBackendFamily
+    cpu_binding_mode: CPUBindingMode
+    default_worker_cls: str
+    device_adaptor_family: DeviceAdaptorFamily
+    device_addressing_mode: DeviceAddressingMode
     weight_layout_policy: WeightLayoutPolicy
+    quantization_backend_family: QuantizationBackendFamily
     capabilities: frozenset[HardwareCapability]
 
     def supports(self, capability: HardwareCapability) -> bool:
@@ -41,31 +104,92 @@ class HardwareProfile:
         return capability in self.capabilities
 
 
-_AUTO_ENABLE_CUSTOM_OP_CAPABILITIES = frozenset({HardwareCapability.AUTO_ENABLE_CUSTOM_OPS})
+_STANDARD_CAPABILITIES = frozenset(
+    {
+        HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+        HardwareCapability.ATB_EXTENSIONS,
+        HardwareCapability.ATB_WARMUP,
+        HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.IRQ_CPU_RESERVATION,
+        HardwareCapability.LORA_CUSTOM_OPS,
+        HardwareCapability.MC2_HIERARCHY_COMM,
+        HardwareCapability.NPUGRAPH_EX,
+        HardwareCapability.RUNTIME_CUSTOM_OPS,
+        HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
+        HardwareCapability.STANDARD_MAMBA_PATCH,
+        HardwareCapability.STANDARD_WORKER_PATCHES,
+        HardwareCapability.TRITON_BATCH_MEMCPY,
+    }
+)
+_A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}
+_DEFAULT_WORKER_CLS = "vllm_ascend.worker.worker.NPUWorker"
 _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyType(
     {
         AscendDeviceType.A2: HardwareProfile(
             _device_type=AscendDeviceType.A2,
+            attention_backend_family=AttentionBackendFamily.STANDARD,
+            cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
+            default_worker_cls=_DEFAULT_WORKER_CLS,
+            device_adaptor_family=DeviceAdaptorFamily.STANDARD,
+            device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
-            capabilities=_AUTO_ENABLE_CUSTOM_OP_CAPABILITIES,
+            quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            capabilities=_STANDARD_CAPABILITIES,
         ),
         AscendDeviceType.A3: HardwareProfile(
             _device_type=AscendDeviceType.A3,
+            attention_backend_family=AttentionBackendFamily.STANDARD,
+            cpu_binding_mode=CPUBindingMode.GLOBAL_SLICE,
+            default_worker_cls=_DEFAULT_WORKER_CLS,
+            device_adaptor_family=DeviceAdaptorFamily.STANDARD,
+            device_addressing_mode=DeviceAddressingMode.DUAL_CHIP_CARD,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
-            capabilities=_AUTO_ENABLE_CUSTOM_OP_CAPABILITIES,
+            quantization_backend_family=QuantizationBackendFamily.STANDARD,
+            capabilities=_A3_CAPABILITIES,
         ),
         AscendDeviceType._310P: HardwareProfile(
             _device_type=AscendDeviceType._310P,
+            attention_backend_family=AttentionBackendFamily.COMPATIBILITY,
+            cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
+            default_worker_cls="vllm_ascend._310p.worker_310p.NPUWorker310",
+            device_adaptor_family=DeviceAdaptorFamily.COMPATIBILITY,
+            device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.FORCE_NZ,
-            capabilities=frozenset(),
+            quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY,
+            capabilities=frozenset(
+                {
+                    HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
+                    HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
+                    HardwareCapability.GDN_COMPATIBILITY,
+                    HardwareCapability.IRQ_CPU_RESERVATION,
+                    HardwareCapability.RC_DEVICE_DISCOVERY,
+                    HardwareCapability.RUNTIME_CUSTOM_OPS,
+                }
+            ),
         ),
         AscendDeviceType.A5: HardwareProfile(
             _device_type=AscendDeviceType.A5,
+            attention_backend_family=AttentionBackendFamily.STANDARD,
+            cpu_binding_mode=CPUBindingMode.TOPO_AFFINITY,
+            default_worker_cls=_DEFAULT_WORKER_CLS,
+            device_adaptor_family=DeviceAdaptorFamily.FP8_OPTIMIZED,
+            device_addressing_mode=DeviceAddressingMode.DIRECT,
             weight_layout_policy=WeightLayoutPolicy.CONFIGURABLE,
+            quantization_backend_family=QuantizationBackendFamily.STANDARD,
             capabilities=frozenset(
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+                    HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+                    HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+                    HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.LOCAL_KV_COMM_RESOURCE,
+                    HardwareCapability.LORA_CUSTOM_OPS,
+                    HardwareCapability.NPUGRAPH_EX,
+                    HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+                    HardwareCapability.STANDARD_MAMBA_PATCH,
+                    HardwareCapability.STANDARD_WORKER_PATCHES,
+                    HardwareCapability.TRITON_BATCH_MEMCPY,
                 }
             ),
         ),
@@ -82,7 +206,10 @@ def get_hardware_profile(device_type: AscendDeviceType) -> HardwareProfile:
         raise RuntimeError(f"No hardware profile is registered for device type: {device_type}.") from exc
 
 
+_CURRENT_HARDWARE_PROFILE = get_hardware_profile(get_device_config()._device_type)
+
+
 def get_current_hardware_profile() -> HardwareProfile:
     """Return the profile selected by the current device configuration."""
 
-    return get_hardware_profile(get_device_config()._device_type)
+    return _CURRENT_HARDWARE_PROFILE

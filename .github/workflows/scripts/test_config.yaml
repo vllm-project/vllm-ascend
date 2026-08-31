@@ -31,9 +31,6 @@
 #                             trigger the tests
 #   exclude_source_file_dependencies: Optional list of source/test directories
 #                                     to exclude from source_file_dependencies
-#   required_pr_labels: Optional list of PR labels that must all be present
-#                       for the module to run (PR CI only; inert when
-#                       select_tests.py is called without --pr-labels)
 #   tests: List of test directories/files to run (directories are expanded
 #          to individual test files before routing).  Supports ``::nodeid``
 #          syntax (e.g. ``test_foo.py::test_bar``) to run a single method.
@@ -195,6 +192,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/core
+    - vllm_ascend/ec_manager
   tests:
     - tests/ut/core
     - tests/ut/test_compressed_prefix_cache.py
@@ -238,14 +236,21 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/eplb
-    - vllm_ascend/distributed/eplb_communicator.py
-    - vllm_ascend/distributed/eplb_state.py
+    - vllm_ascend/distributed/eplb
     - vllm_ascend/ops/fused_moe/eplb.py
-    - vllm_ascend/ops/fused_moe/router.py
+    - vllm_ascend/ops/fused_moe/routed_experts.py
+    - vllm_ascend/ops/triton/eplb.py
     - vllm_ascend/patch/platform/patch_eplb.py
+    - vllm_ascend/patch/platform/patch_fused_moe.py
     - vllm_ascend/worker/v2/eplb.py
   tests:
     - tests/ut/eplb
+    - tests/ut/distributed/eplb
+    - tests/ut/ops/test_eplb.py
+    - tests/ut/ops/a2/test_eplb.py
+    - tests/ut/patch/platform/test_patch_eplb.py
+    - tests/ut/patch/platform/test_patch_fused_moe.py
+    - tests/ut/worker/v2/test_eplb_load_collection_phase.py
     - tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
@@ -666,18 +671,6 @@
     - tests/e2e/pull_request/eight_card/model_runner_v2
     - tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py
 
-# Qwen3-32B V1/V2 migration performance guards (LC W8A8 + LL bf16).
-# Gated by the mrv2 PR label; inert for nightly/schedule callers.
-- name: qwen3_32b_v2_migration_perf
-  optional: true
-  required_pr_labels: [mrv2]
-  source_file_dependencies:
-    - vllm_ascend/worker/worker.py
-    - vllm_ascend/worker/v2
-  tests:
-    - tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_lc_performance.py
-    - tests/e2e/pull_request/four_card/test_qwen3_32b_bf16_ll_performance.py
-
 # XLite
 - name: xlite
   optional: false
@@ -882,6 +875,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/rlhf/consistency/test_moe_routing_replay.py: 560
   tests/e2e/pull_request/two_card/test_prefix_caching.py: 420
   tests/e2e/pull_request/two_card/test_qwen3_30b_a3b.py: 260
+  tests/e2e/pull_request/two_card/model_runner_v2/test_mamba_hybrid.py: 220
   tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py: 370
   tests/e2e/pull_request/two_card/test_qwen3_6_27b_fia.py: 570
   tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py: 470
@@ -902,7 +896,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 1280
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/eight_card/test_glm5_2.py: 1360
-  tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 930
+  tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 1360
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 340
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380
@@ -914,8 +908,6 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 1160
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
-  tests/e2e/pull_request/four_card/test_qwen3_32b_w8a8_lc_performance.py: 1800
-  tests/e2e/pull_request/four_card/test_qwen3_32b_bf16_ll_performance.py: 1200
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
   tests/e2e/pull_request/sixteen_card/test_kimi_k3.py: 360
@@ -928,7 +920,6 @@ estimated_times:
   tests/ut/attention/a2/test_mla_cp_precision.py: 30
   tests/ut/attention/a2/test_mla_precision.py: 190
   tests/ut/attention/a2/test_mla_v1.py: 60
-  tests/ut/attention/a2/test_sfa_cp_precision.py: 30
   tests/ut/attention/a2/test_sfa_v1.py: 30
   tests/ut/attention/a2/test_sfa_v1_precision.py: 120
   tests/ut/compilation/a2/test_acl_graph.py: 40
@@ -937,6 +928,7 @@ estimated_times:
   tests/ut/kv_offload/a2/test_remote_decode_lifecycle.py: 60
   tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
+  tests/ut/ops/a2/test_eplb.py: 30
   tests/ut/ops/a2/test_gdn_layerwise_kv.py: 70
   tests/ut/ops/a2/test_token_dispatcher.py: 30
   tests/ut/ops/a3_2/test_activation.py: 50

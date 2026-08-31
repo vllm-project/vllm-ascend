@@ -10,14 +10,14 @@ from tests.ut.quantization.conftest_quantization import (
     create_mock_vllm_config,
     create_mxfp_moe_layer,
 )
-from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
     AscendW8A8MXFP8DynamicFusedMoEMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
 
 
 class TestAscendW8A8MXFP8LinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         self.scheme = AscendW8A8MXFP8DynamicLinearMethod()
@@ -27,11 +27,11 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         vllm_config.quant_config = SimpleNamespace()
         with (
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                 return_value=vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_dynamic_mx_quant_scale_alg",
                 return_value=0,
             ),
         ):
@@ -115,7 +115,7 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             self.assertTrue(layer.weight.data.is_contiguous())
             self.assertTrue(layer.weight_scale.data.is_contiguous())
 
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
     def test_apply(self, mock_torch_npu):
         dynamic_scale = torch.randint(0, 255, (32, 8), dtype=torch.uint8)
         mock_torch_npu.npu_dynamic_mx_quant.return_value = (
@@ -143,8 +143,8 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     hidden_size = 128
     intermediate_size = 256
 
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config")
     def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
@@ -156,11 +156,11 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         vllm_config.use_v2_model_runner = True
         with (
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_current_vllm_config",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
                 return_value=vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.get_ascend_config",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
                 return_value=create_mock_ascend_config(),
             ),
         ):
@@ -216,7 +216,7 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         self.scheme.restore_weights_for_rl_loading(layer)
         self.assertEqual(layer.w13_weight.shape, original_w13_shape)
 
-    @patch("vllm_ascend.quantization.methods.w8a8_mxfp8._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8._EXTRA_CTX")
     def test_apply_full_params(self, mock_ctx):
         tokens = 4
         layer = create_mxfp_moe_layer(
