@@ -1088,6 +1088,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
         self.softmax_scale = self.head_dim**-0.5
+        self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         self.tp_group = get_tp_group()
         self.tp_size = self.tp_group.world_size
         self.tp_rank = self.tp_group.rank_in_group
@@ -1462,7 +1463,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+            if self.support_fp8_attention:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
                 if isinstance(wo_a_method, AscendUnquantizedLinearMethod):
@@ -1864,7 +1865,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
             and isinstance(self.inderxer_wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod)
             and qr_pertoken_scale is not None
-            and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+            and not self.support_fp8_attention
         ):
             q = torch_npu.npu_quant_matmul(
                 qr,

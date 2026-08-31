@@ -826,6 +826,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         **kwargs,
     ):
         self.vllm_config = get_current_vllm_config()
+        self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -864,11 +865,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         if self.fa_quant_layer:
-            self.dtype = (
-                torch.float8_e4m3fn
-                if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
-                else torch.int8
-            )
+            self.dtype = torch.float8_e4m3fn if self.support_fp8_attention else torch.int8
         else:
             self.dtype = self.vllm_config.model_config.dtype
         # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
@@ -1278,7 +1275,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 toks=toks,
             )
             kv_c_normed = kv_c_normed.squeeze()
-            if self.fa_quant_layer and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+            if self.fa_quant_layer and self.support_fp8_attention:
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
                     torch.bfloat16
                 )
@@ -1434,7 +1431,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         c_kv_scale = None
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and self.fa_quant_layer:
+        if self.support_fp8_attention and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
@@ -1471,7 +1468,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA"
         c_kv_scale = None
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and self.fa_quant_layer:
+        if self.support_fp8_attention and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
@@ -1521,7 +1518,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+        if self.fa_quant_layer and not self.support_fp8_attention:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
@@ -1581,7 +1578,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_mask = None
             sparse_mode = 0
             actual_seq_lengths = None
-            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+            if self.support_fp8_attention:
                 input_layout = "BNSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
@@ -1727,7 +1724,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         hidden_states = hidden_states[:bsz]
 
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+        if self.support_fp8_attention:
             if self.mlapo_weight_quant_mode == 0:
                 quantized_x = hidden_states
                 dequant_scale_x = None
@@ -1861,7 +1858,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
-        if self.fa_quant_layer and get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
+        if self.fa_quant_layer and self.support_fp8_attention:
             decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
                 decode_ql_nope, dst_type=torch.float8_e4m3fn
             )
