@@ -194,8 +194,6 @@ The following table covers the generated `model`, all `envs`, and all `server_cm
 | --- | --- | --- | --- |
 | `moonshotai/Kimi-K2-Thinking` | model path | Model-specific | Specifies the model weight path passed to `vllm serve`. Because `--served-model-name` is not set in the script, API requests must use `moonshotai/Kimi-K2-Thinking` as the model name unless you add an explicit served-model-name override; see the FAQ in Chapter 10. |
 | `HCCL_BUFFSIZE` | `1024` | Performance | Configures the HCCL communication buffer used by distributed NPU communication. This document validates `1024`; other values need separate throughput, TTFT, TPOT, and HCCL stability validation. |
-| `TASK_QUEUE_ENABLE` | `1` | Version-sensitive / Performance | Enables task queue scheduling on Ascend. This document validates `1`; other values or version changes need startup and first-request validation. |
-| `OMP_PROC_BIND` | `false` | Performance | Avoids overly strict OpenMP CPU binding. This document validates `false`; other values need separate CPU affinity, NPU health, and HCCL stability validation. |
 | `HCCL_OP_EXPANSION_MODE` | `AIV` | Performance | Enables the AIV communication path. This document validates `AIV`; other values need separate throughput and latency validation. |
 | `PYTORCH_NPU_ALLOC_CONF` | `expandable_segments:True` | Memory / Performance | Reduces NPU memory fragmentation. This document validates `expandable_segments:True`; other allocator settings need separate startup, memory, and runtime stability validation. |
 | `SERVER_PORT` and `--port` | `8000` | Service | Sets the OpenAI-compatible service port. The documentation generator maps `DEFAULT_PORT` in the YAML to `8000`; update the curl examples if you change this value. |

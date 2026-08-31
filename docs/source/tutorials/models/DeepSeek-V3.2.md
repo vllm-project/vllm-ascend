@@ -126,11 +126,8 @@ If you want to deploy multi-node environment, you need to set up environment on 
 Run the following script to execute online inference.
 
 ```shell
-export HCCL_OP_EXPANSION_MODE="AIV"
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
+export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
@@ -172,16 +169,11 @@ Run the following scripts on two nodes respectively.
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
@@ -217,16 +209,11 @@ Run the following scripts on two nodes respectively.
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
@@ -266,20 +253,13 @@ Run the following scripts on two nodes respectively.
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=100
-    export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_CONNECT_TIMEOUT=120
-    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_IF_IP=$local_ip
     export HCCL_INTRA_ROCE_ENABLE=0
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
@@ -315,20 +295,13 @@ Run the following scripts on two nodes respectively.
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=100
-    export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_CONNECT_TIMEOUT=120
-    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_IF_IP=$local_ip
     export HCCL_INTRA_ROCE_ENABLE=0
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
@@ -392,28 +365,14 @@ Parameter descriptions:
     nic_name="enp48s3u1u1" # change to your own nic name
     local_ip=192.xx.xx.105 # change to your own ip
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=256
-
-    export ASCEND_AGGREGATE_ENABLE=1
-    export ASCEND_TRANSPORT_PRINT=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_A3_ENABLE=1
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
 
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
@@ -464,28 +423,14 @@ Parameter descriptions:
     nic_name="enp48s3u1u1" # change to your own nic name
     local_ip=192.xx.xx.113 # change to your own ip
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=256
-
-    export ASCEND_AGGREGATE_ENABLE=1
-    export ASCEND_TRANSPORT_PRINT=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_A3_ENABLE=1
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     # Timeout (in seconds) for automatically releasing the prefiller's KV cache for a particular request.
-    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
     export ASCEND_RT_VISIBLE_DEVICES=$1
-
 
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
@@ -535,31 +480,14 @@ Parameter descriptions:
     nic_name="enp48s3u1u1" # change to your own nic name
     local_ip=192.xx.xx.117 # change to your own ip
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
     export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
-
+    export GLOO_SOCKET_IFNAME=$nic_name
     #Mooncake
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=256
-
-    export ASCEND_AGGREGATE_ENABLE=1
-    export ASCEND_TRANSPORT_PRINT=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_A3_ENABLE=1
-    # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
-    export TASK_QUEUE_ENABLE=1
-
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
@@ -609,31 +537,14 @@ Parameter descriptions:
     nic_name="enp48s3u1u1" # change to your own nic name
     local_ip=192.xx.xx.181 # change to your own ip
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
     export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
-
+    export GLOO_SOCKET_IFNAME=$nic_name
     #Mooncake
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=256
-
-    export ASCEND_AGGREGATE_ENABLE=1
-    export ASCEND_TRANSPORT_PRINT=1
-    export ACL_OP_INIT_MODE=1
-    export ASCEND_A3_ENABLE=1
-    # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-    export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-
-    export TASK_QUEUE_ENABLE=1
-
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \

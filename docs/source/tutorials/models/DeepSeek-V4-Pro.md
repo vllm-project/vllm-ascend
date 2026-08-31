@@ -143,29 +143,15 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     local_ip="xxx"
     node0_ip="xxxx"
 
-    export HCCL_IF_IP=$local_ip
     export IFNAME="xxx"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
-    export TP_SOCKET_IFNAME="$IFNAME"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
     export HCCL_BUFFSIZE=512
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ACL_OP_INIT_MODE=1
-    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
-
-    export TASK_QUEUE_ENABLE=1
-
+    export HCCL_SOCKET_IFNAME="$IFNAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-    export HCCL_CONNECT_TIMEOUT=7200
-    export ASCEND_CONNECT_TIMEOUT=10000
-    export ASCEND_TRANSFER_TIMEOUT=10000
-    export VLLM_RPC_TIMEOUT=1800000
+    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
@@ -218,29 +204,15 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     local_ip="xxx"
     node0_ip="xxxx"
 
-    export HCCL_IF_IP=$local_ip
     export IFNAME="xxx"
-    export GLOO_SOCKET_IFNAME="$IFNAME"
-    export TP_SOCKET_IFNAME="$IFNAME"
-    export HCCL_SOCKET_IFNAME="$IFNAME"
     export HCCL_BUFFSIZE=512
-    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export ACL_OP_INIT_MODE=1
-    export VLLM_ENGINE_READY_TIMEOUT_S=3600
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE="AIV"
-
-    export TASK_QUEUE_ENABLE=1
-
+    export HCCL_SOCKET_IFNAME="$IFNAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-
-    export HCCL_CONNECT_TIMEOUT=7200
-    export ASCEND_CONNECT_TIMEOUT=10000
-    export ASCEND_TRANSFER_TIMEOUT=10000
-    export VLLM_RPC_TIMEOUT=1800000
+    export GLOO_SOCKET_IFNAME="$IFNAME"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --host 0.0.0.0 \
@@ -301,17 +273,13 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
     export HCCL_BUFFSIZE=2048
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export TASK_QUEUE_ENABLE=1
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --safetensors-load-strategy 'prefetch' \
@@ -357,17 +325,13 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
     node0_ip="xxxx"
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
     export HCCL_BUFFSIZE=2048
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export TASK_QUEUE_ENABLE=1
+    export HCCL_IF_IP=$local_ip
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$nic_name
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --safetensors-load-strategy 'prefetch' \
@@ -582,22 +546,15 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.1 # change to your own ip
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-        export TASK_QUEUE_ENABLE=1
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -651,22 +608,15 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.2 # change to your own ip
 
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-        export TASK_QUEUE_ENABLE=1
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -720,22 +670,15 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.3/4 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=2000
-        export HCCL_CONNECT_TIMEOUT=1200
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -941,29 +884,18 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.1/2/3/4 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
-
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=1200
-
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
+        export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         sysctl -w vm.swappiness=0
         sysctl -w kernel.numa_balancing=0
         sysctl kernel.sched_migration_cost_ns=50000
-
-        export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -1017,24 +949,14 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.5/6/7/8 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
-
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=1200
-
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         sysctl -w vm.swappiness=0
         sysctl -w kernel.numa_balancing=0
         sysctl kernel.sched_migration_cost_ns=50000
