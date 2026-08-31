@@ -13,7 +13,7 @@ def test_qwen3_dense_mrv2_tp2_aclgraph_fp16():
         "Qwen/Qwen3-8B",
         tensor_parallel_size=2,
         enforce_eager=False,
-        enable_prefix_caching=False,
+        enable_prefix_caching=True,
         dtype="float16",
         max_model_len=16384,
         compilation_config={
@@ -30,7 +30,7 @@ def test_qwen3_moe_mrv2_tp2_aclgraph_w8a8():
         "vllm-ascend/Qwen3-30B-A3B-W8A8",
         tensor_parallel_size=2,
         enforce_eager=False,
-        enable_prefix_caching=False,
+        enable_prefix_caching=True,
         dtype="float16",
         quantization="ascend",
         max_model_len=16384,

@@ -70,6 +70,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.input_ids_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int32, device="cpu")
         self.positions_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int64, device="cpu")
         self.next_prefill_tokens_cpu = torch.zeros(self.max_num_reqs, dtype=torch.int32, device="cpu")
+        # PrefillCacheHit / ChunkedPrefill must not replay FULL mixed ACLGraphs
+        # (same as MRv1 `_determine_batch_execution_and_padding`). FULL_DECODE_ONLY
+        # already keeps those batches eager via mixed_mode=NONE.
+        self._force_eager_pc_batch = False
 
     @staticmethod
     def _validate_config(vllm_config: VllmConfig) -> None:
@@ -102,9 +106,8 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("Speculative decoding is not supported by model runner v2 on 310P.")
         if vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("KV cache transfer is not supported by model runner v2 on 310P.")
-        # TODO: Support prefix caching in the next 310P MRV2 iteration.
-        if vllm_config.cache_config.enable_prefix_caching:
-            raise NotImplementedError("Prefix caching is not supported by model runner v2 on 310P.")
+        # Prefix caching is supported: 310P MRv2 reuses CPU Ascend310PBlockTables /
+        # PrefillCacheHit→splitfuse (attention_v1) and hybrid Mamba page sizing below.
         # TODO: Support LoRA in the next 310P MRV2 iteration.
         if vllm_config.lora_config is not None:
             raise NotImplementedError("LoRA is not supported by model runner v2 on 310P.")
@@ -272,13 +275,151 @@ class NPUModelRunner310V2(NPUModelRunner):
             update_cos_sin(input_batch.positions)
         return input_batch
 
+    def _scheduler_output_needs_pc_eager(self, scheduler_output: SchedulerOutput) -> bool:
+        """Force eager for PrefillCacheHit / ChunkedPrefill when mixed FULL graphs exist."""
+        if not self.cache_config.enable_prefix_caching:
+            return False
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        if not cudagraph_mode.has_full_cudagraphs():
+            return False
+        # FULL_DECODE_ONLY: mixed_mode is NONE → prefill/PC hits are already eager.
+        if cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
+            return False
+
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
+        if num_reqs == 0:
+            return False
+
+        computed_by_req: dict[str, int] = {}
+        for req in scheduler_output.scheduled_new_reqs:
+            computed_by_req[req.req_id] = int(req.num_computed_tokens)
+        cached = scheduler_output.scheduled_cached_reqs
+        if cached is not None:
+            for req_id, num_computed in zip(cached.req_ids, cached.num_computed_tokens):
+                computed_by_req[req_id] = int(num_computed)
+        for req_id in num_tokens_per_req:
+            if req_id in computed_by_req:
+                continue
+            req_idx = self.req_states.req_id_to_index.get(req_id)
+            if req_idx is not None:
+                computed_by_req[req_id] = int(self.req_states.num_computed_tokens_np[req_idx])
+
+        req_ids = list(num_tokens_per_req.keys())
+        num_scheduled = np.fromiter(
+            (num_tokens_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        seq_lens = np.fromiter(
+            (computed_by_req.get(req_id, 0) + int(num_tokens_per_req[req_id]) for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        attn_state = build_attn_state(
+            self.vllm_config,
+            seq_lens,
+            num_reqs,
+            num_scheduled,
+            num_scheduled,
+        )
+        # Avoid importing AscendAttentionState at module top (heavy attention_v1).
+        return attn_state.name in ("PrefillCacheHit", "ChunkedPrefill")
+
+    def _install_pc_eager_cudagraph_dispatch(self) -> None:
+        """Wrap ACLGraph dispatch so PrefillCacheHit cannot replay FULL mixed graphs."""
+        manager = self.cudagraph_manager
+        if manager is None or getattr(manager, "_310p_pc_eager_wrapped", False):
+            return
+        orig_dispatch = manager.dispatch
+        runner = self
+
+        def dispatch(
+            num_reqs: int,
+            num_tokens: int,
+            uniform_token_count: int | None,
+            num_active_loras: int,
+            max_query_len: int | None = None,
+        ) -> BatchExecutionDescriptor:
+            if runner._force_eager_pc_batch:
+                return BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.NONE,
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                    num_active_loras=num_active_loras,
+                )
+            return orig_dispatch(
+                num_reqs,
+                num_tokens,
+                uniform_token_count,
+                num_active_loras,
+                max_query_len=max_query_len,
+            )
+
+        manager.dispatch = dispatch  # type: ignore[method-assign]
+        manager._310p_pc_eager_wrapped = True  # type: ignore[attr-defined]
+
     def _sync_num_computed_tokens_gpu_from_np(self) -> None:
-        """Mirror ``num_computed_tokens_np`` onto GPU before mamba preprocess."""
+        """Mirror ``num_computed_tokens_np`` onto GPU before mamba preprocess.
+
+        Must run after ``add_requests`` / ``update_requests`` (see ``prepare_inputs``):
+        ``update_requests`` only refreshes the CPU/np mirror for cached requests,
+        and prefix-cache hits seed ``num_computed_tokens_np`` in ``add_request`` while
+        the GPU tensor may still hold a freed slot or pre-``apply_staged_writes``
+        value. Hybrid align ``preprocess_state`` reads the GPU tensor, so syncing too
+        early in ``execute_model`` leaves stale counts and corrupts recurrent state.
+        """
         np_vals = self.req_states.num_computed_tokens_np
         gpu = self.req_states.num_computed_tokens.gpu
         gpu.copy_(torch.from_numpy(np_vals).to(device=gpu.device, dtype=gpu.dtype))
         self.req_states.num_computed_tokens_cpu.copy_(torch.from_numpy(np_vals))
         self.req_states.num_computed_tokens.cpu.copy_(torch.from_numpy(np_vals))
+
+    def _advance_num_computed_tokens(self, valid_indices: torch.Tensor, query_lens: torch.Tensor) -> None:
+        """Advance per-request computed counts on both CPU mirror and GPU tensor."""
+        if valid_indices.numel() == 0:
+            return
+        vi = valid_indices.detach().cpu().numpy()
+        ql = query_lens.detach().cpu().numpy().astype(np.int32, copy=False)
+        self.req_states.num_computed_tokens_np[vi] += ql
+        self.req_states.num_computed_tokens.gpu.index_add_(
+            0,
+            valid_indices,
+            query_lens.to(self.req_states.num_computed_tokens.gpu.dtype),
+        )
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: Any | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        is_profile: bool = False,
+        context_len: int = 0,
+    ):
+        self._force_eager_pc_batch = False
+        if not dummy_run:
+            self._force_eager_pc_batch = self._scheduler_output_needs_pc_eager(scheduler_output)
+        try:
+            if vllm_version_is("0.27.1"):
+                return super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                )
+            return super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+            )
+        finally:
+            self._force_eager_pc_batch = False
 
     if vllm_version_is("0.27.1"):
 
@@ -392,6 +533,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         if kv_cache_config.needs_kv_cache_zeroing:
             self._init_kv_zero_meta()
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        self._install_pc_eager_cudagraph_dispatch()
 
     def _adjust_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> None:
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
@@ -727,12 +869,12 @@ class NPUModelRunner310V2(NPUModelRunner):
 
         if query_start_loc is not None:
             query_lens = self._get_valid_query_lens(idx_mapping, query_start_loc)
-            self.req_states.num_computed_tokens.gpu.index_add_(
-                0,
-                valid_indices,
-                query_lens.to(self.req_states.num_computed_tokens.gpu.dtype),
-            )
-        self.model_state.postprocess_state(idx_mapping, num_sampled)
+            self._advance_num_computed_tokens(valid_indices, query_lens)
+        self.model_state.postprocess_state(
+            idx_mapping,
+            num_sampled,
+            self.req_states.num_computed_tokens.gpu,
+        )
 
     @staticmethod
     def _get_valid_query_lens(
@@ -745,11 +887,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         return query_lens.masked_select(idx_mapping[:num_query_lens] >= 0)
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
-        # TODO: Refactor this 310P state update to use Triton Dispatcher after
-        # vLLM RFC #45133 lands.
-        query_lens = input_batch.query_start_loc[1:] - input_batch.query_start_loc[:-1]
-        self.req_states.num_computed_tokens.gpu.index_add_(
-            0,
-            input_batch.idx_mapping,
-            query_lens.to(self.req_states.num_computed_tokens.gpu.dtype),
-        )
+        # ``postprocess_sampled`` already advances ``num_computed_tokens`` on
+        # both the CPU mirror and GPU tensor. Upstream GPU MRv2 splits the work
+        # across ``post_update`` + ``postprocess_num_computed_tokens``; our
+        # Triton-free ``postprocess_sampled`` performs both updates in one pass.
+        del input_batch
