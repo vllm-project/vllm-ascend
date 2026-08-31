@@ -12,6 +12,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoEAllGatherCom
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
+    FusedMC2CommImpl,
     MC2CommImpl,
 )
 from vllm_ascend.quantization.methods.base import QuantType
@@ -279,3 +280,87 @@ class TestMoECommMethod(TestBase):
             hidden_states=mock_unified_apply_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils.load_cann_mega_moe_ops")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.is_mega_moe_supported", return_value=True)
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
+    def test_fused_mc2_init_skips_mega_moe_load_when_fused_mc2_disabled(
+        self,
+        mock_token_dispatcher,
+        mock_prepare_finalize,
+        mock_is_mega_moe_supported,
+        mock_load_cann_mega_moe_ops,
+    ):
+        # EP>1 always constructs FusedMC2CommImpl. Default enable_fused_mc2=0
+        # must not JIT-import cann_ops_transformer even if the package exists.
+        self.mock_ascend_config.enable_fused_mc2 = 0
+        self.moe_config.swiglu_limit = None
+        self.moe_config.swiglu_alpha = None
+        self.moe_config.swiglu_beta = None
+        mock_token_dispatcher.return_value = MagicMock()
+        mock_prepare_finalize.return_value = MagicMock()
+
+        comm_impl = FusedMC2CommImpl(self.moe_config)
+
+        mock_load_cann_mega_moe_ops.assert_not_called()
+        self.assertIsNone(comm_impl.expert_token_nums)
+        self.assertFalse(hasattr(comm_impl, "mega_moe"))
+
+    @patch("torch.zeros")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils.load_cann_mega_moe_ops")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.is_mega_moe_supported", return_value=True)
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
+    def test_fused_mc2_init_loads_mega_moe_when_fused_mc2_enabled_and_supported(
+        self,
+        mock_token_dispatcher,
+        mock_prepare_finalize,
+        mock_is_mega_moe_supported,
+        mock_load_cann_mega_moe_ops,
+        mock_zeros,
+    ):
+        # enable_fused_mc2=2 remaps to 1 while keeping mega_moe supported.
+        self.mock_ascend_config.enable_fused_mc2 = 1
+        self.moe_config.swiglu_limit = None
+        self.moe_config.swiglu_alpha = None
+        self.moe_config.swiglu_beta = None
+        mock_token_dispatcher.return_value = MagicMock()
+        mock_prepare_finalize.return_value = MagicMock()
+        mock_get_symm_buffer = MagicMock()
+        mock_mega_moe = MagicMock()
+        mock_load_cann_mega_moe_ops.return_value = (mock_get_symm_buffer, mock_mega_moe)
+        mock_zeros.return_value = MagicMock()
+
+        comm_impl = FusedMC2CommImpl(self.moe_config)
+
+        mock_load_cann_mega_moe_ops.assert_called_once()
+        self.assertIs(comm_impl.get_symm_buffer_for_mega_moe, mock_get_symm_buffer)
+        self.assertIs(comm_impl.mega_moe, mock_mega_moe)
+
+    @patch("torch.zeros")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils.load_cann_mega_moe_ops")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.is_mega_moe_supported", return_value=False)
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
+    def test_fused_mc2_init_skips_mega_moe_load_when_rolled_back(
+        self,
+        mock_token_dispatcher,
+        mock_prepare_finalize,
+        mock_is_mega_moe_supported,
+        mock_load_cann_mega_moe_ops,
+        mock_zeros,
+    ):
+        # enable_fused_mc2=1 rolls mega_moe back to dispatch_ffn_combine.
+        self.mock_ascend_config.enable_fused_mc2 = 1
+        self.moe_config.swiglu_limit = None
+        self.moe_config.swiglu_alpha = None
+        self.moe_config.swiglu_beta = None
+        mock_token_dispatcher.return_value = MagicMock()
+        mock_prepare_finalize.return_value = MagicMock()
+        mock_zeros.return_value = MagicMock()
+
+        comm_impl = FusedMC2CommImpl(self.moe_config)
+
+        mock_load_cann_mega_moe_ops.assert_not_called()
+        self.assertFalse(hasattr(comm_impl, "mega_moe"))

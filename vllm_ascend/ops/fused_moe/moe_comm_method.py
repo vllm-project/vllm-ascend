@@ -259,10 +259,15 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
-        if is_mega_moe_supported():
+        # FusedMC2CommImpl is constructed whenever ep_size > 1, even if fused
+        # MC2 is disabled. cann_ops_transformer JIT-loads npu_mega_moe.so on
+        # import, so only load it when fused MC2 will actually use mega_moe
+        # (enable_fused_mc2=2 remaps to 1 and keeps is_mega_moe_supported()).
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if ascend_config.enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
