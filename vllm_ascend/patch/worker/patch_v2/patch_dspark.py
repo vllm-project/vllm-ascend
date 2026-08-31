@@ -64,6 +64,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
     if bypass_pp_guard:
+        # The upstream loader checks the live PP group independently of config.
         single_rank_pp_group = SimpleNamespace(world_size=1)
         dspark_utils.get_pp_group = lambda: single_rank_pp_group
 
@@ -76,6 +77,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
 
         eagle_utils._should_share = should_share
     try:
+        # get_model also reads the config PP size; keep the draft unsharded.
         with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
             return _original_load_dspark_model(target_model, vllm_config)
     finally:

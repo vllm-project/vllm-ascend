@@ -116,6 +116,8 @@ class NPUModelRunner(GPUModelRunner):
         if parallel_config.decode_context_parallel_size > 1:
             raise NotImplementedError("Decode context parallelism is not supported by Ascend NPU model runner v2.")
 
+        # Eagle3/DSpark drafters are rank-local. Hide PP from the upstream
+        # initializer, then rebuild the skipped PP state.
         spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
             with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support) as pp_disabled:
@@ -123,6 +125,7 @@ class NPUModelRunner(GPUModelRunner):
             if pp_disabled:
                 restore_pp_after_upstream_init(self, vllm_config)
         self.use_spec_pp = spec_pp_support is not None
+        # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
 
