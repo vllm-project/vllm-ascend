@@ -492,6 +492,7 @@ def build_dspark_swa_indices(
     seq_lens: torch.Tensor,
     num_decode_tokens: int | None = None,
     index_width: int | None = None,
+    indices_output: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
@@ -530,6 +531,15 @@ def build_dspark_swa_indices(
 
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
     per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
+
+    if indices_output is not None:
+        if indices_output.shape != per_token_slots.shape:
+            raise ValueError(
+                "DSpark SWA indices output shape does not match active metadata: "
+                f"output={tuple(indices_output.shape)}, active={tuple(per_token_slots.shape)}"
+            )
+        indices_output.copy_(per_token_slots)
+        per_token_slots = indices_output
 
     return per_token_slots, per_token_lens
 
@@ -658,6 +668,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         self.prefill_compressor_metadata_buffers: CompressorMetadataOutput | None = None
         self.decode_compressor_metadata_buffers: CompressorMetadataOutput | None = None
+        self.dspark_swa_indices_buffer: torch.Tensor | None = None
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
@@ -748,6 +759,19 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             torch.empty(output_shape, dtype=torch.float32, device=self.device),
             torch.empty(output_shape, dtype=torch.float32, device=self.device),
             torch.empty(self.slot_mapping_shape, dtype=torch.int32, device=self.device),
+        )
+
+    def enable_dspark_device_metadata(self, max_num_tokens: int) -> None:
+        self.enable_device_metadata()
+        assert self.speculative_config is not None
+        index_width = _aligned_dspark_index_width(
+            self.model_config.hf_config.sliding_window,
+            self.speculative_config.num_speculative_tokens,
+        )
+        self.dspark_swa_indices_buffer = torch.empty(
+            (max_num_tokens, 1, index_width),
+            dtype=torch.int32,
+            device=self.device,
         )
 
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
@@ -1381,6 +1405,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         **kwargs,
     ) -> AscendDSADecodeMetadata:
         assert self.compressor_ratio <= 1, "vLLM-Ascend only support SWA-layer for Deepseek-V4 now."
+        self._device_metadata_tasks = ()
         # DSpark drafting operates on the paged SWA cache, whose block size is the
         # kv_cache_spec block size passed by the proposer (== swa_cache_layer.block_size),
         # NOT this builder's default MLA block size (128). Honor the kwarg so the
@@ -1554,11 +1579,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         slot_mapping = self.spec_slot_mapping[draft_index - 1][:num_decode_tokens_typed]  # type: ignore[index]
         dspark_swa_indices = None
+        build_dspark_swa = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         block_table = common_attn_metadata.block_table_tensor
         if not common_attn_metadata.causal:
             assert num_decodes is not None
-            dspark_swa_indices, _ = build_dspark_swa_indices(
+            dspark_swa_args = (
                 block_table[:num_decodes],
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
@@ -1567,37 +1593,68 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens[:num_decodes],
                 num_decode_tokens,
             )
-            dspark_swa_indices = dspark_swa_indices[:num_decode_tokens_typed]
+            if self._device_metadata_enabled and num_decodes_typed == common_attn_metadata.num_reqs:
+                if self.dspark_swa_indices_buffer is None:
+                    raise RuntimeError(
+                        "DSpark device metadata buffers must be initialized before building draft attention metadata"
+                    )
+                if num_decode_tokens_typed > self.dspark_swa_indices_buffer.shape[0]:
+                    raise ValueError(
+                        "DSpark SWA metadata rows exceed the persistent buffer capacity: "
+                        f"active={num_decode_tokens_typed}, capacity={self.dspark_swa_indices_buffer.shape[0]}"
+                    )
+                dspark_swa_indices = self.dspark_swa_indices_buffer[:num_decode_tokens_typed]
+                build_dspark_swa = lambda: build_dspark_swa_indices(
+                    *dspark_swa_args,
+                    indices_output=dspark_swa_indices,
+                )
+            else:
+                dspark_swa_indices, _ = build_dspark_swa_indices(*dspark_swa_args)
+                dspark_swa_indices = dspark_swa_indices[:num_decode_tokens_typed]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         metadata_op = DeviceOperator.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = DeviceOperator.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
 
-        decode_sas_metadata = metadata_op(
-            **metadata_kwargs,
-            num_heads_q=n_local_heads,
-            num_heads_kv=1,
-            head_dim=self.model_config.get_head_size(),
-            cu_seqlens_q=query_start_loc,
-            cu_seqlens_ori_kv=self.cu_seqlens_ori_kv,
-            cu_seqlens_cmp_kv=self.cu_seqlens_cmp_kv,
-            seqused_q=self.seqused_q,
-            seqused_kv=seq_lens[:num_decodes],
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            batch_size=len(seq_lens[:num_decodes]),
-            cmp_ratio=1,
-            ori_mask_mode=4,
-            cmp_mask_mode=3,
-            ori_win_left=ori_win_left,
-            ori_win_right=ori_win_right,
-            layout_q="TND",
-            layout_kv="PA_ND",
-            has_ori_kv=True,
-            has_cmp_kv=False,
-        )
-        self.spec_sas_metadata[draft_index - 1][:1024].copy_(decode_sas_metadata[:1024])
+        def build_attention_metadata() -> None:
+            if build_dspark_swa is not None:
+                build_dspark_swa()
+            result = metadata_op(
+                **metadata_kwargs,
+                num_heads_q=n_local_heads,
+                num_heads_kv=1,
+                head_dim=self.model_config.get_head_size(),
+                cu_seqlens_q=query_start_loc,
+                cu_seqlens_ori_kv=self.cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=self.cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
+                seqused_kv=seq_lens[:num_decodes],
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                batch_size=len(seq_lens[:num_decodes]),
+                cmp_ratio=1,
+                ori_mask_mode=4,
+                cmp_mask_mode=3,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
+                layout_q="TND",
+                layout_kv="PA_ND",
+                has_ori_kv=True,
+                has_cmp_kv=False,
+            )
+            self.spec_sas_metadata[draft_index - 1][:1024].copy_(result[:1024])
+
         decode_sas_metadata = self.spec_sas_metadata[draft_index - 1]
+        if build_dspark_swa is not None:
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(
+                    DeviceMetadataStage.ATTENTION,
+                    build_attention_metadata,
+                    id(decode_sas_metadata),
+                ),
+            )
+        else:
+            build_attention_metadata()
 
         decode_metadata = AscendDSADecodeMetadata(
             input_positions=None,

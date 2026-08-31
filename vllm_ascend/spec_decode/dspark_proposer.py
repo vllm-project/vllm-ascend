@@ -12,6 +12,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -202,6 +203,16 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark standard-cache path requires registered draft attention "
                 f"groups. Missing layers: {self.attn_layer_names}"
             )
+
+        if (
+            getattr(self.runner, "device_metadata_executor", None) is not None
+            and self.dcp_size == 1
+            and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
+        ):
+            for attn_group in self.draft_attn_groups:
+                builder = attn_group.get_metadata_builder()
+                if isinstance(builder, AscendDSAMetadataBuilder):
+                    builder.enable_dspark_device_metadata(self.max_query_tokens)
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]

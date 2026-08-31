@@ -20,12 +20,14 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.spec_decode.dspark_proposer as dspark_proposer_module
@@ -33,6 +35,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -41,6 +44,197 @@ _NUM_SPECULATIVE_TOKENS = 3
 _MAX_BATCH_SIZE = 2
 _MAX_NUM_TOKENS = 8
 _HIDDEN_SIZE = 16
+
+
+@pytest.mark.parametrize(
+    ("dcp_size", "pcp_size", "expected_submit"),
+    [(1, 1, True), (2, 1, False), (1, 2, False)],
+)
+def test_build_draft_metadata_submits_only_non_cp_device_tasks(
+    dcp_size: int,
+    pcp_size: int,
+    expected_submit: bool,
+):
+    tasks = [DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, group_id) for group_id in (7, 9)]
+
+    class DraftMetadataProvider:
+        def __init__(self, task):
+            self.task = task
+
+        def enable_device_metadata(self):
+            pass
+
+        def take_device_metadata_tasks(self):
+            return (self.task,)
+
+        def build_for_drafting(self, common_attn_metadata, draft_index, **kwargs):
+            return SimpleNamespace()
+
+    builders = [DraftMetadataProvider(task) for task in tasks]
+    groups = [
+        SimpleNamespace(
+            kv_cache_group_id=group_id,
+            layer_names=[f"draft.attn.{group_id}"],
+            get_metadata_builder=lambda builder=builder: builder,
+        )
+        for group_id, builder in enumerate(builders)
+    ]
+    executor = MagicMock()
+    proposer = SimpleNamespace(
+        draft_attn_groups=groups,
+        use_compress=False,
+        method="dspark",
+        runner=SimpleNamespace(device_metadata_executor=executor),
+        dcp_size=dcp_size,
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=pcp_size),
+        ),
+        _per_group_block_table_buffers={group_id: torch.ones((1, 1), dtype=torch.int32) for group_id in range(2)},
+        _per_group_query_slot_mapping_buffers={group_id: torch.zeros(1, dtype=torch.int32) for group_id in range(2)},
+    )
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=1,
+        block_table_tensor=torch.ones((1, 1), dtype=torch.int32),
+        slot_mapping=torch.zeros(1, dtype=torch.int32),
+    )
+
+    metadata, first = AscendSpecDecodeBaseProposer.build_draft_attn_metadata(
+        proposer,
+        common_attn_metadata,
+        num_input_tokens=1,
+        num_actual_tokens=1,
+    )
+
+    assert metadata[0]["draft.attn.0"] is first
+    if expected_submit:
+        executor.submit.assert_called_once_with(tasks)
+    else:
+        executor.submit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("has_task", "failure"),
+    [(True, None), (False, None), (True, "run"), (True, "context")],
+)
+def test_dspark_device_metadata_executor_forward_lifecycle(has_task: bool, failure: str | None):
+    events = []
+    executor = SimpleNamespace(submission_in_flight=False)
+
+    def release():
+        events.append("release")
+        executor.submission_in_flight = False
+
+    executor.release = release
+    runner = SimpleNamespace(
+        device_metadata_executor=executor,
+        dcp_manager=None,
+        input_batch=SimpleNamespace(lora_id_to_lora_request={}),
+        _sync_metadata_across_dp=lambda num_tokens, **kwargs: (num_tokens, torch.tensor(1), None),
+        dynamic_eplb=False,
+        eplb_heat_collection_status=False,
+    )
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.runner = runner
+    proposer.method = "dspark"
+    proposer.model = SimpleNamespace(combine_hidden_states=lambda hidden_states: hidden_states)
+    proposer.get_model = lambda: proposer.model
+    proposer.hidden_size = 4
+    proposer.use_cuda_graph = False
+    proposer.dcp_size = 1
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(use_mla=True))
+    proposer.draft_window_size = None
+    proposer.supports_mm_inputs = False
+    proposer.slot_mapping_group = [torch.zeros(2, dtype=torch.int32)]
+    proposer.seq_lens_group = [torch.zeros(2, dtype=torch.int32)]
+    proposer.query_start_loc_group = [torch.zeros(3, dtype=torch.int32)]
+    proposer._pad_draft_buffers = MagicMock()
+    proposer._prepare_parallel_draft_seq_lens_cpu = MagicMock()
+    proposer.uses_mrope = False
+    proposer.positions = torch.arange(2, dtype=torch.int32)
+    proposer.parallel_drafting = True
+    proposer.token_indices_to_sample = torch.zeros(2, dtype=torch.int32)
+    proposer.enable_enpu = False
+    proposer._update_full_graph_params_if_needed = MagicMock()
+    proposer.set_inputs_first_pass = MagicMock()
+    proposer.build_draft_attn_metadata = MagicMock()
+
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+    common_attn_metadata = SimpleNamespace(
+        batch_size=lambda: 1,
+        num_reqs=1,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor([8], dtype=torch.int32),
+        seq_lens_cpu=torch.tensor([8], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([8], dtype=torch.int32),
+        block_table_tensor=torch.ones((1, 1), dtype=torch.int32),
+        slot_mapping=torch.zeros(1, dtype=torch.int32),
+    )
+    proposer.set_inputs_first_pass.return_value = (
+        1,
+        torch.tensor([0], dtype=torch.int32),
+        common_attn_metadata,
+        None,
+    )
+
+    def build_metadata(*args, **kwargs):
+        events.append("submit" if has_task else "build")
+        executor.submission_in_flight = has_task
+        metadata = {"draft.attn": SimpleNamespace(num_prefills=0)}
+        return [metadata], metadata["draft.attn"]
+
+    proposer.build_draft_attn_metadata.side_effect = build_metadata
+
+    def run_draft(**kwargs):
+        events.append("run")
+        if failure == "run":
+            raise RuntimeError("draft run failed")
+        return torch.ones((1, 1), dtype=torch.int64)
+
+    proposer._runnable = run_draft
+    forward_context = SimpleNamespace(moe_layer_index=-1, cudagraph_runtime_mode=CUDAGraphMode.NONE)
+    context_executors = []
+
+    @contextmanager
+    def forward_context_manager(*args, **kwargs):
+        context_executors.append(kwargs["device_metadata_executor"])
+        events.append("context")
+        if failure == "context":
+            raise RuntimeError("draft context failed")
+        yield
+
+    with (
+        patch("vllm_ascend.spec_decode.llm_base_proposer.DSparkDeepseekV4ForCausalLM", object),
+        patch("vllm_ascend.spec_decode.llm_base_proposer.set_ascend_forward_context", forward_context_manager),
+        patch("vllm_ascend.spec_decode.llm_base_proposer.get_forward_context", return_value=forward_context),
+    ):
+        call = lambda: AscendSpecDecodeBaseProposer._propose(
+            proposer,
+            target_token_ids=torch.ones(1, dtype=torch.int64),
+            target_positions=torch.zeros(1, dtype=torch.int32),
+            target_hidden_states=torch.ones((1, 4)),
+            next_token_ids=torch.ones(1, dtype=torch.int64),
+            token_indices_to_sample=torch.tensor([0], dtype=torch.int32),
+            common_attn_metadata=common_attn_metadata,
+            target_model_batch_desc=SimpleNamespace(uniform=True),
+            sampling_metadata=MagicMock(),
+        )
+        if failure is None:
+            result = call()
+            assert torch.equal(result, torch.ones((1, 1), dtype=torch.int64))
+        else:
+            with pytest.raises(RuntimeError, match=f"draft {failure} failed"):
+                call()
+
+    assert context_executors == [executor if has_task else None]
+    expected_events = ["submit" if has_task else "build", "context"]
+    if failure != "context":
+        expected_events.append("run")
+    if has_task and failure is None:
+        expected_events.append("release")
+    assert events == expected_events
+    if failure is not None:
+        assert executor.submission_in_flight
 
 
 class _DSparkProposerTestBase:
@@ -743,13 +937,71 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
     @staticmethod
     def _make_proposer_for_init():
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer.vllm_config = SimpleNamespace()
+        proposer.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        )
         # The real proposer constructor always sets this field.  These
         # lightweight initializer tests bypass __init__, so preserve that
         # production invariant with a generic non-K3 draft config.
         proposer.draft_model_config = SimpleNamespace(hf_config=object())
         proposer.device = torch.device("cpu")
+        proposer.runner = SimpleNamespace(device_metadata_executor=None)
+        proposer.dcp_size = 1
         return proposer
+
+    @pytest.mark.parametrize(
+        ("dcp_size", "pcp_size", "has_executor", "expected_tokens"),
+        [
+            (1, 1, True, 8),
+            (2, 1, True, None),
+            (1, 2, True, None),
+            (1, 1, False, None),
+        ],
+    )
+    def test_initializes_device_metadata_only_for_eligible_dsa_draft(
+        self,
+        monkeypatch,
+        dcp_size,
+        pcp_size,
+        has_executor,
+        expected_tokens,
+    ):
+        class DraftBuilder:
+            def __init__(self):
+                self.max_num_tokens = None
+
+            def enable_dspark_device_metadata(self, max_num_tokens):
+                self.max_num_tokens = max_num_tokens
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.backend"
+        layer = MagicMock()
+        layer.get_attn_backend.return_value = backend
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            lambda *args, **kwargs: {"L0": layer},
+        )
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(get_draft_kv_cache_layer_names=lambda: {"L0"})
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        proposer.dcp_size = dcp_size
+        proposer.vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+        proposer.runner.device_metadata_executor = object() if has_executor else None
+        kv_cache_spec = MagicMock(block_size=128)
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(layer_names=["L0"], kv_cache_spec=kv_cache_spec)]
+        )
+        builder = DraftBuilder()
+
+        with (
+            patch.object(AttentionGroup, "create_metadata_builders"),
+            patch.object(AttentionGroup, "get_metadata_builder", return_value=builder),
+            patch("vllm_ascend.spec_decode.dspark_proposer.AscendDSAMetadataBuilder", DraftBuilder),
+        ):
+            proposer.initialize_attn_backend(kv_cache_config)
+
+        assert builder.max_num_tokens == expected_tokens
 
     def test_model_without_draft_layer_names_raises(self, monkeypatch):
         # get_layers_from_vllm_config is called first; stub it so the model

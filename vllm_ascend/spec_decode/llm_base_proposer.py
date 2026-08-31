@@ -64,6 +64,7 @@ from vllm_ascend.spec_decode.utils import (
     patch_tensor_parallel_group,
 )
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable
+from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -1252,6 +1253,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        active_device_metadata_executor = (
+            getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
+        )
+        if active_device_metadata_executor is not None and not active_device_metadata_executor.submission_in_flight:
+            active_device_metadata_executor = None
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -1262,6 +1268,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
+            device_metadata_executor=active_device_metadata_executor,
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
             ),
@@ -1290,6 +1297,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        if active_device_metadata_executor is not None:
+            active_device_metadata_executor.release()
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):
@@ -2413,8 +2422,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
         per_layer_attn_metadata: dict[str, Any] = {}
+        device_metadata_tasks: list[DeviceMetadataTask] = []
+        device_metadata_executor = (
+            getattr(self.runner, "device_metadata_executor", None)
+            if self.method == "dspark"
+            and self.dcp_size == 1
+            and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
+            else None
+        )
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
+            device_metadata_provider = (
+                builder
+                if device_metadata_executor is not None and isinstance(builder, DeviceMetadataTaskProvider)
+                else None
+            )
             extra_attn_metadata_args: dict = {}
             if self.use_compress:
                 extra_attn_metadata_args = dict(
@@ -2435,6 +2457,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
+                if device_metadata_provider is not None:
+                    device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             else:
                 attn_metadata = builder.build(
                     0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
@@ -2444,6 +2468,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
+        if device_metadata_tasks:
+            assert device_metadata_executor is not None
+            device_metadata_executor.submit(device_metadata_tasks)
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
         attn_metadata_i = per_layer_attn_metadata[self.draft_attn_groups[0].layer_names[0]]
