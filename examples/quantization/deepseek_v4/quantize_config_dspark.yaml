@@ -1,0 +1,70 @@
+apiversion: modelslim_v1
+metadata:
+  config_id: deepseek_v4_dspark_w8a8
+  score: 90
+  verified_model_types:
+    - DeepSeek-V4-Flash-DSpark
+    - DeepSeek-V4-Pro-DSpark
+  verified_tags:
+    DeepSeek-V4-Flash-DSpark:
+      - - vLLM-Ascend
+        - Atlas_A3_Inference
+    DeepSeek-V4-Pro-DSpark:
+      - - vLLM-Ascend
+        - Atlas_A3_Inference
+  label:
+    w_bit: 8
+    a_bit: 8
+    is_sparse: False
+    kv_cache: False
+
+default_w8a8_dynamic: &default_w8a8_dynamic
+  act:
+    scope: "per_token"
+    dtype: "int8"
+    symmetric: True
+    method: "minmax"
+  weight:
+    scope: "per_channel"
+    dtype: "int8"
+    symmetric: True
+    method: "minmax"
+
+spec:
+  process:
+    # quaRot/smoothQuant are not executed in this script
+    # Rule 1: attention layers. wo_a is excluded from quantization for BOTH
+    # main model (kept as BF16 FLOAT) and draft model (kept as FP8+scale,
+    # because vllm-ascend dspark load_weights has a dedicated FP8->BF16
+    # dequant path for draft wo_a). wo_b is NOT excluded (draft model
+    # is_layer_skipped_ascend returns False, must be quantized).
+    - type: "linear_quant"
+      qconfig: *default_w8a8_dynamic
+      include:
+        - "*attn*"
+      exclude:
+        - "*attn.wq_a"
+        - "*attn.wkv"
+        - "*attn.wo_a"
+        - "*weights_proj"
+        - "*compressor.wgate"
+        - "*compressor.wkv"
+        - "*indexer.wkv"
+        - "*indexer.wgate"
+        - "*indexer.weights_proj"
+        - "*indexer.compressor.wgate"
+        - "*indexer.compressor.wkv"
+    - type: "linear_quant"
+      qconfig: *default_w8a8_dynamic
+      include:
+        - "*ffn*"
+      exclude:
+        - "*gate"
+    # DSpark MTP uses main_proj instead of e_proj/h_proj
+    - type: "linear_quant"
+      qconfig: *default_w8a8_dynamic
+      include:
+        - "*main_proj"
+  save:
+    - type: "ascendv1_saver"
+      part_file_size: 4
