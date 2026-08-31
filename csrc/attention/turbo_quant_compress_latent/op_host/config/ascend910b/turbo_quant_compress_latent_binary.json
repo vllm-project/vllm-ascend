@@ -1,0 +1,49 @@
+{
+  "op_type": "TurboQuantCompressLatent",
+  "op_list": [
+    {
+      "bin_filename": "TurboQuantCompressLatent_ND_ND_ND_fp32_fp32_uint8",
+      "inputs": [
+        {
+          "name": "latent",
+          "index": 0,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ]
+        },
+        {
+          "name": "centroids",
+          "index": 1,
+          "dtype": "float32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "slot",
+          "index": 0,
+          "dtype": "uint8",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [
+            -2
+          ]
+        }
+      ],
+      "attrs": [
+        {
+          "name": "output_mode",
+          "dtype": "int",
+          "value": 0
+        }
+      ]
+    }
+  ]
+}
