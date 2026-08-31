@@ -53,29 +53,6 @@ if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_
     )
 
 
-def _make_ascend_kv_cache_tensor(
-    size: int,
-    layer_names: list[str],
-    page_size: int,
-) -> KVCacheTensor:
-    """Build a KVCacheTensor for Ascend's shared-buffer model.
-
-    vLLM #51718 renamed `shared_by` to `layers` and made `layer_stride`
-    required on main. Ascend's runner only consumes `size` and the layer
-    names, so layer_stride/block_stride are set to the page size to form a
-    valid, self-consistent descriptor.
-    """
-    if vllm_version_is("0.27.1"):
-        return KVCacheTensor(size=size, shared_by=layer_names)
-    return KVCacheTensor(
-        size=size,
-        layers=layer_names,
-        layer_stride=page_size,
-        block_stride=page_size,
-        offset=0,
-    )
-
-
 def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     """Distinct page sizes across a group's cache specs.
 
@@ -397,7 +374,7 @@ def _get_kv_cache_config_deepseek_v4(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> tuple[int, list[KVCacheTensor]]:
-    """Plan DSV4 tensors using Ascend's shared layer-tuple layout."""
+    """Plan v0.27.1 DSV4 tensors using the shared_by contract."""
     page_sizes, bucketed, mtp_layer_names, mtp_page_size, num_layer_tuples = _get_deepseek_v4_cache_layout(
         kv_cache_groups
     )
@@ -414,13 +391,81 @@ def _get_kv_cache_config_deepseek_v4(
                 bucket = b.get(ps)
                 if bucket is not None and tuple_idx < len(bucket):
                     shared_by.append(bucket[tuple_idx])
-            kv_cache_tensors.append(_make_ascend_kv_cache_tensor(ps * num_blocks, shared_by, ps))
+            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=shared_by))
     for i in range(len(mtp_layer_names)):
         kv_cache_tensors.append(
-            _make_ascend_kv_cache_tensor(mtp_page_size * num_blocks, [mtp_layer_names[i]], mtp_page_size)
+            KVCacheTensor(
+                size=mtp_page_size * num_blocks,
+                shared_by=[mtp_layer_names[i]],
+            )
         )
 
     return num_blocks, kv_cache_tensors
+
+
+def _get_kv_cache_config_deepseek_v4_main(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    (
+        page_sizes,
+        bucketed,
+        mtp_layer_names,
+        mtp_page_size,
+        num_tuple_slots,
+    ) = _get_deepseek_v4_cache_layout(kv_cache_groups)
+
+    bytes_per_tuple = sum(page_sizes)
+    num_blocks = available_memory // (bytes_per_tuple * num_tuple_slots)
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+
+    tuple_stride = bytes_per_tuple * num_blocks
+    backing_size = tuple_stride * num_tuple_slots
+
+    # Within every tuple slot, page-size buckets are placed consecutively.
+    page_offsets: dict[int, int] = {}
+    page_prefix = 0
+    for page_size in page_sizes:
+        page_offsets[page_size] = page_prefix * num_blocks
+        page_prefix += page_size
+
+    tensors: list[KVCacheTensor] = []
+
+    # Keep each descriptor inside one cache group. Descriptors from different
+    # groups alias corresponding tuple slots by using identical geometry.
+    for group_buckets in bucketed:
+        for page_size in page_sizes:
+            layer_names = group_buckets.get(page_size)
+            if not layer_names:
+                continue
+
+            tensors.append(
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=list(layer_names),
+                    offset=page_offsets[page_size],
+                    layer_stride=tuple_stride,
+                    block_stride=page_size,
+                )
+            )
+
+    # MTP layers receive trailing tuple slots. Unused page buckets remain
+    # padding so num_blocks and memory accounting retain the existing contract.
+    normal_tuple_slots = num_tuple_slots - len(mtp_layer_names)
+    for index, layer_name in enumerate(mtp_layer_names):
+        slot = normal_tuple_slots + index
+        tensors.append(
+            KVCacheTensor(
+                size=backing_size,
+                layers=[layer_name],
+                offset=slot * tuple_stride + page_offsets[mtp_page_size],
+                layer_stride=0,
+                block_stride=mtp_page_size,
+            )
+        )
+
+    return num_blocks, tensors
 
 
 def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
@@ -486,7 +531,7 @@ def _ascend_get_kv_cache_config_from_groups(
     if vllm_version_is("0.27.1") or not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
 
-    num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4(
+    num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
         vllm_config,
         kv_cache_groups,
         available_memory,
@@ -503,10 +548,11 @@ vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_ca
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
-# vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and
-# get_kv_cache_config_from_groups now calls _get_kv_cache_config_packed directly, bypassing
-# the alias patch above. Patch the canonical name so Ascend's non-packed layout is used.
-vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
+# vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to
+# _get_kv_cache_config_packed. The v0.27.1 planner still consumes shared_by;
+# main uses _ascend_get_kv_cache_config_from_groups and the stride-aware planner.
+if vllm_version_is("0.27.1"):
+    vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
