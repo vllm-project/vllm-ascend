@@ -20,14 +20,12 @@ from typing import Any, TypeVar
 
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import (
-    get_forward_context,
-    is_forward_context_available,
-)
+from vllm.config import VllmConfig
+from vllm.forward_context import is_forward_context_available
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -240,25 +238,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         return padded
 
     @staticmethod
-    def _in_graph_runtime() -> bool:
-        if torch.npu.is_current_stream_capturing():
-            return True
+    def _is_graph_capturing() -> bool:
         if not is_forward_context_available():
             return False
-        forward_context = get_forward_context()
-        runtime_mode = getattr(
-            forward_context,
-            "cudagraph_runtime_mode",
-            CUDAGraphMode.NONE,
-        )
-        # ``ForwardContext.capturing`` was removed in vLLM 0.27.1. The
-        # runtime mode remains the authoritative signal for graph replay on
-        # current vLLM, while older versions may still expose ``capturing``
-        # during graph capture.
-        return getattr(forward_context, "capturing", False) or runtime_mode not in (
-            None,
-            CUDAGraphMode.NONE,
-        )
+        return bool(_EXTRA_CTX.capturing)
 
     def forward(
         self,
@@ -323,7 +306,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 k=k_nope,
                 v=k_pe,
                 has_prefill=False,
-                capturing=self._in_graph_runtime(),
+                capturing=self._is_graph_capturing(),
             )
             return k_pe, k_nope
 
@@ -344,7 +327,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             k=None,
             v=None,
             has_prefill=True,
-            capturing=self._in_graph_runtime(),
+            capturing=self._is_graph_capturing(),
         )
         return result
 
@@ -438,7 +421,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             decode_req_ids,
             decode_stable_prefix_lens,
             token_to_req,
-            capturing=self._in_graph_runtime(),
+            capturing=self._is_graph_capturing(),
             skip_topk=self.skip_topk,
         )
         decode_attn_output = DeviceOperator.execute_sparse_flash_attention_process(

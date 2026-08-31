@@ -8,8 +8,6 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
-from vllm.config.compilation import CUDAGraphMode  # noqa: E402
-
 from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E402
 from vllm_ascend.attention.sfa_kv_offload import (  # noqa: E402
     AscendSFAKVOffloadImpl,
@@ -106,45 +104,32 @@ def test_pd_decode_consumer_still_rejects_long_prefill_classification():
 
 
 @pytest.mark.parametrize(
-    ("runtime_mode", "expected"),
+    ("capturing", "expected"),
     [
-        (CUDAGraphMode.NONE, False),
-        (CUDAGraphMode.PIECEWISE, True),
+        (None, False),
+        (False, False),
+        (True, True),
     ],
 )
-def test_graph_runtime_supports_forward_context_without_capturing(runtime_mode, expected):
-    forward_context = SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
+def test_graph_capture_uses_extra_forward_context(capturing, expected):
     with (
         patch(
-            "vllm_ascend.attention.sfa_kv_offload.torch.npu.is_current_stream_capturing",
+            "vllm_ascend.attention.sfa_kv_offload._EXTRA_CTX",
+            SimpleNamespace(capturing=capturing),
+        ),
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.is_forward_context_available",
+            return_value=True,
+        ),
+    ):
+        assert AscendSFAKVOffloadImpl._is_graph_capturing() is expected
+
+
+def test_graph_capture_is_false_without_forward_context():
+    with (
+        patch(
+            "vllm_ascend.attention.sfa_kv_offload.is_forward_context_available",
             return_value=False,
         ),
-        patch(
-            "vllm_ascend.attention.sfa_kv_offload.is_forward_context_available",
-            return_value=True,
-        ),
-        patch(
-            "vllm_ascend.attention.sfa_kv_offload.get_forward_context",
-            return_value=forward_context,
-        ),
     ):
-        assert AscendSFAKVOffloadImpl._in_graph_runtime() is expected
-
-
-def test_graph_runtime_prefers_actual_stream_capture():
-    forward_context = SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.NONE)
-    with (
-        patch(
-            "vllm_ascend.attention.sfa_kv_offload.torch.npu.is_current_stream_capturing",
-            return_value=True,
-        ),
-        patch(
-            "vllm_ascend.attention.sfa_kv_offload.is_forward_context_available",
-            return_value=True,
-        ),
-        patch(
-            "vllm_ascend.attention.sfa_kv_offload.get_forward_context",
-            return_value=forward_context,
-        ),
-    ):
-        assert AscendSFAKVOffloadImpl._in_graph_runtime() is True
+        assert AscendSFAKVOffloadImpl._is_graph_capturing() is False
