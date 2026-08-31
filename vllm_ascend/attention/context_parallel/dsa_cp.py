@@ -126,6 +126,7 @@ class AscendDSAReqMetadata:
     qli_metadata: torch.Tensor = None
     compressor_metadata: dsa_v1.CompressorMetadataOutput | None = None
     compressor_metadata_group_id: int | None = None
+    device_local_metadata_group_id: int | None = None
     cu_cmp_seqlen_list: torch.Tensor = None
     attn_mask: torch.Tensor | None = None
     ori_win_left: int | None = None
@@ -633,46 +634,66 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         The computation (clamp + cumsum + offset + mask) is identical for
         all attention groups, so we compute once and cache the results.
         """
+        build_local_metadata = None
         cache = self.common_ratio_to_sas_metadata.get("_device_local")
         if cache is None:
-            # Calc and cache device tensor results
-            (
-                local_start,
-                local_end_with_pad,
-                tokens_per_rank,
-                num_tokens_pad,
-                local_query_start_loc,
-                local_seq_lens,
-            ) = self._build_local_token_metadata(
-                num_reqs=num_reqs,
-                num_input_tokens=num_input_tokens,
-                query_start_loc=query_start_loc,
-                seq_lens=seq_lens,
-                local_query_start_loc=self.local_query_start_loc,
-                local_seq_lens=self.local_seq_lens,
-                start_pos_out=self.start_pos_prefill,
-            )
+            local_start, local_end_with_pad, tokens_per_rank, num_tokens_pad = self._local_token_range(num_input_tokens)
+            local_query_start_loc = self.local_query_start_loc[: num_reqs + 1]
+            local_seq_lens = self.local_seq_lens[:num_reqs]
+            if self._device_metadata_enabled:
+
+                def build_local_metadata() -> None:
+                    self._build_local_token_metadata(
+                        num_reqs=num_reqs,
+                        num_input_tokens=num_input_tokens,
+                        query_start_loc=query_start_loc,
+                        seq_lens=seq_lens,
+                        local_query_start_loc=self.local_query_start_loc,
+                        local_seq_lens=self.local_seq_lens,
+                        start_pos_out=self.start_pos_prefill,
+                    )
+
+            else:
+                self._build_local_token_metadata(
+                    num_reqs=num_reqs,
+                    num_input_tokens=num_input_tokens,
+                    query_start_loc=query_start_loc,
+                    seq_lens=seq_lens,
+                    local_query_start_loc=self.local_query_start_loc,
+                    local_seq_lens=self.local_seq_lens,
+                    start_pos_out=self.start_pos_prefill,
+                )
             self.common_ratio_to_sas_metadata["_device_local"] = {
                 "local_start": local_start,
                 "local_end": local_end_with_pad,
                 "tokens_per_rank": tokens_per_rank,
                 "num_tokens_pad": num_tokens_pad,
-                "qsl": self.local_query_start_loc[: num_reqs + 1].clone(),
-                "sl": self.local_seq_lens[:num_reqs].clone(),
-                "sp": self.start_pos_prefill[:num_reqs].clone(),
+                "qsl": local_query_start_loc if self._device_metadata_enabled else local_query_start_loc.clone(),
+                "sl": local_seq_lens if self._device_metadata_enabled else local_seq_lens.clone(),
+                "sp": (
+                    self.start_pos_prefill[:num_reqs]
+                    if self._device_metadata_enabled
+                    else self.start_pos_prefill[:num_reqs].clone()
+                ),
             }
         else:
-            # copy from cache
-            assert cache is not None
             local_start = cache["local_start"]
             local_end_with_pad = cache["local_end"]
             tokens_per_rank = cache["tokens_per_rank"]
             num_tokens_pad = cache["num_tokens_pad"]
-            self.local_query_start_loc[: num_reqs + 1].copy_(cache["qsl"])
-            self.local_seq_lens[:num_reqs].copy_(cache["sl"])
-            self.start_pos_prefill[:num_reqs].copy_(cache["sp"])
             local_query_start_loc = self.local_query_start_loc[: num_reqs + 1]
             local_seq_lens = self.local_seq_lens[:num_reqs]
+            if self._device_metadata_enabled:
+
+                def build_local_metadata() -> None:
+                    local_query_start_loc.copy_(cache["qsl"])
+                    local_seq_lens.copy_(cache["sl"])
+                    self.start_pos_prefill[:num_reqs].copy_(cache["sp"])
+
+            else:
+                local_query_start_loc.copy_(cache["qsl"])
+                local_seq_lens.copy_(cache["sl"])
+                self.start_pos_prefill[:num_reqs].copy_(cache["sp"])
 
         return (
             local_start,
@@ -681,6 +702,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_tokens_pad,
             local_query_start_loc,
             local_seq_lens,
+            build_local_metadata,
         )
 
     def build_req_metadata(
@@ -708,6 +730,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_tokens_pad,
             local_query_start_loc,
             local_seq_lens,
+            build_local_metadata,
         ) = self._ensure_device_local_metadata(
             num_reqs=num_reqs,
             num_input_tokens=num_input_tokens,
@@ -747,7 +770,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             assert cpu_cache is not None
             local_query_start_loc_cpu = cpu_cache["qsl_cpu"]
             local_seq_lens_cpu = cpu_cache["sl_cpu"]
-        local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
         local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
         max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
         max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
@@ -757,7 +779,16 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         else:
             num_actual_reqs = min(num_actual_reqs, num_reqs)
             if num_actual_reqs < num_reqs:
-                self.start_pos_prefill[num_actual_reqs:].fill_(0)
+                if build_local_metadata is None:
+                    self.start_pos_prefill[num_actual_reqs:].fill_(0)
+                else:
+                    build_device_local_metadata = build_local_metadata
+                    valid_num_reqs = num_actual_reqs
+
+                    def build_local_metadata() -> None:
+                        build_device_local_metadata()
+                        self.start_pos_prefill[valid_num_reqs:].fill_(0)
+
                 self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
         # --- Compressed positions ---
         full_compress_cos, full_compress_sin = None, None
@@ -786,13 +817,19 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         index_topk = self.model_config.hf_config.index_topk
 
         if self._device_metadata_enabled:
+            assert build_local_metadata is not None
+            device_local_metadata_group_id = id(self.req_sas_metadata)
+            local_metadata_task = DeviceMetadataTask(
+                DeviceMetadataStage.COMPRESSOR,
+                build_local_metadata,
+                device_local_metadata_group_id,
+            )
 
             def build_sas_metadata() -> None:
                 self._build_sas_metadata(
                     num_heads=num_heads,
                     query_start_loc=local_query_start_loc,
                     seq_lens=local_seq_lens,
-                    seq_lens_q=local_seq_lens_q,
                     max_query_len=max_local_query_len,
                     max_seq_lens=max_local_seq_lens,
                     index_topk=index_topk,
@@ -812,22 +849,24 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
             if self.compressor_ratio == 4:
                 self._device_metadata_tasks = (
+                    local_metadata_task,
                     DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.req_qli_metadata)),
                     DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.req_sas_metadata)),
                 )
             else:
                 self._device_metadata_tasks = (
+                    local_metadata_task,
                     DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.req_sas_metadata)),
                 )
             sas_metadata = self.req_sas_metadata
             qli_metadata = self.req_qli_metadata if self.compressor_ratio == 4 else None
         else:
+            device_local_metadata_group_id = None
             self._device_metadata_tasks = ()
             sas_metadata = self._build_sas_metadata(
                 num_heads=num_heads,
                 query_start_loc=local_query_start_loc,
                 seq_lens=local_seq_lens,
-                seq_lens_q=local_seq_lens_q,
                 max_query_len=max_local_query_len,
                 max_seq_lens=max_local_seq_lens,
                 index_topk=index_topk,
@@ -871,6 +910,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_actual_reqs=num_actual_reqs,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
+            device_local_metadata_group_id=device_local_metadata_group_id,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
@@ -885,12 +925,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             req_metadata.compressor_metadata = outputs
             req_metadata.compressor_metadata_group_id = group_id
             self._device_metadata_tasks = (
+                local_metadata_task,
                 DeviceMetadataTask(
                     DeviceMetadataStage.COMPRESSOR,
                     lambda: dsa_v1.build_compressor_metadata_out(req_metadata, self.compressor_ratio, outputs),
                     group_id,
                 ),
-                *self._device_metadata_tasks,
+                *self._device_metadata_tasks[1:],
             )
         return req_metadata
 
@@ -909,6 +950,14 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         tasks = self._device_metadata_tasks
         self._device_metadata_tasks = ()
         return tasks
+
+    @staticmethod
+    def _local_token_range(num_input_tokens: int) -> tuple[int, int, int, int]:
+        tp_group = get_tp_group()
+        num_tokens_pad = ((num_input_tokens + tp_group.world_size - 1) // tp_group.world_size) * tp_group.world_size
+        tokens_per_rank = num_tokens_pad // tp_group.world_size
+        local_start = tp_group.rank_in_group * tokens_per_rank
+        return local_start, local_start + tokens_per_rank, tokens_per_rank, num_tokens_pad
 
     def _build_local_token_metadata(
         self,
@@ -936,15 +985,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         local_reqs_mask = [0, 0, 0, 0, 0, 1, 1, 1, 0]
         local_seq_lens = [0, 0, 0, 0, 0, 6, 7, 2, 0]
         """
-        tp_group = get_tp_group()
-        tp_size = tp_group.world_size
-        tp_rank = tp_group.rank_in_group
         # Split the flattened token stream evenly across TP ranks. Padding keeps
         # every rank's local slice the same length, which simplifies CP kernels.
-        num_tokens_pad = ((num_input_tokens + tp_size - 1) // tp_size) * tp_size
-        tokens_per_rank = num_tokens_pad // tp_size
-        local_start = tp_rank * tokens_per_rank
-        local_end = local_start + tokens_per_rank
+        local_start, local_end, tokens_per_rank, num_tokens_pad = self._local_token_range(num_input_tokens)
 
         if local_query_start_loc is not None:
             local_query_start_loc.fill_(0)
@@ -1026,7 +1069,6 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_heads,
         query_start_loc,
         seq_lens,
-        seq_lens_q,
         max_query_len,
         max_seq_lens,
         index_topk,
@@ -1294,6 +1336,11 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 metadata.compressor_metadata_group_id,
             )
             return precomputed
+        if metadata.device_local_metadata_group_id is not None:
+            wait_for_device_metadata(
+                DeviceMetadataStage.COMPRESSOR,
+                metadata.device_local_metadata_group_id,
+            )
 
         assert metadata.full_compress_cos is not None
         assert metadata.full_compress_sin is not None
