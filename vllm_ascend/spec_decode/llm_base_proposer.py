@@ -1532,7 +1532,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # A merged speculative forward reuses one ForwardContext while
                 # each substep has different compressor inputs. Drop the prior
                 # substep's outputs before entering the next model invocation.
-                from vllm_ascend.attention.dsa_v1 import reset_compressor_metadata_cache
+                from vllm_ascend.attention.dsa_compressor import (
+                    reset_compressor_metadata_cache,
+                )
 
                 reset_compressor_metadata_cache()
 

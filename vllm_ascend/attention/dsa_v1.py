@@ -18,6 +18,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_compressor import (
+    get_or_compute_compressor_metadata,
+    rotate_activation,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     maybe_save_kv_layer_to_connector,
@@ -57,63 +61,6 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
-CompressorMetadataOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-_COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
-
-
-def reset_compressor_metadata_cache() -> None:
-    """Release metadata outputs before a composite forward changes substeps."""
-    get_forward_context().additional_kwargs.pop(_COMPRESSOR_METADATA_CACHE_KEY, None)
-
-
-def get_or_compute_compressor_metadata(
-    metadata: Any,
-    compress_ratio: int,
-) -> CompressorMetadataOutput:
-    """Build compressor metadata once per cache group in the current substep."""
-    forward_context = get_forward_context()
-    cache: dict[tuple[str, type], CompressorMetadataOutput] = forward_context.additional_kwargs.setdefault(
-        _COMPRESSOR_METADATA_CACHE_KEY,
-        {},
-    )
-    cache_group_key = metadata.cache_group_key
-    if not cache_group_key:
-        raise ValueError("DSV4 compressor metadata requires a cache-group key")
-    # The pre-refactor v0.26 DSA path invokes prefill and decode separately
-    # within one mixed-batch forward. They share a cache group but require
-    # different compressor metadata, so keep the metadata phases isolated.
-    cache_key = (cache_group_key, type(metadata))
-    cached_metadata = cache.get(cache_key)
-    if cached_metadata is not None:
-        return cached_metadata
-
-    assert metadata.full_compress_cos is not None
-    assert metadata.full_compress_sin is not None
-    assert metadata.num_compressed_tokens is not None
-    assert metadata.start_pos is not None
-    assert metadata.num_reqs_actual is not None
-    full_compress_cos = metadata.full_compress_cos.view(
-        metadata.full_compress_cos.shape[0],
-        metadata.full_compress_cos.shape[-1],
-    )
-    full_compress_sin = metadata.full_compress_sin.view(
-        metadata.full_compress_sin.shape[0],
-        metadata.full_compress_sin.shape[-1],
-    )
-    computed_metadata = torch.ops._C_ascend.compressor_metadata(
-        full_compress_cos,
-        full_compress_sin,
-        metadata.query_start_loc,
-        metadata.start_pos,
-        metadata.block_table,
-        metadata.block_size,
-        DeviceOperator.get_dsa_compressor_slot_mapping_format(),
-        compress_ratio,
-        metadata.num_compressed_tokens,
-        metadata.num_reqs_actual,
-    )
-    cache[cache_key] = computed_metadata
-    return computed_metadata
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -124,28 +71,6 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
 
 
 # mypy: disable-error-code="has-type"
-
-
-def hadamard_transform_ref(
-    x: torch.Tensor,
-    hadamard: torch.Tensor,
-    scale: float = 1.0,
-):
-    x_shape = x.shape
-    dim = x.shape[-1]
-    x = x.reshape(-1, dim)
-    log_dim = math.ceil(math.log2(dim))
-    dim_padded = 2**log_dim
-    if dim != dim_padded:
-        x = F.pad(x, (0, dim_padded - dim))
-    out = F.linear(x, hadamard)
-    out = out * scale
-    return out[..., :dim].reshape(*x_shape)
-
-
-def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
-    hidden_size = x.size(-1)
-    return hadamard_transform_ref(x, hadamard=hadamard, scale=hidden_size**-0.5)
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -1613,7 +1538,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         # compress param
         if self.compressor is not None:
             self.compressor_head_dim = self.compressor.head_dim
-            self.compressor_overlap = self.compressor.overlap
             self.compressor_rotate = self.compressor.rotate
 
             self.compressor_ape = self.compressor.ape
@@ -2132,7 +2056,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
 
-            coff = 2 if self.compressor_overlap else 1
+            coff = self.compressor.coff
             compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
                 compressor_prefill_metadata,
             )
@@ -2421,7 +2345,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
 
-            coff = 2 if self.compressor_overlap else 1
+            coff = self.compressor.coff
             compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
                 compressor_decode_metadata,
             )
@@ -2620,7 +2544,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
 
         q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
-        coff = 2 if self.compressor_overlap else 1
+        coff = self.indexer.compressor.coff
 
         if with_prefill:
             indexer_state_prefill_metadata = _require_prefill_metadata(indexer_kv_state_metadata)
@@ -2846,7 +2770,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             qr_quant_ready, qr_scale_ready = self.cv_inderxer_wq_b.quantize(qr)
 
-        coff = 2 if self.compressor_overlap else 1
+        coff = self.indexer.compressor.coff
 
         if with_prefill:
             indexer_state_prefill_metadata = _require_prefill_metadata(indexer_kv_state_metadata)
