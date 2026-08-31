@@ -50,6 +50,75 @@ def causal_conv1d_update_ascendc(
     """
     global _CONV_CUSTOM_AVAILABLE
 
+    # Speculative-verify path: varlen x [T, D] with query_start_loc and
+    # num_accepted_tokens, and a [num_seqs, num_spec+1] slot table. The
+    # AscendC kernel implements the same per-column slot semantics as
+    # recurrent_kda (initial window at the accepted boundary, one column
+    # rolled per token), which is what keeps conv and recurrent state in
+    # lock-step. x may arrive as [T, D]; the op wants [T, D] with
+    # query_start_loc in run_mode=1 varlen form.
+    if (
+        num_accepted_tokens is not None
+        and query_start_loc is not None
+        and x.dim() == 2
+        and conv_state_indices is not None
+        and conv_state_indices.dim() == 2
+    ):
+        if _CONV_CUSTOM_AVAILABLE is not False:
+            try:
+                D = x.shape[-1]
+                orig_dtype = x.dtype
+                x_c = x.to(conv_state.dtype).contiguous()
+                if conv_state.dim() == 3 and conv_state.shape[-2] == D and conv_state.shape[-1] != D:
+                    # DS-layout aliasing pool: the op addresses rows through
+                    # cache_indices on the pool it receives, so hand it a
+                    # transposed (SD) contiguous view of the whole pool. The
+                    # spec path runs once per verify step; the full-pool
+                    # transpose (~0.2ms) is acceptable here.
+                    conv_state_t = conv_state.transpose(1, 2).contiguous()
+                else:
+                    conv_state_t = conv_state.contiguous()
+                indices_c = conv_state_indices.contiguous()
+                if weight.shape[0] == D:
+                    weight_t = weight.to(conv_state.dtype).transpose(0, 1).contiguous()
+                else:
+                    weight_t = weight.to(conv_state.dtype).contiguous()
+                bias_c = (
+                    bias.to(conv_state.dtype).contiguous() if bias is not None else None
+                )
+                act_mode = 1 if (
+                    activation is True
+                    or (isinstance(activation, str) and activation in ("silu", "swish"))
+                ) else 0
+                out = torch.empty_like(x_c)
+                result = torch.ops._C_ascend.npu_causal_conv1d_custom(
+                    out,
+                    x_c,
+                    weight_t,
+                    conv_state=conv_state_t,
+                    bias_opt=bias_c,
+                    query_start_loc_opt=query_start_loc.contiguous(),
+                    cache_indices_opt=indices_c,
+                    initial_state_mode_opt=None,
+                    num_accepted_tokens_opt=num_accepted_tokens.contiguous(),
+                    activation_mode=act_mode,
+                    pad_slot_id=PAD_SLOT_ID,
+                    run_mode=1,
+                )
+                _CONV_CUSTOM_AVAILABLE = True
+                return result.to(orig_dtype)
+            except Exception as _op_err:
+                if _CONV_CUSTOM_AVAILABLE is True:
+                    raise
+                import sys as _sys
+
+                print(
+                    "[conv-ascendc] spec path failed, falling back:",
+                    repr(_op_err)[:800],
+                    flush=True, file=_sys.stderr,
+                )
+                _CONV_CUSTOM_AVAILABLE = False
+
     if num_accepted_tokens is None and query_start_loc is None and x.dim() == 2:
         if _CONV_CUSTOM_AVAILABLE is not False:
             if isinstance(activation, bool):
