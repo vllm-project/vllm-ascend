@@ -150,7 +150,7 @@ benchmarks:
     # Start with a deterministic subset of GPQA's 198 questions for nightly.
     num_prompts: 64
     max_out_len: 65536
-    batch_size: 32
+    batch_size: 16
     work_dir: /root/.cache/benchmark_results/${BENCHMARK_JOB_NAME}/aisbench
     temperature: 1.0
     top_p: 1.0
