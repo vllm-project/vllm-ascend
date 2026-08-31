@@ -1029,10 +1029,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if self.compressor_ratio == 4:
             sas_kwargs["cmp_topk"] = index_topk
 
+        prefill_metadata_cache = self.prefill_ratio_to_sas_metadata
+        assert prefill_metadata_cache is not None
+
         def get_sas_metadata() -> torch.Tensor:
-            if self.prefill_ratio_to_sas_metadata.get(layer_name) is None:
-                self.prefill_ratio_to_sas_metadata[layer_name] = metadata_op(**sas_kwargs)
-            return self.prefill_ratio_to_sas_metadata[layer_name]
+            if prefill_metadata_cache.get(layer_name) is None:
+                prefill_metadata_cache[layer_name] = metadata_op(**sas_kwargs)
+            return prefill_metadata_cache[layer_name]
 
         qli_cu_seqlens_q = None
         qli_seqused_k = None
@@ -1059,28 +1062,26 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             assert qli_cu_seqlens_q is not None
             assert qli_seqused_k is not None
             assert qli_cmp_residual_k is not None
-            if self.prefill_ratio_to_sas_metadata.get("qli") is None:
-                self.prefill_ratio_to_sas_metadata["qli"] = (
-                    torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-                        num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
-                        num_heads_k=1,
-                        head_dim=self.model_config.hf_config.index_head_dim,  # 128
-                        topk=self.model_config.hf_config.index_topk,
-                        quant_mode=2,
-                        cu_seqlens_q=qli_cu_seqlens_q,
-                        seqused_k=qli_seqused_k,
-                        cmp_residual_k=qli_cmp_residual_k,
-                        batch_size=len(self.seq_lens[reqs_start:]),
-                        max_seqlen_q=max_query_len,
-                        max_seqlen_k=max_seq_lens // 4,
-                        layout_q="TND",
-                        layout_k="PA_BBND",
-                        mask_mode=3,
-                        cmp_ratio=4,
-                        device=str(self.seqused_q.device),
-                    )
+            if prefill_metadata_cache.get("qli") is None:
+                prefill_metadata_cache["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                    num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
+                    num_heads_k=1,
+                    head_dim=self.model_config.hf_config.index_head_dim,  # 128
+                    topk=self.model_config.hf_config.index_topk,
+                    quant_mode=2,
+                    cu_seqlens_q=qli_cu_seqlens_q,
+                    seqused_k=qli_seqused_k,
+                    cmp_residual_k=qli_cmp_residual_k,
+                    batch_size=len(self.seq_lens[reqs_start:]),
+                    max_seqlen_q=max_query_len,
+                    max_seqlen_k=max_seq_lens // 4,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=4,
+                    device=str(self.seqused_q.device),
                 )
-            return self.prefill_ratio_to_sas_metadata["qli"]
+            return prefill_metadata_cache["qli"]
 
         if self._device_metadata_enabled:
 
@@ -1246,7 +1247,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
         index_topk = self.model_config.hf_config.index_topk
 
-        assert self.decode_sas_metadata is not None
+        decode_sas_metadata = self.decode_sas_metadata
+        assert decode_sas_metadata is not None
 
         cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
             self.decode_ratio_to_sas_metadata,
@@ -1285,10 +1287,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if self.compressor_ratio == 4:
             sas_kwargs["cmp_topk"] = index_topk
 
-        def build_sas_metadata() -> None:
-            if self.decode_ratio_to_sas_metadata.get(layer_name) is None:
-                self.decode_ratio_to_sas_metadata[layer_name] = metadata_op(**sas_kwargs)
-            self.decode_sas_metadata[:1024] = self.decode_ratio_to_sas_metadata[layer_name]
+        decode_metadata_cache = self.decode_ratio_to_sas_metadata
+        assert decode_metadata_cache is not None
+
         qli_cu_seqlens_q = None
         qli_seqused_k = None
         qli_cmp_residual_k = None
@@ -1309,14 +1310,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 out=qli_cmp_residual_k,
             )
 
-        assert self.decode_qli_metadata is not None
+        def build_sas_metadata() -> None:
+            if decode_metadata_cache.get(layer_name) is None:
+                decode_metadata_cache[layer_name] = metadata_op(**sas_kwargs)
+            decode_sas_metadata[:1024] = decode_metadata_cache[layer_name]
+
+        decode_qli_metadata = self.decode_qli_metadata
+        assert decode_qli_metadata is not None
 
         def build_qli_metadata() -> None:
             assert qli_cu_seqlens_q is not None
             assert qli_seqused_k is not None
             assert qli_cmp_residual_k is not None
-            if self.decode_ratio_to_sas_metadata.get("qli") is None:
-                self.decode_ratio_to_sas_metadata["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+            if decode_metadata_cache.get("qli") is None:
+                decode_metadata_cache["qli"] = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                     num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
                     num_heads_k=1,
                     head_dim=self.model_config.hf_config.index_head_dim,  # 128
@@ -1334,15 +1341,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     cmp_ratio=4,
                     device=str(self.seqused_q.device),
                 )
-            self.decode_qli_metadata[:1024] = self.decode_ratio_to_sas_metadata["qli"]
+            decode_qli_metadata[:1024] = decode_metadata_cache["qli"]
 
         if self._device_metadata_enabled:
             if self.compressor_ratio == 4:
                 self._device_metadata_tasks += (
-                    DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.decode_qli_metadata)),
+                    DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(decode_qli_metadata)),
                 )
             self._device_metadata_tasks += (
-                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.decode_sas_metadata)),
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(decode_sas_metadata)),
             )
         else:
             if self.compressor_ratio == 4:
