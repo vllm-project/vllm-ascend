@@ -51,21 +51,25 @@
 # ** 2. File: platform/patch_deepseek_v4_frontend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.tokenizers.deepseek_v4.get_deepseek_v4_tokenizer`
-#      `vllm.parser.deepseek_v4.DeepSeekV4Parser.__init__`
+#      `vllm.parser.deepseek_v4.DeepSeekV4Parser.__init__` (legacy vLLM only)
 #    Why:
-#       The supported vLLM inserts request tools before an existing system
-#       message and initializes the parser in content mode when thinking
-#       controls are omitted. Both differ from the DeepSeek V4 tokenizer
-#       default and checkpoint renderer.
+#       vLLM v0.27.1 inserts request tools before an existing system message,
+#       defaults the parser to content mode, and does not expose the current
+#       reasoning-effort prompt mapping. The pre-0731 checkpoint and post-0731
+#       (dspark_*) checkpoint use different effort mappings.
 #    How:
-#       Attach tools to a shallow copy of the first system message, or insert
-#       a system message only when one is absent. Default the parser to
-#       thinking only when neither thinking control is present.
+#       Bind one wrapper to each returned tokenizer instance, attach tools to a
+#       shallow copy of the first system message (or insert one when absent),
+#       and use inspect-based behavior detection for legacy renderer/parser
+#       compatibility. Checkpoints without dspark_* use the Preview mapping:
+#       default/high have no prefix and max/xhigh use Absolute maximum. The
+#       dspark_* mapping keeps the post-Preview low/high/max behavior.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/issues/51829
 #       https://github.com/vllm-project/vllm/pull/51856
 #       https://github.com/vllm-project/vllm/pull/52255
 #       https://github.com/vllm-project/vllm/pull/51296
+#       https://github.com/vllm-project/vllm-ascend/pull/14952
 #    Future Plan:
 #       Remove this patch once both behaviors are in the supported vLLM.
 #
