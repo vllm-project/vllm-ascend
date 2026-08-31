@@ -1073,7 +1073,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
         if self.enable_mlapo:
-            device_type = get_ascend_device_type()
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
             if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
                 quant_method = None
@@ -1087,10 +1086,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 quant_method,
                 (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
             )
-            supports_native_weights = device_type == AscendDeviceType.A5 and isinstance(
-                layer_quant_method,
-                UnquantizedLinearMethod,
-            )
+            supports_native_weights = get_current_hardware_profile().supports(
+                HardwareCapability.MLAPO_NATIVE_WEIGHTS
+            ) and isinstance(layer_quant_method, UnquantizedLinearMethod)
             if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
@@ -1970,7 +1968,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
-        can_use_decode_prolog = self.use_mla_rope or get_ascend_device_type() == AscendDeviceType.A5
+        can_use_decode_prolog = self.use_mla_rope or get_current_hardware_profile().supports(
+            HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE
+        )
         if (
             (self.fa_quant_layer or self.enable_mlapo)
             and can_use_decode_prolog
