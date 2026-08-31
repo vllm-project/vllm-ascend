@@ -30,6 +30,7 @@
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
+#include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
 #endif
@@ -2674,6 +2675,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "-> (Tensor y ,Tensor rstd, Tensor x)"
         );
     ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
+
+    ops.def(
+        "npu_rms_norm_cast(Tensor x, Tensor gamma, float epsilon=1e-6)"
+        " -> (Tensor y, Tensor y_fp32)"
+    );
+    ops.impl("npu_rms_norm_cast", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_cast);
 
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);

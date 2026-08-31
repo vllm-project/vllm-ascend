@@ -85,6 +85,7 @@ from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
+    enable_custom_op,
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_ascend_device_type,
@@ -460,9 +461,16 @@ class DeepseekV4MoE(nn.Module):
             tid2eid=self.gate.tid2eid,
         )
 
-    def forward(self, hidden_states: torch.Tensor, input_ids=None) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids=None,
+        hidden_states_fp32: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if hidden_states_fp32 is not None:
+            hidden_states_fp32 = hidden_states_fp32.view(-1, hidden_dim)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
@@ -470,13 +478,17 @@ class DeepseekV4MoE(nn.Module):
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
+            if hidden_states_fp32 is not None:
+                hidden_states_fp32 = sequence_parallel_chunk(hidden_states_fp32)
 
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=hidden_states)
+            router_input = hidden_states if hidden_states_fp32 is None else hidden_states_fp32
+            fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=router_input)
         else:
             # router_logits: (num_tokens, n_experts)
-            router_logits = F.linear(hidden_states.float(), self.gate.weight)
+            router_input = hidden_states.float() if hidden_states_fp32 is None else hidden_states_fp32
+            router_logits = F.linear(router_input, self.gate.weight)
             fused_moe_out = self.experts(hidden_states=hidden_states, router_logits=router_logits)
 
         fused_moe_out_is_tuple = isinstance(fused_moe_out, tuple)
@@ -970,6 +982,17 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hc_attn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
         self.hc_ffn_scale = nn.Parameter(torch.empty(3, dtype=torch.float32))
 
+    def rms_norm_cast(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalize once and provide the exact FP32 routing input."""
+        if enable_custom_op():
+            return torch.ops._C_ascend.npu_rms_norm_cast(
+                hidden_states,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
+            )
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        return hidden_states, hidden_states.float()
+
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         y = torch.ops._C_ascend.npu_hc_pre_v2(
             x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps
@@ -997,8 +1020,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
+        hidden_states, hidden_states_fp32 = self.rms_norm_cast(hidden_states)
+        hidden_states = self.mlp(hidden_states, hidden_states_fp32=hidden_states_fp32)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         return hidden_states, residual

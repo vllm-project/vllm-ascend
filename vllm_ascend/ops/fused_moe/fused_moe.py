@@ -967,7 +967,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             # increase with extra hidden states. We also assume that all gate
             # linear is unquantized so that we the weight is pre-casted in
             # process_weights_after_loading of AscendUnquantizedLinearMethod.
-            hidden_states_fp32 = shared_hidden_states.float()
+            hidden_states_fp32 = router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
             before_routed_experts = torch.npu.current_stream().record_event()
             router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
             after_routed_experts = torch.npu.current_stream().record_event()
@@ -1009,6 +1009,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
             if self.shared_experts is None:
+                if self.is_internal_router and router_logits.shape[-1] == self.hidden_size:
+                    gate = self.gate
+                    assert gate is not None
+                    hidden_states_fp32 = (
+                        router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+                    )
+                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
                 return self.no_shared_forward_impl(hidden_states, router_logits)
             else:
                 return self.shared_forward_impl(hidden_states, router_logits, shared_experts_input)
