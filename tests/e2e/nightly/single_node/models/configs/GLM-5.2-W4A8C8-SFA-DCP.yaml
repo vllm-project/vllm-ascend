@@ -67,7 +67,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_dsa_cp": true, "ascend_compilation_config":{"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": false,"enable_fused_mc2":0,"weight_nz_mode":1,"enable_mlapo":false}'
       - "--speculative-config"
-      - '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+      - '{"num_speculative_tokens": 5, "method": "deepseek_mtp", "enforce_eager": true}'
     test_content: []
     benchmarks:
       acc_gsm8k:
