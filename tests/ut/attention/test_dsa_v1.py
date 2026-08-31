@@ -4,10 +4,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAImpl,
     AscendDSAMetadataBuilder,
+    build_compressor_metadata_out,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage
@@ -53,6 +55,11 @@ def _make_decode_builder(compressor_ratio: int, enabled: bool):
     builder.cu_seqlens_cmp_kv = torch.empty(0, dtype=torch.int32)
     builder._device_metadata_enabled = enabled
     builder._device_metadata_tasks = ()
+    builder.prefill_compressor_metadata_buffers = None
+    builder.decode_compressor_metadata_buffers = None
+    if enabled and compressor_ratio > 1:
+        builder.prefill_compressor_metadata_buffers = tuple(torch.empty((8, 2), dtype=torch.int32) for _ in range(3))
+        builder.decode_compressor_metadata_buffers = tuple(torch.empty((8, 2), dtype=torch.int32) for _ in range(3))
     builder.block_size = 128
     builder.cache_group_key = "group"
     builder.get_block_table_size = MagicMock(return_value=2)
@@ -118,20 +125,26 @@ def test_decode_metadata_defers_device_work(
 
         if enabled:
             expected = (
-                [DeviceMetadataStage.INDEXER, DeviceMetadataStage.ATTENTION]
+                list(DeviceMetadataStage)
                 if compressor_ratio == 4
+                else [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.ATTENTION]
+                if compressor_ratio > 1
                 else [DeviceMetadataStage.ATTENTION]
             )
             assert [task.stage for task in tasks] == expected
-            assert [task.group_id for task in tasks] == (
-                [id(builder.decode_qli_metadata), id(builder.decode_sas_metadata)]
-                if compressor_ratio == 4
-                else [id(builder.decode_sas_metadata)]
-            )
+            expected_groups = []
+            if compressor_ratio > 1:
+                assert builder.decode_compressor_metadata_buffers is not None
+                expected_groups.append(id(builder.decode_compressor_metadata_buffers[0]))
+            if compressor_ratio == 4:
+                expected_groups.append(id(builder.decode_qli_metadata))
+            expected_groups.append(id(builder.decode_sas_metadata))
+            assert [task.group_id for task in tasks] == expected_groups
             sas_op.assert_not_called()
             qli_op.assert_not_called()
-            for task in tasks:
-                task.run()
+            with patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out"):
+                for task in tasks:
+                    task.run()
         else:
             assert tasks == ()
 
@@ -221,21 +234,26 @@ def test_prefill_metadata_defers_device_work(
 
         if enabled:
             expected_stages = (
-                [DeviceMetadataStage.INDEXER, DeviceMetadataStage.ATTENTION]
+                list(DeviceMetadataStage)
                 if compressor_ratio == 4
+                else [DeviceMetadataStage.COMPRESSOR, DeviceMetadataStage.ATTENTION]
+                if compressor_ratio > 1
                 else [DeviceMetadataStage.ATTENTION]
             )
-            expected_groups = (
-                [id(builder.prefill_qli_metadata), id(builder.prefill_sas_metadata)]
-                if compressor_ratio == 4
-                else [id(builder.prefill_sas_metadata)]
-            )
+            expected_groups = []
+            if compressor_ratio > 1:
+                assert builder.prefill_compressor_metadata_buffers is not None
+                expected_groups.append(id(builder.prefill_compressor_metadata_buffers[0]))
+            if compressor_ratio == 4:
+                expected_groups.append(id(builder.prefill_qli_metadata))
+            expected_groups.append(id(builder.prefill_sas_metadata))
             assert [task.stage for task in tasks] == expected_stages
             assert [task.group_id for task in tasks] == expected_groups
             sas_op.assert_not_called()
             qli_op.assert_not_called()
-            for task in tasks:
-                task.run()
+            with patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out"):
+                for task in tasks:
+                    task.run()
         else:
             assert tasks == ()
 
@@ -308,24 +326,193 @@ def test_mixed_metadata_keeps_prefill_and_decode_groups_isolated():
         )
         builder.build_decode_metadata(0, SimpleNamespace(), 2)
         tasks = builder.take_device_metadata_tasks()
-        for task in tasks:
-            task.run()
+        with patch("vllm_ascend.attention.dsa_v1.build_compressor_metadata_out"):
+            for task in tasks:
+                task.run()
 
-    assert [task.stage for task in tasks] == [
+    ordered_tasks = sorted(tasks, key=lambda task: task.stage)
+    assert [task.stage for task in ordered_tasks] == [
+        DeviceMetadataStage.COMPRESSOR,
+        DeviceMetadataStage.COMPRESSOR,
+        DeviceMetadataStage.INDEXER,
         DeviceMetadataStage.INDEXER,
         DeviceMetadataStage.ATTENTION,
-        DeviceMetadataStage.INDEXER,
         DeviceMetadataStage.ATTENTION,
     ]
-    assert [task.group_id for task in tasks] == [
+    assert {task.group_id for task in tasks} == {
+        id(builder.prefill_compressor_metadata_buffers[0]),
+        id(builder.decode_compressor_metadata_buffers[0]),
         id(builder.prefill_qli_metadata),
-        id(builder.prefill_sas_metadata),
         id(builder.decode_qli_metadata),
+        id(builder.prefill_sas_metadata),
         id(builder.decode_sas_metadata),
-    ]
-    assert len(set(task.group_id for task in tasks)) == 4
+    }
     assert sas_op.call_count == 2
     assert qli_op.call_count == 2
+
+
+def test_build_compressor_metadata_out_uses_fixed_outputs():
+    metadata = SimpleNamespace(
+        full_compress_cos=torch.ones((8, 1, 1, 4)),
+        full_compress_sin=torch.zeros((8, 1, 1, 4)),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        start_pos=torch.tensor([1], dtype=torch.int32),
+        block_table=torch.tensor([[3]], dtype=torch.int32),
+        block_size=128,
+        num_reqs_actual=1,
+    )
+    outputs = (
+        torch.empty((2, 1, 1, 4)),
+        torch.empty((2, 1, 1, 4)),
+        torch.empty((2, 2), dtype=torch.int32),
+    )
+
+    with (
+        patch.object(DeviceOperator, "get_dsa_compressor_slot_mapping_format", return_value=2),
+        patch.object(torch.ops._C_ascend, "compressor_metadata_out", create=True) as metadata_out,
+    ):
+        build_compressor_metadata_out(metadata, 4, outputs)
+
+    assert metadata_out.call_args.args[-3:] == outputs
+
+
+@pytest.mark.parametrize(
+    ("mode", "allocates_buffers"),
+    [
+        (CUDAGraphMode.NONE, True),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, True),
+        (CUDAGraphMode.FULL, False),
+    ],
+)
+def test_enable_device_metadata_keeps_pure_full_compressor_legacy(
+    mode: CUDAGraphMode,
+    allocates_buffers: bool,
+):
+    builder = AscendDSAMetadataBuilder.__new__(AscendDSAMetadataBuilder)
+    builder._device_metadata_enabled = False
+    builder.compressor_ratio = 4
+    builder.device = torch.device("cpu")
+    builder.slot_mapping_shape = (8, 2)
+    builder.model_config = SimpleNamespace(hf_config=SimpleNamespace(qk_rope_head_dim=4))
+    builder.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=mode),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+    builder.prefill_compressor_metadata_buffers = None
+    builder.decode_compressor_metadata_buffers = None
+
+    builder.enable_device_metadata()
+
+    assert builder._device_metadata_enabled
+    assert (builder.prefill_compressor_metadata_buffers is not None) is allocates_buffers
+    assert (builder.decode_compressor_metadata_buffers is not None) is allocates_buffers
+    if allocates_buffers:
+        assert builder.prefill_compressor_metadata_buffers is not None
+        assert builder.decode_compressor_metadata_buffers is not None
+        for buffers in (
+            builder.prefill_compressor_metadata_buffers,
+            builder.decode_compressor_metadata_buffers,
+        ):
+            assert buffers[0].shape == (8, 1, 1, 4)
+            assert buffers[1].shape == (8, 1, 1, 4)
+            assert buffers[2].shape == (8, 2)
+            assert buffers[0].dtype == buffers[1].dtype == torch.float32
+            assert buffers[2].dtype == torch.int32
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_full_graph_compressor_uses_stable_padded_extent(phase: str):
+    builder = _make_prefill_builder(4, True)
+    builder.decode_ratio_to_sas_metadata = {
+        "query_start_loc": torch.tensor([0, 1, 2], dtype=torch.int32),
+        "input_positions": torch.arange(2),
+        "cos": torch.ones((2, 1)),
+        "sin": torch.zeros((2, 1)),
+        "query_start_loc_cpu": torch.tensor([0, 1, 2], dtype=torch.int32),
+        "max_seq_lens": 9,
+        "seq_lens_list": [8, 9],
+        "max_seqlen_kv": 9,
+        "max_seqlen_q": 1,
+        "start_pos_decode": torch.tensor([7, 8], dtype=torch.int32),
+    }
+    common = SimpleNamespace(
+        num_input_tokens=8,
+        query_start_loc=torch.tensor([0, 1, 3], dtype=torch.int32),
+    )
+
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_tensor_model_parallel_world_size",
+            return_value=1,
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_full_cos_and_sin_dsa",
+            return_value=(torch.ones(1), torch.zeros(1)),
+        ),
+        patch.object(
+            DeviceOperator,
+            "get_dsa_sparse_attn_metadata_op",
+            return_value=MagicMock(return_value=torch.ones(1024, dtype=torch.int32)),
+        ),
+        patch.object(DeviceOperator, "get_dsa_sparse_attn_metadata_kwargs", return_value={}),
+        patch.object(
+            DeviceOperator,
+            "get_dsa_decode_cu_seqlens_ori_kv",
+            return_value=torch.tensor([0, 8, 17], dtype=torch.int32),
+        ),
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv", return_value=None),
+    ):
+        if phase == "prefill":
+            capture_metadata = builder.build_prefill_metadata(0, common, 2, full_graph_mode=True)
+            metadata = builder.build_prefill_metadata(0, common, 1, full_graph_mode=True)
+            buffers = builder.prefill_compressor_metadata_buffers
+            expected_rows = 3
+            expected_reqs = 1
+        else:
+            builder.num_decodes = 2
+            builder.num_decode_tokens = 2
+            capture_metadata = builder.build_decode_metadata(0, common, 2, full_graph_mode=True)
+            metadata = builder.build_decode_metadata(0, common, 1, full_graph_mode=True)
+            buffers = builder.decode_compressor_metadata_buffers
+            expected_rows = 4
+            expected_reqs = 2
+
+    assert buffers is not None
+    assert metadata.num_compressed_tokens == expected_rows
+    assert metadata.num_reqs_actual == expected_reqs
+    assert metadata.compressor_metadata is not None
+    assert metadata.compressor_metadata[0].shape[0] == expected_rows
+    assert metadata.compressor_metadata[0].data_ptr() == buffers[0].data_ptr()
+    assert capture_metadata.compressor_metadata is not None
+    assert capture_metadata.compressor_metadata[0].shape == metadata.compressor_metadata[0].shape
+    assert capture_metadata.compressor_metadata[0].data_ptr() == metadata.compressor_metadata[0].data_ptr()
+
+
+def test_compressor_consumer_waits_only_for_precomputed_metadata():
+    impl = AscendDSAImpl.__new__(AscendDSAImpl)
+    impl.compress_ratio = 4
+    outputs = (torch.ones(1), torch.zeros(1), torch.zeros(1, dtype=torch.int32))
+    precomputed = SimpleNamespace(
+        compressor_metadata=outputs,
+        compressor_metadata_group_id=17,
+    )
+    legacy = SimpleNamespace(
+        compressor_metadata=None,
+        compressor_metadata_group_id=None,
+    )
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.wait_for_device_metadata") as wait,
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_or_compute_compressor_metadata",
+            return_value=(torch.ones(1), torch.ones(1), torch.ones(1)),
+        ) as legacy_compute,
+    ):
+        assert impl._compute_compressor_metadata(precomputed) is outputs
+        impl._compute_compressor_metadata(legacy)
+
+    wait.assert_called_once_with(DeviceMetadataStage.COMPRESSOR, 17)
+    legacy_compute.assert_called_once_with(legacy, 4)
 
 
 @pytest.mark.parametrize("with_prefill", [False, True])
