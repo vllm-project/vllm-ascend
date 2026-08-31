@@ -88,8 +88,30 @@ def _compare_offload_logprobs(
 # -------------------- Prefetch backend tests --------------------
 
 
-@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
-@pytest.mark.parametrize("nz_mode", [0, 2], ids=["ND", "NZ"])
+@pytest.mark.parametrize(
+    "enforce_eager, nz_mode",
+    [
+        pytest.param(True, 0, id="ND-eager"),
+        pytest.param(False, 0, id="ND-graph"),
+        pytest.param(True, 2, id="NZ-eager"),
+        # TODO(wangfiox): nz+graph not supported yet
+        pytest.param(
+            False,
+            2,
+            id="NZ-graph",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "NZ static buffers make the prefetch H2D copy a "
+                    "cross-format (ND->NZ) conversion that is aclop-only on "
+                    "CANN 9.0.0 and rejected during ACL graph capture, so "
+                    "EngineCore dies at capture time. Remove this marker "
+                    "once the no-transdata prefetch path lands."
+                ),
+            ),
+        ),
+    ],
+)
 @wait_until_npu_memory_free()
 def test_prefetch_offload_accuracy(enforce_eager, nz_mode):
     """Test prefetch CPU offloading across eager/graph × ND/NZ.
