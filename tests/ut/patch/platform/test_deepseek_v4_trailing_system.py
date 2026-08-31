@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
+
 from vllm.tokenizers import deepseek_v4_encoding
 
-import vllm_ascend.patch.platform.patch_deepseek_v4_trailing_system  # noqa: F401
+import vllm_ascend.patch.platform.patch_deepseek_v4_trailing_system as trailing_system_patch
 
 
 def test_trailing_system_appends_assistant_transition():
@@ -53,3 +55,18 @@ def test_mid_conversation_system_does_not_append_transition():
 
     assert "new rules<｜User｜>second" in prompt
     assert "new rules<｜Assistant｜>" not in prompt
+
+
+def test_probe_skips_incompatible_signature(monkeypatch):
+    def render_message(index, messages, thinking_mode, required):
+        del index, messages, thinking_mode, required
+        return ""
+
+    monkeypatch.setattr(
+        trailing_system_patch,
+        "_render_message_signature",
+        inspect.signature(render_message),
+    )
+    monkeypatch.setattr(trailing_system_patch, "_original_render_message", render_message)
+
+    assert not trailing_system_patch._needs_trailing_system_patch()

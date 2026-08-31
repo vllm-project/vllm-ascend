@@ -24,13 +24,18 @@ _original_render_message = deepseek_v4_encoding.render_message
 _render_message_signature = inspect.signature(_original_render_message)
 
 
-def _upstream_handles_trailing_system() -> bool:
-    prompt = _original_render_message(
-        0,
-        [{"role": "system", "content": ""}],
-        thinking_mode="chat",
-    )
-    return prompt.endswith(deepseek_v4_encoding.ASSISTANT_SP_TOKEN + deepseek_v4_encoding.thinking_end_token)
+def _needs_trailing_system_patch() -> bool:
+    try:
+        bound_args = _render_message_signature.bind(
+            index=0,
+            messages=[{"role": "system", "content": ""}],
+            thinking_mode="chat",
+        )
+    except TypeError:
+        return False
+    bound_args.apply_defaults()
+    prompt = _original_render_message(*bound_args.args, **bound_args.kwargs)
+    return not prompt.endswith(deepseek_v4_encoding.ASSISTANT_SP_TOKEN + deepseek_v4_encoding.thinking_end_token)
 
 
 @wraps(_original_render_message)
@@ -41,7 +46,7 @@ def _patched_render_message(*args: Any, **kwargs: Any) -> str:
     index = bound_args.arguments["index"]
     messages = bound_args.arguments["messages"]
     thinking_mode = bound_args.arguments["thinking_mode"]
-    drop_thinking = bound_args.arguments["drop_thinking"]
+    drop_thinking = bound_args.arguments.get("drop_thinking", True)
     message = messages[index]
     if message.get("role") != "system" or message.get("task") is not None:
         return prompt
@@ -59,5 +64,5 @@ def _patched_render_message(*args: Any, **kwargs: Any) -> str:
     return prompt
 
 
-if not _upstream_handles_trailing_system():
+if _needs_trailing_system_patch():
     deepseek_v4_encoding.render_message = _patched_render_message
