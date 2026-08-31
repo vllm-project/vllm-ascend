@@ -27,6 +27,8 @@ import vllm_ascend.batch_invariant as batch_invariant
 class TestBatchInvariant:
     """Complete test suite for batch_invariant.py"""
 
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     def test_reduce_sum_uses_batch_invariant_operator_for_npu_tensor(self):
         x = MagicMock(spec=torch.Tensor)
         x.device.type = "npu"
@@ -42,6 +44,8 @@ class TestBatchInvariant:
         mock_reduce.assert_called_once_with(x, -1, True)
         assert result is expected
 
+    @patch("vllm_ascend.batch_invariant.HAS_TRITON", False)
+    @patch("vllm_ascend.batch_invariant.HAS_ASCENDC_BATCH_INVARIANT", True)
     def test_reduce_sum_uses_native_operator_for_cpu_tensor(self):
         x = MagicMock(spec=torch.Tensor)
         x.device.type = "cpu"
