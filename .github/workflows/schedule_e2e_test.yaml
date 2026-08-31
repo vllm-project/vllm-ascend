@@ -241,7 +241,7 @@ jobs:
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ needs.setup-vars.outputs.vllm_ascend_ref }}
       soc_version: "a2"
-      should_run: "true"
+      # should_run: "true"
       test_frequency: nightly
       testcase_timeout: "45"
 
@@ -262,7 +262,7 @@ jobs:
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ needs.setup-vars.outputs.vllm_ascend_ref }}
       soc_version: "a3"
-      should_run: "true"
+      # should_run: "true"
       test_frequency: nightly
       testcase_timeout: "45"
 
