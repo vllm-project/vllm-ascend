@@ -40,7 +40,7 @@ from vllm_ascend.utils import (
 
 @dataclass
 class DSAModules:
-    """Modules used in SFA V2."""
+    """Components required by the DeepSeek sparse attention wrapper."""
 
     wq_a: torch.nn.Module
     q_norm: torch.nn.Module

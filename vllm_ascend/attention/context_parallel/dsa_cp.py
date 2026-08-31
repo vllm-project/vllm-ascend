@@ -122,10 +122,7 @@ class AscendDSAReqMetadata:
 
 @dataclass
 class AscendDSAMetadata:
-    """Metadata for MLACommon.
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Runtime metadata for context-parallel DeepSeek sparse attention."""
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
@@ -170,10 +167,7 @@ class AscendDSACPLayerMetadata:
 
 
 class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Build runtime metadata for context-parallel DeepSeek sparse attention."""
 
     def __init__(
         self,
@@ -1053,10 +1047,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
 
 class AscendDSACPImpl(AttentionImplBase[Any]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Context-parallel implementation of DeepSeek sparse attention."""
 
     o_proj_full_pools: ClassVar[dict[Any, torch.Tensor]] = {}
 

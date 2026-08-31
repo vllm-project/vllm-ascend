@@ -53,14 +53,11 @@ DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
 
 
 class DSAAttention(nn.Module, AttentionLayerBase):
-    """Multi-Head Latent Attention layer.
+    """DeepSeek sparse attention layer for compressed KV caches.
 
-    This class takes query, and compressed key/value tensors as input.
-    The class does the following:
-
-    1. Store the input key and value tensors in the KV cache.
-    2. Perform (multi-head/multi-query/grouped-query) attention.
-    3. Return the output tensor.
+    This layer selects the backend and cache specification for DeepSeek V4's
+    C4, C128, and sliding-window attention variants. Execution is delegated to
+    the selected backend implementation.
     """
 
     def __init__(

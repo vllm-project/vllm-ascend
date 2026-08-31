@@ -160,10 +160,7 @@ class AscendMlaDCPMetadataBuilder(
 
 
 class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Ascend MLA implementation for decode context parallelism."""
 
     @staticmethod
     def update_graph_params(

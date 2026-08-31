@@ -227,10 +227,7 @@ class AscendDSAReqMetadata:
 
 @dataclass
 class AscendDSAMetadata:
-    """Metadata for MLACommon.
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Runtime metadata for Ascend DeepSeek sparse attention."""
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     num_decodes: int
@@ -330,10 +327,7 @@ def build_dspark_swa_indices(
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Build runtime metadata for Ascend DeepSeek sparse attention."""
 
     def __init__(
         self,
@@ -972,10 +966,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
 
 class AscendDSAImpl(AttentionImplBase[Any]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Ascend implementation of DeepSeek sparse attention."""
 
     def __init__(
         self,
