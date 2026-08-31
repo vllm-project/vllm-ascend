@@ -256,6 +256,8 @@ Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md
 
     - `GLM-5.3-w8a8c8`: can be deployed on 4 Atlas 800 A2 (64GB × 32).
 
+    Run the following scripts on four nodes respectively.
+
     **node 0**
 
     ```shell
@@ -419,8 +421,9 @@ curl http://<node0_ip>:<port>/v1/chat/completions \
     }'
 ```
 
-Expected result should have this :
-```
+Expected result should have this:
+
+```text
 "message":{"role":"assistant","content":"I'm GLM, a large language model developed by Z.ai. I'm designed to understand and generate human-like text based on the conversations we have together. My tvolves processing diverse text data to help answer questions and provide assistance across many topics.\n\nI don't store your personal data, and I'm contiarning to improve my capabilities. Is there something specific I can help you with today?","refusal":null,"annotations":null,"audio":null,"function_call":oning":"Let me analyze this question about my identity. First, I should acknowledge that this is a fundamental question about who and what I am. The key pover are my identity as GLM, a large language model by Z.ai, and my core capabilities. I should explain my primary function of text processing and generat being transparent about my nature as an AI system. It's also important to clarify my role in helping users and my ability to engage with various topics. ention my text processing abilities and learning from diverse datasets, but avoid making claims about consciousness or emotions. The response should be stogically, starting with my basic identity and moving on to my capabilities and purpose. I'll organize this information in a clear, straightforward manner sses the user's query directly."}
 ```
 
