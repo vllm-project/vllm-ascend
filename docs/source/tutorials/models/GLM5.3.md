@@ -125,7 +125,7 @@ If you don't want to use the docker image as above, you can also build all from 
 
 ## 5 Online Service Deployment
 
-The deployment scenarios validated for this release are organized by context window size (below 1M / 1M), hardware (Atlas 800 A3 / A2), and deployment mode (multi-node co-located). All startup scripts below are the verified reference commands; key parameters are explained after each scenario.
+The deployment scenarios validated for this release are organized by context window size (below 1M), hardware (Atlas 800 A3 / A2), and deployment mode (multi-node co-located). All startup scripts below are the verified reference commands; key parameters are explained after each scenario.
 
 !!! warning
 
@@ -394,11 +394,11 @@ Only the key parameters specific to this model/scenario are described below. max
 **Notice:**
 This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on).
 
-#### 5.1.2 1M Context Deployment (Experimental)
+#### 5.1.2 1M Context Deployment
 
 The 1M context scenarios have not yet tested for `GLM-5.3`. If you want to deploy, please refer to scripts in [GLM-5.2 1M Context Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#m-context-deployment).
 
-### 5.2 Prefill-Decode Disaggregation (Experimental)
+### 5.2 Prefill-Decode Disaggregation
 
 Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. If you want to deploy prefill-decode disaggregation, you can refer to scripts in [GLM-5.2 Prefill-Decode Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#prefill-decode-disaggregation).
 
@@ -437,9 +437,10 @@ Here are two accuracy evaluation methods.
 
 2. After execution, you can get the result. Here are the results of `GLM-5.3-w8a8c8` in `vllm-ascend:v0.23.0` for reference only.
 
-| dataset | model | metric | mode | vllm-api-general-chat |
-| ----- | ----- | ----- | ----- | ----- |
-| GPQA Diamond | GLM-5.3-w8a8c8 | accuracy | gen | 92.42 |
+| dataset | model | hardware | metric | mode | vllm-api-general-chat |
+| ----- | ----- | ----- | ----- | ----- | ----- |
+| GPQA Diamond | GLM-5.3-w8a8c8 | A3 | accuracy | gen | 92.42 |
+| GPQA Diamond | GLM-5.3-w8a8c8 | A2 | accuracy | gen | 90.40 |
 
 ### 7.2 Using Language Model Evaluation Harness
 
