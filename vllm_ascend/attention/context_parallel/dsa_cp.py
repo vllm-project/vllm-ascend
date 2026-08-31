@@ -138,9 +138,11 @@ class CompressorSPAsyncGather:
     The C4 launch phase runs the local Compressor and enqueues the async
     AllGather before the Indexer TopK; this handle keeps every tensor the
     collective still references alive until the finalize phase waits on it.
+    The main Compressor fills ``kv_cache``/``block_size`` for its scatter
+    finalize; the Indexer launch leaves them empty and passes its cache tuple
+    to ``_finalize_indexer_cache_sp`` directly.
     """
 
-    kv_cache: torch.Tensor
     plan: CompressorSPMetadata
     full_slot_mapping: torch.Tensor
     block_size: int
@@ -148,6 +150,7 @@ class CompressorSPAsyncGather:
     gather_input: torch.Tensor
     gather_work: Any
     comm_stream: torch.npu.Stream
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | None = None
 
 
 @dataclass
@@ -1742,6 +1745,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
         compressed_cos: torch.Tensor,
         coff: int,
         plan: CompressorSPMetadata,
+        wkv_weight: torch.Tensor,
+        wgate_weight: torch.Tensor,
+        ape: torch.Tensor,
+        norm_weight: torch.Tensor,
     ) -> None:
         if plan.state_replay_start_pos is None or plan.state_replay_start_pos.numel() == 0:
             return
@@ -1763,11 +1770,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
         )
         torch.ops._C_ascend.compressor(
             replay_x,
-            self.compressor_wkv.weight,
-            self.compressor_wgate.weight,
+            wkv_weight,
+            wgate_weight,
             state_cache.squeeze(-2),
-            self.compressor_ape,
-            self.compressor_norm.weight,
+            ape,
+            norm_weight,
             replay_sin,
             replay_cos,
             state_block_table=replay_block_table,
@@ -1793,6 +1800,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
         compressed_cos: torch.Tensor,
         coff: int,
         plan: CompressorSPMetadata,
+        wkv_weight: torch.Tensor,
+        wgate_weight: torch.Tensor,
+        ape: torch.Tensor,
+        norm_weight: torch.Tensor,
     ) -> torch.Tensor:
         """Run this rank's owned-token Compressor and keep only owned rows."""
         local_x = self._select_compressor_sp_rows(x, plan, "token")
@@ -1802,11 +1813,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         local_compressed_kv = torch.ops._C_ascend.compressor(
             local_x,
-            self.compressor_wkv.weight,
-            self.compressor_wgate.weight,
+            wkv_weight,
+            wgate_weight,
             state_cache.squeeze(-2),
-            self.compressor_ape,
-            self.compressor_norm.weight,
+            ape,
+            norm_weight,
             local_sin,
             local_cos,
             state_block_table=local_state_block_table,
@@ -1922,6 +1933,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
             compressed_cos=compressed_cos,
             coff=coff,
             plan=plan,
+            wkv_weight=self.compressor_wkv.weight,
+            wgate_weight=self.compressor_wgate.weight,
+            ape=self.compressor_ape,
+            norm_weight=self.compressor_norm.weight,
         )
         comm_stream = _compressor_sp_comm_stream()
         gathered, gather_input, gather_work = self._gather_compressor_sp_rows(
@@ -1937,6 +1952,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
             compressed_cos=compressed_cos,
             coff=coff,
             plan=plan,
+            wkv_weight=self.compressor_wkv.weight,
+            wgate_weight=self.compressor_wgate.weight,
+            ape=self.compressor_ape,
+            norm_weight=self.compressor_norm.weight,
         )
         return CompressorSPAsyncGather(
             kv_cache=kv_cache,
@@ -1961,6 +1980,131 @@ class AscendDSACPImpl(DSAAttentionImpl):
             pending.full_slot_mapping,
             pending.block_size,
         )
+
+    def _launch_indexer_cache_sp(
+        self,
+        *,
+        x: torch.Tensor,
+        indexer_state_cache: torch.Tensor,
+        indexer_kv_state_metadata: Any,
+        compressed_sin: torch.Tensor,
+        compressed_cos: torch.Tensor,
+        indexer_slot_mapping: torch.Tensor,
+        plan: CompressorSPMetadata,
+        coff: int,
+        need_gather_q_kv: bool,
+    ) -> CompressorSPAsyncGather | None:
+        """Launch the Indexer Compressor SP update for C4 layers.
+
+        Mirrors ``_launch_compressor_cache_sp`` with the Indexer weights and
+        caches: run this rank's owned-token Indexer Compressor, enqueue the
+        async AllGather behind the main Compressor's collective on the shared
+        communication stream, and replay the Indexer state tail. The caller
+        must run ``_finalize_indexer_cache_sp`` before TopK consumes the
+        Indexer caches. Only contiguous gathered layouts are accepted
+        (``gather_compact_slice`` is not None); other batches keep the full
+        Indexer path. The local call passes narrowed rope views directly and
+        creates no ``CompressorMetadata``, so the cross-layer metadata cache
+        cannot alias local and global cu_seqlens.
+        """
+        if (
+            coff != 2
+            or not need_gather_q_kv
+            or not self.compressor_sp_hccl_overlap
+            or torch.npu.is_current_stream_capturing()
+            or plan is None
+            or not plan.enabled
+            or plan.gather_compact_slice is None
+            or plan.num_input_tokens < self.compressor_sp_hccl_overlap_min_tokens
+            or indexer_kv_state_metadata.req_metadata is None
+            or indexer_kv_state_metadata.req_metadata.slot_mapping is None
+        ):
+            return None
+        row_counts = plan.sp_row_counts_per_rank
+        expected_global = sum(row_counts)
+        if expected_global == 0 or indexer_slot_mapping.shape[0] < expected_global:
+            return None
+
+        local_compressed_kv = self._run_local_compressor_sp(
+            x=x,
+            state_cache=indexer_state_cache,
+            req_metadata=indexer_kv_state_metadata.req_metadata,
+            state_req_metadata=indexer_kv_state_metadata.req_metadata,
+            compressed_sin=compressed_sin,
+            compressed_cos=compressed_cos,
+            coff=coff,
+            plan=plan,
+            wkv_weight=self.indexcom_wkv.weight,
+            wgate_weight=self.indexcom_wgate.weight,
+            ape=self.indexcom_ape,
+            norm_weight=self.indexcom_norm.weight,
+        )
+        comm_stream = _compressor_sp_comm_stream()
+        gathered, gather_input, gather_work = self._gather_compressor_sp_rows(
+            local_compressed_kv,
+            row_counts,
+            comm_stream=comm_stream,
+        )
+        self._replay_c4_compressor_sp_state(
+            x=x,
+            state_cache=indexer_state_cache,
+            state_block_table=indexer_kv_state_metadata.req_metadata.block_table,
+            compressed_sin=compressed_sin,
+            compressed_cos=compressed_cos,
+            coff=coff,
+            plan=plan,
+            wkv_weight=self.indexcom_wkv.weight,
+            wgate_weight=self.indexcom_wgate.weight,
+            ape=self.indexcom_ape,
+            norm_weight=self.indexcom_norm.weight,
+        )
+        return CompressorSPAsyncGather(
+            kv_cache=None,
+            plan=plan,
+            full_slot_mapping=indexer_slot_mapping,
+            block_size=0,
+            gathered=gathered,
+            gather_input=gather_input,
+            gather_work=gather_work,
+            comm_stream=comm_stream,
+        )
+
+    def _finalize_indexer_cache_sp(
+        self,
+        pending: CompressorSPAsyncGather,
+        kv_cache: tuple[torch.Tensor, ...],
+        hadamard: torch.Tensor | None,
+    ) -> None:
+        """Wait for the Indexer AllGather and write the quantized Indexer caches."""
+        pending.gather_work.wait()
+        torch.npu.current_stream().wait_stream(pending.comm_stream)
+        pending.gather_input = None
+        (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
+            DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
+        )
+        del indexer_state_cache
+        expected_global = sum(pending.plan.sp_row_counts_per_rank)
+        start, length = pending.plan.gather_compact_slice
+        kv = pending.gathered.narrow(0, start, length)
+        pending.gathered = None
+        if kv.numel() == 0:
+            return
+        valid_slot_mapping = pending.full_slot_mapping[:expected_global]
+        if self.indexer is not None and self.indexer.compressor.rotate:
+            assert hadamard is not None
+            kv = rotate_activation(kv, hadamard)
+        _, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
+            kv,
+            indexer_k_cache,
+            indexer_full_cache,
+            valid_slot_mapping,
+        )
+        if kv_scale is not None:
+            DeviceOperator.dsa_indexer_scatter_scale_part3(
+                kv_scale,
+                indexer_scale_cache,
+                valid_slot_mapping,
+            )
 
     def _try_update_compressor_cache_sp(
         self,
@@ -2000,6 +2144,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
             compressed_cos=compressed_cos,
             coff=coff,
             plan=plan,
+            wkv_weight=self.compressor_wkv.weight,
+            wgate_weight=self.compressor_wgate.weight,
+            ape=self.compressor_ape,
+            norm_weight=self.compressor_norm.weight,
         )
 
         gathered: torch.Tensor | None = None
@@ -2012,6 +2160,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 compressed_cos=compressed_cos,
                 coff=coff,
                 plan=plan,
+                wkv_weight=self.compressor_wkv.weight,
+                wgate_weight=self.compressor_wgate.weight,
+                ape=self.compressor_ape,
+                norm_weight=self.compressor_norm.weight,
             )
         else:
             # C128 has no state replay to overlap, so the output gather is folded
@@ -2184,12 +2336,38 @@ class AscendDSACPImpl(DSAAttentionImpl):
             )
 
             if self.compress_ratio == 4:
-                self._update_indexer_cache(
-                    x=hidden_states_cache,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
+                (_, _, indexer_kv_state_metadata, indexer_kv_scale_metadata, _) = attn_metadata
+                assert indexer_kv_scale_metadata is not None
+                assert indexer_kv_state_metadata is not None
+                assert indexer_kv_scale_metadata.req_metadata is not None
+                assert indexer_kv_state_metadata.req_metadata is not None
+                indexer_cos, indexer_sin, indexer_slot_mapping = self._compute_compressor_metadata(
+                    indexer_kv_scale_metadata.req_metadata,
                 )
+                indexer_async_gather = self._launch_indexer_cache_sp(
+                    x=hidden_states_cache,
+                    indexer_state_cache=DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)[0],
+                    indexer_kv_state_metadata=indexer_kv_state_metadata,
+                    compressed_sin=indexer_sin,
+                    compressed_cos=indexer_cos,
+                    indexer_slot_mapping=indexer_slot_mapping,
+                    plan=compressor_attn_metadata.req_metadata.compressor_sp,
+                    coff=coff,
+                    need_gather_q_kv=need_gather_q_kv,
+                )
+                if indexer_async_gather is not None:
+                    self._finalize_indexer_cache_sp(
+                        indexer_async_gather,
+                        kv_cache,
+                        indexer_kv_scale_metadata.hadamard,
+                    )
+                else:
+                    self._update_indexer_cache(
+                        x=hidden_states_cache,
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        actual_seq_lengths_query=actual_seq_lengths_query,
+                    )
                 compress_topk_idxs = self._indexer_select_topk(
                     x=hidden_states_local,
                     qr=qr_local,
