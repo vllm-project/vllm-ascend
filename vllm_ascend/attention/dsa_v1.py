@@ -66,7 +66,6 @@ if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
 else:
     triton_q_rms = None  # type: ignore
-from vllm_ascend.utils import device_print
 
 
 # The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
@@ -427,6 +426,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
+        self.dspark_swa_indices_buffer: torch.Tensor | None = None
         if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
             vllm_config
         ):
@@ -447,16 +447,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
                 for _ in range(spec_token_num)
             ]
-            # Fixed per-draft_index buffer for dspark_swa_indices, so its
-            # address stays stable across async ACL-graph replays. Otherwise
-            # build_dspark_swa_indices returns a fresh local each draft step
-            # that is freed before the graph executes -> dangling read.
-            # Mirrors spec_sas_metadata / spec_slot_mapping.
+            # Shared static buffer for dspark_swa_indices, so its address
+            # stays stable across async ACL-graph replays.
             _dspark_index_width = _aligned_dspark_index_width(
                 self.model_config.hf_config.sliding_window, spec_token_num
             )
-            self.spec_dspark_swa_indices = torch.zeros(
-                (scheduler_config.max_num_batched_tokens, 1, _dspark_index_width),
+            max_dspark_rows = max(
+                scheduler_config.max_num_batched_tokens,
+                scheduler_config.max_num_seqs * (self.speculative_config.num_speculative_tokens + 1),
+            )
+            self.dspark_swa_indices_buffer = torch.zeros(
+                (max_dspark_rows, 1, _dspark_index_width),
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -521,6 +522,24 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 torch.bfloat16
             ),
         )
+
+    def _store_dspark_swa_indices(self, indices: torch.Tensor) -> torch.Tensor:
+        """Store DSpark SWA visible-slot indices into an address-stable buffer.
+        ACL graph capture freezes tensor addresses, so a freshly allocated
+        ``build_dspark_swa_indices`` result has a different ``data_ptr`` at
+        replay than at capture and the replayed kernel reads a stale address.
+        Copying into a static buffer (like ``sas_metadata``) keeps the address
+        identical across capture/replay.
+        """
+        if self.dspark_swa_indices_buffer is None:
+            return indices
+        num_rows = indices.shape[0]
+        assert num_rows <= self.dspark_swa_indices_buffer.shape[0], (
+            f"dspark_swa_indices needs {num_rows} rows but the static buffer "
+            f"only has {self.dspark_swa_indices_buffer.shape[0]}"
+        )
+        self.dspark_swa_indices_buffer[:num_rows].copy_(indices)
+        return self.dspark_swa_indices_buffer[:num_rows]
 
     @classmethod
     def get_cudagraph_support(
@@ -858,10 +877,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
             )
-            dspark_swa_indices = dspark_swa_indices[: self.num_decode_tokens]
+            dspark_swa_indices = self._store_dspark_swa_indices(dspark_swa_indices[: self.num_decode_tokens])
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
-            self.spec_dspark_swa_indices[: self.num_decode_tokens] = dspark_swa_indices
-            dspark_swa_indices = self.spec_dspark_swa_indices[: self.num_decode_tokens]
         if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
             cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
                 self.common_ratio_to_sas_metadata,
@@ -1957,29 +1974,4 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 assert compress_topk_idxs is not None
                 attn_kwargs["cmp_sparse_indices"] = compress_topk_idxs
 
-        # device_print(layer_name)
-        if torch.distributed.get_rank() == 0 and layer_name == "mtp.0.self_attn.attn":
-            device_print(f"{swa_kv_cache.shape=}")
-            if swa_req_metadata.block_table is not None:
-                device_print(f"{swa_req_metadata.block_table.shape=}")
-                device_print("swa_req_metadata.block_table=")
-                device_print(swa_req_metadata.block_table)
-            device_print("actual_seq_lengths_query=")
-            device_print(actual_seq_lengths_query)
-            device_print("actual_seq_lengths_key=")
-            device_print(actual_seq_lengths_key)
-            device_print("self.attn_sink=")
-            device_print(self.attn_sink)
-            device_print(f"{common_metadata.sas_metadata.shape=}")
-            device_print(f"{common_metadata.sas_metadata.data_ptr()=}")
-            device_print("common_metadata.sas_metadata=")
-            device_print(common_metadata.sas_metadata)
-            device_print(f"{self.softmax_scale=}")
-            device_print(f"{ori_win_left=}")
-            device_print(f"{ori_win_right}")
-            if swa_req_metadata.dspark_swa_indices is not None:
-                device_print(f"{swa_req_metadata.dspark_swa_indices.shape=}")
-                device_print(f"{swa_req_metadata.dspark_swa_indices.data_ptr()=}")
-                device_print("swa_req_metadata.dspark_swa_indices=")
-                device_print(swa_req_metadata.dspark_swa_indices)
         return attn_op(q, **attn_kwargs)[0]

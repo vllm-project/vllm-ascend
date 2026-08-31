@@ -170,7 +170,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
-        torch.npu.synchronize()
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
@@ -195,4 +194,3 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 mm_inputs,
                 is_profile=is_profile,
             )
-        torch.npu.synchronize()
