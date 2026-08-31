@@ -20,6 +20,8 @@ from vllm.model_executor.models.qwen3_dflash import (
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def _grouped_conv(
     hidden_states: torch.Tensor,
@@ -236,7 +238,7 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
         start_layer_id: int = 0,
         prefix: str = "",
     ) -> None:
-        if hasattr(DFlashQwen3Model, "decoder_layer_cls"):
+        if not vllm_version_is("0.27.1"):
             super().__init__(
                 vllm_config=vllm_config,
                 start_layer_id=start_layer_id,
@@ -284,7 +286,7 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     has_own_lm_head = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        if hasattr(DFlashQwen3ForCausalLM, "model_cls"):
+        if not vllm_version_is("0.27.1"):
             super().__init__(vllm_config=vllm_config, prefix=prefix)
         else:
             import vllm.model_executor.models.qwen3_dflash as dflash_mod
