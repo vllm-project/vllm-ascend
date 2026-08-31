@@ -23,8 +23,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import typing
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch import nn
@@ -89,8 +89,8 @@ class AscendCompressorStateCache(CompressorStateCache):
 class AscendCompressorMetadata:
     """Request metadata for the compressed KV and compressor state caches."""
 
-    cache: typing.Any
-    state: typing.Any
+    cache: Any
+    state: Any
 
 
 class Compressor(nn.Module):
@@ -166,37 +166,10 @@ class Compressor(nn.Module):
                 f"Only support compress_ratio in [4, 128]. Got unsupported compress_ratio: {compress_ratio}"
             )
 
-    def _compute_metadata(
-        self,
-        metadata: typing.Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        from vllm_ascend.device.device_op import DeviceOperator
+    def _compute_metadata(self, metadata: Any):
+        from vllm_ascend.attention.dsa_v1 import get_or_compute_compressor_metadata
 
-        assert metadata.full_compress_cos is not None
-        assert metadata.full_compress_sin is not None
-        assert metadata.num_compressed_tokens is not None
-        assert metadata.start_pos is not None
-        assert metadata.num_actual_reqs is not None
-        full_compress_cos = metadata.full_compress_cos.view(
-            metadata.full_compress_cos.shape[0],
-            metadata.full_compress_cos.shape[-1],
-        )
-        full_compress_sin = metadata.full_compress_sin.view(
-            metadata.full_compress_sin.shape[0],
-            metadata.full_compress_sin.shape[-1],
-        )
-        return torch.ops._C_ascend.compressor_metadata(
-            full_compress_cos,
-            full_compress_sin,
-            metadata.query_start_loc,
-            metadata.start_pos,
-            metadata.block_table,
-            metadata.storage_block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
-            self.compress_ratio,
-            metadata.num_compressed_tokens,
-            metadata.num_actual_reqs,
-        )
+        return get_or_compute_compressor_metadata(metadata, self.compress_ratio)
 
     def forward(
         self,

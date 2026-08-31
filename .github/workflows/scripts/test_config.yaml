@@ -933,6 +933,7 @@ estimated_times:
   tests/ut/attention/a2/test_attention_v1.py: 30
   tests/ut/attention/a2/test_attention_v1_precision.py: 540
   tests/ut/attention/a2/test_common_cp.py: 30
+  tests/ut/attention/a2/test_dsv4_compressor_metadata_cache.py: 30
   tests/ut/attention/a2/test_mla_cp.py: 30
   tests/ut/attention/a2/test_mla_cp_precision.py: 30
   tests/ut/attention/a2/test_mla_precision.py: 190

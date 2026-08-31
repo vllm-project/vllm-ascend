@@ -17,6 +17,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
+    get_or_compute_compressor_metadata,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -104,6 +105,7 @@ class AscendDSAReqMetadata:
     storage_block_size: int
     query_start_loc: torch.Tensor
     cp_metadata: DSACPMetadata
+    cache_group_key: str = ""
     num_compressed_tokens: int | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
@@ -203,6 +205,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.seq_lens_cpu: torch.Tensor = None
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
+        if not layer_names:
+            raise ValueError("DSA-CP metadata builder requires at least one layer name")
+        # vLLM assigns one builder result to every layer name in the attention
+        # group. Keep one canonical prefix as the semantic group identity.
+        self.cache_group_key = layer_names[0]
         hf_config = self.model_config.hf_config
 
         self.hadamard = None
@@ -583,6 +590,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=self.seq_lens[:num_reqs],
             query_start_loc=query_start_loc,
             cp_metadata=cp_metadata,
+            cache_group_key=self.cache_group_key,
             sin=sin,
             cos=cos,
             start_pos=start_pos,
@@ -799,6 +807,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=self.seq_lens[:num_reqs],
             query_start_loc=query_start_loc,
             cp_metadata=cp_metadata,
+            cache_group_key=self.cache_group_key,
             sin=sin,
             cos=cos,
             full_compress_sin=full_compress_sin,
@@ -1173,36 +1182,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             compressor_state=compressor_state_metadata,
             indexer_cache=indexer_cache_metadata,
             indexer_state=indexer_state_metadata,
-        )
-
-    def _compute_compressor_metadata(
-        self,
-        metadata: AscendDSAReqMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        assert metadata.full_compress_cos is not None
-        assert metadata.full_compress_sin is not None
-        assert metadata.num_compressed_tokens is not None
-        assert metadata.start_pos is not None
-        assert metadata.num_actual_reqs is not None
-        full_compress_cos = metadata.full_compress_cos.view(
-            metadata.full_compress_cos.shape[0],
-            metadata.full_compress_cos.shape[-1],
-        )
-        full_compress_sin = metadata.full_compress_sin.view(
-            metadata.full_compress_sin.shape[0],
-            metadata.full_compress_sin.shape[-1],
-        )
-        return torch.ops._C_ascend.compressor_metadata(
-            full_compress_cos,
-            full_compress_sin,
-            metadata.query_start_loc,
-            metadata.start_pos,
-            metadata.block_table,
-            metadata.storage_block_size,
-            DeviceOperator.get_dsa_compressor_slot_mapping_format(),
-            self.compress_ratio,
-            metadata.num_compressed_tokens,
-            metadata.num_actual_reqs,
         )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -1650,8 +1629,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 )
 
             coff = 2 if self.compressor_overlap else 1
-            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
+            compress_cos, compress_sin, compress_slot_mapping = get_or_compute_compressor_metadata(
                 compressor_attn_metadata.req_metadata,
+                self.compress_ratio,
             )
             compressed_kv = torch.ops._C_ascend.compressor(
                 hidden_states_cache,
@@ -1801,8 +1781,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert indexer_kv_scale_metadata.req_metadata is not None
         assert indexer_kv_state_metadata.req_metadata is not None
         assert self.indexer is not None
-        compressed_cos, compressed_sin, indexer_slot_mapping = self._compute_compressor_metadata(
+        compressed_cos, compressed_sin, indexer_slot_mapping = get_or_compute_compressor_metadata(
             indexer_kv_scale_metadata.req_metadata,
+            self.compress_ratio,
         )
         kv = torch.ops._C_ascend.compressor(
             x,

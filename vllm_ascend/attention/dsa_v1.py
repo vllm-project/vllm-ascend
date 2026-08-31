@@ -7,6 +7,7 @@ import torch.distributed as dist
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -61,6 +62,79 @@ else:
 
 # The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
 DSA_METADATA_BUFFER_SIZE = 1024
+
+CompressorMetadataOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+_COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
+
+
+def reset_compressor_metadata_cache() -> None:
+    """Release metadata outputs before a composite forward changes substeps."""
+    get_forward_context().additional_kwargs.pop(_COMPRESSOR_METADATA_CACHE_KEY, None)
+
+
+def get_or_compute_compressor_metadata(
+    metadata: Any,
+    compress_ratio: int,
+) -> CompressorMetadataOutput:
+    """Build compressor metadata once per cache group in the current substep.
+
+    Attention metadata builders provide a semantic cache-group key, and all
+    layers in that group consume the same result. Composite speculative
+    forwards reset this cache when switching substeps, so only the current
+    substep's outputs stay live. The metadata op remains in model forward for
+    graph capture.
+
+    Prefill and decode must stay isolated. On v0.26 they used separate
+    dataclasses, so the cache key includes ``type(metadata)``. Main unifies
+    both into ``AscendDSAReqMetadata``, so the key also includes the input
+    tensor identities that distinguish those phases.
+    """
+    forward_context = get_forward_context()
+    cache: dict[tuple, CompressorMetadataOutput] = forward_context.additional_kwargs.setdefault(
+        _COMPRESSOR_METADATA_CACHE_KEY,
+        {},
+    )
+    cache_group_key = metadata.cache_group_key
+    if not cache_group_key:
+        raise ValueError("DSV4 compressor metadata requires a cache-group key")
+    cache_key = (
+        cache_group_key,
+        type(metadata),
+        id(metadata.query_start_loc),
+        id(metadata.start_pos),
+    )
+    cached_metadata = cache.get(cache_key)
+    if cached_metadata is not None:
+        return cached_metadata
+
+    assert metadata.full_compress_cos is not None
+    assert metadata.full_compress_sin is not None
+    assert metadata.num_compressed_tokens is not None
+    assert metadata.start_pos is not None
+    assert metadata.num_actual_reqs is not None
+    full_compress_cos = metadata.full_compress_cos.view(
+        metadata.full_compress_cos.shape[0],
+        metadata.full_compress_cos.shape[-1],
+    )
+    full_compress_sin = metadata.full_compress_sin.view(
+        metadata.full_compress_sin.shape[0],
+        metadata.full_compress_sin.shape[-1],
+    )
+    computed_metadata = torch.ops._C_ascend.compressor_metadata(
+        full_compress_cos,
+        full_compress_sin,
+        metadata.query_start_loc,
+        metadata.start_pos,
+        metadata.block_table,
+        metadata.storage_block_size,
+        DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+        compress_ratio,
+        metadata.num_compressed_tokens,
+        metadata.num_actual_reqs,
+    )
+    cache[cache_key] = computed_metadata
+    return computed_metadata
+
 
 _DSV4_DSA_OVERLAP_STREAM = None
 
@@ -208,6 +282,7 @@ class AscendDSAReqMetadata:
     slot_mapping: torch.Tensor | None
     storage_block_size: int
     query_start_loc: torch.Tensor
+    cache_group_key: str = ""
 
     num_compressed_tokens: int | None = None
     sin: torch.Tensor = None
@@ -391,6 +466,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
 
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
+        if not layer_names:
+            raise ValueError("DSA metadata builder requires at least one layer name")
+        # vLLM assigns one builder result to every layer name in the attention
+        # group. Keep one canonical prefix as the semantic group identity.
+        self.cache_group_key = layer_names[0]
         self.hadamard = None
         self._init_hadamard(layer_names)
         self.start_pos_prefill: torch.Tensor = torch.zeros(
@@ -775,6 +855,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             slot_mapping=slot_mapping,
             storage_block_size=self.storage_block_size,
             query_start_loc=query_start_loc,
+            cache_group_key=self.cache_group_key,
             num_compressed_tokens=num_compressed_tokens,
             sin=sin,
             cos=cos,
@@ -935,6 +1016,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             slot_mapping=slot_mapping,
             storage_block_size=self.storage_block_size,
             query_start_loc=query_start_loc,
+            cache_group_key=self.cache_group_key,
             num_compressed_tokens=self.num_actual_tokens,
             sin=sin,
             cos=cos,
