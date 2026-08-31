@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
@@ -568,6 +569,32 @@ class TestAscendConfig(TestBase):
         second_ascend_config = init_ascend_config(second_vllm_config)
         self.assertIsNot(first_ascend_config, second_ascend_config)
         self.assertTrue(second_ascend_config.ascend_compilation_config.enable_npugraph_ex)
+
+
+class TestFinegrainedTPPreconditions(TestBase):
+    """An explicit cudagraph_mode=NONE (without enforce_eager) must fail at
+    startup instead of surviving until the first eager step in warmup."""
+
+    @staticmethod
+    def _make_vc(cudagraph_mode):
+        return SimpleNamespace(
+            parallel_config=SimpleNamespace(tensor_parallel_size=1, data_parallel_size=2),
+            model_config=SimpleNamespace(enforce_eager=False, is_moe=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        )
+
+    def test_oproj_rejects_explicit_none_cudagraph_mode(self):
+        cfg = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        with self.assertRaises(AssertionError) as ctx:
+            cfg._validate_preconditions(self._make_vc(CUDAGraphMode.NONE))
+        self.assertIn("only supported in graph mode", str(ctx.exception))
+
+    def test_oproj_accepts_graph_modes(self):
+        cfg = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        for mode in (CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY):
+            with self.subTest(mode=mode):
+                cfg._validate_preconditions(self._make_vc(mode))
 
 
 class TestShortRequestFirstConfig(TestBase):

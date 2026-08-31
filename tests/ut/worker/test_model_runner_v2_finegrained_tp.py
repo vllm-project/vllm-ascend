@@ -254,6 +254,8 @@ def test_dummy_run_lmhead_disabled_or_profile_skips_collectives():
         (10_000, CUDAGraphMode.NONE, dict(dp_size=2, oproj_enabled=True, is_profile=True)),
         (512, CUDAGraphMode.FULL, dict(dp_size=2, oproj_enabled=True)),  # exactly at capacity
         (64, CUDAGraphMode.PIECEWISE, dict(dp_size=4, oproj_enabled=True)),
+        # uniform decode step under FULL_DECODE_ONLY stays on the decode graphs
+        (64, CUDAGraphMode.FULL_DECODE_ONLY, dict(dp_size=2, oproj_enabled=True, uniform_decode_step=True)),
     ],
 )
 def test_oproj_guard_allows_step(num_tokens, cudagraph_mode, kwargs):
@@ -261,13 +263,15 @@ def test_oproj_guard_allows_step(num_tokens, cudagraph_mode, kwargs):
 
 
 @pytest.mark.parametrize(
-    "num_tokens, cudagraph_mode",
+    "num_tokens, cudagraph_mode, kwargs",
     [
-        (513, CUDAGraphMode.FULL),  # exceeds the largest captured size -> eager fallback
-        (64, CUDAGraphMode.NONE),  # graphs disabled in config -> every step is eager
+        (513, CUDAGraphMode.FULL, dict()),  # exceeds the largest captured size -> eager fallback
+        (64, CUDAGraphMode.NONE, dict()),  # graphs disabled in config -> every step is eager
+        # mixed/prefill step under FULL_DECODE_ONLY dispatches to eager without DP padding
+        (64, CUDAGraphMode.FULL_DECODE_ONLY, dict(uniform_decode_step=False)),
     ],
 )
-def test_oproj_guard_raises_outside_captured_graph(num_tokens, cudagraph_mode):
+def test_oproj_guard_raises_outside_captured_graph(num_tokens, cudagraph_mode, kwargs):
     with pytest.raises(ValueError, match="o_proj collectives will hang"):
         validate_oproj_tp_graph_step(
             num_tokens,
@@ -277,6 +281,7 @@ def test_oproj_guard_raises_outside_captured_graph(num_tokens, cudagraph_mode):
             oproj_enabled=True,
             dummy_run=False,
             is_profile=False,
+            **kwargs,
         )
 
 
@@ -312,7 +317,39 @@ def test_execute_model_wires_oproj_guard():
         oproj_enabled=True,
         dummy_run=False,
         is_profile=False,
+        uniform_decode_step=True,
     )
+
+
+def test_execute_model_classifies_step_under_full_decode_only():
+    """Under FULL_DECODE_ONLY execute_model must classify the step from the
+    scheduler output: a mixed (non-decode) step reaches the guard as an eager
+    step and fails fast instead of silently hanging the cross-DP collectives."""
+    runner = _make_runner()
+    runner.ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(profiling_chunk_config=MagicMock()),
+        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=2),
+    )
+    runner.compilation_config = SimpleNamespace(
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY, max_cudagraph_capture_size=512
+    )
+    runner.dp_size = 2
+    runner.decode_query_len = 1
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=4,
+        num_scheduled_tokens={"r0": 1, "r1": 3},
+    )
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.vllm_version_is", return_value=True),
+        patch.object(NPUModelRunner.__bases__[0], "execute_model") as super_exec,
+        patch("vllm_ascend.worker.v2.model_runner._start_profiling_chunk_timing"),
+        patch("vllm_ascend.worker.v2.model_runner._finish_profiling_chunk_timing"),
+        pytest.raises(ValueError, match="o_proj collectives will hang"),
+    ):
+        runner.execute_model(scheduler_output, dummy_run=False, is_profile=False)
+
+    super_exec.assert_not_called()
 
 
 def test_execute_model_skips_guard_when_oproj_disabled():
