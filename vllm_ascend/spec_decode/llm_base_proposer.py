@@ -547,10 +547,40 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else:
                     self.model.lm_head = target_lm_head
 
-        if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
-            for _, layer_module in self.model.model.layers.items():
-                if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
-                    layer_module.shared_head.head = model.lm_head
+        # GLM-5.3-Flash: the runtime method is normalized to "deepseek_mtp"
+        # (vllm/config/speculative.py), so the previous `== "mtp"` comparison
+        # never fired and the drafter kept the checkpoint's separately-trained
+        # shared_head.head instead of the tied target lm_head. Accept both
+        # spellings so the tie-in executes (measured: acceptance max 1.75->2.33,
+        # TPOT median 171->168ms on GLM-5.3-Flash spec=3).
+        if self.method in ("mtp", "deepseek_mtp") and self.vllm_config.model_config.is_deepseek_mla:
+            # mtp_lm_head_lookup: multimodal wrappers such as
+            # Glm5NextForConditionalGeneration keep lm_head on the nested
+            # language model, so resolve it the same way the EAGLE branch does.
+            target_lm_head = getattr(model, "lm_head", None)
+            if target_lm_head is None and hasattr(model, "get_language_model"):
+                target_lm_head = getattr(model.get_language_model(), "lm_head", None)
+            if target_lm_head is None and hasattr(model, "language_model"):
+                target_lm_head = getattr(model.language_model, "lm_head", None)
+            if target_lm_head is None:
+                logger.warning(
+                    "[spec_decode/base] Target model has no accessible lm_head;"
+                    " MTP layers keep their own shared_head weights."
+                )
+            else:
+                # mtp_head_tied_share: GLM-5.3-Flash omits shared_head.head from
+                # the checkpoint and ties it to the target lm_head, so the
+                # equality test never fires and the draft head stays
+                # uninitialised. Share whenever the shapes line up.
+                for _, layer_module in self.model.model.layers.items():
+                    shared_head = getattr(layer_module, "shared_head", None)
+                    draft_head = getattr(shared_head, "head", None)
+                    if (
+                        shared_head is not None
+                        and draft_head is not None
+                        and draft_head.weight.shape == target_lm_head.weight.shape
+                    ):
+                        shared_head.head = target_lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             logger.info(
