@@ -439,6 +439,74 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
+    @patch("vllm_ascend.worker.model_runner_v1.enable_fa_quant", return_value=False)
+    def test_a5_flash_mla_cache_uses_unified_zero_copy_views(self, _mock_fa_quant):
+        runner = self._build_runner()
+        runner._uses_a5_flash_mla_cache = MagicMock(return_value=True)
+        runner._get_attention_kv_cache_dims = MagicMock(return_value=(512, 64))
+        layer_name = "mla_attn"
+        num_blocks = 2
+        block_size = 128
+        kv_cache_spec = AscendMLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=kv_cache_spec.page_size_bytes * num_blocks,
+                    shared_by=[layer_name],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=[layer_name],
+                    kv_cache_spec=kv_cache_spec,
+                )
+            ],
+        )
+        backend = MagicMock()
+        backend.get_kv_cache_shape.side_effect = (
+            lambda block_count, block_size_, num_heads, head_size: (
+                block_count,
+                block_size_,
+                num_heads,
+                head_size,
+            )
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=kv_cache_spec,
+                backend=backend,
+                layer_names=[layer_name],
+            )
+        ]
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+        raw_cache = raw_caches[layer_name]
+        self.assertIsInstance(raw_cache, torch.Tensor)
+        nope_cache, rope_cache, unified_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config,
+            raw_caches,
+        )[layer_name]
+
+        self.assertEqual(nope_cache.shape, (num_blocks, block_size, 1, 512))
+        self.assertEqual(rope_cache.shape, (num_blocks, block_size, 1, 64))
+        self.assertEqual(unified_cache.shape, (num_blocks, block_size, 1, 576))
+        backing_storage = unified_cache.untyped_storage().data_ptr()
+        self.assertEqual(nope_cache.untyped_storage().data_ptr(), backing_storage)
+        self.assertEqual(rope_cache.untyped_storage().data_ptr(), backing_storage)
+        self.assertEqual(nope_cache.stride()[:-1], unified_cache.stride()[:-1])
+        self.assertEqual(rope_cache.stride()[:-1], unified_cache.stride()[:-1])
+
+        nope_cache.fill_(1)
+        rope_cache.fill_(2)
+        self.assertEqual(torch.count_nonzero(unified_cache[..., :512] != 1), 0)
+        self.assertEqual(torch.count_nonzero(unified_cache[..., 512:] != 2), 0)
+
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_hybrid_mla_cache_uses_logical_kernel_block_shape(
         self,

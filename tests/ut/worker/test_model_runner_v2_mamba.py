@@ -302,6 +302,99 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     assert backend.get_kv_cache_shape.call_args.args[0] == num_kernel_blocks
 
 
+@patch(
+    "vllm_ascend.worker.v2.attn_utils._uses_a5_flash_mla_cache",
+    return_value=True,
+)
+@patch(
+    "vllm_ascend.worker.v2.attn_utils._get_attention_kv_cache_dims",
+    return_value=(512, 64),
+)
+@patch(
+    "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
+    return_value=SimpleNamespace(
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        quant_config=None,
+    ),
+)
+def test_a5_flash_mla_cache_uses_unified_zero_copy_views(
+    _mock_config,
+    _mock_cache_dims,
+    _mock_uses_flash_mla,
+):
+    layer_name = "mla_attn"
+    num_blocks = 2
+    block_size = 128
+    spec = AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=num_blocks * spec.page_size_bytes,
+                shared_by=[layer_name],
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=[layer_name],
+                kv_cache_spec=spec,
+            )
+        ],
+    )
+    backend = MagicMock()
+    backend.get_kv_cache_shape.side_effect = (
+        lambda num_kernel_blocks, kernel_block_size, num_heads, head_size, _cache_dtype: (
+            num_kernel_blocks,
+            kernel_block_size,
+            num_heads,
+            head_size,
+        )
+    )
+    group = SimpleNamespace(
+        kv_cache_group_id=0,
+        kv_cache_spec=spec,
+        layer_names=[layer_name],
+        backend=backend,
+    )
+
+    raw_caches = _allocate_kv_cache(
+        kv_cache_config,
+        shared_layers={},
+        device=torch.device("cpu"),
+    )
+    raw_cache = raw_caches[layer_name]
+    assert isinstance(raw_cache, torch.Tensor)
+
+    nope_cache, rope_cache, unified_cache = _reshape_kv_cache_v2(
+        attn_groups=[group],
+        kv_cache_raw_tensors=raw_caches,
+        cache_dtype="auto",
+        kernel_block_sizes=[block_size],
+        shared_kv_cache_layers={},
+        kv_cache_config=kv_cache_config,
+    )[layer_name]
+
+    assert nope_cache.shape == (num_blocks, block_size, 1, 512)
+    assert rope_cache.shape == (num_blocks, block_size, 1, 64)
+    assert unified_cache.shape == (num_blocks, block_size, 1, 576)
+    backing_storage = unified_cache.untyped_storage().data_ptr()
+    assert nope_cache.untyped_storage().data_ptr() == backing_storage
+    assert rope_cache.untyped_storage().data_ptr() == backing_storage
+    assert nope_cache.stride()[:-1] == unified_cache.stride()[:-1]
+    assert rope_cache.stride()[:-1] == unified_cache.stride()[:-1]
+
+    nope_cache.fill_(1)
+    rope_cache.fill_(2)
+    assert torch.count_nonzero(unified_cache[..., :512] != 1) == 0
+    assert torch.count_nonzero(unified_cache[..., 512:] != 2) == 0
+
+
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
 def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
     spec = _mamba_spec()

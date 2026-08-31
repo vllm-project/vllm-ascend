@@ -18,7 +18,7 @@
 #if (__NPU_ARCH__ == 5102)
 #include "buffer_mix_core.h"
 #else
-#include "buffer.h"
+#include "attn_buffer.h"
 #endif
 
 // L1  TPosition::A1
@@ -38,20 +38,26 @@ public:
         mem_ = tbuf.template Get<uint8_t>();
     }
 
+    // Static-tensor mode used by the Ascend 950 Flash MLA kernel.
+    __aicore__ inline void Init(uint32_t size) {
+        static_assert(bufferType != BufferType::GM, "GM should use workspace.");
+        mem_ = LocalTensor<uint8_t>(BufferInfo<bufferType>::Position, 0, size);
+    }
+
     __aicore__ inline void Init(__gm__ uint8_t* workspace) {
         static_assert(bufferType == BufferType::GM, "BufferType should be GM.");
         mem_.SetGlobalBuffer((__gm__ uint8_t*)workspace);
     }
 
-    template<SyncType syncType = SyncType::INNER_CORE_SYNC>
-    __aicore__ inline Buffer<bufferType, syncType> AllocBuffer(uint32_t size) {
+    template<SyncType syncType = SyncType::INNER_CORE_SYNC, SyncMode syncMode = SyncMode::SET_WAIT_FLAG>
+    __aicore__ inline Buffer<bufferType, syncType, syncMode> AllocBuffer(uint32_t size) {
         TensorType temp = mem_[offset_];
         offset_ += size;
-        return Buffer<bufferType, syncType>(temp, size);
+        return Buffer<bufferType, syncType, syncMode>(temp, size);
     }
 
-    template<SyncType syncType = SyncType::INNER_CORE_SYNC>
-    __aicore__ inline void FreeBuffer(Buffer<bufferType, syncType> &buffer){
+    template<SyncType syncType = SyncType::INNER_CORE_SYNC, SyncMode syncMode = SyncMode::SET_WAIT_FLAG>
+    __aicore__ inline void FreeBuffer(Buffer<bufferType, syncType, syncMode> &buffer){
     }
 private:
     uint32_t offset_ = 0;

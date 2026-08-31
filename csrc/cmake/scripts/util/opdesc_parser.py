@@ -76,6 +76,7 @@ SOC_TO_SHORT_SOC_MAP = {
     "ascend950dt_9577": "ascend950",
     "ascend950dt_9578": "ascend950",
     "ascend950": "ascend950",
+    "ascend950pr_9599": "ascend950",
 }
 CONFLICT_KEYWORDS = {
     "and",

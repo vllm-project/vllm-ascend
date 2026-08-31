@@ -4114,6 +4114,32 @@ class NPUModelRunner(GPUModelRunner):
         head_size_v = kv_cache_spec.head_size_v if hasattr(kv_cache_spec, "head_size_v") else kv_cache_spec.head_size
         return kv_cache_spec.head_size, head_size_v
 
+    def _uses_a5_flash_mla_cache(
+        self,
+        layer_name: str,
+        kv_cache_spec: AttentionSpec,
+    ) -> bool:
+        if (
+            get_ascend_device_type() != AscendDeviceType.A5
+            or not isinstance(kv_cache_spec, AscendMLAAttentionSpec)
+            or enable_fa_quant(self.vllm_config)
+        ):
+            return False
+        compilation_config = getattr(self.vllm_config, "compilation_config", None)
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
+        if static_forward_context is None:
+            return False
+        layer = static_forward_context.get(layer_name)
+        impl = getattr(layer, "impl", None)
+        return bool(
+            impl is not None
+            and not getattr(impl, "fa_quant_layer", False)
+            and not getattr(impl, "enable_kv_nz", False)
+            and getattr(impl, "kv_lora_rank", None) == 512
+            and getattr(impl, "qk_rope_head_dim", None) == 64
+            and getattr(impl, "num_kv_heads", None) == 1
+        )
+
     @staticmethod
     def _align_up(value: int, alignment: int) -> int:
         return (value + alignment - 1) // alignment * alignment
@@ -4335,6 +4361,15 @@ class NPUModelRunner(GPUModelRunner):
                     # and rope head dim.
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(current_kv_cache_spec, AttentionSpec)
+                    if self._uses_a5_flash_mla_cache(layer_name, current_kv_cache_spec):
+                        unified_tensor = self._allocate_int8_cache_tensor(
+                            kv_cache_tensor.size,
+                            alignment,
+                        )
+                        for layer_name_inner in kv_cache_tensor.shared_by:
+                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                kv_cache_raw_tensors[layer_name_inner] = unified_tensor
+                        continue
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
@@ -4566,6 +4601,10 @@ class NPUModelRunner(GPUModelRunner):
                     current_sparse_sfa_c8 = self.use_sparse and kv_cache_spec_uses_sparse_sfa_c8(
                         current_kv_cache_spec
                     )
+                    use_flash_mla_cache = self._uses_a5_flash_mla_cache(
+                        layer_name,
+                        current_kv_cache_spec,
+                    )
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
@@ -4579,7 +4618,13 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         kv_caches[layer_name] = reshaped_tensors
                         continue
-                    if self.use_sparse and "cache_only_layers" not in layer_name:
+                    if use_flash_mla_cache:
+                        raw_cache = kv_cache_raw_tensors[layer_name]
+                        if not isinstance(raw_cache, torch.Tensor):
+                            raise ValueError(f"A5 FlashMLA cache for {layer_name} must use one raw tensor.")
+                        raw_k_tensor = raw_v_tensor = raw_cache
+                        sum_page_size_bytes = raw_cache.numel()
+                    elif self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         assert isinstance(raw_cache, tuple)
                         if current_sparse_sfa_c8:
@@ -4666,7 +4711,9 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.head_size,
                         )
                         if self.hybrid_with_attn_and_mamba:
-                            if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
+                            if use_flash_mla_cache:
+                                pass
+                            elif not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                                 attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
                                     current_kv_cache_spec.dtype
                                 )
@@ -4731,6 +4778,25 @@ class NPUModelRunner(GPUModelRunner):
 
                     if current_sparse_sfa_c8:
                         k_cache_dtype = self.c8_k_cache_dtype
+
+                    if use_flash_mla_cache:
+                        raw_cache = kv_cache_raw_tensors[layer_name]
+                        assert isinstance(raw_cache, torch.Tensor)
+                        unified_shape = (*k_shape[:-1], k_shape[-1] + v_shape[-1])
+                        unified_size = (
+                            torch.empty(unified_shape, device="meta").numel()
+                            * get_dtype_size(k_cache_dtype)
+                        )
+                        unified_start = raw_cache.numel() - unified_size
+                        if unified_start < 0:
+                            raise ValueError(
+                                f"A5 FlashMLA cache view exceeds the allocation for {layer_name}."
+                            )
+                        unified_cache = raw_cache[unified_start:].view(k_cache_dtype).view(unified_shape)
+                        k_cache = unified_cache[..., : k_shape[-1]]
+                        v_cache = unified_cache[..., k_shape[-1] :]
+                        kv_caches[layer_name] = (k_cache, v_cache, unified_cache)
+                        continue
 
                     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape)
                     if current_sparse_sfa_c8:

@@ -313,7 +313,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if layer_names:
             impl = self.compilation_config.static_forward_context[layer_names[0]].impl
             if (
-                isinstance(impl, AscendAttentionBackendImpl)
+                not is_950()
+                and isinstance(impl, AscendAttentionBackendImpl)
                 and not impl.enable_c8_quant
                 and impl.sinks is None
                 and impl.attn_type != AttentionType.ENCODER_DECODER

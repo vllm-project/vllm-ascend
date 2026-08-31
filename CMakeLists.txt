@@ -85,6 +85,13 @@ if(SOC_VERSION MATCHES "ascend310p.*")
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
+elseif(SOC_VERSION MATCHES "ascend950")
+    # A5 uses FlashAttention/FlashMLA tiling sink.  Do not compile the
+    # A2/A3-only FIA v2 sink torch bindings into the A5 extension.
+    file(GLOB VLLM_ASCEND_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
 else()
     file(GLOB VLLM_ASCEND_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
@@ -110,6 +117,12 @@ set(
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
+
+if(SOC_VERSION MATCHES "ascend950")
+    target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_FLASH_MLA)
+elseif(NOT SOC_VERSION MATCHES "ascend310p.*")
+    target_compile_definitions(vllm_ascend_C PRIVATE VLLM_ASCEND_ENABLE_FIA_V2_SINK)
+endif()
 
 # Detect aclrtMemcpyBatchAsync availability (CANN 8.5+)
 # Can be overridden via VLLM_ASCEND_ENABLE_BATCH_MEMCPY env var (registered

@@ -42,6 +42,12 @@ set(ARCH_DIRECTORY_LIST arch22 arch32 arch32 arch35 arch32)
 if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
 message(STATUS "build with 3~8 packages........")
 set(BUILD_WITH_3_8_PACKAGE  ON CACHE BOOL "build with 3~8 package and opsbase")
+
+# Flash MLA metadata is an AICPU operator. Enable the AICPU link/package
+# stages only for A5 builds that include this operator.
+if(NOT ASCEND_OP_NAME OR "flash_mla_with_kvcache_metadata" IN_LIST ASCEND_OP_NAME)
+    set(ENABLE_AICPU ON)
+endif()
 endif()
 
 foreach(SOC_VERSION ${ASCEND_COMPUTE_UNIT})
@@ -132,6 +138,7 @@ if (BUILD_OPEN_PROJECT)
         include(cmake/third_party/makeself-fetch.cmake)
         include(cmake/opbuild.cmake)
         include(cmake/custom_build.cmake)
+
         message(STATUS "End building custom package.")
         if (ENABLE_OPS_HOST)
             gen_aclnn_with_opdef()

@@ -57,6 +57,11 @@ from vllm_ascend.ops.flash_attn import (
     flash_attn_metadata_size,
     run_flash_attn,
 )
+from vllm_ascend.ops.flash_mla import (
+    build_flash_mla_metadata,
+    flash_mla_metadata_size,
+    run_flash_mla,
+)
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
 from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
@@ -203,6 +208,9 @@ class AscendMLADecodeMetadata:
     actual_seq_lengths_q: list[int] | None = None
     actual_seq_lengths_q_device: torch.Tensor = None
     fia_v2_metadata: torch.Tensor | None = None
+    flash_mla_cu_seqlens_q: torch.Tensor | None = None
+    flash_mla_cache_seqlens: torch.Tensor | None = None
+    flash_mla_metadata: torch.Tensor | None = None
     attn_mask: torch.Tensor | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
@@ -348,9 +356,16 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self._flash_attn_impl: AscendMLAImpl | None = None
         self._flash_attn_head_dim: int | None = None
         self._flash_attn_metadata_buffers: dict[tuple[str, int, int], torch.Tensor] = {}
+        self._flash_mla_impl: AscendMLAImpl | None = None
+        self._flash_mla_buffers: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         if layer_names:
             impl = vllm_config.compilation_config.static_forward_context[layer_names[0]].impl
-            if isinstance(impl, AscendMLAImpl) and not impl.fa_quant_layer and not impl.enable_kv_nz:
+            if (
+                get_ascend_device_type() != AscendDeviceType.A5
+                and isinstance(impl, AscendMLAImpl)
+                and not impl.fa_quant_layer
+                and not impl.enable_kv_nz
+            ):
                 self._fia_v2_sink_impl = impl
                 self._fia_v2_metadata_buffer = torch.zeros(
                     FIA_V2_SINK_METADATA_SIZE,
@@ -368,6 +383,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
                 ):
                     self._flash_attn_impl = impl
                     self._flash_attn_head_dim = flash_attn_head_dim
+                    if (
+                        impl.kv_lora_rank == 512
+                        and impl.qk_rope_head_dim == 64
+                        and impl.num_kv_heads == 1
+                    ):
+                        self._flash_mla_impl = impl
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -593,6 +614,66 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             )
             self._fia_actual_seq_len_buffers[num_reqs] = buffers
         return buffers
+
+    def _get_flash_mla_buffers(
+        self,
+        num_reqs: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        buffers = self._flash_mla_buffers.get(num_reqs)
+        if buffers is None:
+            buffers = (
+                torch.empty(num_reqs + 1, dtype=torch.int32, device=self.device),
+                torch.empty(num_reqs, dtype=torch.int32, device=self.device),
+                torch.empty(flash_mla_metadata_size(num_reqs), dtype=torch.int32, device=self.device),
+            )
+            self._flash_mla_buffers[num_reqs] = buffers
+        return buffers
+
+    def _build_flash_mla_metadata(
+        self,
+        actual_seq_lengths_q: list[int],
+        seq_lens: list[int],
+        causal: bool,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        impl = self._flash_mla_impl
+        if impl is None:
+            return None, None, None
+
+        num_reqs = len(actual_seq_lengths_q)
+        if len(seq_lens) != num_reqs:
+            raise ValueError(
+                "FlashMLA query/KV batch sizes differ: "
+                f"{num_reqs} query sequences and {len(seq_lens)} KV sequences."
+            )
+        cu_seqlens_q, cache_seqlens, metadata_buffer = self._get_flash_mla_buffers(num_reqs)
+        cu_seqlens_q.copy_(
+            torch.tensor(
+                [0, *actual_seq_lengths_q],
+                dtype=torch.int32,
+                device=self.device,
+            )
+        )
+        # Full-graph padding adds virtual requests with zero KV length. Keep
+        # their block-table row valid without exposing an empty required input
+        # to FlashMLA.
+        cache_seqlens.copy_(
+            torch.tensor(seq_lens, dtype=torch.int32, device=self.device).clamp_min_(1)
+        )
+        mask_mode = 3 if causal else 0
+        metadata = build_flash_mla_metadata(
+            cache_seqlens,
+            impl.num_heads,
+            impl.num_kv_heads,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=-1,
+            max_seqlen_kv=-1,
+            head_dim_qk=impl.kv_lora_rank + impl.qk_rope_head_dim,
+            head_dim_v=impl.kv_lora_rank,
+            mask_mode=mask_mode,
+            layout_q="TND",
+            output_buffer=metadata_buffer,
+        )
+        return cu_seqlens_q, cache_seqlens, metadata
 
     def build(
         self,
@@ -870,13 +951,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             sin = sin[: self.num_decode_tokens, ...]
         else:
             cos = sin = None
-        num_fia_reqs = len(actual_seq_lengths_q)
-        actual_seq_lengths_q_device, seq_lens_device = self._get_fia_actual_seq_len_buffers(num_fia_reqs)
-        actual_seq_lengths_q_device.copy_(torch.tensor(actual_seq_lengths_q, dtype=torch.int64, device=self.device))
-        # seq_lens_list already includes the synthetic zero-length requests
-        # added for full-graph padding. Copy that complete list into the
-        # graph-stable buffer instead of slicing the unpadded runtime tensor.
-        seq_lens_device.copy_(torch.tensor(seq_lens_list, dtype=torch.int64, device=self.device))
+        actual_seq_lengths_q_device = None
+        seq_lens_device = None
+        if self._flash_mla_impl is None:
+            num_fia_reqs = len(actual_seq_lengths_q)
+            actual_seq_lengths_q_device, seq_lens_device = self._get_fia_actual_seq_len_buffers(num_fia_reqs)
+            actual_seq_lengths_q_device.copy_(
+                torch.tensor(actual_seq_lengths_q, dtype=torch.int64, device=self.device)
+            )
+            # seq_lens_list already includes the synthetic zero-length requests
+            # added for full-graph padding. Copy that complete list into the
+            # graph-stable buffer instead of slicing the unpadded runtime tensor.
+            seq_lens_device.copy_(torch.tensor(seq_lens_list, dtype=torch.int64, device=self.device))
         decode_metadata = self.decode_metadata_cls(
             input_positions=input_positions,
             block_table=self.block_table,
@@ -890,11 +976,22 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             sin=sin,
             cos=cos,
         )
-        decode_metadata.fia_v2_metadata = self._build_fia_v2_metadata(
-            decode_metadata.actual_seq_lengths_q_device,
-            decode_metadata.seq_lens_device,
-            common_attn_metadata.causal,
-        )
+        if self._flash_mla_impl is not None:
+            (
+                decode_metadata.flash_mla_cu_seqlens_q,
+                decode_metadata.flash_mla_cache_seqlens,
+                decode_metadata.flash_mla_metadata,
+            ) = self._build_flash_mla_metadata(
+                actual_seq_lengths_q,
+                seq_lens_list,
+                common_attn_metadata.causal,
+            )
+        else:
+            decode_metadata.fia_v2_metadata = self._build_fia_v2_metadata(
+                decode_metadata.actual_seq_lengths_q_device,
+                decode_metadata.seq_lens_device,
+                common_attn_metadata.causal,
+            )
         return decode_metadata
 
     def build_for_graph_capture(
@@ -1053,7 +1150,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.enable_mlapo = enabling_mlapo(self.vllm_config)
+        # The A5 MLA path uses the independent projection/RoPE/cache-update
+        # operators before FlashMLA. MlaPrologV3WeightNz is an A2/A3 path and
+        # its cache layout is incompatible with the A5 unified FlashMLA cache.
+        self.enable_mlapo = (
+            enabling_mlapo(self.vllm_config) and get_ascend_device_type() != AscendDeviceType.A5
+        )
 
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
@@ -1806,6 +1908,24 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    def _use_flash_mla_decode(
+        self,
+        decode_meta: AscendMLADecodeMetadata,
+        unified_kv_cache: torch.Tensor | None,
+    ) -> bool:
+        return (
+            get_ascend_device_type() == AscendDeviceType.A5
+            and not self.fa_quant_layer
+            and not self.enable_kv_nz
+            and self.kv_lora_rank == 512
+            and self.qk_rope_head_dim == 64
+            and self.num_kv_heads == 1
+            and unified_kv_cache is not None
+            and decode_meta.flash_mla_cu_seqlens_q is not None
+            and decode_meta.flash_mla_cache_seqlens is not None
+            and decode_meta.flash_mla_metadata is not None
+        )
+
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -1815,9 +1935,37 @@ class AscendMLAImpl(MLAAttentionImpl):
         block_size: int,
         attn_metadata: AscendMLAMetadata,
         dequant_scale_q_nope=None,
+        unified_kv_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
+        if self._use_flash_mla_decode(decode_meta, unified_kv_cache):
+            assert unified_kv_cache is not None
+            assert decode_meta.flash_mla_cu_seqlens_q is not None
+            assert decode_meta.flash_mla_cache_seqlens is not None
+            assert decode_meta.flash_mla_metadata is not None
+            mask_mode = 3 if attn_metadata.causal else 0
+            query = torch.cat((q_nope, q_pe), dim=-1).contiguous()
+            attn_output, _ = run_flash_mla(
+                query,
+                unified_kv_cache,
+                block_table=decode_meta.block_table,
+                cache_seqlens=decode_meta.flash_mla_cache_seqlens,
+                cu_seqlens_q=decode_meta.flash_mla_cu_seqlens_q,
+                attn_mask=decode_meta.attn_mask if mask_mode != 0 else None,
+                metadata=decode_meta.flash_mla_metadata,
+                head_dim_v=self.kv_lora_rank,
+                softmax_scale=self.scale,
+                mask_mode=mask_mode,
+                max_seqlen_q=-1,
+                max_seqlen_kv=-1,
+                layout_q="TND",
+                layout_kv="PA_BBND",
+                layout_out="TND",
+                return_softmax_lse=False,
+            )
+            return self._v_up_proj_batch_major(attn_output)
+
         # TODO: The CANN package is expected to support num_heads that are not
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.
@@ -2326,6 +2474,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 kv_cache[0].shape[1],
                 attn_metadata,
                 decode_preprocess_res.dequant_scale_q_nope,
+                unified_kv_cache=kv_cache[2] if len(kv_cache) > 2 else None,
             )
 
             o_proj_input[:num_decode_tokens] = output_decode
@@ -2351,7 +2500,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         output[...] = self.o_proj(o_proj_input, is_prefill=prefill_preprocess_res is not None)[0]
 
         del o_proj_input
-        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        # The third A5 MLA cache entry is a unified zero-copy view over the
+        # first two logical cache components, not an independent transferable
+        # cache.
+        maybe_save_kv_layer_to_connector(layer_name, list(kv_cache[:2]))
         return output_padded
 
 
