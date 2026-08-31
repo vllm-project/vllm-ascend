@@ -4404,6 +4404,21 @@ class NPUModelRunner(GPUModelRunner):
             isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
         ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
 
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        kv_connector = (
+            getattr(kv_transfer_config, "kv_connector", None)
+            if kv_transfer_config is not None
+            else None
+        )
+        # ExampleHiddenStatesConnector only consumes the dedicated cache-only
+        # layer and does not register or migrate the per-layer Attention/Mamba
+        # buffers. It therefore does not require the independent 2 MiB-aligned
+        # allocations needed by Mooncake/ADXL connectors.
+        supports_shared_backing_with_kv_transfer = (
+            kv_transfer_config is None
+            or kv_connector == "ExampleHiddenStatesConnector"
+        )
+
         # The standardized main descriptors all refer to the same backing
         # allocation. Ascend attention and Mamba backends still require
         # contiguous per-layer tensors, which the default layer/block-compact
@@ -4412,7 +4427,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             not use_ascend_shared_layout
             and self.hybrid_with_attn_and_mamba
-            and self.vllm_config.kv_transfer_config is None
+            and supports_shared_backing_with_kv_transfer
             and not self.use_sparse
             and not self.use_compress
             and kv_cache_config.kv_cache_tensors
@@ -4434,7 +4449,10 @@ class NPUModelRunner(GPUModelRunner):
                     if not regions:
                         break
                 if regions:
-                    backing = torch.zeros(backing_size, dtype=torch.int8, device=self.device)
+                    backing = self._allocate_int8_cache_tensor(
+                        backing_size,
+                        alignment,
+                    )
                     for layer_name, start, layer_size in regions:
                         kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
 

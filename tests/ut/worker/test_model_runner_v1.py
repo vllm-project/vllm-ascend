@@ -593,7 +593,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
     @unittest.skipIf(vllm_version_is("0.27.1"), "vLLM #51718 only changed the main planner")
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
-        runner = self._build_runner()
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
         mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
         attn_spec = FullAttentionSpec(
@@ -635,17 +634,30 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 KVCacheGroupSpec(layer_names=mamba_names, kv_cache_spec=mamba_spec),
             ],
         )
-        layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
-        runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = layout
+        for kv_transfer_config in (
+            None,
+            SimpleNamespace(kv_connector="ExampleHiddenStatesConnector"),
+        ):
+            with self.subTest(kv_transfer_config=kv_transfer_config):
+                runner = self._build_runner()
+                runner.vllm_config.kv_transfer_config = kv_transfer_config
+                layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
+                runner.vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = layout
 
-        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
-        storage_ptrs = {raw.untyped_storage().data_ptr() for raw in raw_caches.values()}
+                raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+                storage_ptrs = {raw.untyped_storage().data_ptr() for raw in raw_caches.values()}
+                base_offset = raw_caches[attn_names[0]].storage_offset()
 
-        self.assertEqual(len(storage_ptrs), 1)
-        self.assertEqual(raw_caches[attn_names[0]].storage_offset(), 0)
-        self.assertEqual(raw_caches[mamba_names[0]].storage_offset(), 0)
-        self.assertEqual(raw_caches[attn_names[1]].storage_offset(), layer_size)
-        self.assertEqual(raw_caches[mamba_names[1]].storage_offset(), layer_size)
+                self.assertEqual(len(storage_ptrs), 1)
+                self.assertEqual(raw_caches[mamba_names[0]].storage_offset(), base_offset)
+                self.assertEqual(
+                    raw_caches[attn_names[1]].storage_offset(),
+                    base_offset + layer_size,
+                )
+                self.assertEqual(
+                    raw_caches[mamba_names[1]].storage_offset(),
+                    base_offset + layer_size,
+                )
 
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
