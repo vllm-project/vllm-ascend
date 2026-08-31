@@ -1466,6 +1466,13 @@ def chunk_kda_with_fused_gate(
 
 
 _KDA_ASCENDC_AVAILABLE: bool | None = None
+# Snapshot the module-level Triton fallback BEFORE any patch/sweep rebinds the
+# public name. The ascendc wrapper's fallback path calls fused_recurrent_kda;
+# after the from-import sweep both names may resolve back to this wrapper,
+# causing infinite recursion (observed RecursionError -> silent corruption).
+# The triton implementation is defined earlier in this file, so this
+# module-dict lookup captures it safely at import time.
+_ORIG_RECURRENT = globals().get("fused_recurrent_kda")
 
 
 def fused_recurrent_kda_ascendc(
@@ -1500,7 +1507,7 @@ def fused_recurrent_kda_ascendc(
     """
     global _KDA_ASCENDC_AVAILABLE
     if _KDA_ASCENDC_AVAILABLE is False or initial_state is None or cu_seqlens is None:
-        return fused_recurrent_kda(
+        return _ORIG_RECURRENT(
             q, k, v, g, beta, scale, initial_state, inplace_final_state,
             use_qk_l2norm_in_kernel, cu_seqlens, ssm_state_indices,
             num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
@@ -1532,7 +1539,7 @@ def fused_recurrent_kda_ascendc(
                 # decomposition below advances one slot in place with explicit
                 # accepted-prefix rollback, so it is the correct fallback for
                 # this degenerate metadata shape.
-                return fused_recurrent_kda(
+                return _ORIG_RECURRENT(
                     q, k, v, g, beta, scale, initial_state, inplace_final_state,
                     use_qk_l2norm_in_kernel, cu_seqlens, ssm_state_indices,
                     num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
@@ -1552,7 +1559,7 @@ def fused_recurrent_kda_ascendc(
         ):
             # Degenerate speculative table (single column) reaching the AscendC
             # operator: same cross-slot hazard as above, same fallback.
-            return fused_recurrent_kda(
+            return _ORIG_RECURRENT(
                 q, k, v, g, beta, scale, initial_state, inplace_final_state,
                 use_qk_l2norm_in_kernel, cu_seqlens, ssm_state_indices,
                 num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
@@ -1598,7 +1605,7 @@ def fused_recurrent_kda_ascendc(
             flush=True, file=_sys.stderr,
         )
         _KDA_ASCENDC_AVAILABLE = False
-        return fused_recurrent_kda(
+        return _ORIG_RECURRENT(
             q, k, v, g, beta, scale, initial_state, inplace_final_state,
             use_qk_l2norm_in_kernel, cu_seqlens, ssm_state_indices,
             num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
