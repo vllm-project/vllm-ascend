@@ -273,7 +273,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.req_states.num_computed_tokens_cpu.copy_(torch.from_numpy(np_vals))
         self.req_states.num_computed_tokens.cpu.copy_(torch.from_numpy(np_vals))
 
-    def prepare_inputs(
+    def prepare_inputs(  # type: ignore[misc, override]
         self,
         scheduler_output: SchedulerOutput,
         batch_req_state: BatchReqState,
