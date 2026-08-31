@@ -289,7 +289,7 @@ class NPUWorker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if (tags is None or "kv_cache" in tags) and hasattr(self.model_runner, "post_kv_cache_wake_up"):
+        if (tags is None or "kv_cache" in tags) and vllm_version_is("0.27.1"):
             self.model_runner.post_kv_cache_wake_up()
 
         rl_config = get_ascend_config().rl_config

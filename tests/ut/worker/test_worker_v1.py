@@ -493,8 +493,15 @@ class TestNPUWorker(TestBase):
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
             worker.wake_up(tags=["kv_cache"])
-            mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
+            if vllm_version_is("0.27.1"):
+                mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
+            else:
+                mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
+    @unittest.skipIf(
+        vllm_version_is("0.27.1"),
+        "The post-KV-cache wake hook is present on vLLM 0.27.1",
+    )
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class):
