@@ -62,6 +62,8 @@ constexpr int32_t ACT_RED_CHUNK = 1024;   // ReduceMax chunk width
 constexpr int32_t SCALE_SUB = 256;        // fp32 outputs per de-interleave chunk
 constexpr uint16_t FLAG_WAVE_READY = 8;   // AIC -> AIV (PIPE_FIX): wave-batch tiles in GM
 constexpr int32_t SYNC_THROTTLE = 14;     // max unconsumed cross-core sets
+constexpr int32_t XS_MAX_CHUNK = 2048;    // x_scale floats per on-demand chunk (8 KiB
+                                           // UB), independent of capacity C
 constexpr int32_t P54_SMALL_M = 64;       // P54 header-opt: mValid <= 64 collapses the
                                            // per-wave cross-core handshake into ONE sync
 
@@ -498,7 +500,10 @@ public:
         N_ = N;
         N2_ = N2;
         K_ = K;
-        M_ = C;  // xs buffer sized to capacity C (M_valid parsed on-device <= C)
+        // x_scale is loaded in on-demand chunks (see LoadXsChunk): the UB
+        // footprint no longer scales with the input capacity C, which used to
+        // overflow the AIV UB (507015) for profile-sized C (>= ~18K rows).
+        (void)C;
         beta_ = beta;
         invBeta2_ = 2.0f * invBeta;
         hasLinear_ = hasLinear;
@@ -527,7 +532,7 @@ public:
         uint32_t rowH16 = (uint32_t)(N2 * sizeof(half));
         pipe->InitBuffer(accGQueue_, 1, rowH16);
         pipe->InitBuffer(accUQueue_, 1, rowH16);
-        pipe->InitBuffer(xsQueue_, 1, (uint32_t)(M_ * sizeof(float)));
+        pipe->InitBuffer(xsQueue_, 1, XS_MAX_CHUNK * sizeof(float));
         pipe->InitBuffer(gBuf_, rowF32);
         pipe->InitBuffer(uBuf_, rowF32);
         pipe->InitBuffer(tBuf_, rowF32);
@@ -626,16 +631,27 @@ private:
     }
 
     // Phase 2: wave-driven fused act+quant.
+    // On-demand x_scale chunk: load x_scale[g0 : g0+len) into the fixed 8 KiB
+    // chunk buffer. Total MTE2 bytes = M_valid * 4 (padding rows are never read,
+    // versus the old full-capacity C * 4 copy on every AIV slot).
+    __aicore__ inline LocalTensor<float> LoadXsChunk(int32_t g0, int32_t len)
+    {
+        LocalTensor<float> xs = xsQueue_.AllocTensor<float>();
+        DataCopyExtParams xcp{1, (uint32_t)(len * sizeof(float)), 0, 0, 0};
+        DataCopyPadExtParams<float> xpp{false, 0, 0, 0};
+        AscendC::DataCopyPad(xs, xsGM_[(int64_t)g0], xcp, xpp);
+        xsQueue_.EnQue(xs);
+        return xsQueue_.DeQue<float>();
+    }
+
+    __aicore__ inline void FreeXsChunk(LocalTensor<float> &xs)
+    {
+        xsQueue_.FreeTensor(xs);
+    }
+
     __aicore__ inline void ActPhase(int32_t slot, int32_t slots, int32_t cores,
                                     int32_t totalWaves)
     {
-        LocalTensor<float> xs = xsQueue_.AllocTensor<float>();
-        DataCopyExtParams xcp{1, (uint32_t)(M_ * sizeof(float)), 0, 0, 0};
-        DataCopyPadExtParams<float> xpp{false, 0, 0, 0};
-        AscendC::DataCopyPad(xs, xsGM_[0], xcp, xpp);
-        xsQueue_.EnQue(xs);
-        LocalTensor<float> xsl = xsQueue_.DeQue<float>();
-
         g_ = gBuf_.Get<float>();
         u_ = uBuf_.Get<float>();
         t_ = tBuf_.Get<float>();
@@ -670,37 +686,49 @@ private:
             }
             int32_t rbDone = completed / nBlockNum_;
             if (globalStripe) {
-                ActPhaseGlobal(slot, slots, xsl, mValid);
+                ActPhaseGlobal(slot, slots, mValid);
             } else {
                 for (int32_t rb = prevRB; rb < rbDone; rb++) {
-                    ActRowBlock(rb, slot, slots, xsl);
+                    ActRowBlock(rb, slot, slots);
                 }
             }
             prevRB = rbDone;
         }
-
-        xsQueue_.FreeTensor(xsl);
     }
 
     // Act+quant ALL real rows in one global stripe (single-sync path). For a
     // tiny M each expert has 1-2 rows, so the per-row-block stripe would
     // serialize ~E blocks; this spreads the MValid real rows across all slots.
-    // accRow mapping is IDENTICAL to ActRowBlock: accRow = PadOff(e) + (g-Start(e)).
-    __aicore__ inline void ActPhaseGlobal(int32_t slot, int32_t slots,
-                                          const LocalTensor<float> &xsl,
-                                          int32_t mValid)
+    // Chunk-cyclic order (each slot owns contiguous row chunks) keeps the
+    // on-demand x_scale load at one small copy per chunk instead of one copy
+    // per row, and keeps the load balance identical to the old slot-strided
+    // order. accRow mapping is IDENTICAL to ActRowBlock:
+    // accRow = PadOff(e) + (g-Start(e)).
+    __aicore__ inline void ActPhaseGlobal(int32_t slot, int32_t slots, int32_t mValid)
     {
-        for (int32_t g = slot; g < mValid; g += slots) {
-            int32_t e = meta_.FindExpertReal(g);
-            int32_t lr = g - meta_.Start(e);
-            int32_t accRow = meta_.PadOff(e) + lr;
-            ActRow(accRow, g, xsl.GetValue(g));
+        int32_t chunk = (mValid + slots - 1) / slots;
+        if (chunk > XS_MAX_CHUNK) {
+            chunk = XS_MAX_CHUNK;
+        }
+        if (chunk < 1) {
+            chunk = 1;
+        }
+        for (int32_t g0 = slot * chunk; g0 < mValid; g0 += slots * chunk) {
+            int32_t len = mValid - g0 < chunk ? mValid - g0 : chunk;
+            LocalTensor<float> xs = LoadXsChunk(g0, len);
+            for (int32_t g = g0; g < g0 + len; g++) {
+                int32_t e = meta_.FindExpertReal(g);
+                int32_t lr = g - meta_.Start(e);
+                int32_t accRow = meta_.PadOff(e) + lr;
+                ActRow(accRow, g, xs.GetValue(g - g0));
+            }
+            FreeXsChunk(xs);
         }
     }
 
     // Act+quant all real rows of padded row-block rb (striped over slots).
-    __aicore__ inline void ActRowBlock(int32_t rb, int32_t slot, int32_t slots,
-                                       const LocalTensor<float> &xsl)
+    // x_scale for the block (<= BM rows) is loaded on demand once per block.
+    __aicore__ inline void ActRowBlock(int32_t rb, int32_t slot, int32_t slots)
     {
         int32_t rowW = rb * BM;
         int32_t e = meta_.FindExpert(rowW);
@@ -709,13 +737,15 @@ private:
         if (valid > BM) {
             valid = BM;
         }
-        if (valid <= 0) {
+        if (valid <= 0 || slot >= valid) {
             return;
         }
         int32_t outRow0 = meta_.Start(e) + lr0;
+        LocalTensor<float> xs = LoadXsChunk(outRow0, valid);
         for (int32_t r = slot; r < valid; r += slots) {
-            ActRow(rowW + r, outRow0 + r, xsl.GetValue(outRow0 + r));
+            ActRow(rowW + r, outRow0 + r, xs.GetValue(r));
         }
+        FreeXsChunk(xs);
     }
 
     // Per-row act+quant. The channel scale (sgl/sul) is now applied in the AIC
@@ -853,7 +883,6 @@ private:
     int32_t N_;
     int32_t N2_;
     int32_t K_;
-    int32_t M_;
     float beta_;
     float invBeta2_;
     int32_t hasLinear_;

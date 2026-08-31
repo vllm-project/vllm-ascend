@@ -61,6 +61,13 @@ void gmsq_fused_256_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl
                           float beta, float invBeta, int32_t hasLinear, float linBeta,
                           float invLinBeta, int32_t skipUnpack);
 
+// AIV epilogue UB budget: the x_scale chunk buffer + static per-row buffers
+// must stay within the AIV UB. Measured overflow threshold on Ascend910_9382
+// is between C=16384 (pass) and C=18432 (UB OOB, error 507015). Guard at the
+// conservative bound so callers can catch and fall back instead of crashing
+// the device.
+constexpr int64_t GMSQ_MAX_CAPACITY = 16384;
+
 constexpr int32_t GMSQ_BM = 128;
 constexpr int32_t GMSQ_BN = 128;
 constexpr int32_t GMSQ_BK = 64;
@@ -194,6 +201,11 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
     if (C == 0) {
         return {y, y_scale};
     }
+
+    TORCH_CHECK(C <= GMSQ_MAX_CAPACITY,
+                "grouped_matmul_situ_quant: capacity C=", C,
+                " exceeds the supported maximum ", GMSQ_MAX_CAPACITY,
+                " (AIV UB budget); reduce max_num_batched_tokens for this op");
 
     float betaF = static_cast<float>(beta);
     float invBeta = 1.0f / betaF;
