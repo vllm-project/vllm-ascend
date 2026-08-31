@@ -53,7 +53,7 @@ def executor_env(monkeypatch):
     allocations: list[str] = []
     model_stream = _FakeStream("model", calls)
     metadata_stream = _FakeStream("metadata", calls)
-    event_names = iter(("inputs", "compressor", "indexer", "attention", "reusable"))
+    event_names = iter(("inputs", "reusable", "compressor", "indexer", "attention", "indexer-2"))
 
     def make_stream():
         allocations.append("stream")
@@ -77,14 +77,17 @@ def _tasks(calls: list[tuple]) -> tuple[DeviceMetadataTask, ...]:
         DeviceMetadataTask(
             DeviceMetadataStage.COMPRESSOR,
             lambda: calls.append(("task", "compressor")),
+            1,
         ),
         DeviceMetadataTask(
             DeviceMetadataStage.INDEXER,
             lambda: calls.append(("task", "indexer")),
+            2,
         ),
         DeviceMetadataTask(
             DeviceMetadataStage.ATTENTION,
             lambda: calls.append(("task", "attention")),
+            3,
         ),
     )
 
@@ -95,12 +98,17 @@ def test_submit_records_inputs_and_stage_frontiers(executor_env):
     assert allocations == [
         "stream",
         "inputs",
-        "compressor",
-        "indexer",
-        "attention",
         "reusable",
     ]
     executor.submit(_tasks(calls))
+    assert allocations == [
+        "stream",
+        "inputs",
+        "reusable",
+        "compressor",
+        "indexer",
+        "attention",
+    ]
 
     assert calls == [
         ("model", "record", "inputs"),
@@ -119,7 +127,7 @@ def test_wait_and_release_fence_buffer_reuse(executor_env):
     tasks = _tasks(calls)
 
     executor.submit(tasks)
-    executor.wait(DeviceMetadataStage.INDEXER)
+    executor.wait(DeviceMetadataStage.INDEXER, 2)
     executor.release()
     assert calls[-2:] == [
         ("model", "wait", "indexer"),
@@ -139,8 +147,8 @@ def test_wait_records_each_stage_once_per_submission(executor_env):
     executor, calls, _ = executor_env
     executor.submit(_tasks(calls))
 
-    executor.wait(DeviceMetadataStage.INDEXER)
-    executor.wait(DeviceMetadataStage.INDEXER)
+    executor.wait(DeviceMetadataStage.INDEXER, 2)
+    executor.wait(DeviceMetadataStage.INDEXER, 2)
 
     assert calls.count(("model", "wait", "indexer")) == 1
 
@@ -177,13 +185,32 @@ def test_submit_orders_tasks_by_stage(executor_env):
     ]
 
 
+def test_wait_uses_group_specific_frontier(executor_env):
+    executor, calls, _ = executor_env
+    tasks = (
+        DeviceMetadataTask(DeviceMetadataStage.INDEXER, lambda: None, 2),
+        DeviceMetadataTask(DeviceMetadataStage.INDEXER, lambda: None, 4),
+    )
+
+    executor.submit(tasks)
+    executor.wait(DeviceMetadataStage.INDEXER, 2)
+    executor.wait(DeviceMetadataStage.INDEXER, 4)
+
+    waits = [call for call in calls if call[:2] == ("model", "wait")]
+    assert len(waits) == 2
+    assert waits[0][2] != waits[1][2]
+
+
 def test_task_provider_is_structural():
     class LegacyBuilder:
         pass
 
     class ProviderBuilder:
-        def build_device_metadata_tasks(self, _context):
-            return (DeviceMetadataTask(DeviceMetadataStage.INDEXER, lambda: None),)
+        def enable_device_metadata(self):
+            pass
+
+        def take_device_metadata_tasks(self):
+            return (DeviceMetadataTask(DeviceMetadataStage.INDEXER, lambda: None, 1),)
 
     assert not isinstance(LegacyBuilder(), DeviceMetadataTaskProvider)
     assert isinstance(ProviderBuilder(), DeviceMetadataTaskProvider)
@@ -198,7 +225,7 @@ def test_submit_rejects_empty_tasks(executor_env):
 
 def test_wait_helper_uses_active_forward_executor(monkeypatch):
     calls = []
-    executor = SimpleNamespace(wait=lambda stage: calls.append(stage))
+    executor = SimpleNamespace(wait=lambda stage, group_id: calls.append((stage, group_id)))
     monkeypatch.setattr(device_metadata, "is_forward_context_available", lambda: True)
     monkeypatch.setattr(
         device_metadata,
@@ -206,9 +233,9 @@ def test_wait_helper_uses_active_forward_executor(monkeypatch):
         lambda: SimpleNamespace(device_metadata_executor=executor),
     )
 
-    wait_for_device_metadata(DeviceMetadataStage.ATTENTION)
+    wait_for_device_metadata(DeviceMetadataStage.ATTENTION, 7)
 
-    assert calls == [DeviceMetadataStage.ATTENTION]
+    assert calls == [(DeviceMetadataStage.ATTENTION, 7)]
 
 
 def test_wait_helper_is_noop_without_forward_context(monkeypatch):
@@ -219,4 +246,4 @@ def test_wait_helper_is_noop_without_forward_context(monkeypatch):
         lambda: pytest.fail("forward context should not be read"),
     )
 
-    wait_for_device_metadata(DeviceMetadataStage.ATTENTION)
+    wait_for_device_metadata(DeviceMetadataStage.ATTENTION, 7)

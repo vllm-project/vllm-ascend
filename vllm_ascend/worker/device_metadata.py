@@ -32,18 +32,14 @@ class DeviceMetadataStage(IntEnum):
 class DeviceMetadataTask:
     stage: DeviceMetadataStage
     run: Callable[[], None]
-
-
-@dataclass(frozen=True, slots=True)
-class DeviceMetadataTaskContext:
-    common_attn_metadata: object
-    layer_attn_metadata: object
-    for_cudagraph_capture: bool
+    group_id: int
 
 
 @runtime_checkable
 class DeviceMetadataTaskProvider(Protocol):
-    def build_device_metadata_tasks(self, context: DeviceMetadataTaskContext) -> tuple[DeviceMetadataTask, ...]: ...
+    def enable_device_metadata(self) -> None: ...
+
+    def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]: ...
 
 
 class DeviceMetadataExecutor:
@@ -52,11 +48,11 @@ class DeviceMetadataExecutor:
     def __init__(self) -> None:
         self.stream = torch.npu.Stream()
         self._inputs_ready = torch.npu.Event()
-        self._stage_ready = {stage: torch.npu.Event() for stage in DeviceMetadataStage}
+        self._stage_ready: dict[tuple[DeviceMetadataStage, int], torch.npu.Event] = {}
         self._buffer_reusable = torch.npu.Event()
         self._has_reuse_fence = False
         self._submission_in_flight = False
-        self._waited_stages: set[DeviceMetadataStage] = set()
+        self._waited_stages: set[tuple[DeviceMetadataStage, int]] = set()
 
     @property
     def submission_in_flight(self) -> bool:
@@ -68,6 +64,10 @@ class DeviceMetadataExecutor:
         ordered_tasks = tuple(sorted(tasks, key=lambda task: task.stage))
         if not ordered_tasks:
             raise ValueError("At least one device metadata task is required")
+        for task in ordered_tasks:
+            frontier = (task.stage, task.group_id)
+            if frontier not in self._stage_ready:
+                self._stage_ready[frontier] = torch.npu.Event()
 
         self._waited_stages.clear()
         self._inputs_ready.record(torch.npu.current_stream())
@@ -79,18 +79,20 @@ class DeviceMetadataExecutor:
             task_index = 0
             for stage in DeviceMetadataStage:
                 while task_index < len(ordered_tasks) and ordered_tasks[task_index].stage == stage:
-                    ordered_tasks[task_index].run()
+                    task = ordered_tasks[task_index]
+                    task.run()
+                    self._stage_ready[(stage, task.group_id)].record(self.stream)
                     task_index += 1
-                self._stage_ready[stage].record(self.stream)
 
         self._submission_in_flight = True
 
-    def wait(self, stage: DeviceMetadataStage) -> None:
+    def wait(self, stage: DeviceMetadataStage, group_id: int) -> None:
         if not self._submission_in_flight:
             raise RuntimeError("No device metadata submission is in flight")
-        if stage not in self._waited_stages:
-            torch.npu.current_stream().wait_event(self._stage_ready[stage])
-            self._waited_stages.add(stage)
+        frontier = (stage, group_id)
+        if frontier not in self._waited_stages:
+            torch.npu.current_stream().wait_event(self._stage_ready[frontier])
+            self._waited_stages.add(frontier)
 
     def release(self) -> None:
         if not self._submission_in_flight:
@@ -100,9 +102,9 @@ class DeviceMetadataExecutor:
         self._submission_in_flight = False
 
 
-def wait_for_device_metadata(stage: DeviceMetadataStage) -> None:
+def wait_for_device_metadata(stage: DeviceMetadataStage, group_id: int) -> None:
     if not is_forward_context_available():
         return
     executor = getattr(get_forward_context(), "device_metadata_executor", None)
     if executor is not None:
-        executor.wait(stage)
+        executor.wait(stage, group_id)

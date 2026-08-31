@@ -195,7 +195,6 @@ from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPMan
 from vllm_ascend.worker.device_metadata import (
     DeviceMetadataExecutor,
     DeviceMetadataTask,
-    DeviceMetadataTaskContext,
     DeviceMetadataTaskProvider,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
@@ -311,6 +310,7 @@ class NPUModelRunner(GPUModelRunner):
             super().__init__(vllm_config, device)
 
         self.device_metadata_executor: DeviceMetadataExecutor | None = None
+        self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
         self.pin_memory = PIN_MEMORY
 
         set_offloader(create_offloader(self.offload_config))
@@ -3309,6 +3309,11 @@ class NPUModelRunner(GPUModelRunner):
                         else None
                     ),
                 )
+            device_metadata_provider = (
+                self.device_metadata_providers.get(id(builder))
+                if self.device_metadata_providers is not None
+                else None
+            )
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid] if cascade_attn_prefix_lens else 0
             )
@@ -3332,7 +3337,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_actual_reqs=num_reqs,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                 )
-
             if (for_cudagraph_capture
                     and not isinstance(builder, (
                         AscendDSAMetadataBuilder,
@@ -3352,18 +3356,9 @@ class NPUModelRunner(GPUModelRunner):
                     and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
                     if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
                         attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
-            if device_metadata_tasks is not None and isinstance(
-                builder, DeviceMetadataTaskProvider
-            ):
-                device_metadata_tasks.extend(
-                    builder.build_device_metadata_tasks(
-                        DeviceMetadataTaskContext(
-                            common_attn_metadata=common_attn_metadata,
-                            layer_attn_metadata=attn_metadata_i,
-                            for_cudagraph_capture=for_cudagraph_capture,
-                        )
-                    ),
-                )
+            if device_metadata_provider is not None:
+                assert device_metadata_tasks is not None
+                device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             if isinstance(builder, AscendDSAMetadataBuilder):
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
 
@@ -5049,13 +5044,18 @@ class NPUModelRunner(GPUModelRunner):
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
-        if any(
-            isinstance(builder, DeviceMetadataTaskProvider)
+        device_metadata_providers = {
+            id(builder): builder
             for attn_groups in self.attn_groups
             for attn_group in attn_groups
             for builder in attn_group.metadata_builders
-        ):
+            if isinstance(builder, DeviceMetadataTaskProvider)
+        }
+        if device_metadata_providers:
             self.device_metadata_executor = DeviceMetadataExecutor()
+            self.device_metadata_providers = device_metadata_providers
+            for provider in device_metadata_providers.values():
+                provider.enable_device_metadata()
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
