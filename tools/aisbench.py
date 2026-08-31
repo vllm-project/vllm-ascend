@@ -289,7 +289,13 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
         logging.info("[%d/%d] Starting benchmark: %s (type=%s)", idx, total, case_name, case_type)
         logging.info("=" * 60)
         try:
-            with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
+            with AisbenchRunner(
+                model=model,
+                port=port,
+                host_ip=host_ip,
+                aisbench_config=aisbench_case,
+                verify=aisbench_case.get("verify", True),
+            ) as aisbench:
                 aisbench_results.append(aisbench.result)
             logging.info("[%d/%d] Finished benchmark: %s", idx, total, case_name)
         except Exception as e:

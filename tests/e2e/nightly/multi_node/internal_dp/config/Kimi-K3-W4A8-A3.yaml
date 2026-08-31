@@ -156,6 +156,7 @@ benchmarks:
     temperature: 1.0
     top_p: 1.0
     thinking: true
+    verify: false
     # Add a baseline and threshold after repeated A3 CI calibration runs.
 
   perf_16k_prefix0:
