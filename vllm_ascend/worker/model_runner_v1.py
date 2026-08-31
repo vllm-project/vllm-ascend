@@ -188,6 +188,11 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
+from vllm_ascend.worker.device_metadata import (
+    DeviceMetadataExecutor,
+    DeviceMetadataTask,
+    DeviceMetadataTaskProvider,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
 
@@ -301,6 +306,8 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        self.device_metadata_executor: DeviceMetadataExecutor | None = None
+        self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
         self.pin_memory = PIN_MEMORY
 
         set_offloader(create_offloader(self.offload_config))
@@ -2908,6 +2915,9 @@ class NPUModelRunner(GPUModelRunner):
                 self._offload_token_to_req,
             )
         attn_metadata: PerLayerAttnMetadata = {}
+        device_metadata_tasks: list[DeviceMetadataTask] | None = (
+            [] if self.device_metadata_executor is not None else None
+        )
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
@@ -3054,6 +3064,11 @@ class NPUModelRunner(GPUModelRunner):
             assert num_reqs_padded is not None
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
+            device_metadata_provider = (
+                self.device_metadata_providers.get(id(builder))
+                if self.device_metadata_providers is not None
+                else None
+            )
             is_gdn_noop = skip_gdn_state_update and isinstance(
                 builder,
                 GDNAttentionMetadataBuilder,
@@ -3123,6 +3138,9 @@ class NPUModelRunner(GPUModelRunner):
                     and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
                     if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
                         attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
+            if device_metadata_provider is not None:
+                assert device_metadata_tasks is not None
+                device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             if isinstance(builder, AscendDSAMetadataBuilder):
                 prefill_ratio_to_sas_metadata = builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
                 decode_ratio_to_sas_metadata = builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
@@ -3221,6 +3239,9 @@ class NPUModelRunner(GPUModelRunner):
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
+        if device_metadata_tasks:
+            assert self.device_metadata_executor is not None
+            self.device_metadata_executor.submit(device_metadata_tasks)
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
@@ -4795,6 +4816,19 @@ class NPUModelRunner(GPUModelRunner):
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+        device_metadata_providers = {
+            id(builder): builder
+            for attn_groups in self.attn_groups
+            for attn_group in attn_groups
+            for builder in attn_group.metadata_builders
+            if isinstance(builder, DeviceMetadataTaskProvider)
+        }
+        if device_metadata_providers:
+            self.device_metadata_executor = DeviceMetadataExecutor()
+            self.device_metadata_providers = device_metadata_providers
+            for provider in device_metadata_providers.values():
+                provider.enable_device_metadata()
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
