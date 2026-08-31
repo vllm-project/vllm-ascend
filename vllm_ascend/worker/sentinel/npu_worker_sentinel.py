@@ -37,7 +37,16 @@ if TYPE_CHECKING:
 
 
 def fault_barrier_wrapper(func: Callable):
-    """Quarantine and reset the worker when a wrapped method faults."""
+    """Barrier between device faults and the async step loop.
+
+    On the first device-touching fault (e.g. an EP-group allreduce failing on a
+    dead peer that poisons the model stream) it quarantines the worker and
+    resets the device immediately, before any tensor teardown on the broken
+    stream can std::terminate the process. While quarantined, wrapped methods
+    short-circuit with an empty output so in-flight async steps drain safely
+    without re-hitting the device; retry lifts the quarantine only after the
+    groups are rebuilt.
+    """
 
     def wrapped(self, *args, **kwargs):
         sentinel = getattr(self, "worker_sentinel", None)
@@ -163,13 +172,19 @@ class WorkerSentinel(GPUWorkerSentinel):
 
         eplb_model_state = self._eplb_model_state()
         # Propagate the new placement into the Ascend routing tables (in-place,
-        # so captured graphs keep pointing at valid storage).
+        # so captured graphs keep pointing at valid storage), then renumber
+        # their ids into the densified space for the MC2 kernels.
         refresh_model_routing_tables(eplb_model_state)
+        self._densify_routing_tables(eplb_model_state)
 
-        # The MC2 kernels consume the routing tables in the densified id space;
-        # renumber the kernel-facing values in place after the refresh. The
-        # dead set is cumulative (accumulated across recovery rounds), so
-        # derive it from the manager's mask rather than this round's ranks.
+    def _densify_routing_tables(self, eplb_model_state) -> None:
+        """Renumber the kernel-facing routing tables into the densified id space.
+
+        The MC2 kernels consume the routing tables in the densified id space,
+        so the kernel-facing values are renumbered in place after the refresh.
+        The dead set is cumulative (accumulated across recovery rounds), so it
+        is derived from the manager's mask rather than this round's ranks.
+        """
         p2l = eplb_model_state.physical_to_logical_map
         ep_world_size = get_ep_group().world_size
         num_local_experts = p2l.shape[1] // ep_world_size
