@@ -35,7 +35,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### 4.1 Docker Image Installation
 
-- You can use our official docker image to run GLM-5.2 directly.
+- You can use our official docker image to run GLM-5.2 and GLM-5.3 directly.
 
 :::::{tab-set}
 :sync-group: install
@@ -236,7 +236,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.x-w8a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
     --host 0.0.0.0 \
     --port 8077 \
     --api-server-count 1 \
@@ -292,7 +292,7 @@ Run the following scripts on two nodes respectively.
     export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.x-w8a8c8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -329,7 +329,7 @@ Run the following scripts on two nodes respectively.
 
 ##### 5.1.1.3 Prefill-Decode Disaggregation
 
-We'd like to show the deployment guide of `GLM-5.2` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance.
+We'd like to show the deployment guide of `GLM-5.2` and `GLM-5.3` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance.
 
 In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_pool.md) for the Mooncake configuration.
 
@@ -410,9 +410,9 @@ Before you start, please
 
     ```
 
-**GLM-5.2-w8a8c8 (198K context, PD disaggregation with PP2):**
+**GLM-5.2-w8a8c8 / GLM-5.3-w8a8c8 (198K context, PD disaggregation with PP2):**
 
-`GLM-5.2-w8a8c8` PD disaggregation can be deployed on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node).
+`GLM-5.2-w8a8c8` and `GLM-5.3-w8a8c8` PD disaggregation can be deployed on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node).
 
 **Prefill node 0** (`run_dp_template.sh`): `node_rank=0`, engine port `9081` (PP master node, `--master-addr` uses `$local_ip`).
 
@@ -446,7 +446,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
             --host 0.0.0.0 \
             --port 9081 \
             --pipeline-parallel-size 2 \
@@ -519,7 +519,7 @@ Before you start, please
 
         export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
             --host 0.0.0.0 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
@@ -595,7 +595,7 @@ Before you start, please
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -669,7 +669,7 @@ Before you start, please
         export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
         export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+        vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
             --host 0.0.0.0 \
             --port $2 \
             --data-parallel-size $3 \
@@ -1271,7 +1271,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
 --host 0.0.0.0 \
 --port 8077 \
 --api-server-count 1 \
@@ -1329,7 +1329,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
 --host 0.0.0.0 \
 --port 8077 \
 --headless \
@@ -1369,9 +1369,9 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
 
 #### 5.2.2 PD Disaggregation 1M Deployment
 
-**GLM-5.2-w8a8c8 (1M context, PD disaggregation):**
+**GLM-5.2-w8a8c8 / GLM-5.3-w8a8c8 (1M context, PD disaggregation):**
 
-`GLM-5.2-w8a8c8` 1M PD disaggregation can be deployed on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`DP2 TP16`, 1 DP rank per node, decode context parallelism 16) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node, decode context parallelism 4).
+`GLM-5.2-w8a8c8` and `GLM-5.3-w8a8c8` and 1M PD disaggregation can be deployed on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`DP2 TP16`, 1 DP rank per node, decode context parallelism 16) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node, decode context parallelism 4).
 
 **Prefill node 0** (`run_dp_template.sh`): DP rank 0, engine port `9081`. The value of `node_p0_ip` must be consistent with the `local_ip` set on prefill node 0 (DP master node).
 
@@ -1403,7 +1403,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
     --host 0.0.0.0 \
     --port 9081 \
     --data-parallel-size 2 \
@@ -1473,7 +1473,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
     --host 0.0.0.0 \
     --port 9082 \
     --data-parallel-size 2 \
@@ -1545,7 +1545,7 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
@@ -1617,7 +1617,7 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 export VLLM_ASCEND_ENABLE_MLAPO=1
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/<model-name> \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
@@ -1774,7 +1774,7 @@ The tables below provide recommended parameter configurations for different depl
 
 #### 9.1.1 Table 1: Detailed Node Configuration
 
-> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a prefill node hosting 1 DP rank of TP16 uses 16 NPUs; a decode node hosting 4 DP ranks of TP4 uses 16 NPUs). The 198K PD scenario prefill side uses `PP2 TP16` with the layer partition `41,37`. All scenarios use the `GLM-5.2-w8a8c8` weights.
+> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a prefill node hosting 1 DP rank of TP16 uses 16 NPUs; a decode node hosting 4 DP ranks of TP4 uses 16 NPUs). The 198K PD scenario prefill side uses `PP2 TP16` with the layer partition `41,37`. All scenarios use the `GLM-5.2-w8a8c8` or `GLM-5.3-w8a8c8` weights.
 >
 > When testing with a prefix cache hit rate > 0, keep `--enable-prefix-caching` (as in the deployment scripts); when the hit rate is 0, replace it with `--no-enable-prefix-caching`.
 
@@ -1827,7 +1827,7 @@ For environment variable descriptions and constraints, refer to [envs.py](https:
 
 ## 10 FAQ
 
-- **Q: How to enable function calling for GLM-5.2?**
+- **Q: How to enable function calling for GLM-5.2/5.3?**
 
   A: Please add following configurations in vLLM startup command
 
