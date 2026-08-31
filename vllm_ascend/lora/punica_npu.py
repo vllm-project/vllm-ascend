@@ -639,17 +639,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         if sgmv_metadata is not None:
             if sgmv_metadata.no_lora:
                 return
-            _dispatch_lora_shrink(
-                y_views,
-                x,
-                list(lora_a_stacked),
-                sgmv_metadata.lora_indices,
-                sgmv_metadata.seq_lengths,
-                sgmv_metadata.token_lora_indices,
-                scale,
-                sgmv_metadata.use_gmm_shrink,
-                sgmv_metadata.no_lora_dispatch,
-            )
+            for output, lora_a in zip(y_views, lora_a_stacked):
+                self.bgmv_shrink(
+                    x,
+                    lora_a[:, 0].contiguous(),
+                    output,
+                    sgmv_metadata.token_lora_indices,
+                    scale,
+                )
             return
 
         _, seq_lengths, lora_indices, _, _, _ = self.prefill_metadata
@@ -696,31 +693,28 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
         y_org = y
         y = y.view(-1, y.shape[-1])
-        # aclnnGroupedMatmulV4 forbids a transposed X when group_type=0.
-        # TP all-gather can return a logically transposed view even though its
-        # shape is already [tokens, rank], so normalize it at the dispatcher
-        # boundary. This is a no-op for the common contiguous case.
-        x_views = [
-            x[slice_idx].view(-1, x[slice_idx].shape[-1]).contiguous() for slice_idx in range(len(lora_b_stacked))
-        ]
+        x_views = [x[slice_idx].view(-1, x[slice_idx].shape[-1]) for slice_idx in range(len(lora_b_stacked))]
         if sgmv_metadata is not None:
             if sgmv_metadata.no_lora:
                 return
-            _dispatch_lora_expand(
-                y,
-                x_views,
-                list(lora_b_stacked),
-                sgmv_metadata.lora_indices,
-                sgmv_metadata.seq_lengths,
-                sgmv_metadata.token_lora_indices,
-                list(output_slices),
-                offset_start,
-                add_inputs,
-                sgmv_metadata.use_gmm_expand,
-                sgmv_metadata.no_lora_dispatch,
-            )
+            offset_left = offset_start
+            for x_view, lora_b, output_slice in zip(x_views, lora_b_stacked, output_slices):
+                self.bgmv_expand_slice(
+                    x_view,
+                    lora_b[:, 0].contiguous(),
+                    y,
+                    sgmv_metadata.token_lora_indices,
+                    offset_left,
+                    output_slice,
+                    add_inputs,
+                )
+                offset_left += output_slice
             return
 
+        # aclnnGroupedMatmulV4 forbids a transposed X when group_type=0.
+        # Keep this normalization on the external dispatcher path only; the
+        # DSA path above uses the native BGMV kernel.
+        x_views = [x_view.contiguous() for x_view in x_views]
         _, seq_lengths, lora_indices, _, _, _ = self.prefill_metadata
         _dispatch_lora_expand(
             y,

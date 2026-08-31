@@ -13,7 +13,7 @@ from vllm_ascend.lora.fused_moe import (
     moe_lora_apply_w2,
     moe_lora_apply_w13,
 )
-from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
+from vllm_ascend.lora.punica_npu import GMM_TOKEN_THRESHOLD, PunicaWrapperNPU
 
 
 def test_ascend_fused_moe_lora_initializes_skipped_upstream_fields() -> None:
@@ -240,6 +240,7 @@ def test_decode_metadata_refreshes_no_lora(index_mapping, expected_no_lora) -> N
     with patch.object(PunicaWrapperBase, "update_metadata"):
         wrapper.update_metadata(mapping, [], 2, 100)
     assert wrapper.no_lora is expected_no_lora
+    assert bool(wrapper._no_lora_cpu) is expected_no_lora
 
 
 @pytest.mark.parametrize(
@@ -375,3 +376,173 @@ def test_dsa_sgmv_metadata_marks_base_only_segment() -> None:
     prefill_metadata = wrapper.get_dsa_sgmv_metadata(wrapper._token_lora_indices[2:])
     assert decode_metadata.no_lora
     assert not prefill_metadata.no_lora
+    assert bool(decode_metadata.no_lora_dispatch)
+    assert not bool(prefill_metadata.no_lora_dispatch)
+
+
+def test_dsa_shrink_dispatch_uses_segment_local_flags_and_mapping_views() -> None:
+    num_decode_tokens = 2
+    num_prefill_tokens = GMM_TOKEN_THRESHOLD + 1
+    num_actual_tokens = num_decode_tokens + num_prefill_tokens
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.device = torch.device("cpu")
+    wrapper._token_lora_indices = torch.zeros(num_actual_tokens, dtype=torch.long)
+    with patch("vllm_ascend.lora.punica_npu.PIN_MEMORY", False):
+        wrapper._init_dsa_sgmv_metadata_buffers(max_batches=2)
+    wrapper._host_sgmv_metadata = wrapper._encode_sgmv_metadata((0,) * num_actual_tokens)
+
+    wrapper.prepare_dsa_sgmv_metadata(
+        num_decode_tokens=num_decode_tokens,
+        num_actual_tokens=num_actual_tokens,
+    )
+
+    decode_metadata = wrapper.get_dsa_sgmv_metadata(wrapper._token_lora_indices[:num_decode_tokens])
+    prefill_metadata = wrapper.get_dsa_sgmv_metadata(wrapper._token_lora_indices[num_decode_tokens:])
+    assert not bool(decode_metadata.use_gmm_shrink)
+    assert bool(prefill_metadata.use_gmm_shrink)
+    assert not bool(decode_metadata.use_gmm_expand)
+    assert bool(prefill_metadata.use_gmm_expand)
+    assert decode_metadata.token_lora_indices.data_ptr() == wrapper._token_lora_indices.data_ptr()
+    assert prefill_metadata.token_lora_indices.untyped_storage().data_ptr() == (
+        wrapper._token_lora_indices.untyped_storage().data_ptr()
+    )
+    assert prefill_metadata.token_lora_indices.storage_offset() == num_decode_tokens
+
+
+@pytest.mark.parametrize(
+    ("token_count", "expected_use_gmm"),
+    [
+        (GMM_TOKEN_THRESHOLD, False),
+        (GMM_TOKEN_THRESHOLD + 1, True),
+    ],
+)
+def test_group_gemm_dispatch_uses_token_threshold(token_count, expected_use_gmm) -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    mapping = SimpleNamespace(index_mapping=(7,) * token_count)
+
+    with patch.object(PunicaWrapperBase, "update_metadata"):
+        wrapper.update_metadata(mapping, [7], 1, 100)
+
+    assert bool(wrapper._use_gmm_shrink_cpu) is expected_use_gmm
+    assert bool(wrapper._use_gmm_expand_cpu) is expected_use_gmm
+    assert not bool(wrapper._no_lora_cpu)
+
+
+def test_group_gemm_dispatch_forwards_dense_lora_metadata() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper._seq_start_locs = torch.tensor([0, 2])
+    wrapper._seq_lengths = torch.tensor([2, 1])
+    wrapper._lora_indices_per_batch = torch.tensor([0, 1])
+    wrapper._token_lora_indices = torch.tensor([0, 0, 1])
+    wrapper.batch_size = 2
+    wrapper.max_length = 2
+    wrapper.token_nums = 3
+    wrapper._use_gmm_shrink_cpu = torch.tensor(True)
+    wrapper._use_gmm_expand_cpu = torch.tensor(True)
+    wrapper._no_lora_cpu = torch.tensor(False)
+
+    x = torch.ones(3, 4)
+    shrink_output = (torch.zeros(3, 2),)
+    lora_a_stacked = (torch.zeros(2, 1, 2, 4),)
+    expand_output = torch.zeros(3, 5)
+    lora_b_stacked = (torch.zeros(2, 1, 5, 2),)
+
+    with (
+        patch("vllm_ascend.lora.punica_npu._dispatch_lora_shrink") as dispatch_shrink,
+        patch("vllm_ascend.lora.punica_npu._dispatch_lora_expand") as dispatch_expand,
+    ):
+        wrapper.add_shrink(shrink_output, x, lora_a_stacked, 0.5)
+        wrapper.add_expand(expand_output, shrink_output, lora_b_stacked, (5,))
+
+    shrink_args = dispatch_shrink.call_args.args
+    assert torch.equal(shrink_args[0][0], shrink_output[0])
+    assert shrink_args[2][0] is lora_a_stacked[0]
+    assert torch.equal(shrink_args[3], torch.tensor([0, 1]))
+    assert torch.equal(shrink_args[4], torch.tensor([2, 1]))
+    assert torch.equal(shrink_args[5], torch.tensor([0, 0, 1]))
+    assert shrink_args[6] == 0.5
+    assert shrink_args[7] is wrapper._use_gmm_shrink_cpu
+    assert shrink_args[8] is wrapper._no_lora_cpu
+
+    expand_args = dispatch_expand.call_args.args
+    assert torch.equal(expand_args[0], expand_output)
+    assert torch.equal(expand_args[1][0], shrink_output[0])
+    assert expand_args[2][0] is lora_b_stacked[0]
+    assert torch.equal(expand_args[3], torch.tensor([0, 1]))
+    assert torch.equal(expand_args[4], torch.tensor([2, 1]))
+    assert torch.equal(expand_args[5], torch.tensor([0, 0, 1]))
+    assert expand_args[6] == [5]
+    assert expand_args[7:9] == (0, True)
+    assert expand_args[9] is wrapper._use_gmm_expand_cpu
+    assert expand_args[10] is wrapper._no_lora_cpu
+
+
+def test_dsa_metadata_routes_shrink_and_expand_to_native_bgmv() -> None:
+    wrapper = object.__new__(PunicaWrapperNPU)
+    wrapper.sgmv_shrink = Mock()
+    wrapper.sgmv_expand_slice = Mock()
+    wrapper.bgmv_shrink = Mock()
+    wrapper.bgmv_expand_slice = Mock()
+    lora_indices = torch.tensor([0])
+    seq_lengths = torch.tensor([2])
+    token_lora_indices = torch.tensor([0, 0])
+    metadata = SimpleNamespace(
+        no_lora=False,
+        lora_indices=lora_indices,
+        seq_lengths=seq_lengths,
+        token_lora_indices=token_lora_indices,
+        op_args=(
+            torch.tensor([0]),
+            seq_lengths,
+            lora_indices,
+            1,
+            2,
+            2,
+        ),
+    )
+    x = torch.ones(2, 4)
+    shrink_output = (torch.zeros(2, 2).transpose(0, 1),)
+    assert not shrink_output[0].is_contiguous()
+    lora_a_stacked = (torch.zeros(1, 1, 2, 4),)
+    expand_output = torch.zeros(2, 5)
+    lora_b_stacked = (torch.zeros(1, 1, 5, 2),)
+
+    with (
+        patch("vllm_ascend.lora.punica_npu._dispatch_lora_shrink") as dispatch_shrink,
+        patch("vllm_ascend.lora.punica_npu._dispatch_lora_expand") as dispatch_expand,
+    ):
+        wrapper.add_shrink(
+            shrink_output,
+            x,
+            lora_a_stacked,
+            1.0,
+            sgmv_metadata=metadata,
+        )
+        wrapper.add_expand(
+            expand_output,
+            shrink_output,
+            lora_b_stacked,
+            (5,),
+            sgmv_metadata=metadata,
+        )
+
+    shrink_args = wrapper.bgmv_shrink.call_args.args
+    assert torch.equal(shrink_args[0], x)
+    assert torch.equal(shrink_args[1], lora_a_stacked[0][:, 0])
+    assert torch.equal(shrink_args[2], shrink_output[0])
+    assert shrink_args[3] is token_lora_indices
+    assert shrink_args[4] == 1.0
+
+    expand_args = wrapper.bgmv_expand_slice.call_args.args
+    assert torch.equal(expand_args[0], shrink_output[0])
+    assert not expand_args[0].is_contiguous()
+    assert torch.equal(expand_args[1], lora_b_stacked[0][:, 0])
+    assert expand_args[2] is expand_output
+    assert expand_args[3] is token_lora_indices
+    assert expand_args[4:] == (0, 5, True)
+    wrapper.bgmv_shrink.assert_called_once()
+    wrapper.bgmv_expand_slice.assert_called_once()
+    wrapper.sgmv_shrink.assert_not_called()
+    wrapper.sgmv_expand_slice.assert_not_called()
+    dispatch_shrink.assert_not_called()
+    dispatch_expand.assert_not_called()
