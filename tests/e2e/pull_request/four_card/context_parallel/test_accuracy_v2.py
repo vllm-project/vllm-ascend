@@ -143,6 +143,7 @@ FULL_FEATURE_MODEL_CASES = AccuracyCase(
     os.environ,
     {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_BATCH_INVARIANT": "1",
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
     },
