@@ -89,7 +89,7 @@ def _compare_offload_logprobs(
 
 
 @pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
-@pytest.mark.parametrize("nz_mode", [0, 1], ids=["ND", "NZ"])
+@pytest.mark.parametrize("nz_mode", [0, 2], ids=["ND", "NZ"])
 @wait_until_npu_memory_free()
 def test_prefetch_offload_accuracy(enforce_eager, nz_mode):
     """Test prefetch CPU offloading across eager/graph × ND/NZ.
