@@ -153,13 +153,12 @@ jobs:
   
   setup-vars:
     name: Resolve daily test matrix
+    needs: [select-all-tests]
     runs-on: linux-aarch64-a2b3-0
     outputs:
       a2_image: ${{ steps.export.outputs.a2_image }}
       a3_image: ${{ steps.export.outputs.a3_image }}
-      a2_pr_e2e: ${{ steps.set-matrix.outputs.a2_pr_e2e }}
-      a3_pr_e2e_two_card: ${{ steps.set-matrix.outputs.a3_pr_e2e_two_card }}
-      a3_pr_e2e_four_card: ${{ steps.set-matrix.outputs.a3_pr_e2e_four_card }}
+      vllm_ascend_ref: ${{ needs.select-all-tests.outputs.vllm_ascend_ref }}
       a2_nightly_hf: ${{ steps.set-matrix.outputs.a2_nightly_hf }}
       a3_nightly_hf: ${{ steps.set-matrix.outputs.a3_nightly_hf }}
     steps:
@@ -202,7 +201,7 @@ jobs:
       image: ${{ needs.setup-vars.outputs.a2_image }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_branch: main
+      vllm_ascend_branch: ${{ needs.setup-vars.outputs.vllm_ascend_ref }}
       soc_version: "a2"
       should_run: true
       test_frequency: nightly
@@ -223,7 +222,7 @@ jobs:
       image: ${{ needs.setup-vars.outputs.a3_image }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
-      vllm_ascend_branch: main
+      vllm_ascend_branch: ${{ needs.setup-vars.outputs.vllm_ascend_ref }}
       soc_version: "a3"
       should_run: true
       test_frequency: nightly
