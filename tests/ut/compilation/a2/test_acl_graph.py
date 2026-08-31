@@ -386,7 +386,6 @@ class TestACLGraphWrapper(TestBase):
                     mock_torch.npu.super_kernel_scope_end.assert_called_once_with("full_model")
                     mock_npu_graph.super_kernel_optimize.assert_called_once_with(
                         optimize_options={"dcci_after_kernel_end": [".*"]},
-                        debug_options={},
                     )
                 else:
                     mock_torch.npu.super_kernel_scope_begin.assert_not_called()
