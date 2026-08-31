@@ -84,9 +84,14 @@ def _is_w8a8_dynamic(linear) -> bool:
 class AscendDSABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
-    @staticmethod
-    def get_name() -> str:
-        return "ASCEND_DSA"
+    # Paging variants below only declare these two class attributes instead of
+    # overriding get_name()/get_supported_kernel_block_sizes() boilerplate.
+    _backend_name: str = "ASCEND_DSA"
+    _kernel_block_sizes: list[int] = [2, 4, 8, 16, 32, 64, 128]
+
+    @classmethod
+    def get_name(cls) -> str:
+        return cls._backend_name
 
     @staticmethod
     def get_builder_cls():
@@ -138,62 +143,46 @@ class AscendDSABackend(AttentionBackend):
             return AscendDSAPCPImpl
         return AscendDSAImpl
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [2, 4, 8, 16, 32, 64, 128]
+    @classmethod
+    def get_supported_kernel_block_sizes(cls) -> list[int]:
+        # Return a copy: callers previously received a fresh literal per
+        # call, so mutating the result must not corrupt the class default.
+        return list(cls._kernel_block_sizes)
 
 
 class AscendDSAC4Backend(AscendDSABackend):
-    @staticmethod
-    def get_name() -> str:
-        return "ASCEND_DSA_C4"
-
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        # Align with upstream's logical block-size contract: Ascend's physical
-        # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
-        return [128, 256, 512]
+    _backend_name = "ASCEND_DSA_C4"
+    # Align with upstream's logical block-size contract: Ascend's physical
+    # 32/64/128-token C4 pages represent 128/256/512 raw scheduler tokens.
+    _kernel_block_sizes = [128, 256, 512]
 
 
 class AscendDSAC128Backend(AscendDSABackend):
-    @staticmethod
-    def get_name() -> str:
-        return "ASCEND_DSA_C128"
-
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        # Align with upstream's logical block-size contract: Ascend's physical
-        # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
-        return [4096, 8192, 16384]
+    _backend_name = "ASCEND_DSA_C128"
+    # Align with upstream's logical block-size contract: Ascend's physical
+    # 32/64/128-token C128 pages represent 4096/8192/16384 raw scheduler tokens.
+    _kernel_block_sizes = [4096, 8192, 16384]
 
 
 class AscendDSASWABackend(AscendDSABackend):
-    @staticmethod
-    def get_name() -> str:
-        return "ASCEND_DSA_SWA"
-
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [32, 64, 128]
+    _backend_name = "ASCEND_DSA_SWA"
+    _kernel_block_sizes = [32, 64, 128]
 
 
 class AscendDSAC4StateBackend(AscendDSABackend):
-    @staticmethod
-    def get_name() -> str:
-        return "ASCEND_DSA_C4_STATE"
-
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
-        return [2, 4, 8]
+    _backend_name = "ASCEND_DSA_C4_STATE"
+    _kernel_block_sizes = [2, 4, 8]
 
 
 class AscendDSAC128StateBackend(AscendDSABackend):
-    @staticmethod
-    def get_name() -> str:
-        return "ASCEND_DSA_C128_STATE"
+    _backend_name = "ASCEND_DSA_C128_STATE"
+    # Not applicable: supported block sizes are device-dependent, so this
+    # class overrides get_supported_kernel_block_sizes() instead. Declared
+    # explicitly to avoid inheriting the base class value by accident.
+    _kernel_block_sizes: list[int] = []
 
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int]:
+    @classmethod
+    def get_supported_kernel_block_sizes(cls) -> list[int]:
         if get_ascend_device_type() == AscendDeviceType.A5:
             return [4, 8, 16]
         return [8, 16, 32]
