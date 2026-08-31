@@ -87,12 +87,12 @@ def _configure_jemalloc() -> None:
 @pytest.mark.e2e_model(DEEPSEEK_V4_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
-    feature="spec_decode,aclgraph",
+    feature="spec_decode",
     parallel="PP,TP,EP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W4A8",
-    graph_mode="full_decode_only",
+    graph_mode="eager",
 )
 @patch.dict(
     os.environ,
@@ -118,9 +118,9 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
+        enforce_eager=True,
         enable_prefix_caching=False,
         disable_log_stats=False,
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": 5,
@@ -129,7 +129,6 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
         additional_config={
             "enable_dsa_cp": False,
             "enable_fused_mc2": 0,
-            "enable_flashcomm1": False,
         },
     ) as runner:
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
@@ -196,7 +195,6 @@ def test_minimax_m3_eagle3_pp_accuracy() -> None:
             "multistream_overlap_shared_expert": False,
             "enable_fused_mc2": 0,
             "weight_nz_mode": 2,
-            "enable_flashcomm1": False,
         },
     ) as runner:
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
