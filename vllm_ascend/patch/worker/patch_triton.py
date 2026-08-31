@@ -88,8 +88,71 @@ try:
     fla_kda.chunk_kda = _npu_chunk_kda
     fla_kda.chunk_kda_with_fused_gate = _npu_chunk_kda_with_fused_gate
     fla_kda.fused_kda_gate = _npu_fused_kda_gate
+
+    # Prefer the AscendC fused recurrent_kda operator (same one the upstream
+    # Kimi-K3 path uses): gate formula / beta sigmoid / spec-decode acceptance
+    # all run in-kernel, one launch per call, ACL-graph capturable. Drop back
+    # to the Triton implementation with GLM53_ASCENDC_KDA=0.
+    import os as _os_kda
+
+    if _os_kda.environ.get("GLM53_ASCENDC_KDA", "1") == "1":
+        try:
+            from vllm_ascend.ops.triton.kda.kda import (
+                fused_recurrent_kda_ascendc as _npu_fused_recurrent_kda_ascendc,
+            )
+
+            fla_kda.fused_recurrent_kda = _npu_fused_recurrent_kda_ascendc
+            print("[kda-ascendc] bound fused_recurrent_kda_ascendc", flush=True)
+        except ImportError as _kda_err:
+            print("[kda-ascendc] bind failed:", repr(_kda_err), flush=True)
 except ImportError:
     pass
+
+# kda from-import sweep: `from fla_kda import fused_recurrent_kda` freezes the
+# object reference at model-module import time, so rebinding fla_kda.* afterwards
+# is invisible to the model (W2 finding: the GLM layer kept running the upstream
+# CUDA/Python decomposition on NPU). Sweep every loaded vllm/vllm_ascend module
+# and rewrite stale aliases to the patched implementations.
+def _sweep_kda_from_imports(dst_module: str, names: list[str]) -> list[str]:
+    """Rewrite stale from-imported aliases to dst_module's patched values.
+
+    `from X import f` copies the object reference at import time; rebinding
+    X.f afterwards is invisible to the importer. The GLM model module imports
+    fused_recurrent_kda/chunk_kda BEFORE this patch rebinds fla_kda.*, so the
+    layer kept calling the upstream CUDA/Python decomposition on NPU (W2
+    finding). Sweep every loaded vllm/vllm_ascend module whose alias no longer
+    matches the final patched object (identity check).
+    """
+    import sys as _sys
+    dst = _sys.modules.get(dst_module)
+    if dst is None:
+        return []
+    patched = []
+    for name, mod in list(_sys.modules.items()):
+        if not name.startswith(("vllm.", "vllm_ascend.")) or mod is None:
+            continue
+        hit = False
+        for attr in names:
+            if not hasattr(mod, attr):
+                continue  # only rewrite existing aliases, never create attrs
+            target = getattr(dst, attr, None)
+            if target is not None and getattr(mod, attr) is not target:
+                setattr(mod, attr, target)
+                hit = True
+        if hit:
+            patched.append(name)
+    if patched:
+        print("[kda-ascendc] swept from-imports in:", patched[:6], flush=True)
+    return patched
+
+try:
+    _sweep_kda_from_imports(
+        "vllm.third_party.flash_linear_attention.ops.kda",
+        ["fused_recurrent_kda", "chunk_kda", "chunk_kda_with_fused_gate",
+         "fused_kda_gate", "fused_gdn_gating"],
+    )
+except Exception as _sweep_err:
+    print("[kda-ascendc] sweep failed:", repr(_sweep_err), flush=True)
 
 # GLM-5.3-Flash vision tower (and any other NVIDIA fused Q/K RMSNorm) launches a
 # CUDA Triton kernel that references tl.extra.cuda.gdc_wait. Ascend Triton has
@@ -225,25 +288,27 @@ if not HAS_TRITON:
     fla_fused_recurrent.fused_recurrent_gated_delta_rule_packed_decode = _fused_recurrent_packed_decode_pytorch
 
 
-# npu_mhc_fused_rmsnorm: the tilelang mHC pre kernel fuses the layer's input
-# RMSNorm into layer_input, but mhc_pre_torch (which forward_native/forward_oot
-# use on NPU) ignores norm_weight/norm_eps entirely, so every layer would run
-# without its input norm. Reapply it here to match the CUDA semantics:
-#   layer_input = layer_input * rsqrt(mean(layer_input^2) + norm_eps) * norm_weight
+# npu_hc_pre_v2/npu_hc_post: fused mHC kernels (mix projection + RMS-normalised
+# gates + 20-round Sinkhorn + stream contraction in ONE launch, instead of the
+# ~340 eager dispatches / 168 aten ops of mhc_pre_torch). mhc_ascendc keeps the
+# MHCPreOp/MHCFusedPostPreOp return contract (post_mix [..., hc, 1], layer_input
+# bf16 [..., d]) and fuses the layer's input RMSNorm (the reason this block
+# existed); it falls back to mhc_pre_torch/mhc_post_torch when the operator is
+# unavailable or the shape is outside its envelope (hc_mult=4, d in {4096,
+# 7168}, x bf16 / hc params fp32, hc_post_mult_value pinned to 2.0).
+# GLM53_HC_ASCENDC=0 forces the torch path for the whole module.
 try:
-    import torch as _t
-    from vllm.model_executor.kernels.mhc.torch import (
-        mhc_post_torch as _mhc_post_torch,
-    )
-    from vllm.model_executor.kernels.mhc.torch import (
-        mhc_pre_torch as _mhc_pre_torch,
-    )
+    import torch as _mhc_torch
     from vllm.model_executor.layers import mhc as _mhc_mod
-
-    def _mhc_rms_norm(x, weight, eps):
-        xf = x.float()
-        var = xf.square().mean(dim=-1, keepdim=True)
-        return (xf * _t.rsqrt(var + eps) * weight.float()).to(x.dtype)
+    from vllm.model_executor.kernels.mhc.torch import (
+        mhc_post_torch as _mhc_post_torch_fb,
+        mhc_pre_torch as _mhc_pre_torch_fb,
+    )
+    from vllm_ascend.ops.mhc_ascendc import (
+        fused_post_pre_ascendc as _mhc_fused_post_pre_ascendc,
+        hc_pre_ascendc as _mhc_pre_ascendc,
+        infer_hc_mult as _mhc_infer_hc_mult,
+    )
 
     def _mhc_pre_npu(
         self,
@@ -260,20 +325,20 @@ try:
         norm_weight=None,
         norm_eps=0.0,
     ):
-        post_mix, comb_mix, layer_input = _mhc_pre_torch(
+        y, post, comb = _mhc_pre_ascendc(
             residual,
             fn,
             hc_scale,
             hc_base,
+            _mhc_infer_hc_mult(residual),
+            sinkhorn_repeat,
             rms_eps,
             hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
+            hc_post_mult_value=hc_post_mult_value,
+            norm_weight=norm_weight,
+            layer_norm_eps=norm_eps,
         )
-        if norm_weight is not None:
-            layer_input = _mhc_rms_norm(layer_input, norm_weight, norm_eps)
-        return post_mix, comb_mix, layer_input
+        return post, comb, y
 
     def _mhc_fused_post_pre_npu(
         self,
@@ -294,21 +359,22 @@ try:
         norm_weight=None,
         norm_eps=0.0,
     ):
-        residual_cur = _mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
-        post_mix_cur, comb_mix_cur, layer_input_cur = _mhc_pre_torch(
-            residual_cur,
+        residual_cur, post_cur, comb_cur, layer_input_cur = _mhc_fused_post_pre_ascendc(
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
             fn,
             hc_scale,
             hc_base,
+            sinkhorn_repeat,
             rms_eps,
             hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
+            hc_post_mult_value=hc_post_mult_value,
+            norm_weight=norm_weight,
+            layer_norm_eps=norm_eps,
         )
-        if norm_weight is not None:
-            layer_input_cur = _mhc_rms_norm(layer_input_cur, norm_weight, norm_eps)
-        return residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur
+        return residual_cur, post_cur, comb_cur, layer_input_cur
 
     _mhc_mod.MHCPreOp.forward_oot = _mhc_pre_npu
     _mhc_mod.MHCPreOp.forward_native = _mhc_pre_npu
@@ -317,24 +383,29 @@ try:
 except ImportError:
     pass
 
-# npu_kda_causal_conv1d_triton: the 310P PyTorch fallback calls .item() per
-# request, which aborts ACL graph capture. The upstream NPU Triton kernel has
-# no host sync and accepts the spec-decode kwargs the fallback had to drop.
+# npu_kda_causal_conv1d_ascendc: prefer the AscendC fused operator used by the
+# upstream Qwen3-Next/Kimi GDN path (single launch, no host sync, ACL-graph
+# capturable). Falls back to the vectorized torch implementation when the
+# operator is unavailable, and to the 310P PyTorch fallback inside the
+# vectorized implementation for shapes the operator does not cover.
 try:
     from vllm_ascend.ops.triton.mamba.causal_conv1d import (  # type: ignore[attr-defined]
-        causal_conv1d_update_npu as _cc1d_update_npu,
+        causal_conv1d_update_ascendc as _cc1d_update_ascendc,
     )
 
-    _cc1d.causal_conv1d_update = _cc1d_update_npu
-    try:
-        import vllm.models.glm5next.nvidia.kda as _glm_kda_triton
+    import os as _os_conv
+    if _os_conv.environ.get("GLM53_ASCENDC_CONV", "0") == "1":
+        _cc1d.causal_conv1d_update = _cc1d_update_ascendc
+        try:
+            import vllm.models.glm5next.nvidia.kda as _glm_kda_ascendc
 
-        _glm_kda_triton.causal_conv1d_update = _cc1d_update_npu
-    except ImportError:
-        pass
-    print("[npu_kda_causal_conv1d_triton] bound NPU Triton causal_conv1d_update", flush=True)
+            _glm_kda_ascendc.causal_conv1d_update = _cc1d_update_ascendc
+        except ImportError:
+            pass
+    # else: keep the 310P fallback bound by the earlier block
+    print("[npu_kda_causal_conv1d_ascendc] bound AscendC causal_conv1d_update", flush=True)
 except Exception as _cc1d_err:
-    print("[npu_kda_causal_conv1d_triton] FAILED:", repr(_cc1d_err), flush=True)
+    print("[npu_kda_causal_conv1d_ascendc] FAILED:", repr(_cc1d_err), flush=True)
 
 # npu_mamba_state_ops: gather_initial_states / scatter_states assert
 # state.is_cuda and launch Triton kernels that reference

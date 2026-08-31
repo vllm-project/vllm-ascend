@@ -1463,3 +1463,153 @@ def chunk_kda_with_fused_gate(
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         cu_seqlens=cu_seqlens,
     )
+
+
+_KDA_ASCENDC_AVAILABLE: bool | None = None
+
+
+def fused_recurrent_kda_ascendc(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor = None,
+    scale: float = None,
+    initial_state: torch.Tensor = None,
+    inplace_final_state: bool = True,
+    use_qk_l2norm_in_kernel: bool = True,
+    cu_seqlens: torch.Tensor | None = None,
+    ssm_state_indices: torch.LongTensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
+    sigmoid_beta: bool = False,
+    a_log: torch.Tensor | None = None,
+    g_bias: torch.Tensor | None = None,
+    compute_gate: bool = False,
+    lower_bound: float | None = -5.0,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """fused_recurrent_kda backed by the AscendC fused operator.
+
+    Same contract as :func:`fused_recurrent_kda`, but routes to
+    ``torch.ops._C_ascend.recurrent_kda`` — the single fused kernel the
+    upstream Kimi-K3/Qwen3.5 KDA path uses (gate formula, beta sigmoid, l2
+    norm and the spec-decode ``num_accepted_tokens`` handling all run inside
+    the kernel; one launch per call; ACL-graph capturable). Falls back to the
+    Triton implementation on any operator failure.
+    """
+    global _KDA_ASCENDC_AVAILABLE
+    if _KDA_ASCENDC_AVAILABLE is False or initial_state is None or cu_seqlens is None:
+        return fused_recurrent_kda(
+            q, k, v, g, beta, scale, initial_state, inplace_final_state,
+            use_qk_l2norm_in_kernel, cu_seqlens, ssm_state_indices,
+            num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
+            compute_gate, lower_bound, **kwargs,
+        )
+
+    squeeze_b = q.dim() == 4
+    try:
+        # The operator wants per-token packed indices [T] (plain decode) or a
+        # [seq_num, max_step] speculative table. The speculative table is
+        # walked PER TOKEN: recurrent_kda.h computes
+        #   offset = row * stride + (token_idx - seq_start)
+        # i.e. token i of a sequence reads/writes column i of its row, and the
+        # initial state comes from column (num_accepted_tokens - 1). A3 passes
+        # the full [seq, num_spec+1] block-table slice (gdn_attn_builder.py),
+        # and so does the vendored GLM model (kda.py forwards
+        # spec_state_indices_tensor verbatim) -- keep it verbatim here.
+        indices = ssm_state_indices
+        if indices is not None and indices.dim() == 1 and cu_seqlens is not None:
+            if num_accepted_tokens is not None:
+                # Speculative verify step with only a per-sequence slot list:
+                # a [seq, 1] table is NOT a valid substitute. With
+                # stride == dim(1) == 1 the kernel reads row + step for token
+                # step, which walks into the NEXT sequence's slot, and
+                # ResolveInitialStateSlot reads column (num_accepted - 1) of a
+                # one-column row -- i.e. another request's state (or an
+                # out-of-range slot, which makes the kernel bail out silently
+                # and leave the outputs uninitialised). The Triton
+                # decomposition below advances one slot in place with explicit
+                # accepted-prefix rollback, so it is the correct fallback for
+                # this degenerate metadata shape.
+                return fused_recurrent_kda(
+                    q, k, v, g, beta, scale, initial_state, inplace_final_state,
+                    use_qk_l2norm_in_kernel, cu_seqlens, ssm_state_indices,
+                    num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
+                    compute_gate, lower_bound, **kwargs,
+                )
+            total_tokens = q.squeeze(0).shape[0] if squeeze_b else q.shape[0]
+            if indices.numel() != total_tokens:
+                token_counts = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.long)
+                indices = torch.repeat_interleave(
+                    indices.to(torch.long), token_counts
+                ).to(ssm_state_indices.dtype)
+        elif (
+            indices is not None
+            and indices.dim() == 2
+            and num_accepted_tokens is not None
+            and indices.size(1) <= 1
+        ):
+            # Degenerate speculative table (single column) reaching the AscendC
+            # operator: same cross-slot hazard as above, same fallback.
+            return fused_recurrent_kda(
+                q, k, v, g, beta, scale, initial_state, inplace_final_state,
+                use_qk_l2norm_in_kernel, cu_seqlens, ssm_state_indices,
+                num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
+                compute_gate, lower_bound, **kwargs,
+            )
+        result = torch.ops._C_ascend.recurrent_kda(
+            q.squeeze(0).contiguous() if squeeze_b else q.contiguous(),
+            k.squeeze(0).contiguous() if k.dim() == 4 else k.contiguous(),
+            v.squeeze(0).contiguous() if v.dim() == 4 else v.contiguous(),
+            g.squeeze(0).contiguous() if squeeze_b else g.contiguous(),
+            (beta.squeeze(0) if beta.dim() >= 3 else beta).contiguous(),
+            initial_state,
+            cu_seqlens.contiguous(),
+            indices.contiguous() if indices is not None else indices,
+            a_log.reshape(-1).contiguous() if a_log is not None else a_log,
+            g_bias.contiguous() if g_bias is not None else g_bias,
+            num_accepted_tokens=num_accepted_tokens,
+            scale=scale if scale is not None else k.shape[-1] ** -0.5,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_gate_in_kernel=bool(compute_gate),
+            use_beta_sigmoid_in_kernel=bool(sigmoid_beta),
+            allow_neg_eigval=False,
+            safe_gate=True,
+            lower_bound=DEFAULT_KDA_LOWER_BOUND if lower_bound is None else float(lower_bound),
+        )
+        if _KDA_ASCENDC_AVAILABLE is None:
+            import sys as _sys
+
+            print("[kda-ascendc] active (first call ok)", flush=True, file=_sys.stderr)
+        _KDA_ASCENDC_AVAILABLE = True
+    except Exception as op_err:
+        if _KDA_ASCENDC_AVAILABLE is True:
+            raise
+        import sys as _sys
+
+        print(
+            "[kda-ascendc] op failed, falling back to triton:",
+            repr(op_err)[:600],
+            "| q:", tuple(q.shape), q.dtype,
+            "| g:", tuple(g.shape), g.dtype,
+            "| beta:", tuple(beta.shape), beta.dtype,
+            "| state:", tuple(initial_state.shape), initial_state.dtype,
+            flush=True, file=_sys.stderr,
+        )
+        _KDA_ASCENDC_AVAILABLE = False
+        return fused_recurrent_kda(
+            q, k, v, g, beta, scale, initial_state, inplace_final_state,
+            use_qk_l2norm_in_kernel, cu_seqlens, ssm_state_indices,
+            num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
+            compute_gate, lower_bound, **kwargs,
+        )
+
+    # The triton path returns a 4-D [1, T, H, V] output; restore the batch dim
+    # when we squeezed it for the operator, and honor the caller's out= buffer.
+    if squeeze_b:
+        result = result.unsqueeze(0)
+    if out is not None:
+        out.copy_(result)
+        return out, initial_state
+    return result, initial_state

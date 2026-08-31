@@ -2791,7 +2791,14 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         # A stateful P/D handoff can use a uniform decode graph even at
         # prompt_len - 1 computed tokens. Keep first-token prefills out.
-        has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        # A3 18c483e0: "> 0" misclassifies a mixed batch (one running request +
+        # a fresh prefill chunk) as uniform decode, which dispatches wrong
+        # graph metadata and garbles spec output; require every request to
+        # have consumed its whole prompt instead.
+        has_initial_state = np.all(
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            >= self.input_batch.num_prompt_tokens[:num_reqs]
+        )
         uniform_decode = (
             (
                 has_initial_state
