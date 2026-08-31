@@ -711,6 +711,17 @@ at::Tensor adn_rms_norm_meta(
     return at::empty_symint(x.sym_sizes(), x.options());
 }
 
+at::Tensor npu_rejection_sample_greedy_310_meta(
+    const at::Tensor &cu_num_draft_tokens,
+    const at::Tensor &draft_token_ids,
+    const at::Tensor &target_argmax,
+    const at::Tensor &bonus_token_ids,
+    at::Tensor &output_token_ids,
+    int64_t max_spec_len)
+{
+    return output_token_ids;
+}
+
 at::Tensor npu_causal_conv1d_custom_meta(
     const at::Tensor& output,
     const at::Tensor& x,
@@ -1771,6 +1782,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_dflash_inputs", &vllm_ascend::meta::npu_copy_and_expand_dflash_inputs_meta);
     // AdnRmsNorm
     ops.impl("adn_rms_norm", &vllm_ascend::meta::adn_rms_norm_meta);
+    // RejectionSampleGreedy310
+    ops.impl("npu_rejection_sample_greedy_310", &vllm_ascend::meta::npu_rejection_sample_greedy_310_meta);
 }
 }
 #else

@@ -747,6 +747,68 @@ at::Tensor adn_rms_norm(
     return y;
 }
 
+at::Tensor npu_rejection_sample_greedy_310(
+    const at::Tensor &cu_num_draft_tokens,
+    const at::Tensor &draft_token_ids,
+    const at::Tensor &target_argmax,
+    const at::Tensor &bonus_token_ids,
+    at::Tensor &output_token_ids,
+    int64_t max_spec_len)
+{
+    TORCH_CHECK(max_spec_len >= 0, "max_spec_len must be non-negative");
+    TORCH_CHECK(cu_num_draft_tokens.dim() == 1, "cu_num_draft_tokens must be one-dimensional");
+    TORCH_CHECK(draft_token_ids.dim() == 1, "draft_token_ids must be one-dimensional");
+    TORCH_CHECK(target_argmax.dim() == 1, "target_argmax must be one-dimensional");
+    TORCH_CHECK(output_token_ids.dim() == 2, "output_token_ids must be two-dimensional");
+    TORCH_CHECK(
+        output_token_ids.size(0) == cu_num_draft_tokens.size(0),
+        "output_token_ids batch size must match cu_num_draft_tokens");
+    TORCH_CHECK(
+        output_token_ids.size(1) == max_spec_len + 1,
+        "output_token_ids width must equal max_spec_len + 1");
+    TORCH_CHECK(
+        bonus_token_ids.numel() == cu_num_draft_tokens.numel(),
+        "bonus_token_ids must contain one token per request");
+    TORCH_CHECK(
+        draft_token_ids.numel() == target_argmax.numel(),
+        "draft_token_ids and target_argmax must have equal lengths");
+    TORCH_CHECK(cu_num_draft_tokens.scalar_type() == at::kInt, "cu_num_draft_tokens must be int32");
+    TORCH_CHECK(draft_token_ids.scalar_type() == at::kInt, "draft_token_ids must be int32");
+    TORCH_CHECK(target_argmax.scalar_type() == at::kLong, "target_argmax must be int64");
+    TORCH_CHECK(bonus_token_ids.scalar_type() == at::kInt, "bonus_token_ids must be int32");
+    TORCH_CHECK(output_token_ids.scalar_type() == at::kInt, "output_token_ids must be int32");
+    TORCH_CHECK(
+        cu_num_draft_tokens.is_contiguous() && draft_token_ids.is_contiguous() &&
+            target_argmax.is_contiguous() && bonus_token_ids.is_contiguous() && output_token_ids.is_contiguous(),
+        "all rejection sampling tensors must be contiguous");
+    TORCH_CHECK(
+        cu_num_draft_tokens.device() == output_token_ids.device() &&
+            draft_token_ids.device() == output_token_ids.device() &&
+            target_argmax.device() == output_token_ids.device() &&
+            bonus_token_ids.device() == output_token_ids.device(),
+        "all rejection sampling tensors must be on the same device");
+
+    constexpr int64_t INT32_ELEMENTS_PER_BLOCK = 8;
+    const int64_t output_len = max_spec_len + 1;
+    const int64_t aligned_output_len =
+        (output_len + INT32_ELEMENTS_PER_BLOCK - 1) / INT32_ELEMENTS_PER_BLOCK * INT32_ELEMENTS_PER_BLOCK;
+    at::Tensor kernel_output = output_token_ids;
+    if (output_len != aligned_output_len) {
+        kernel_output = at::empty(
+            {output_token_ids.size(0), aligned_output_len},
+            output_token_ids.options());
+    }
+
+    EXEC_NPU_CMD(aclnnRejectionSampleGreedyV310,
+        cu_num_draft_tokens, draft_token_ids, target_argmax, bonus_token_ids,
+        max_spec_len, aligned_output_len, kernel_output);
+
+    if (output_len != aligned_output_len) {
+        output_token_ids.copy_(kernel_output.slice(1, 0, output_len).contiguous());
+    }
+    return output_token_ids;
+}
+
 at::Tensor npu_causal_conv1d_custom(
     const at::Tensor& output,
     const at::Tensor& x,
@@ -2290,6 +2352,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "adn_rms_norm(Tensor x, Tensor gamma, float epsilon=1e-6) -> Tensor");
     ops.impl("adn_rms_norm", torch::kPrivateUse1, &vllm_ascend::adn_rms_norm);
+
+    ops.def(
+        "npu_rejection_sample_greedy_310(Tensor cu_num_draft_tokens, Tensor draft_token_ids, "
+        "Tensor target_argmax, Tensor bonus_token_ids, Tensor(a!) output_token_ids, "
+        "int max_spec_len) -> Tensor(a!)"
+    );
+    ops.impl("npu_rejection_sample_greedy_310", torch::kPrivateUse1, &vllm_ascend::npu_rejection_sample_greedy_310);
 }
 #else
 // Pybind on other platform

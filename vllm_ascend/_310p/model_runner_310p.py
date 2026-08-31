@@ -251,10 +251,7 @@ class NPUModelRunner310(NPUModelRunner):
         logger.info_once("Weight layout uses FRACTAL_NZ.")
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
-            self.rejection_sampler = AscendRejectionSampler310(
-                self.sampler,
-                use_fdo_alignment_safe_greedy=(is_310p_dflash_full_decode_only(self.vllm_config)),
-            )
+            self.rejection_sampler = AscendRejectionSampler310(self.sampler)
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.

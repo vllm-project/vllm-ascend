@@ -156,17 +156,51 @@ def _rejection_greedy_sample_pytorch_310(
     output_token_ids.copy_(torch.where(write_mask, candidates, output_token_ids))
 
 
+def _get_rejection_sample_greedy_310_op():
+    try:
+        return torch.ops._C_ascend.npu_rejection_sample_greedy_310
+    except AttributeError:
+        return None
+
+
+def _rejection_greedy_sample_310(
+    output_token_ids,
+    cu_num_draft_tokens,
+    draft_token_ids,
+    target_argmax,
+    bonus_token_ids,
+    draft_tokens_per_req,
+    max_spec_len,
+    is_greedy=None,
+):
+    """Use the fused 310P op for all-greedy batches, with a safe fallback."""
+    if is_greedy is None:
+        rejection_op = _get_rejection_sample_greedy_310_op()
+        if rejection_op is not None:
+            rejection_op(
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                output_token_ids,
+                max_spec_len,
+            )
+            return
+
+    _rejection_greedy_sample_pytorch_310(
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        target_argmax,
+        bonus_token_ids,
+        draft_tokens_per_req,
+        max_spec_len,
+        is_greedy,
+    )
+
+
 class AscendRejectionSampler310(AscendRejectionSampler):
     """310P rejection sampler: PyTorch recovered-token path with CPU RNG (no Triton)."""
-
-    def __init__(
-        self,
-        sampler,
-        *,
-        use_fdo_alignment_safe_greedy: bool = False,
-    ):
-        super().__init__(sampler)
-        self._use_fdo_alignment_safe_greedy = use_fdo_alignment_safe_greedy
 
     def forward(
         self,
@@ -175,10 +209,9 @@ class AscendRejectionSampler310(AscendRejectionSampler):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        greedy_fn = _rejection_greedy_sample_pytorch_310 if self._use_fdo_alignment_safe_greedy else None
         with _force_pytorch_rejection_path(
             self.sample_recovered_tokens,
-            greedy_fn=greedy_fn,
+            greedy_fn=_rejection_greedy_sample_310,
         ):
             return super().forward(metadata, draft_probs, logits, sampling_metadata)
 

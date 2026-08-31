@@ -13,13 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
+from unittest.mock import patch
+
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 
+import vllm_ascend._310p.sample.rejection_sampler as rejection_sampler_310_module
 import vllm_ascend.sample.rejection_sampler as rejection_sampler_module
 from tests.ut.base import TestBase
 from vllm_ascend._310p.sample.rejection_sampler import (
+    AscendRejectionSampler310,
     _force_pytorch_rejection_path,
+    _rejection_greedy_sample_310,
     _rejection_greedy_sample_pytorch_310,
 )
 
@@ -45,6 +51,30 @@ class _RejectUnalignedGreedyCopyOps(TorchDispatchMode):
 
 
 class TestForcePytorchRejectionPath(TestBase):
+    def test_sampler_always_binds_fused_greedy_entry(self):
+        sampler = AscendRejectionSampler310.__new__(AscendRejectionSampler310)
+        expected = object()
+
+        with (
+            patch.object(
+                rejection_sampler_310_module,
+                "_force_pytorch_rejection_path",
+                return_value=nullcontext(),
+            ) as force_path,
+            patch.object(
+                rejection_sampler_310_module.AscendRejectionSampler,
+                "forward",
+                return_value=expected,
+            ),
+        ):
+            actual = sampler.forward(None, None, None, None)
+
+        self.assertIs(actual, expected)
+        force_path.assert_called_once_with(
+            sampler.sample_recovered_tokens,
+            greedy_fn=_rejection_greedy_sample_310,
+        )
+
     def test_disables_triton_and_binds_recovered_then_restores(self):
         orig_triton = rejection_sampler_module.HAS_TRITON
         orig_recovered = rejection_sampler_module.sample_recovered_tokens
@@ -106,6 +136,71 @@ class TestForcePytorchRejectionPath(TestBase):
                 [
                     [1, 9, -1, -1],
                     [4, 5, 6, 8],
+                ],
+                dtype=torch.int32,
+            ),
+        )
+
+    def test_all_greedy_routes_to_fused_op(self):
+        output_token_ids = torch.full((2, 4), -1, dtype=torch.int32)
+        cu_num_draft_tokens = torch.tensor([3, 6], dtype=torch.int32)
+        draft_token_ids = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32)
+        target_argmax = draft_token_ids.to(torch.int64)
+        bonus_token_ids = torch.tensor([[7], [8]], dtype=torch.int32)
+        calls = []
+
+        def fused_op(*args):
+            calls.append(args)
+            args[4].fill_(42)
+
+        with patch.object(
+            rejection_sampler_310_module,
+            "_get_rejection_sample_greedy_310_op",
+            return_value=fused_op,
+        ):
+            _rejection_greedy_sample_310(
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                [3, 3],
+                3,
+            )
+
+        self.assertEqual(len(calls), 1)
+        torch.testing.assert_close(output_token_ids, torch.full_like(output_token_ids, 42))
+
+    def test_mixed_greedy_keeps_pytorch_fallback(self):
+        output_token_ids = torch.full((2, 4), -1, dtype=torch.int32)
+        cu_num_draft_tokens = torch.tensor([3, 6], dtype=torch.int32)
+        draft_token_ids = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32)
+        target_argmax = torch.tensor([1, 9, 3, 4, 5, 6], dtype=torch.int64)
+        bonus_token_ids = torch.tensor([[7], [8]], dtype=torch.int32)
+        is_greedy = torch.tensor([True, False])
+
+        with patch.object(
+            rejection_sampler_310_module,
+            "_get_rejection_sample_greedy_310_op",
+            side_effect=AssertionError("mixed batches must not query the fused op"),
+        ):
+            _rejection_greedy_sample_310(
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                [3, 3],
+                3,
+                is_greedy,
+            )
+
+        torch.testing.assert_close(
+            output_token_ids,
+            torch.tensor(
+                [
+                    [1, 9, -1, -1],
+                    [-1, -1, -1, -1],
                 ],
                 dtype=torch.int32,
             ),
