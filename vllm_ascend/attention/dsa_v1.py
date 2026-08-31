@@ -59,6 +59,12 @@ BUILD_METADATA_STEP_DECODE = 1
 _DSV4_DSA_OVERLAP_STREAM = None
 
 
+def _compressor_cache_mode() -> int:
+    # CYCLE keeps only the persistent per-request tail in paged cache; the
+    # current chunk's partial states stay in the CANN operator workspace.
+    return 2 if get_ascend_config().enable_dsv4_shared_compressor_workspace else 1
+
+
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     global _DSV4_DSA_OVERLAP_STREAM
     if _DSV4_DSA_OVERLAP_STREAM is None:
@@ -2132,7 +2138,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 coff=coff,
                 norm_eps=self.compressor_norm_eps,
                 rotary_mode=2,
-                cache_mode=1,
+                cache_mode=_compressor_cache_mode(),
             )
 
             # For multistream_dsv4_dsa_overlap with compress_ratio=4:
@@ -2430,7 +2436,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 coff=coff,
                 norm_eps=self.compressor_norm_eps,
                 rotary_mode=2,
-                cache_mode=1,
+                cache_mode=_compressor_cache_mode(),
             )
 
             # For multistream_dsv4_dsa_overlap with compress_ratio=4:
@@ -2642,7 +2648,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff=coff,
             norm_eps=self.compressor_norm_eps,
             rotary_mode=2,
-            cache_mode=1,
+            cache_mode=_compressor_cache_mode(),
         )
 
         if kv.numel() == 0:
@@ -2868,7 +2874,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             coff=coff,
             norm_eps=self.compressor_norm_eps,
             rotary_mode=2,
-            cache_mode=1,
+            cache_mode=_compressor_cache_mode(),
         )
 
         if kv.numel() == 0:

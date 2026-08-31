@@ -75,11 +75,15 @@ from vllm.models.deepseek_v4.compressor import CompressorStateCache  # type: ign
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendCompressorTailSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -123,6 +127,25 @@ class AscendCompressorStateCache(CompressorStateCache):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         pads = _dsv4_block_sizes()[vllm_config.cache_config.block_size][1]
         page_size_padded = pads[0] if self.state_dim == 2 * 256 and self.compress_ratio == 4 else pads[1]
+
+        if get_ascend_config().enable_dsv4_shared_compressor_workspace:
+            return AscendCompressorTailSpec(
+                block_size=self.block_size,
+                num_kv_heads=1,
+                head_size=self.state_dim,
+                dtype=self.dtype,
+                sliding_window=self.sliding_window,
+                alignment=None,
+                page_size_padded=page_size_padded,
+                compress_ratio=self.compress_ratio,
+                model_version="deepseek_v4",
+                tail_tokens=self.sliding_window,
+                ring_blocks_per_request=cdiv(
+                    self.sliding_window,
+                    self.block_size,
+                ),
+                state_dim=self.state_dim,
+            )
 
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,

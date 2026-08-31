@@ -121,7 +121,6 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -4392,10 +4391,17 @@ class NPUModelRunner(GPUModelRunner):
         for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            max_num_blocks_per_req = cdiv(
-                max_model_len,
-                block_sizes[i] * get_decode_context_model_parallel_world_size(),
-            )
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                max_num_blocks_per_req = max(
+                    spec.max_num_blocks_per_req(self.vllm_config, max_model_len)
+                    for spec in kv_cache_spec.kv_cache_specs.values()
+                )
+            else:
+                max_num_blocks_per_req = kv_cache_spec.max_num_blocks_per_req(
+                    self.vllm_config,
+                    max_model_len,
+                )
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 mamba_blocks_per_req = (
                     max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1

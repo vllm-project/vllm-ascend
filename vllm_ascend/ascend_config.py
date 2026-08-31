@@ -24,6 +24,40 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+def get_dsv4_shared_compressor_workspace_fallback_reasons(
+    vllm_config: "VllmConfig",
+    *,
+    is_a3: bool,
+    multistream_dsv4_dsa_overlap: bool,
+) -> list[str]:
+    """Return Stage-1 incompatibilities without mutating user features."""
+    reasons = []
+    model_type = getattr(
+        getattr(vllm_config.model_config, "hf_text_config", None),
+        "model_type",
+        None,
+    )
+    if model_type != "deepseek_v4":
+        reasons.append("model is not DeepSeek-V4")
+    if not is_a3:
+        reasons.append("device is not A3")
+    if not vllm_config.model_config.enforce_eager:
+        reasons.append("ACL graph is enabled")
+    if multistream_dsv4_dsa_overlap:
+        reasons.append("multistream_dsv4_dsa_overlap is enabled")
+    if vllm_config.cache_config.enable_prefix_caching:
+        reasons.append("prefix caching is enabled")
+    if vllm_config.kv_transfer_config is not None:
+        reasons.append("KV transfer/P-D is enabled")
+    if vllm_config.speculative_config is not None:
+        reasons.append("speculative decoding is enabled")
+    if vllm_config.parallel_config.decode_context_parallel_size != 1:
+        reasons.append("decode context parallelism is enabled")
+    if vllm_config.parallel_config.prefill_context_parallel_size != 1:
+        reasons.append("prefill context parallelism is enabled")
+    return reasons
+
+
 class AscendConfig:
     """
     Configuration Object for additional_config from vllm.configs.
@@ -144,6 +178,37 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
+        shared_compressor_workspace_requested = bool(
+            additional_config.get("enable_dsv4_shared_compressor_workspace", False)
+        )
+        shared_compressor_workspace_fallback_reasons = []
+        if shared_compressor_workspace_requested:
+            from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+            shared_compressor_workspace_fallback_reasons = (
+                get_dsv4_shared_compressor_workspace_fallback_reasons(
+                    vllm_config,
+                    is_a3=get_ascend_device_type() == AscendDeviceType.A3,
+                    multistream_dsv4_dsa_overlap=self.multistream_dsv4_dsa_overlap,
+                )
+            )
+        self.enable_dsv4_shared_compressor_workspace = (
+            shared_compressor_workspace_requested
+            and not shared_compressor_workspace_fallback_reasons
+        )
+        if shared_compressor_workspace_requested:
+            if shared_compressor_workspace_fallback_reasons:
+                logger.info_once(
+                    "DeepSeek-V4 shared compressor workspace requested but "
+                    "unsupported for this configuration (%s); falling back "
+                    "to the CONTINUOUS state-cache path.",
+                    ", ".join(shared_compressor_workspace_fallback_reasons),
+                )
+            else:
+                logger.info_once(
+                    "Enabled DeepSeek-V4 persistent compressor tails and "
+                    "cross-layer transient workspace reuse."
+                )
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
         self.enable_fused_mc2 = self._get_config_value(

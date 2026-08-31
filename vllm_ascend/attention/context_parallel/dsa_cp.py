@@ -12,6 +12,7 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
@@ -35,6 +36,10 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     olora_tp_enable,
 )
+
+
+def _compressor_cache_mode() -> int:
+    return 2 if get_ascend_config().enable_dsv4_shared_compressor_workspace else 1
 
 
 def hadamard_transform_ref(
@@ -1514,7 +1519,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 coff=coff,
                 norm_eps=self.compressor_norm_eps,
                 rotary_mode=2,
-                cache_mode=1,
+                cache_mode=_compressor_cache_mode(),
             )
 
             if compressed_kv.numel() == 0:
@@ -1655,7 +1660,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             coff=coff,
             norm_eps=self.compressor_norm_eps,
             rotary_mode=2,
-            cache_mode=1,
+            cache_mode=_compressor_cache_mode(),
         )
 
         if kv.numel() == 0:

@@ -14,17 +14,90 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SingleTypeKVCacheManager,
+    SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+    from vllm_ascend.core.kv_cache_interface import (
+        AscendCompressorTailSpec,
+        AscendMLAAttentionSpec,
+    )
+
+
+class CompressorTailManager(SlidingWindowManager):
+    """Allocate a fixed persistent compressor-state ring per request."""
+
+    def __init__(self, kv_cache_spec: "AscendCompressorTailSpec", **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        self.ring_blocks_per_request = kv_cache_spec.ring_blocks_per_request
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int | None = None,
+        num_tokens_main_model: int | None = None,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        del (
+            num_tokens,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            apply_admission_cap,
+        )
+        assert not new_computed_blocks, (
+            "Compressor-tail prefix hits are unsupported; the feature gate "
+            "must fall back before cache allocation."
+        )
+        allocated = len(self.req_to_blocks.get(request_id, ()))
+        return max(self.ring_blocks_per_request - allocated, 0)
+
+    def allocate_new_blocks(
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_main_model: int,
+    ) -> list[KVCacheBlock]:
+        del num_tokens, num_tokens_main_model
+        req_blocks = self.req_to_blocks[request_id]
+        num_new_blocks = self.ring_blocks_per_request - len(req_blocks)
+        if num_new_blocks <= 0:
+            return []
+        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        req_blocks.extend(new_blocks)
+        return new_blocks
+
+    def remove_skipped_blocks(
+        self,
+        request_id: str,
+        processed_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
+    ) -> None:
+        del request_id, processed_computed_tokens, num_prompt_tokens
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        **kwargs,
+    ) -> None:
+        del request, num_tokens, retention_interval, kwargs
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        del running_request_id
+        return 0
 
 
 class CompressAttentionManager(FullAttentionManager):
@@ -298,17 +371,33 @@ def get_manager_for_kv_cache_spec(
 
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    # DeepSeek-V4 cache groups retain per-layer layouts in a
+    # UniformTypeKVCacheSpecs wrapper. Manager semantics are uniform within a
+    # group, so use one contained spec for manager selection and allocation.
+    # The physical per-layer page sizes remain on the wrapper in KVCacheConfig.
+    manager_spec = kv_cache_spec
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        nested_specs = list(kv_cache_spec.kv_cache_specs.values())
+        assert nested_specs, "UniformTypeKVCacheSpecs must contain at least one spec"
+        manager_spec = nested_specs[0]
+        manager_classes = {
+            KVCacheSpecRegistry.get_manager_class(spec) for spec in nested_specs
+        }
+        assert len(manager_classes) == 1, (
+            "All specs in one uniform KV cache group must use the same manager"
+        )
+
+    manager_class = KVCacheSpecRegistry.get_manager_class(manager_spec)
     assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
-    if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
+    if isinstance(manager_spec, AscendMLAAttentionSpec) and manager_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:
             # Compressed-MLA peak in blocks: ceil(max_model_len/compress/block).
-            compress_ratio = kv_cache_spec.compress_ratio
-            block_size = kv_cache_spec.block_size
+            compress_ratio = manager_spec.compress_ratio
+            block_size = manager_spec.block_size
             max_compressed_tokens = max_model_len // compress_ratio
             kwargs["max_admission_blocks_per_request"] = cdiv(max_compressed_tokens, block_size) + 1
-    elif isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
+    elif isinstance(manager_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
         # Replicate the upstream PR #40946 cap setting for recycling specs.
         # We override the vLLM factory above, so the upstream block that does
         # this lives in dead code (never reached); without re-applying it here
@@ -318,9 +407,9 @@ def get_manager_for_kv_cache_spec(
         # at cc>=2 on DSv4 (see vLLM issue #40863).
         token_budget = max_in_flight_tokens
         if token_budget is not None and max_model_len is not None:
-            kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
+            kwargs["max_admission_blocks_per_request"] = manager_spec.max_admission_blocks_per_request(
                 max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
             )
-    manager = manager_class(kv_cache_spec, **kwargs)
+    manager = manager_class(manager_spec, **kwargs)
     return manager
