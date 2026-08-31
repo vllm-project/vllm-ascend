@@ -48,15 +48,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    KVCacheConfig,
-    KVCacheSpec,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
@@ -605,9 +598,6 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
-        self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
-            self.available_kv_cache_memory_bytes,
-        )
 
         extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
@@ -638,92 +628,6 @@ class NPUWorker(WorkerBase):
         )
 
         return int(self.available_kv_cache_memory_bytes)
-
-    def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
-        """Scale the KV cache budget for vllm main's multi-group layout.
-
-        vLLM #51718 derives num_blocks from the largest KV cache group's
-        bytes-per-block, but some Ascend runners keep per-layer contiguous
-        buffers for every group. Per-layer sizing then totals
-        num_blocks * (sum of ALL groups' pages), which exceeds available
-        memory whenever more than one group is non-trivial. Scale the
-        advertised budget by bytes_per_block / sum(pages) so the engine
-        derives a num_blocks (and block pool) small enough for the per-layer
-        buffers to fit.
-        """
-        if vllm_version_is("0.27.1"):
-            return available_memory
-        kv_cache_spec = self.get_kv_cache_spec()
-        if not isinstance(kv_cache_spec, dict):
-            return available_memory
-        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
-        if not kv_cache_groups:
-            return available_memory
-        # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
-        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
-        # all groups in one physical budget and must not take the generic
-        # per-layer multi-group scale below.
-        for group in kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            specs = (
-                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
-            )
-            if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
-                return available_memory
-
-        # vLLM #51718 overlays KV cache groups in one standardized backing
-        # allocation. For the default layer/block-compact layout, Ascend can
-        # preserve that contract for hybrid attention/Mamba models while still
-        # exposing contiguous per-layer views to its existing backends. Do not
-        # shrink the planner budget when the runner can consume that layout.
-        per_layer_specs = []
-        for group in kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                per_layer_specs.extend(group_spec.kv_cache_specs.values())
-            else:
-                per_layer_specs.append(group_spec)
-        has_attention = any(isinstance(spec, AttentionSpec) for spec in per_layer_specs)
-        has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
-        model_runner = getattr(self, "model_runner", None)
-        layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
-        if (
-            has_attention
-            and has_mamba
-            and layout.is_layer_compact
-            and layout.is_block_compact
-            and self.vllm_config.kv_transfer_config is None
-            and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
-            and not getattr(model_runner, "use_sparse", False)
-            and not getattr(model_runner, "use_compress", False)
-        ):
-            return available_memory
-
-        bytes_per_block = 0
-        sum_pages = 0
-        for group in kv_cache_groups:
-            group_pages = 0
-            for layer_name in group.layer_names:
-                group_spec = group.kv_cache_spec
-                if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                    layer_spec = group_spec.kv_cache_specs[layer_name]
-                else:
-                    layer_spec = group_spec
-                group_pages += layer_spec.page_size_bytes
-                sum_pages += layer_spec.page_size_bytes
-            bytes_per_block = max(bytes_per_block, group_pages)
-        if bytes_per_block > 0 and sum_pages > bytes_per_block:
-            scale = bytes_per_block / sum_pages
-            logger.info(
-                "Ascend per-layer KV layout scales the multi-group budget by %.4f "
-                "(%d bytes/block over %d total page bytes) so per-layer "
-                "buffers fit within device memory.",
-                scale,
-                bytes_per_block,
-                sum_pages,
-            )
-            return int(available_memory * scale)
-        return available_memory
 
     def log_memory_stats(self) -> None:
         """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
