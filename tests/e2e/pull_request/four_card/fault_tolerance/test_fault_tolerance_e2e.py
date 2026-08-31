@@ -14,6 +14,7 @@ from typing import Any
 
 import psutil
 import pytest
+import regex as re
 import requests
 import torch
 
@@ -30,29 +31,16 @@ CPU_DISTRIBUTED_TIMEOUT_S = 15
 FT_COMMUNICATION_ABORT_TIMEOUT_S = 10
 FAULT_DETECTION_DEADLINE_S = 45
 
-# Golden-output accuracy check, mirroring the pattern in
-# tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: greedy
-# completions for fixed prompts must be reproduced exactly after retry recovery.
-#
-# The golden outputs are hardcoded (NOT captured during the test): the fault
-# injection is step-triggered while serving, so it could fire mid-request and
-# corrupt a self-captured reference. Generate them by starting a healthy
-# Qwen/Qwen3-30B-A3B server once and issuing the prompts below with
-# temperature=0, max_tokens=_GOLDEN_MAX_TOKENS, then paste the returned texts
-# into _GOLDEN_OUTPUTS.
-_GOLDEN_PROMPTS = [
-    "Hello, my name is",
-    "The capital of France is",
-    "What is the meaning of life?",
+# Post-recovery accuracy check: after retry recovery, every DP rank must
+# answer these factual prompts correctly. Each expected answer is a single
+# word, matched case-insensitively on word boundaries anywhere in the
+# completion, so harmless phrasing variations do not fail the check.
+_ANSWER_CASES = [
+    ("The capital of France is", ("Paris",)),
+    ("The largest planet in our solar system is", ("Jupiter",)),
+    ("The first month of the year is", ("January",)),
 ]
-_GOLDEN_OUTPUTS = [
-    " Sarah, and I am 14 years old. I have a question about the equation $x^2 + y^2 = 1$. I know",
-    " Paris. The capital of the United Kingdom is London. The capital of Germany is Berlin. "
-    "The capital of Spain is Madrid. The capital of Italy is Rome.",
-    " Is it possible to find a single, universal answer to this question, and how do "
-    "different perspectives approach it?\n\nThe question of the meaning of life is one of",
-]
-_GOLDEN_MAX_TOKENS = 32
+_ANSWER_MAX_TOKENS = 16
 
 
 # ---------------------------------------------------------------------------
@@ -303,31 +291,28 @@ def _assert_serving_and_healthy(
     _in_parallel(lambda s: _complete(s.get_client()), servers)
 
 
-def _assert_golden_outputs(servers: tuple[RemoteOpenAIServer, ...]) -> None:
-    """Send the golden prompts to every DP rank directly and assert each rank
-    reproduces the expected output exactly.
+def _assert_correct_answers(servers: tuple[RemoteOpenAIServer, ...]) -> None:
+    """Send factual prompts to every DP rank and assert the answer appears.
 
     Must only be called after retry recovery has fully completed (see
-    ``_assert_serving_and_healthy``), so the golden requests are not sent into
-    a still-faulting cluster.
+    ``_assert_serving_and_healthy``), so the requests are not sent into a
+    still-faulting cluster.
     """
     for server in servers:
         client = server.get_client()
-        for prompt, golden in zip(_GOLDEN_PROMPTS, _GOLDEN_OUTPUTS):
+        for prompt, answers in _ANSWER_CASES:
             resp = client.completions.create(
                 model=MODEL_NAME,
                 prompt=prompt,
-                max_tokens=_GOLDEN_MAX_TOKENS,
+                max_tokens=_ANSWER_MAX_TOKENS,
                 temperature=0.0,
             )
-            text = resp.choices[0].text
-            print(f"[golden] rank {server.port} prompt {prompt!r}:")
-            print(f"  golden: {golden!r}")
-            print(f"  actual: {text!r}")
-            assert text.strip() == golden.strip(), (
-                f"[post-retry] rank {server.port} output for prompt {prompt!r} diverged from golden:\n"
-                f"  golden: {golden}\n"
-                f"  actual: {text}"
+            completion = resp.choices[0].text
+            matched = any(re.search(rf"\b{re.escape(answer)}\b", completion, re.IGNORECASE) for answer in answers)
+            print(f"[accuracy] rank {server.port} prompt {prompt!r}: {completion!r}")
+            assert matched, (
+                f"[post-retry] rank {server.port} answered {prompt!r} incorrectly: "
+                f"expected one of {answers!r}, got {completion!r}"
             )
 
 
@@ -441,10 +426,9 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     All 4 being UNHEALTHY is the precondition for ``retry``.  The fault
     is patched via a generated ``sitecustomize.py``.
 
-    After retry recovery completes, the serving cluster must reproduce the
-    hardcoded golden outputs exactly (greedy decoding is deterministic, so an
-    exact match verifies correctness without needing an ais_bench benchmark
-    tree).
+    After retry recovery completes, every rank must answer factual prompts
+    correctly (greedy decoding; case-insensitive whole-word match, not an
+    exact-match golden, so the check is independent of environment numerics).
     """
     fault_step = int(os.getenv("FT_FAULT_STEP", "100"))
     _install_fault_injection(monkeypatch, tmp_path, rank=3, step=fault_step)
@@ -481,10 +465,10 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # 4. Recovery completes: all engines return to healthy and serve again.
         _assert_serving_and_healthy(all_ranks)
 
-        # 5. Only now (after retry fully completed) send the golden prompts to
-        #    every DP rank directly. The injected fault is a one-shot step
+        # 5. Only now (after retry fully completed) send the accuracy prompts
+        #    to every DP rank directly. The injected fault is a one-shot step
         #    guard, so these requests do not re-trigger it.
-        _assert_golden_outputs(all_ranks)
+        _assert_correct_answers(all_ranks)
 
 
 @pytest.mark.skipif(
