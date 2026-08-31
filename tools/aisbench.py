@@ -91,7 +91,6 @@ class AisbenchRunner:
         self.min_p = aisbench_config.get("min_p")
         self.presence_penalty = aisbench_config.get("presence_penalty")
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
-        self.reasoning_effort = aisbench_config.get("reasoning_effort")
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
         work_dir = aisbench_config.get("work_dir")
@@ -157,12 +156,6 @@ class AisbenchRunner:
             content = re.sub(
                 r"ignore_eos.*",
                 f"ignore_eos=False,\n            repetition_penalty={self.repetition_penalty},",
-                content,
-            )
-        if self.reasoning_effort:
-            content = re.sub(
-                r"ignore_eos.*",
-                f'ignore_eos=False,\n            reasoning_effort="{self.reasoning_effort}",',
                 content,
             )
         if self.thinking:
