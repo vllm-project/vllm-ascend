@@ -651,7 +651,12 @@ class ChunkedTokenDatabase:
         for i, (addr_list, size_list) in enumerate(zip(addr, size)):
             n = len(addr_list)
             if split_bounds is not None:
-                bounds = [(min(s, n), min(e, n)) for s, e in split_bounds]
+                # Clamp to n; if the caller passes more entries than the
+                # registered offsets cover, the surplus still belongs to the
+                # last partition instead of being silently dropped.
+                last_start = split_bounds[-1][0]
+                bounds = [(min(s, n), min(e, n)) for s, e in split_bounds[:-1]]
+                bounds.append((min(last_start, n), n))
             else:
                 caches_per_layer = n // group_num_layers if group_num_layers else 2
                 caches_per_layer = max(caches_per_layer, 1)

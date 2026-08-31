@@ -150,6 +150,25 @@ class TestHeterogeneousLayerSplit:
 
         assert len(new_addr[0]) + len(new_addr[1]) == 30
 
+    def test_long_addr_list_surplus_goes_to_last_partition(self):
+        # addr_list longer than the registered offsets table: surplus entries
+        # must be kept (folded into the last partition), not dropped.
+        _, num_layers, offsets = _dsv4_layout()
+        total = 126
+        surplus = 10
+        db, _ = _make_db([21, 22], num_layers, offsets, total)
+
+        _, new_addr, _ = db.decode_adaptor_prefill_pp(
+            [BASE_KEY],
+            [[10000 + 10 * i for i in range(total + surplus)]],
+            [[16] * (total + surplus)],
+            kv_cache_group_id=0,
+        )
+
+        assert len(new_addr[0]) + len(new_addr[1]) == total + surplus
+        assert len(new_addr[0]) == 59  # precise layer-21 boundary kept
+        assert len(new_addr[1]) == total + surplus - 59  # surplus in last partition
+
 
 class TestLegacyUniformSplit:
     """Homogeneous layout without offsets table keeps old behavior."""
