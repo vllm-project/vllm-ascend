@@ -152,7 +152,6 @@ benchmarks:
     max_out_len: 65536
     batch_size: 32
     work_dir: /root/.cache/benchmark_results/${BENCHMARK_JOB_NAME}/aisbench
-    reasoning_effort: max
     temperature: 1.0
     top_p: 1.0
     thinking: true
