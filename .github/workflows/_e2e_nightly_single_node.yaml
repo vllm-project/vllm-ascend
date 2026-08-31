@@ -52,6 +52,7 @@ on:
         type: string
       should_run:
         required: false
+        default: true
         type: boolean
       vllm_ascend_branch:
         required: false
