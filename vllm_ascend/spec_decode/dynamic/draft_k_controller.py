@@ -86,4 +86,3 @@ class AdaptiveDraftKController:
         target = max(self.min_k, min(self.max_k, observed + self.slack))
         if target < self._current_k:
             self._current_k = target
-
