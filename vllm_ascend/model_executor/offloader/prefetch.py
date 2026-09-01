@@ -104,6 +104,39 @@ def _format_static_buffers_for_nz(
             param_offloader._param.data = nz_buffer
 
 
+def _raise_if_nz_prefetch_incompatible_with_graph(param_infos: list[ParamInfo]) -> None:
+    """Fail fast when NZ static buffers would meet ACL graph capture.
+
+    The prefetch H2D copy from ND pinned CPU storage into a FRACTAL_NZ
+    static buffer requires an ND->NZ format conversion. The current
+    CANN/torch_npu stack does not support running aclop operators during
+    NPU graph capture, and on these versions the conversion is only
+    available as an aclop implementation, so this combination is
+    unsupported for now. Without this check the combo aborts EngineCore
+    at capture time with an opaque 107025 capture_end error.
+    """
+    nz_param_count = sum(1 for info in param_infos if info.use_nz_buffer)
+    if nz_param_count == 0:
+        return
+
+    # Lazy import: vllm.config pulls in platform plugins, which import us.
+    from vllm.config import get_current_vllm_config
+
+    if get_current_vllm_config().model_config.enforce_eager:
+        return
+
+    raise RuntimeError(
+        f"CPU weight offload is incompatible with ACL graph capture for "
+        f"{nz_param_count} offloaded parameter(s) stored in FRACTAL_NZ: the "
+        f"prefetch copy (ND pinned CPU storage -> NZ static buffer) requires "
+        f"an ND->NZ conversion, which is aclop-only on the current "
+        f"CANN/torch_npu versions; running aclop operators during NPU graph "
+        f"capture is not supported yet by these libraries. Use "
+        f"enforce_eager=True, or disable NZ weights "
+        f"(additional_config={{'weight_nz_mode': 0}})."
+    )
+
+
 class AscendPrefetchOffloader(PrefetchOffloader):
     """Ascend prefetch offloader that reuses vLLM behavior with NZ buffers."""
 
@@ -150,6 +183,7 @@ class AscendPrefetchOffloader(PrefetchOffloader):
             # No modules to offload
             return
 
+        _raise_if_nz_prefetch_incompatible_with_graph(param_infos)
         _format_static_buffers_for_nz(self.module_offloaders, self.buffer_pool, param_infos)
 
         for i in range(min(self.prefetch_step, len(self.module_offloaders))):

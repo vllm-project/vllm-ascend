@@ -104,9 +104,10 @@ def _compare_offload_logprobs(
                 reason=(
                     "NZ static buffers make the prefetch H2D copy a "
                     "cross-format (ND->NZ) conversion that is aclop-only on "
-                    "CANN 9.0.0 and rejected during ACL graph capture, so "
-                    "EngineCore dies at capture time. Remove this marker "
-                    "once the no-transdata prefetch path lands."
+                    "CANN 9.0.0 and rejected during ACL graph capture; "
+                    "AscendPrefetchOffloader fails fast with a clear error "
+                    "for this combo. Remove this marker and the offloader "
+                    "guard once the no-transdata prefetch path lands."
                 ),
             ),
         ),
