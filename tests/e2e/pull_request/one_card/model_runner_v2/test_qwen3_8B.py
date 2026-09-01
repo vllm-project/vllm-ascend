@@ -84,6 +84,6 @@ def test_qwen3_eagle3_dsd() -> None:
             "compilation_config": {"cudagraph_mode": "NONE"},
         },
         acceptance_length_rtol=ACCEPTANCE_LENGTH_RTOL,
-        is_moe = False,
+        is_moe=False,
     )
     assert acceptance_length > 1.0, f"acceptance_length {acceptance_length:.4f} must be greater than 1.0"
