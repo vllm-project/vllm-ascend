@@ -16,7 +16,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_fused_mc2=0),
     )
 
 
@@ -83,7 +83,6 @@ def _patch_select_moe_comm_method_deps(
     capacity: int = 128,
     ep_world_size: int = 8,
     enable_fused_mc2: int = 0,
-    enable_prefill_mc2: int = 0,
     is_moe: bool = True,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
@@ -93,7 +92,7 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_prefill_mc2=enable_prefill_mc2),
+        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2),
     )
 
 
@@ -146,19 +145,36 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     assert "input_ids" not in forward_context.additional_kwargs
 
 
-def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
-    vllm_config = _make_vllm_config(tensor_parallel_size=6)
+def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=0,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
+    vllm_config = _make_vllm_config(tensor_parallel_size=6, kv_role="kv_consumer")
 
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=200, uniform_decode_query_len=3)
 
     assert afc.get_mc2_tokens_capacity() == 600
 
 
-def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns():
+def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=0,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
     vllm_config = _make_vllm_config(
         tensor_parallel_size=8,
         cudagraph_capture_sizes=[1, 2],
         max_cudagraph_capture_size=257,
+        kv_role="kv_consumer",
     )
 
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
@@ -166,11 +182,11 @@ def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns():
     assert afc.get_mc2_tokens_capacity() == 264
 
 
-def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeypatch):
+def test_set_mc2_tokens_capacity_non_decode_only_uses_max_num_batched_tokens(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_fused_mc2=0),
     )
     vllm_config = _make_vllm_config(tensor_parallel_size=8, max_num_batched_tokens=513)
 
@@ -188,7 +204,6 @@ def test_is_decode_only_node_true_for_decode_bench_connector(monkeypatch):
         afc,
         "get_ascend_config",
         lambda: SimpleNamespace(
-            enable_prefill_mc2=False,
             enable_fused_mc2=0,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
         ),
@@ -203,7 +218,6 @@ def test_is_decode_only_node_true_for_kv_consumer(monkeypatch):
         afc,
         "get_ascend_config",
         lambda: SimpleNamespace(
-            enable_prefill_mc2=False,
             enable_fused_mc2=0,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
         ),
@@ -220,7 +234,6 @@ def test_is_decode_only_node_false_without_recompute_scheduler(monkeypatch):
         afc,
         "get_ascend_config",
         lambda: SimpleNamespace(
-            enable_prefill_mc2=False,
             enable_fused_mc2=0,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=False),
         ),
@@ -329,7 +342,6 @@ def test_select_moe_comm_method_a3_without_fused_mc2(
         monkeypatch,
         device_type=afc.AscendDeviceType.A3,
         capacity=128,
-        enable_prefill_mc2=1,
     )
     vllm_config = _make_vllm_config()
 
@@ -354,7 +366,6 @@ def test_select_moe_comm_method_a3_quant_w4a16(
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
-        enable_prefill_mc2=1,
     )
 
     vllm_config = _make_vllm_config(quant_type="w4a16")
@@ -380,7 +391,6 @@ def test_select_moe_comm_method_a3_quant_w4a8(
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
-        enable_prefill_mc2=1,
     )
 
     vllm_config = _make_vllm_config(quant_type="w4a8")
@@ -406,7 +416,6 @@ def test_select_moe_comm_method_a3_quant_w8a8(
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
-        enable_prefill_mc2=1,
     )
 
     vllm_config = _make_vllm_config(quant_type="w8a8")
@@ -432,7 +441,6 @@ def test_select_moe_comm_method_a3_mc2_invalid_hidden_size(
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
-        enable_prefill_mc2=0,
     )
 
     vllm_config = _make_vllm_config(quant_type="w4a8", hidden_size=512)
