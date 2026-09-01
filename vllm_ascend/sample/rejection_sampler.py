@@ -972,13 +972,11 @@ def sample_recovered_tokens(
     )
     q.exponential_()
 
-    num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
-    has_draft_mask = num_draft_tensor > 0
-
     for i, generator in sampling_metadata.generators.items():
-        temp_q = torch.empty_like(q[i])
-        temp_q.exponential_(generator=generator)
-        q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
+        # Do not generate random numbers for requests with no draft tokens.
+        # This can be important for reproducibility.
+        if num_draft_tokens[i] > 0:
+            q[i].exponential_(generator=generator)
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     if HAS_TRITON:
