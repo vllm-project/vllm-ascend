@@ -557,6 +557,41 @@ void transpose_kv_cache_by_block(
 
 }
 
+void npu_scatter_pa_kv_cache(
+    const at::Tensor& key,
+    const at::Tensor& value,
+    at::Tensor& key_cache,
+    at::Tensor& value_cache,
+    const at::Tensor& slot_mapping,
+    c10::string_view cache_mode,
+    c10::string_view scatter_mode)
+{
+    std::string cache_mode_str(cache_mode);
+    std::string scatter_mode_str(scatter_mode);
+    char* cache_mode_ptr = const_cast<char*>(cache_mode_str.c_str());
+    char* scatter_mode_ptr = const_cast<char*>(scatter_mode_str.c_str());
+
+    c10::optional<at::Tensor> optional_tensor = c10::nullopt;
+    c10::optional<at::IntArrayRef> optional_int_array = c10::nullopt;
+
+    // aclnnScatterPaKvCache uses a different argument order from the public
+    // torch_npu wrapper. Call it directly so scatter_mode (for example,
+    // NHSD) is forwarded instead of being fixed to None by op-plugin.
+    EXEC_NPU_CMD(aclnnScatterPaKvCache,
+                 key,
+                 key_cache,
+                 slot_mapping,
+                 value,
+                 value_cache,
+                 optional_tensor,
+                 optional_tensor,
+                 optional_tensor,
+                 cache_mode_ptr,
+                 scatter_mode_ptr,
+                 optional_int_array,
+                 optional_int_array);
+}
+
 void device_print(c10::string_view msg)
 {
     auto payload = std::make_unique<DevicePrintPayload>();
@@ -2277,6 +2312,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "transpose_kv_cache_by_block(Tensor[] kCache, Tensor[] vCache, Tensor blockIDs, int blockSize, int headNum, int headDim, int splitNum, int layerNum) -> ()"
     );
     ops.impl("transpose_kv_cache_by_block", torch::kPrivateUse1, &vllm_ascend::transpose_kv_cache_by_block);
+
+    ops.def(
+        "npu_scatter_pa_kv_cache(Tensor key, Tensor value, "
+        "Tensor(a!) key_cache, Tensor(b!) value_cache, Tensor slot_mapping, *, "
+        "str cache_mode='Norm', str scatter_mode='None') -> ()"
+    );
+    ops.impl("npu_scatter_pa_kv_cache", torch::kPrivateUse1,
+             &vllm_ascend::npu_scatter_pa_kv_cache);
 
     ops.def(
         "npu_copy_and_expand_eagle_inputs(Tensor target_token_ids, Tensor target_positions, "

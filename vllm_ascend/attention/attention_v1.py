@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 import torch_npu
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
@@ -119,6 +120,8 @@ class AscendAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "",
     ) -> tuple[int, ...]:
+        if envs.VLLM_KV_CACHE_LAYOUT in ("LBHNC", "HND"):
+            return (2, num_blocks, num_kv_heads, block_size, head_size)
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -520,6 +523,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         self.attn_type = attn_type
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.kv_cache_layout = envs.VLLM_KV_CACHE_LAYOUT
+        self.use_bnsd_kv_cache = self.kv_cache_layout in ("LBHNC", "HND")
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -1285,6 +1290,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params.handles[num_tokens].append(handle)
             return output
 
+    def _get_kv_cache_view(self, key: torch.Tensor, value: torch.Tensor):
+        if not self.use_bnsd_kv_cache:
+            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+            key = self.key_cache.view(  # type: ignore
+                num_block, block_size, -1
+            )
+            value = self.value_cache.view(  # type: ignore
+                num_block, block_size, -1
+            )
+        else:
+            num_block, num_head, block_size, _ = self.key_cache.shape
+        return key, value, block_size
+
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
         # PrefillNoCache doesn't need key_cache, but other modes do
         # Only initialize/require cache for modes that actually use it
@@ -1314,33 +1332,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             batch_size = attn_metadata.seq_lens.shape[0]
             block_table = attn_metadata.block_tables[:batch_size, :]
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         # chunked prefill.
         else:
-            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
-            key = self.key_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
-            value = self.value_cache.view(  # type: ignore
-                num_block, block_size, -1
-            )
+            key, value, block_size = self._get_kv_cache_view(self.key_cache, self.value_cache)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         return key, value, block_size, block_table, actual_seq_lengths_kv
@@ -1618,13 +1618,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
-        DeviceOperator.reshape_and_cache(
-            key=key,
-            value=value,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            slot_mapping=slot_mapping,
-        )
+        if self.use_bnsd_kv_cache:
+            torch.ops._C_ascend.npu_scatter_pa_kv_cache(
+                key.contiguous(),
+                value.contiguous(),
+                self.key_cache,
+                self.value_cache,
+                slot_mapping.contiguous(),
+                cache_mode="Norm",
+                scatter_mode="NHSD",
+            )
+        else:
+            DeviceOperator.reshape_and_cache(
+                key=key,
+                value=value,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                slot_mapping=slot_mapping,
+            )
 
     def reshape_and_cache(
         self,
@@ -1646,15 +1657,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 return query, key, value, output
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
-            DeviceOperator.reshape_and_cache(
-                key=key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key,
-                value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                # quick fix to make sure slots is int32 for cross attention case.
-                # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
-                slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
-            )
+            key_to_cache = key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key
+            value_to_cache = value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value
+            # quick fix to make sure slots is int32 for cross attention case.
+            # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
+            slots_to_cache = slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32)
+            if self.use_bnsd_kv_cache:
+                torch.ops._C_ascend.npu_scatter_pa_kv_cache(
+                    key_to_cache.contiguous(),
+                    value_to_cache.contiguous(),
+                    self.key_cache,
+                    self.value_cache,
+                    slots_to_cache.contiguous(),
+                    cache_mode="Norm",
+                    scatter_mode="NHSD",
+                )
+            else:
+                DeviceOperator.reshape_and_cache(
+                    key=key_to_cache,
+                    value=value_to_cache,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    slot_mapping=slots_to_cache,
+                )
             notify_kv_cache_written()
         return query, key, value, output
 
