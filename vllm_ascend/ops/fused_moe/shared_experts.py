@@ -285,6 +285,7 @@ class AscendSharedExperts:
         hidden_states: torch.Tensor,
         fused_moe_evts: FusedMoEEvents,
         input_is_gathered: bool = False,
+        defer_output_wait: bool = False,
     ):
         mode = self.parallel_mode()
         local_dp_metadata = None
@@ -427,9 +428,11 @@ class AscendSharedExperts:
                 maybe_wait_event(fused_moe_evts.after_routed_finalize)
                 shared_out = self._pad_and_reduce_scatter(shared_out)
 
-        # SP-only defers this join until after the routed latent up projection,
-        # allowing that matmul to overlap the shared-output reduce-scatter.
-        if self.multistream_overlap and mode is not SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+        # Defer only when a routed output transform can overlap this collective;
+        # otherwise preserve the original join point for non-latent models.
+        if self.multistream_overlap and (
+            mode is not SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY or not defer_output_wait
+        ):
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:

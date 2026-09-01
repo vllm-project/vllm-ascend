@@ -126,10 +126,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self.quant_type,
                 self._quant_method,
             )
-            if (
-                self.ascend_shared_experts.multistream_overlap
-                and self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
-            ):
+            if self._can_overlap_sp_shared_with(self.routed_input_transform):
                 self._forward_entry = torch.ops.vllm.ascend_moe_forward_shared_sp
 
         setup_moe_comm_method(self.moe_config)
@@ -159,6 +156,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Ascend uses its own forward_impl path, not the FlashInfer Cutlass
         chunked path. Always return False to stay on forward_impl."""
         return False
+
+    def _can_overlap_sp_shared_with(self, routed_transform: object | None) -> bool:
+        """Limit SP shared-expert overlap changes to routed transforms."""
+        shared_experts = getattr(self, "ascend_shared_experts", None)
+        return (
+            routed_transform is not None
+            and shared_experts is not None
+            and shared_experts.multistream_overlap
+            and shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
+        )
 
     @property
     def _fused_output_is_reduced(self) -> bool:
@@ -266,7 +273,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Start the SP shared-input gather before the latent down projection."""
         gathered_input = hidden_states
         all_gather_done = None
-        if self.ascend_shared_experts is not None:
+        if self._can_overlap_sp_shared_with(self.routed_input_transform):
             gathered_input, all_gather_done = self.ascend_shared_experts.start_input_all_gather(hidden_states)
         routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
         if all_gather_done is not None:
@@ -277,7 +284,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def apply_routed_output_transform(self, fused_output: torch.Tensor) -> torch.Tensor:
         """Run the latent up projection before joining the SP shared output."""
         fused_output = super().apply_routed_output_transform(fused_output)
-        if self.ascend_shared_experts is not None:
+        if self._can_overlap_sp_shared_with(self.routed_output_transform):
             self.ascend_shared_experts.wait_for_output()
         return fused_output
 
@@ -290,7 +297,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             shared_output is not None
             and fused_output.dtype == torch.float16
             and self.routed_scaling_factor != 1.0
-            and self.ascend_shared_experts is not None
+            and self._can_overlap_sp_shared_with(self.routed_output_transform)
         ):
             # The base FP16 overflow path scales shared_output in place. Join
             # a deferred SP reduce-scatter before that write; BF16 keeps the
@@ -318,10 +325,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 # The runner input transform provides a padded gathered tensor
                 # in SP multistream mode. Trim only the shared-MLP view; retain
                 # the padded tensor for local internal-router reconstruction.
-                shared_input_is_gathered = (
-                    self.ascend_shared_experts.multistream_overlap
-                    and self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
-                )
+                shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
+                defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
                 shared_expert_input = (
                     shared_hidden_states[: _EXTRA_CTX.num_tokens] if shared_input_is_gathered else shared_hidden_states
                 )
@@ -359,6 +364,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     shared_expert_input,
                     fused_moe_events,
                     input_is_gathered=shared_input_is_gathered,
+                    defer_output_wait=defer_shared_output_wait,
                 )
                 return shared_out, routed_out
 
@@ -388,10 +394,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         input_ids=input_ids,
                     )
                 # See the v0.27.1 branch above for the input-shape contract.
-                shared_input_is_gathered = (
-                    self.ascend_shared_experts.multistream_overlap
-                    and self.ascend_shared_experts.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
-                )
+                shared_input_is_gathered = self._can_overlap_sp_shared_with(self.routed_input_transform)
+                defer_shared_output_wait = self._can_overlap_sp_shared_with(self.routed_output_transform)
                 shared_expert_input = (
                     shared_hidden_states[: _EXTRA_CTX.num_tokens] if shared_input_is_gathered else shared_hidden_states
                 )
@@ -433,5 +437,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     shared_expert_input,
                     fused_moe_events,
                     input_is_gathered=shared_input_is_gathered,
+                    defer_output_wait=defer_shared_output_wait,
                 )
                 return shared_out, routed_out
