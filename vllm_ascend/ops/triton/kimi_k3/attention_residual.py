@@ -1,7 +1,15 @@
-"""Fused Kimi K3 attention-residual mixture.
+"""Fused Kimi K3 attention-residual mixture (v2: UB-optimized).
 
 This is the supplied Kimi K3 implementation, adapted only to use the
 vLLM-Ascend Triton device-property helper.
+
+v2 changes vs v1 (UB overflow fix, requires 3211776 bits vs 1572864 available):
+- ADD path reloads the rounded sum from sum_out (stored by WRITE_SUM at the
+  top of the same iteration) instead of holding va/vb f32 rows live through
+  both stream loops.  Bit-identical to v1: same rounded bf16 value.
+- out_norm_w is loaded at its use site instead of staying live across the
+  stream loops.
+- wrapper pins num_warps=32 so the JIT path matches the inductor AOT default.
 """
 
 import torch
@@ -44,8 +52,6 @@ def _apply_attn_res_kernel(
     norm_w = tl.load(norm_w_ptr + cols).to(tl.float32)
     proj_w = tl.load(proj_w_ptr + cols).to(tl.float32)
     w = norm_w * proj_w
-    if OUT_NORM:
-        out_norm_w = tl.load(out_norm_w_ptr + cols).to(tl.float32)
 
     br_stride = B * H
 
@@ -63,11 +69,15 @@ def _apply_attn_res_kernel(
                 v = tl.load(block_residual_ptr + tok * br_stride + s * H + cols).to(tl.float32)
             else:
                 if ADD:
-                    va = tl.load(prefix_sum_ptr + tok * H + cols).to(tl.float32)
-                    vb = tl.load(addend_ptr + tok * H + cols).to(tl.float32)
-                    # Round once to the storage dtype so the fused sum matches
-                    # the standalone aclnnAdd bf16 result bit-for-bit.
-                    v = (va + vb).to(sum_out_ptr.dtype.element_ty).to(tl.float32)
+                    if WRITE_SUM:
+                        # The rounded sum is already in sum_out from this
+                        # iteration's store; reload it instead of keeping
+                        # va/vb rows live through the stream loops.
+                        v = tl.load(sum_out_ptr + tok * H + cols).to(tl.float32)
+                    else:
+                        va = tl.load(prefix_sum_ptr + tok * H + cols).to(tl.float32)
+                        vb = tl.load(addend_ptr + tok * H + cols).to(tl.float32)
+                        v = (va + vb).to(sum_out_ptr.dtype.element_ty).to(tl.float32)
                 else:
                     v = tl.load(prefix_sum_ptr + tok * H + cols).to(tl.float32)
             ms = tl.sum(v * v) / H
@@ -85,15 +95,21 @@ def _apply_attn_res_kernel(
                 v = tl.load(block_residual_ptr + tok * br_stride + s * H + cols).to(tl.float32)
             else:
                 if ADD:
-                    va = tl.load(prefix_sum_ptr + tok * H + cols).to(tl.float32)
-                    vb = tl.load(addend_ptr + tok * H + cols).to(tl.float32)
-                    v = (va + vb).to(sum_out_ptr.dtype.element_ty).to(tl.float32)
+                    if WRITE_SUM:
+                        v = tl.load(sum_out_ptr + tok * H + cols).to(tl.float32)
+                    else:
+                        va = tl.load(prefix_sum_ptr + tok * H + cols).to(tl.float32)
+                        vb = tl.load(addend_ptr + tok * H + cols).to(tl.float32)
+                        v = (va + vb).to(sum_out_ptr.dtype.element_ty).to(tl.float32)
                 else:
                     v = tl.load(prefix_sum_ptr + tok * H + cols).to(tl.float32)
             w_s = tl.sum(tl.where(s_idx == s, weights, 0.0))
             out += w_s * v
 
         if OUT_NORM:
+            # Loaded at the use site so it does not stay live across the
+            # stream loops (UB pressure).
+            out_norm_w = tl.load(out_norm_w_ptr + cols).to(tl.float32)
             out_ms = tl.sum(out * out) / H
             out_rstd = tl.rsqrt(out_ms + OUT_EPS)
             out = out * out_rstd * out_norm_w
@@ -152,5 +168,6 @@ def apply_attn_res(
         WRITE_SUM=sum_out is not None,
         OUT_NORM=out_norm is not None,
         multibuffer=True,
+        num_warps=32,
     )
     return out
