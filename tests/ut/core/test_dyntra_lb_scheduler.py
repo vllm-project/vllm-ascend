@@ -1200,10 +1200,7 @@ def test_diagnostics_enabled_is_false_for_missing_or_invalid_config():
     assert diagnostics_enabled(SimpleNamespace(additional_config={})) is False
     assert diagnostics_enabled(SimpleNamespace(additional_config={"scheduler_config": "bad"})) is False
     assert (
-        diagnostics_enabled(
-            SimpleNamespace(additional_config={"scheduler_config": {"dyntra_lb_config": []}})
-        )
-        is False
+        diagnostics_enabled(SimpleNamespace(additional_config={"scheduler_config": {"dyntra_lb_config": []}})) is False
     )
     assert (
         diagnostics_enabled(
