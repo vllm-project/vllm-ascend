@@ -1690,9 +1690,11 @@ class NPUModelRunner(GPUModelRunner):
         default_stream = torch.npu.current_stream()
         with torch.npu.stream(self.valid_sampled_token_count_copy_stream):
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
-            counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None
+            # Proposers may return different integer dtypes. Normalize on device
+            # because a dtype-converting D2H copy_ forces a host sync.
+            counts = valid_sampled_tokens_count.to(dtype=counts_cpu.dtype)
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
             self.valid_sampled_token_count_event.record()
 

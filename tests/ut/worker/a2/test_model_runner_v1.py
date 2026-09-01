@@ -1424,6 +1424,45 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         self.assertFalse(hasattr(runner, "_execution_start_time"))
 
 
+class TestCopyValidSampledTokenCount(unittest.TestCase):
+    class _HostBufferSpy:
+        def __init__(self, host_tensor):
+            self.dtype = host_tensor.dtype
+            self.received_tensor = None
+
+        def __getitem__(self, _key):
+            return self
+
+        def copy_(self, device_tensor, non_blocking=False):
+            self.received_tensor = device_tensor
+
+    @patch("torch.npu.stream", new=MagicMock())
+    @patch("torch.npu.current_stream", new=MagicMock())
+    def test_normalizes_device_counts_to_host_buffer_dtype(self):
+        dtype_cases = (
+            (torch.int32, torch.int64),
+            (torch.int64, torch.int32),
+        )
+        for device_dtype, host_dtype in dtype_cases:
+            with self.subTest(device_dtype=device_dtype, host_dtype=host_dtype):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                runner.valid_sampled_token_count_event = MagicMock()
+                runner.valid_sampled_token_count_copy_stream = MagicMock()
+                host_buffer = self._HostBufferSpy(torch.empty(2, dtype=host_dtype))
+                runner.valid_sampled_token_count_cpu = host_buffer
+                runner.use_async_spec_decode = False
+                runner.input_batch = SimpleNamespace(prev_sampled_token_ids=None)
+
+                device_counts = torch.tensor([1, 3], dtype=device_dtype)
+                next_token_ids = torch.tensor([11, 22], dtype=torch.int64)
+                runner._copy_valid_sampled_token_count(next_token_ids, device_counts)
+
+                received_counts = host_buffer.received_tensor
+                assert received_counts is not None
+                # D2H copy must receive the target dtype to avoid an implicit cast.
+                self.assertEqual(received_counts.dtype, host_buffer.dtype)
+
+
 class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
     """Regression tests for async spec-decode seq_lens correction.
 
