@@ -1,0 +1,56 @@
+# Basic log quality rules for pre-commit (vllm_ascend/ production code).
+# Phase 1: LQ001-LQ004 hard fail, LQ005 handled by tools/check_logger.sh
+# Stock scan / rewrite candidates (not a PR gate):
+#   .agents/skills/log-quality-governance/  (default mode: phase1-stock)
+# Full ideal standard is opt-in via that skill's full-standard mode only.
+
+[scope]
+path_prefixes = ["vllm_ascend/"]
+
+[hard_fail.privacy]
+# Match log message text, keyword names, or variable names passed to logger calls.
+identifiers = [
+  "messages",
+  "password",
+  "passwd",
+  "api_key",
+  "access_token",
+  "secret",
+  "secret_key",
+  "private_key",
+  "certificate",
+  "token",
+]
+
+# LQ002: safe token-related names that must not trigger bare-token privacy checks.
+allowlist_names = [
+  "num_tokens",
+  "input_tokens",
+  "output_tokens",
+  "total_tokens",
+  "max_tokens",
+  "prompt_hash",
+  "token_ids",
+  "token_id",
+]
+
+[hard_fail.vague]
+# ERROR/WARNING/exception/critical with a single literal message matching these fail.
+exact_messages = [
+  "failed",
+  "error",
+  "timeout",
+  "link failed",
+  "connect failed",
+]
+min_message_length = 15
+
+[soft_warn]
+info_failure_keywords = [
+  "fail",
+  "failed",
+  "error",
+  "exception",
+  "timeout",
+  "unable",
+]
