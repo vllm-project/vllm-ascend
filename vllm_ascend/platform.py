@@ -903,8 +903,8 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
 
     _validate_kv_load_failure_policy(vllm_config)
 
-    # short_request_first_config: requires fcfs policy and excludes
-    # batch_job_sched_config / profiling_chunk_config / kv_consumer
+    # short_request_first_config requires FCFS, excludes batch-job and
+    # kv-consumer paths, and only supports profiling-chunk synchronously.
     if scheduler_extension_config.short_request_first_config.enabled:
         kv_transfer_config = vllm_config.kv_transfer_config
         kv_role = getattr(kv_transfer_config, "kv_role", None)
@@ -918,10 +918,10 @@ def _check_ascend_config(vllm_config: VllmConfig, ascend_config) -> None:
                 "ShortRequestFirst scheduling cannot be enabled with batch_job_sched_config. "
                 "Please disable one of them."
             )
-        if scheduler_extension_config.profiling_chunk_config.enabled:
+        if scheduler_extension_config.profiling_chunk_config.enabled and vllm_config.scheduler_config.async_scheduling:
             raise ValueError(
-                "ShortRequestFirst scheduling cannot be enabled with profiling_chunk_config. "
-                "Please disable one of them."
+                "ShortRequestFirst with profiling_chunk_config requires synchronous scheduling. "
+                "Please disable async scheduling."
             )
         if kv_role == "kv_consumer":
             raise ValueError(
