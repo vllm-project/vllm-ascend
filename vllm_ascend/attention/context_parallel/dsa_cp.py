@@ -928,7 +928,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 local_metadata_task,
                 DeviceMetadataTask(
                     DeviceMetadataStage.COMPRESSOR,
-                    lambda: dsa_v1.build_compressor_metadata_out(req_metadata, self.compressor_ratio, outputs),
+                    lambda: dsa_v1.build_compressor_metadata_out(
+                        req_metadata, self.compressor_ratio, outputs, self.vllm_config
+                    ),
                     group_id,
                 ),
                 *self._device_metadata_tasks[1:],
@@ -1830,7 +1832,6 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             )
 
         notify_kv_cache_written(layer_name)
-        record_attention_compute_start()
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         extra_attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()
@@ -1858,6 +1859,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
         if self.compress_ratio <= 1:
             wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(swa_metadata.req_metadata.sas_metadata))
+            record_attention_compute_start()
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1873,6 +1875,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(req_metadata.sas_metadata))
+            record_attention_compute_start()
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -1892,6 +1895,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
             wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(compressor_req_metadata.sas_metadata))
+            record_attention_compute_start()
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,

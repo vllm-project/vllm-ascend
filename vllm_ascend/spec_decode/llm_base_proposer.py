@@ -2422,7 +2422,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
-        if device_metadata_tasks:
+        if device_metadata_executor is not None and device_metadata_tasks:
             device_metadata_executor.submit(device_metadata_tasks)
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
