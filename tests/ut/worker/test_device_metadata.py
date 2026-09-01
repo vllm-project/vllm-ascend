@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.forward_context import BatchDescriptor
 
 import vllm_ascend.worker.device_metadata as device_metadata
 from vllm_ascend.worker.device_metadata import (
@@ -47,6 +48,14 @@ class _FakeEvent:
         self.calls.append((stream.name, "record", self.name))
 
 
+class _FakeExternalEvent(_FakeEvent):
+    def wait(self, stream: _FakeStream) -> None:
+        self.calls.append((stream.name, "external_wait", self.name))
+
+    def reset(self, stream: _FakeStream) -> None:
+        self.calls.append((stream.name, "reset", self.name))
+
+
 @pytest.fixture
 def executor_env(monkeypatch):
     calls: list[tuple] = []
@@ -54,6 +63,7 @@ def executor_env(monkeypatch):
     model_stream = _FakeStream("model", calls)
     metadata_stream = _FakeStream("metadata", calls)
     event_names = iter(("inputs", "reusable", "compressor", "indexer", "attention", "indexer-2"))
+    external_event_names = iter(f"external-{index}" for index in range(6))
 
     def make_stream():
         allocations.append("stream")
@@ -64,8 +74,14 @@ def executor_env(monkeypatch):
         allocations.append(name)
         return _FakeEvent(name, calls)
 
+    def make_external_event():
+        name = next(external_event_names)
+        allocations.append(name)
+        return _FakeExternalEvent(name, calls)
+
     monkeypatch.setattr(torch.npu, "Stream", make_stream)
     monkeypatch.setattr(torch.npu, "Event", make_event)
+    monkeypatch.setattr(torch.npu, "ExternalEvent", make_external_event, raising=False)
     monkeypatch.setattr(torch.npu, "current_stream", lambda: model_stream)
     monkeypatch.setattr(torch.npu, "stream", lambda stream: nullcontext())
 
@@ -153,20 +169,54 @@ def test_wait_records_each_stage_once_per_submission(executor_env):
     assert calls.count(("model", "wait", "indexer")) == 1
 
 
-def test_wait_all_waits_current_frontiers_once(executor_env):
-    executor, calls, _ = executor_env
-    tasks = (*_tasks(calls), _tasks(calls)[1])
-    executor.submit(tasks)
+def test_external_events_bridge_full_graph_and_are_reused(executor_env):
+    executor, calls, allocations = executor_env
+    descriptor = BatchDescriptor(num_tokens=4, num_reqs=4)
 
-    executor.wait_all()
+    executor.submit(_tasks(calls), descriptor)
+    assert executor.uses_external_events
+    assert allocations[-3:] == ["external-0", "external-1", "external-2"]
     executor.wait(DeviceMetadataStage.INDEXER, 2)
-
-    waits = [call for call in calls if call[:2] == ("model", "wait")]
-    assert waits == [
-        ("model", "wait", "compressor"),
-        ("model", "wait", "indexer"),
-        ("model", "wait", "attention"),
+    executor.wait(DeviceMetadataStage.INDEXER, 2)
+    assert calls[-2:] == [
+        ("model", "external_wait", "external-1"),
+        ("model", "reset", "external-1"),
     ]
+    assert calls.count(("model", "external_wait", "external-1")) == 1
+    assert calls.count(("model", "reset", "external-1")) == 1
+    assert calls.index(("metadata", "record", "external-1")) < calls.index(("model", "external_wait", "external-1"))
+    executor.release()
+    assert not executor.uses_external_events
+
+    executor.submit(_tasks(calls), descriptor)
+    assert allocations.count("external-0") == 1
+
+
+def test_external_events_are_isolated_by_batch_descriptor(executor_env):
+    executor, calls, allocations = executor_env
+
+    executor.submit(_tasks(calls), BatchDescriptor(num_tokens=4, num_reqs=4))
+    executor.release()
+    executor.submit(_tasks(calls), BatchDescriptor(num_tokens=8, num_reqs=4))
+
+    assert allocations[-3:] == ["external-3", "external-4", "external-5"]
+
+
+def test_external_event_frontiers_must_remain_stable(executor_env):
+    executor, calls, allocations = executor_env
+    descriptor = BatchDescriptor(num_tokens=4, num_reqs=4)
+
+    executor.submit(_tasks(calls), descriptor)
+    executor.release()
+    calls.clear()
+    allocations_before = list(allocations)
+
+    with pytest.raises(RuntimeError, match="frontiers changed"):
+        executor.submit(_tasks(calls)[:-1], descriptor)
+
+    assert calls == []
+    assert allocations == allocations_before
+    assert not executor.submission_in_flight
 
 
 def test_submission_in_flight_tracks_release(executor_env):
