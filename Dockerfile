@@ -86,8 +86,10 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip cache purge
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
-RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
-RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
+# Make jemalloc and libascend_hal available to non-interactive entrypoints.
+# glibc expands $PLATFORM to the runtime architecture at process startup.
+ENV LD_PRELOAD="/usr/lib/\$PLATFORM-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:${LD_PRELOAD}}" \
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}${LD_LIBRARY_PATH:+:}/usr/local/lib"
 
 # ===== Conditional installation based on BUILD_TYPE =====
 # All ARG definitions are in the same stage for better maintainability
