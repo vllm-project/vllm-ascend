@@ -131,39 +131,28 @@ class AscendKVBlockZeroer(KVBlockZeroer):
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
-                kv_cache = static_forward_context[layer_name].kv_cache
-                cache_tensors: tuple[tuple[torch.Tensor, int], ...]
-                if isinstance(kv_cache, torch.Tensor):
-                    cache_tensors = ((kv_cache, packed_block_dim),)
-                elif isinstance(kv_cache, (tuple, list)):
-                    if not all(isinstance(kv, torch.Tensor) for kv in kv_cache):
-                        raise TypeError(f"KV cache for {layer_name} must contain only tensors")
-                    # Legacy Ascend backends expose K and V as separate tensors
-                    # with the block dimension outermost. Keep supporting that
-                    # representation alongside packed backend tensors.
-                    cache_tensors = tuple((kv, 0) for kv in kv_cache)
-                else:
+                kv = static_forward_context[layer_name].kv_cache
+                if not isinstance(kv, torch.Tensor):
                     continue
 
-                for kv, block_dim in cache_tensors:
-                    dp = kv.data_ptr()
-                    if dp in seen_ptrs:
-                        continue
-                    seen_ptrs.add(dp)
+                dp = kv.data_ptr()
+                if dp in seen_ptrs:
+                    continue
+                seen_ptrs.add(dp)
 
-                    el = kv.element_size()
-                    cur_bytes = kv.stride(block_dim) * el
-                    assert cur_bytes % 4 == 0
-                    kernel_block_el = cur_bytes // 4
-                    cur_page_el = kernel_block_el * ratio
+                el = kv.element_size()
+                cur_bytes = kv.stride(packed_block_dim) * el
+                assert cur_bytes % 4 == 0
+                kernel_block_el = cur_bytes // 4
+                cur_page_el = kernel_block_el * ratio
 
-                    block_stride_bytes = cur_bytes
-                    outer_dims = [d for d in range(block_dim) if kv.stride(d) * el > block_stride_bytes]
-                    outer_strides = [kv.stride(d) * el for d in outer_dims]
-                    for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
-                        off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                        seg_addrs.append(dp + off_bytes)
-                        seg_page_sizes.append(cur_page_el)
+                block_stride_bytes = cur_bytes
+                outer_dims = [d for d in range(packed_block_dim) if kv.stride(d) * el > block_stride_bytes]
+                outer_strides = [kv.stride(d) * el for d in outer_dims]
+                for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
+                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
+                    seg_addrs.append(dp + off_bytes)
+                    seg_page_sizes.append(cur_page_el)
 
         if not seg_addrs:
             self._meta = None
