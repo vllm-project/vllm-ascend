@@ -182,6 +182,15 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             )
         )
 
+    @staticmethod
+    def get_eplb_weight_views(layer: torch.nn.Module) -> list[torch.Tensor]:
+        return [
+            layer.w13_weight.transpose(1, 2),
+            layer.w2_weight.transpose(1, 2),
+            layer.w13_weight_scale.transpose(1, 2),
+            layer.w2_weight_scale.transpose(1, 2),
+        ]
+
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = torch_npu.npu_format_cast(
             layer.w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
