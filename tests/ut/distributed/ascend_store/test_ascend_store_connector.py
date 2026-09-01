@@ -256,6 +256,54 @@ class TestAscendStoreConnector(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_set_external_slot_release_waiter_worker_gates(self, mock_worker_cls, mock_lookup_cls):
+        """Regression guard for the #14465 / #15291 connector flag.
+
+        The connector must stay a pure forwarder: it no longer derives
+        ``use_gva_layerwise`` (#14465 dropped the copy that this method
+        read, crashing MultiConnector init; #15291 restored it). The gate
+        now lives in KVPoolWorker.set_external_slot_release_waiter, so
+        this test also pins that the connector keeps no flag of its own.
+        """
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        config = self._make_vllm_config(
+            extra_config={"use_layerwise": True, "backend": "mooncake"},
+        )
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        worker = mock_worker_cls.return_value
+
+        # Non-GVA backend: the worker gate rejects, the connector relays False.
+        worker.set_external_slot_release_waiter.return_value = False
+        self.assertFalse(connector.set_external_slot_release_waiter(lambda _l: None))
+        worker.set_external_slot_release_waiter.assert_called_once()
+
+        # GVA backend: the worker gate accepts, the connector relays True and
+        # passes the waiter through unchanged.
+        waiter = MagicMock()
+        worker.set_external_slot_release_waiter.reset_mock()
+        worker.set_external_slot_release_waiter.return_value = True
+        self.assertTrue(connector.set_external_slot_release_waiter(waiter))
+        worker.set_external_slot_release_waiter.assert_called_once_with(waiter)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
+    def test_set_external_slot_release_waiter_scheduler_role(self, mock_scheduler_cls):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        config = self._make_vllm_config()
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.SCHEDULER,
+            kv_cache_config=MagicMock(),
+        )
+        self.assertFalse(connector.set_external_slot_release_waiter(lambda _l: None))
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
     def test_save_kv_layer_not_layerwise(self, mock_worker_cls, mock_lookup_cls):
         config = self._make_vllm_config(extra_config={"use_layerwise": False})
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole

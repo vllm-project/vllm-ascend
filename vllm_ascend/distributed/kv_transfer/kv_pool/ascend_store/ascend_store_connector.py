@@ -88,8 +88,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
-        backend_name = str(extra_config.get("backend", "mooncake")).lower()
-        self.use_gva_layerwise = self.use_layerwise and backend_name == "memcache"
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
@@ -198,10 +196,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker Side Methods
     ############################################################
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
-        if not self.use_gva_layerwise or getattr(self, "connector_worker", None) is None:
+        """Pure forwarder: the GVA-layerwise gate is evaluated by the worker.
+
+        The connector must not derive ``use_gva_layerwise`` — the copy here
+        was dropped by #14465 while this method still read it (crashing
+        MultiConnector init), and restored by #15291. Gating at the
+        data-plane consumer, where the flag is already derived, makes that
+        class of regression structurally impossible and supersedes the
+        connector-side flag entirely.
+        """
+        if getattr(self, "connector_worker", None) is None:
             return False
-        self.connector_worker.set_external_slot_release_waiter(waiter)
-        return True
+        return self.connector_worker.set_external_slot_release_waiter(waiter)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
