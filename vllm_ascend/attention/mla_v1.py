@@ -62,10 +62,7 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 if vllm_version_is("0.27.1"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 else:
-    try:
-        from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-    except ImportError:
-        from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
