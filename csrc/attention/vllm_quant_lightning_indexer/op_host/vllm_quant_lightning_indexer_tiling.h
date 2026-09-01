@@ -103,21 +103,7 @@ TILING_DATA_FIELD_DEF(uint32_t, returnValues)
 TILING_DATA_FIELD_DEF(int64_t, stride)
 TILING_DATA_FIELD_DEF(int64_t, scaleStride)
 END_TILING_DATA_DEF
-<<<<<<< HEAD
-=======
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.h
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-<<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.h
 REGISTER_TILING_DATA_CLASS(VllmQuantLightningIndexer, QLITilingData)
-========
-REGISTER_TILING_DATA_CLASS(QuantLightningIndexerCustom, QLITilingData)
->>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.h
-<<<<<<< HEAD
-=======
-========
-REGISTER_TILING_DATA_CLASS(VllmQuantLightningIndexer, QLITilingData)
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.h
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 
 // -----------算子CompileInfo定义-------------------
 struct QLICompileInfo {};
@@ -263,27 +249,9 @@ public:
 };
 
 // ---------------算子Tiling类---------------
-<<<<<<< HEAD
-=======
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.h
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-<<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.h
 class VllmQuantLightningIndexerTiling {
 public:
     explicit VllmQuantLightningIndexerTiling(gert::TilingContext *context) : context_(context) {};
-========
-class QuantLightningIndexerCustomTiling {
-public:
-    explicit QuantLightningIndexerCustomTiling(gert::TilingContext *context) : context_(context) {};
->>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.h
-<<<<<<< HEAD
-=======
-========
-class VllmQuantLightningIndexerTiling {
-public:
-    explicit VllmQuantLightningIndexerTiling(gert::TilingContext *context) : context_(context) {};
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.h
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
     ge::graphStatus DoTiling(QLITilingInfo *tilingInfo);
 
 private:

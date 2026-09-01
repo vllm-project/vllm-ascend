@@ -1,16 +1,4 @@
 /**
-<<<<<<< HEAD
- * Copyright (c) 2026 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
-
-/*!
-=======
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
@@ -21,46 +9,16 @@
  */
 
 /*!
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_custom_def.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-<<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_def.cpp
  * \file vllm_quant_lightning_indexer_def.cpp
-========
- * \file quant_lightning_indexer_custom_def.cpp
->>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_custom_def.cpp
-<<<<<<< HEAD
-=======
-========
- * \file vllm_quant_lightning_indexer_def.cpp
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_def.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
  * \brief
  */
 
 #include "register/op_def_registry.h"
 
 namespace ops {
-<<<<<<< HEAD
-=======
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_custom_def.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-<<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_def.cpp
 class VllmQuantLightningIndexer : public OpDef {
 public:
     explicit VllmQuantLightningIndexer(const char *name) : OpDef(name)
-========
-class QuantLightningIndexerCustom : public OpDef {
-public:
-    explicit QuantLightningIndexerCustom(const char *name) : OpDef(name)
->>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_custom_def.cpp
-<<<<<<< HEAD
-=======
-========
-class VllmQuantLightningIndexer : public OpDef {
-public:
-    explicit VllmQuantLightningIndexer(const char *name) : OpDef(name)
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_def.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
     {
         this->Input("query")
             .ParamType(REQUIRED)
@@ -191,19 +149,5 @@ public:
         this->AICore().AddConfig("ascend950", aicore_config_950);
     }
 };
-<<<<<<< HEAD
-=======
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_custom_def.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-<<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_def.cpp
 OP_ADD(VllmQuantLightningIndexer);
-========
-OP_ADD(QuantLightningIndexerCustom);
->>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_custom_def.cpp
-<<<<<<< HEAD
-=======
-========
-OP_ADD(VllmQuantLightningIndexer);
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_def.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 }  // namespace ops

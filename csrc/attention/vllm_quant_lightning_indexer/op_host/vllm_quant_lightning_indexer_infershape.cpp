@@ -33,21 +33,7 @@ constexpr uint32_t DIM_NUM_4 = 4;
 static ge::graphStatus InferShapeVllmQuantLightningIndexer(gert::InferShapeContext *context)
 {
     if (context == nullptr) {
-<<<<<<< HEAD
-=======
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_infershape.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-<<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_infershape.cpp
         OP_LOGE("VllmQuantLightningIndexer", "context is nullptr!");
-========
-        OP_LOGE("QuantLightningIndexerCustom", "context is nullptr!");
->>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_infershape.cpp
-<<<<<<< HEAD
-=======
-========
-        OP_LOGE("VllmQuantLightningIndexer", "context is nullptr!");
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_infershape.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
         return ge::GRAPH_FAILED;
     }
     const gert::Shape *queryShape = context->GetInputShape(QUERY_INDEX);
@@ -96,32 +82,13 @@ static ge::graphStatus InferShapeVllmQuantLightningIndexer(gert::InferShapeConte
         sparseValuesShape->SetDim(0, 0);
     }
 
-<<<<<<< HEAD
-=======
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_infershape.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-<<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_infershape.cpp
     OP_LOGD(context->GetNodeName(), "VllmQuantLightningIndexer InferShape end.");
-========
-    OP_LOGD(context->GetNodeName(), "QuantLightningIndexerCustom InferShape end.");
->>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_infershape.cpp
-<<<<<<< HEAD
-=======
-========
-    OP_LOGD(context->GetNodeName(), "VllmQuantLightningIndexer InferShape end.");
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_infershape.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
     return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus InferDataTypeVllmQuantLightningIndexer(gert::InferDataTypeContext *context)
 {
     if (context == nullptr) {
-<<<<<<< HEAD
-=======
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_infershape.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-<<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_infershape.cpp
         OP_LOGE("VllmQuantLightningIndexer", "InferDataTypeContext context is nullptr!");
         return ge::GRAPH_FAILED;
     }
@@ -136,45 +103,4 @@ static ge::graphStatus InferDataTypeVllmQuantLightningIndexer(gert::InferDataTyp
 IMPL_OP_INFERSHAPE(VllmQuantLightningIndexer)
     .InferShape(InferShapeVllmQuantLightningIndexer)
     .InferDataType(InferDataTypeVllmQuantLightningIndexer);
-========
-        OP_LOGE("QuantLightningIndexerCustom", "InferDataTypeContext context is nullptr!");
-<<<<<<< HEAD
-        return ge::GRAPH_FAILED;
-    }
-    OP_LOGD(context->GetNodeName(), "Enter QuantLightningIndexerCustom InferDataType impl.");
-    // default index data type is int32
-    ge::DataType outputType = ge::DT_INT32;
-    context->SetOutputDataType(0, outputType);
-    OP_LOGD(context->GetNodeName(), "QuantLightningIndexerCustom InferDataType end.");
-    return GRAPH_SUCCESS;
-}
-
-=======
-========
-        OP_LOGE("VllmQuantLightningIndexer", "InferDataTypeContext context is nullptr!");
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_infershape.cpp
-        return ge::GRAPH_FAILED;
-    }
-    OP_LOGD(context->GetNodeName(), "Enter VllmQuantLightningIndexer InferDataType impl.");
-    // default index data type is int32
-    ge::DataType outputType = ge::DT_INT32;
-    context->SetOutputDataType(0, outputType);
-    OP_LOGD(context->GetNodeName(), "VllmQuantLightningIndexer InferDataType end.");
-    return GRAPH_SUCCESS;
-}
-
-<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_infershape.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
-IMPL_OP_INFERSHAPE(QuantLightningIndexerCustom)
-    .InferShape(InferShapeQuantLightningIndexer)
-    .InferDataType(InferDataTypeQuantLightningIndexer);
->>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_infershape.cpp
-<<<<<<< HEAD
-=======
-========
-IMPL_OP_INFERSHAPE(VllmQuantLightningIndexer)
-    .InferShape(InferShapeVllmQuantLightningIndexer)
-    .InferDataType(InferDataTypeVllmQuantLightningIndexer);
->>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_infershape.cpp
->>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 }  // namespace ops
