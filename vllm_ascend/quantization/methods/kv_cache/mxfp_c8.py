@@ -73,9 +73,11 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
         vllm_config = get_current_vllm_config()
         target_dtype = vllm_config.model_config.dtype
         exponent = layer.v_cache_scale.data.to(torch.float32) - 127
-        layer.v_cache_scale_float = torch.nn.Parameter(torch.exp2(exponent).to(target_dtype), requires_grad=False)
+        # Only the reciprocal is consumed (npu_quantize needs 1/scale); the
+        # forward scale itself is written into the V-scale cache as raw E8M0
+        # bytes straight from v_cache_scale.
         layer.v_cache_scale_float_reciprocal = torch.nn.Parameter(
-            1 / torch.exp2(exponent).to(target_dtype),
+            (1 / torch.exp2(exponent)).to(target_dtype),
             requires_grad=False,
         )
 

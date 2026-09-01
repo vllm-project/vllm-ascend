@@ -164,7 +164,15 @@ class AscendC8MXFPAttentionBackend(AscendAttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendC8MXFPAttentionBackendImpl"]:
+        if enable_pcp() or enable_dcp():
+            raise NotImplementedError("C8_MXFP attention does not support PCP/DCP yet.")
         return AscendC8MXFPAttentionBackendImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["AscendC8MXFPMetadataBuilder"]:
+        if enable_pcp() or enable_dcp():
+            raise NotImplementedError("C8_MXFP attention does not support PCP/DCP yet.")
+        return AscendC8MXFPMetadataBuilder
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
@@ -513,6 +521,31 @@ class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
         if metadata.num_prefills > 0:
             metadata.attn_state = AscendAttentionState.ChunkedPrefill
         return metadata
+
+
+class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
+    """Metadata builder for the C8-MXFP (QFA) backend.
+
+    The generic Ascend builder advertises ALWAYS cudagraph support and sizes
+    its block-table width with the 128-token generic block. The QFA path is
+    eager-only (graph capture raises in the impl) and uses 512-token kernel
+    blocks, so declare NEVER here: the engine then disables graph capture
+    during startup instead of failing later at capture time.
+    """
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec,
+    ) -> AttentionCGSupport:
+        return AttentionCGSupport.NEVER
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.max_num_blocks_per_req = cdiv(
+            self.model_config.max_model_len, AscendC8MXFPAttentionBackend.get_supported_kernel_block_sizes()[0]
+        )
 
 
 class AscendAttentionBackendImpl(AttentionImpl):
@@ -2295,9 +2328,14 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     Speculative decoding is also out of scope for v1.
 
     NOTE: kwarg names of the two QFA calls follow the QFA requirement doc's
-    torch-level calling example. Re-verify them against the delivered
-    torch_npu wrapper signature before on-device bring-up; they are the only
-    integration point expected to need renaming.
+    torch-level calling example (torch_npu.npu_quant_flash_attn*,
+    dequant_scale_query/key/value, quant_scale_p, pa_block_size,
+    return_softmax_lse=bool). The public ops-transformer extension exposes a
+    DIFFERENT wrapper (cann_ops_transformer.quant_flash_attn: positional
+    q_descale/k_descale/v_descale, no pa_block_size, an extra
+    layout_q_descale); re-verify against the actual torch_npu build before
+    on-device bring-up. Any mismatch is confined to _get_qfa_metadata /
+    _run_qfa (see the bring-up checklist for the full signature diff).
     """
 
     # Installed via ``layer.impl.__class__`` assignment, which does not call
@@ -2348,6 +2386,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         if metadata is None:
             # TND + PA: pass cu_seqlens_q only; the KV side is addressed via
             # block_table + seqused_kv (QFA requirement doc, 3.2.3).
+            # NOTE: kwargs follow the delivered torch_npu wrapper example in
+            # the QFA requirement doc (3.4.2D). The public ops-transformer
+            # extension uses a different signature (positional
+            # q_descale/k_descale/v_descale, no pa_block_size, and an extra
+            # layout_q_descale); re-verify against the actual torch_npu build
+            # before on-device bring-up (see the bring-up checklist).
             metadata = torch_npu.npu_quant_flash_attn_metadata(
                 num_heads_q=self.num_heads,
                 num_heads_kv=self.num_kv_heads,
@@ -2364,7 +2408,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
                 win_left=-1,
                 win_right=-1,
                 layout_q=QFA_LAYOUT_TND,
-                layout_q_descale=QFA_LAYOUT_TND,
                 layout_kv=QFA_LAYOUT_PA_BNBD,
                 layout_out=QFA_LAYOUT_TND,
             )
@@ -2372,15 +2415,14 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         return metadata
 
     def _qfa_int8_mask(self, attn_metadata: AscendMetadata) -> torch.Tensor | None:
-        """QFA's attn_mask is INT8; cache the cast once per step."""
+        """QFA's attn_mask is INT8/UINT8/bool; the shared builder already
+        hands out an int8 2048x2048 causal mask, so only convert when some
+        other mask source slips in."""
         if attn_metadata.attn_mask is None:
             return None
-        cache = self._qfa_step_cache(attn_metadata)
-        attn_mask = cache.get("attn_mask_int8")
-        if attn_mask is None:
-            attn_mask = attn_metadata.attn_mask.to(torch.int8)
-            cache["attn_mask_int8"] = attn_mask
-        return attn_mask
+        if attn_metadata.attn_mask.dtype == torch.int8:
+            return attn_metadata.attn_mask
+        return attn_metadata.attn_mask.to(torch.int8)
 
     def _run_qfa(
         self,
@@ -2648,8 +2690,14 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             filled_caches = set()
             self._v_scale_filled_caches = filled_caches
         if value_scale_cache not in filled_caches:
-            # (hidden_size) -> (num_kv_heads, head_size) -> broadcast -> (num_blocks, num_kv_heads, block_size // 64, head_size, 2)
-            value_scale_cache.copy_(value_scale.view(1, self.num_kv_heads, 1, self.head_size, 1))
+            # (hidden_size) -> (num_kv_heads, head_size) -> broadcast ->
+            # (num_blocks, num_kv_heads, block_size // 64, head_size, 2).
+            # Derive num_kv_heads / v head_dim from the cache layout instead
+            # of self.num_kv_heads / self.head_size so models whose V head
+            # dim differs from the Q/K head dim stay correct.
+            num_kv_heads = value_scale_cache.shape[1]
+            v_head_dim = value_scale_cache.shape[3]
+            value_scale_cache.copy_(value_scale.view(1, num_kv_heads, 1, v_head_dim, 1))
             filled_caches.add(value_scale_cache)
 
     def forward(
@@ -2675,40 +2723,59 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
         if self.vllm_config.speculative_config is not None:
             raise NotImplementedError("C8_MXFP v1 does not support speculative decoding yet.")
+        if self.vllm_config.kv_transfer_config is not None:
+            raise NotImplementedError("C8_MXFP v1 does not support PD disaggregation (kv_transfer) yet.")
         if _EXTRA_CTX.capturing:
             # v1 is eager-only: FULL graph capture needs the operator aclgraph
             # ("path 7") contract, and PIECEWISE capture of the AICPU metadata
             # operator needs its own confirmation. Run with
-            # cudagraph_mode=NONE / enforce_eager until then.
+            # cudagraph_mode=NONE / enforce_eager until then. The metadata
+            # builder already reports AttentionCGSupport.NEVER so a normal
+            # engine start disables graphs before reaching this guard; it
+            # only fires when graphs were forced on.
             raise NotImplementedError(
                 "C8_MXFP QFA does not support ACL graph capture yet; "
                 "run with cudagraph_mode=NONE (or enforce_eager)."
             )
+        if kv_cache is None or len(kv_cache) < 4:
+            raise RuntimeError(
+                "C8_MXFP attention requires a (k, v, k_scale, v_scale) KV cache "
+                f"tuple, got: {type(kv_cache)} with length "
+                f"{len(kv_cache) if kv_cache is not None else 0}."
+            )
+
+        record_attention_compute_start()
 
         query_mxfp8, query_scale = torch_npu.npu_dynamic_mx_quant(
             query[: attn_metadata.num_actual_tokens],
             dst_type=torch.float8_e4m3fn,
         )
-        key_mxfp8, key_scale = torch_npu.npu_dynamic_mx_quant(
-            key[: attn_metadata.num_actual_tokens],
-            dst_type=torch.float8_e4m3fn,
-        )
 
-        original_value_shape = value.shape
-        value = value.view(original_value_shape[0], -1)
-        value_mxfp8 = torch_npu.npu_quantize(
-            value[: attn_metadata.num_actual_tokens],
-            layer.v_cache_scale_float_reciprocal,
-            None,
-            torch.float8_e4m3fn,
-            -1,
-            False,
-        )
-        value_mxfp8 = value_mxfp8.view((attn_metadata.num_actual_tokens, *original_value_shape[1:]))
+        # KV-sharing consumer layers reuse another layer's cache; writing
+        # their (dummy) K/V would corrupt the shared slots, so only the
+        # owner layer quantizes and scatters K/V. key/value may also be None
+        # on pure decode paths.
+        if key is not None and value is not None and self.kv_sharing_target_layer_name is None:
+            key_mxfp8, key_scale = torch_npu.npu_dynamic_mx_quant(
+                key[: attn_metadata.num_actual_tokens],
+                dst_type=torch.float8_e4m3fn,
+            )
 
-        self.reshape_and_cache(
-            key_mxfp8, value_mxfp8, key_scale, layer.v_cache_scale, kv_cache, attn_metadata
-        )
+            original_value_shape = value.shape
+            value = value.view(original_value_shape[0], -1)
+            value_mxfp8 = torch_npu.npu_quantize(
+                value[: attn_metadata.num_actual_tokens],
+                layer.v_cache_scale_float_reciprocal,
+                None,
+                torch.float8_e4m3fn,
+                -1,
+                False,
+            )
+            value_mxfp8 = value_mxfp8.view((attn_metadata.num_actual_tokens, *original_value_shape[1:]))
+
+            self.reshape_and_cache(
+                key_mxfp8, value_mxfp8, key_scale, layer.v_cache_scale, kv_cache, attn_metadata
+            )
 
         qfa_kv_cache = self._transpose_kv_cache(kv_cache)
         return self._forward_mxfp8_attention(

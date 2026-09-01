@@ -46,9 +46,11 @@ from vllm_ascend.utils import (
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
+    A5_C8_MXFP_KV_CACHE_BLOCK_SIZE,
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
+    is_c8_mxfp_kv_quant,
     is_moe_model,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -343,6 +345,9 @@ class NPUPlatform(Platform):
                 assert cache_config.mamba_block_size % cache_config.block_size == 0, (
                     f"mamba_block_size must be a multiple of block_size: {cache_config.block_size}"
                 )
+
+        if model_config is not None and model_config.is_hybrid:
+            _realign_c8_mxfp_hybrid_page_size(vllm_config)
 
     @classmethod
     def _validate_indexer_pp_config(cls, vllm_config: VllmConfig) -> None:
@@ -1191,6 +1196,82 @@ def _setup_compile_backend(
             "for example, check the plog files (default: $HOME/ascend/log/debug) "
             "for more information about runtime errors."
         )
+
+
+def _realign_c8_mxfp_hybrid_page_size(vllm_config: VllmConfig) -> None:
+    """Re-align the hybrid block/mamba page sizes for C8-MXFP models.
+
+    ``patch_mamba_config.HybridAttentionMambaModelConfig`` aligns the mamba
+    page with the *bf16* attention page early, during
+    ``VllmConfig.try_verify_and_update_config``. C8-MXFP layers instead store
+    fp8 K/V with the E8M0 scale bytes packed into the spec head_size, so the
+    real per-token page is much smaller. Left as-is,
+    ``unify_kv_cache_spec_page_size`` would see a mamba page that neither
+    equals nor divides the real attention page and raise NotImplementedError.
+
+    Fix: bump ``block_size`` (in multiples of the 512-token QFA kernel block)
+    until the packed fp8 attention page covers the mamba page, then pad the
+    mamba page to exactly that attention page. This runs after model layers
+    are constructed (the executor calls it via
+    ``update_block_size_for_backend``), so the C8 backend is already installed
+    on the layers. Non-C8 models are untouched.
+    """
+    if not is_c8_mxfp_kv_quant(vllm_config):
+        return
+
+    from vllm.utils.math_utils import cdiv
+    from vllm.utils.torch_utils import get_dtype_size
+
+    from vllm_ascend.device.mxfp_kv_cache import MXFP8_GROUP_SIZE
+
+    cache_config = vllm_config.cache_config
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+
+    get_mamba_state_shape = None
+    try:
+        from vllm.model_executor.models import ModelRegistry
+
+        model_cls, _ = ModelRegistry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
+        get_mamba_state_shape = getattr(model_cls, "get_mamba_state_shape_from_config", None)
+        get_mamba_state_dtype = getattr(model_cls, "get_mamba_state_dtype_from_config", None)
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not resolve model class for C8-MXFP page re-alignment.", exc_info=True)
+        return
+    if get_mamba_state_shape is None or get_mamba_state_dtype is None:
+        return
+
+    mamba_page_size = sum(
+        math.prod(shape) * get_dtype_size(dtype)
+        for shape, dtype in zip(
+            get_mamba_state_shape(vllm_config),
+            get_mamba_state_dtype(vllm_config),
+        )
+    )
+    if mamba_page_size == 0:
+        return
+
+    # Real per-token page: fp8 K/V (1B) plus the packed E8M0 scale bytes
+    # (head_dim // MXFP8_GROUP_SIZE per head, per side). Must stay in sync
+    # with get_kv_cache_spec / _allocate_kv_cache_tensors.
+    num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+    head_dim = model_config.get_head_size()
+    per_token_bytes = num_kv_heads * 2 * (head_dim + head_dim // MXFP8_GROUP_SIZE)
+
+    kernel_block = A5_C8_MXFP_KV_CACHE_BLOCK_SIZE
+    required_blocks = kernel_block * max(1, cdiv(mamba_page_size, kernel_block * per_token_bytes))
+    if cache_config.block_size < required_blocks:
+        cache_config.block_size = required_blocks
+        logger.info(
+            "Setting attention block size to %d tokens so the C8-MXFP fp8 "
+            "KV page covers the mamba page (%d bytes).",
+            required_blocks,
+            mamba_page_size,
+        )
+    cache_config.mamba_page_size_padded = cache_config.block_size * per_token_bytes
 
 
 def _setup_worker_and_scheduler(

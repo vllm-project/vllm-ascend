@@ -810,7 +810,11 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
-        elif isinstance(layer, AttentionLayerBase) and self.enable_mxfp_c8_quant:
+        elif (
+            isinstance(layer, AttentionLayerBase)
+            and self.enable_mxfp_c8_quant
+            and self._is_c8_mxfp_kv_layer(layer)
+        ):
             from ..methods.kv_cache.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
 
             logger.debug("Select AscendKVCacheMethod(C8-MXFP) for %s (layer=%s)", prefix, "AttentionLayerBase[C8-MXFP]")
@@ -910,9 +914,21 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return True
         return False
 
+    @staticmethod
+    def _is_c8_mxfp_kv_layer(layer: torch.nn.Module) -> bool:
+        """C8-MXFP only applies to standard full-attention ``Attention``
+        layers. Other AttentionLayerBase subclasses (GDN/Mamba, encoder
+        attention, ...) must not get the MXFP KV-cache method: they have no
+        ``num_kv_heads``/``head_size_v`` and install the QFA backend on the
+        wrong layer type."""
+        from vllm.model_executor.layers.attention import Attention
+
+        return isinstance(layer, Attention)
+
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
-        if self.enable_mxfp_c8_quant:
-            return torch.float8_e4m3fn, torch.float8_e4m3fn
+        # Note: C8-MXFP models never reach this hook — its only caller in
+        # model_runner_v1 is gated by enable_fa_quant(), and the C8-MXFP
+        # cache dtype comes from the rebuilt fp8 spec in get_kv_cache_spec.
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
             quant_dtype = (

@@ -193,17 +193,21 @@ def scatter_mxfp_k_scale_cache(
         return
 
     # Graph replay keeps the captured token shape and marks padded rows with
-    # slot -1. Advanced indexing would interpret -1 as the last cache entry
-    # and silently corrupt its scale. Remap padding to slot 0 and write back
-    # the existing value so the padded rows perform a no-op.
+    # slot -1. Remapping -1 to a sentinel slot and writing back the cached
+    # value is NOT a no-op when a real token also targets that slot in the
+    # same batch: the duplicate-index write order would let the padding row
+    # clobber the real token's scale. Drop the padded rows instead (v1 is
+    # eager-only, so the dynamic shape is acceptable).
     valid_slots = slots >= 0
-    safe_slots = torch.where(valid_slots, slots, torch.zeros_like(slots))
-    block_ids = safe_slots // block_size
-    block_offsets = safe_slots % block_size
-    cached_scale = key_scale_cache[block_ids, :, block_offsets, :, :]
-    scale_mask = valid_slots.view(-1, 1, 1, 1)
-    scale_updates = torch.where(scale_mask, key_scale, cached_scale)
-    key_scale_cache[block_ids, :, block_offsets, :, :] = scale_updates
+    if not bool(valid_slots.all()):
+        slots = slots[valid_slots]
+        key_scale = key_scale[valid_slots]
+        if slots.numel() == 0:
+            return
+
+    block_ids = slots // block_size
+    block_offsets = slots % block_size
+    key_scale_cache[block_ids, :, block_offsets, :, :] = key_scale
 
 
 def scatter_mxfp_v_cache(

@@ -61,6 +61,27 @@ class TestScatterMXFPKScaleCache(TestBase):
         self.assertTrue(torch.all(self.key_scale_cache[0, :, 1] == 0))
         self.assertTrue(torch.all(self.key_scale_cache[1, :, 0] == 0))
 
+    def test_scatter_padding_does_not_clobber_real_slot(self):
+        """A padded (-1) row must never overwrite a real token written to the
+        same cache slot in the same batch (regression: the old remap-to-slot-0
+        trick wrote the stale value back over the real token's scale)."""
+        key_scale = torch.zeros((2, self.num_kv_heads, 1, 2), dtype=torch.uint8)
+        key_scale[0] = 200  # real token
+        key_scale[1] = 77  # padding row (dropped)
+        slot_mapping = torch.tensor([0, -1], dtype=torch.int64)
+
+        scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
+
+        self.assertTrue(torch.all(self.key_scale_cache[0, :, 0] == 200))
+
+    def test_scatter_all_padding_rows_are_no_op(self):
+        key_scale = torch.full((2, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
+        slot_mapping = torch.tensor([-1, -1], dtype=torch.int64)
+
+        scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
+
+        self.assertTrue(torch.all(self.key_scale_cache == 0))
+
 
 class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
     """Quant-method wiring: v_cache_scale fallback and backend installation."""

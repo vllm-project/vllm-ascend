@@ -1170,7 +1170,12 @@ A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
 
 
 def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
-    return vllm_config.quant_config is not None and vllm_config.quant_config.enable_mxfp_c8_quant
+    # getattr: non-ModelSlim quant configs (fp8/mxfp8/compressed-tensors/...)
+    # do not define this attribute; this helper runs for every engine start
+    # via refresh_block_size.
+    return vllm_config.quant_config is not None and getattr(
+        vllm_config.quant_config, "enable_mxfp_c8_quant", False
+    )
 
 
 def refresh_block_size(vllm_config):
@@ -1189,7 +1194,11 @@ def refresh_block_size(vllm_config):
 
     # Must run before the hybrid early-return below: C8-MXFP hybrid models
     # (e.g. Qwen3.5/3.6 linear-attention + full-attention mixes) still need
-    # the 512-token pages that the QFA PA path requires.
+    # the 512-token pages that the QFA PA path requires. This value is the
+    # final block size for dense models; for hybrid models,
+    # AscendPlatform.update_block_size_for_backend re-aligns it (upwards, in
+    # multiples of 512) with the mamba page so that
+    # unify_kv_cache_spec_page_size sees a single page size.
     if is_c8_mxfp_kv_quant(vllm_config):
         if cache_config.block_size != A5_C8_MXFP_KV_CACHE_BLOCK_SIZE:
             logger.info(
