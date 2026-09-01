@@ -1,0 +1,57 @@
+# Offload accuracy verification
+test_cases:
+  - name: "Qwen3-30B-A3B-W8A8-offload-test-acc"
+    model: "vllm-ascend/Qwen3-30B-A3B-W8A8"
+
+    envs:
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      VLLM_ASCEND_ENABLE_FLASHCOMM: "1"
+      VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--trust-remote-code"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--max-model-len"
+      - "32768"
+      - "--max-num-batched-tokens"
+      - "40960"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--quantization"
+      - "ascend"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[4,8,64,72,76,80,96,100,120,140,144,160,192,216,240,252,288,320,336,360,384,400,408,416,420,432,480,540,576,600]}'
+      - "--offload-backend"
+      - "prefetch"
+      - "--offload-group-size"
+      - "4"
+      - "--offload-num-in-group"
+      - "1"
+      - "--offload-prefetch-step"
+      - "1"
+      - "--offload_params"
+      - '{"gate_up_proj", "down_proj"}'
+      - "--port"
+      - "$SERVER_PORT"
+      - "--block-size"
+      - "128"
+      - "--gpu-memory-utilization"
+      - "0.9"
+
+    benchmarks:
+      acc:
+        case_type: accuracy
+        dataset_path_local: vllm-ascend/gsm8k
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        max_out_len: 28000
+        batch_size: 32
+        baseline: 94.79
+        threshold: 10
+        temperature: 1.0
+        top_p: 0.95
