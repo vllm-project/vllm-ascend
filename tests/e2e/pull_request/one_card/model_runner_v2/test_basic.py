@@ -23,6 +23,7 @@ from vllm import SamplingParams
 from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
@@ -30,6 +31,11 @@ MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
 DFLASH_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DFLASH_MODELS = ["z-lab/Qwen3-8B-DFlash-b16"]
+
+pytestmark = pytest.mark.skipif(
+    vllm_version_is("0.23.0"),
+    reason="v2 model runner patches not supported on v0.23.0",
+)
 
 pytestmark = pytest.mark.skipif(
     vllm_version_is("0.23.0"),
