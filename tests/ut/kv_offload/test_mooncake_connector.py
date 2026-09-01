@@ -64,7 +64,10 @@ patch(
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
 patch("torch.npu.set_device").start()
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
+from vllm_ascend.core.kv_cache_interface import (  # noqa: E402
+    AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
     GroupPull,
@@ -1736,36 +1739,37 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         ):
             self.scheduler = MooncakeConnectorScheduler(self.config, "test_engine", MockKVCacheConfig())
 
-    def test_refreshes_dsv4_block_size_before_ascend_config_init(self):
-        config = MockVllmConfig()
-        config.model_config.hf_config.model_type = "deepseek_v4"
-        config.cache_config.block_size = 2
+    def test_uses_dsv4_swa_block_size(self):
+        for block_size, physical_block_size in ((32, 2), (64, 4), (128, 8)):
+            with self.subTest(block_size=block_size):
+                config = MockVllmConfig()
+                config.cache_config.block_size = physical_block_size
+                swa_spec = AscendSlidingWindowMLASpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=128,
+                    dtype=torch.bfloat16,
+                    sliding_window=4096,
+                    model_version="deepseek_v4",
+                )
+                kv_cache_config = MockKVCacheConfig(kv_cache_groups=[MockKVCacheGroup(kv_cache_spec=swa_spec)])
 
-        def assert_block_size_refreshed(vllm_config):
-            self.assertEqual(vllm_config.cache_config.block_size, 32)
+                with (
+                    patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config"),
+                    patch(
+                        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                        return_value=MagicMock(),
+                    ),
+                ):
+                    scheduler = MooncakeConnectorScheduler(config, "test_engine", kv_cache_config)
+
+                self.assertEqual(scheduler.block_size, block_size)
+                self.assertEqual(config.cache_config.block_size, physical_block_size)
+
+    def test_keeps_non_dsv4_block_size(self):
+        config = MockVllmConfig()
 
         with (
-            patch(
-                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config",
-                side_effect=assert_block_size_refreshed,
-            ),
-            patch(
-                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
-                return_value=MagicMock(),
-            ),
-        ):
-            scheduler = MooncakeConnectorScheduler(config, "test_engine", MockKVCacheConfig())
-
-        self.assertEqual(scheduler.block_size, 32)
-
-    def test_does_not_refresh_non_dsv4_block_size(self):
-        config = MockVllmConfig()
-        config.model_config.hf_config.model_type = "qwen2"
-
-        with (
-            patch(
-                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.refresh_block_size"
-            ) as mock_refresh_block_size,
             patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config"),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
@@ -1774,7 +1778,6 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         ):
             scheduler = MooncakeConnectorScheduler(config, "test_engine", MockKVCacheConfig())
 
-        mock_refresh_block_size.assert_not_called()
         self.assertEqual(scheduler.block_size, 16)
 
     def _make_remote_decode_request(self, prompt_len: int, request_id: str = "req1"):
