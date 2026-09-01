@@ -240,6 +240,45 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
         self.assertIs(fused_experts_input.lora_context, lora_context)
+    
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    def test_apply_fused_mc2_uses_megamoe_lists(self, mock_extra_ctx, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.enable_fused_mc2 = 1
+        mock_extra_ctx.moe_comm_type = MoECommType.FUSED_MC2
+        mock_comm = Mock()
+        mock_extra_ctx.moe_comm_method = mock_comm
+        expected_output = torch.randn(4, self.hidden_size, dtype=torch.float32)
+        mock_comm.fused_experts.return_value = expected_output
+
+        layer = torch.nn.Module()
+        layer.cann_mega_moe_w13_weight_list = [torch.empty(2, 3, dtype=torch.int8)]
+        layer.cann_mega_moe_w2_weight_list = [torch.empty(3, 2, dtype=torch.int8)]
+        layer.cann_mega_moe_fused_w1_scale_list = [torch.empty(3, dtype=torch.int64)]
+        layer.cann_mega_moe_fused_w2_scale_list = [torch.empty(2, dtype=torch.int64)]
+        layer.ascend_expert_map = None
+        layer.global_redundant_expert_num = 0
+        layer.ascend_mc2_mask = None
+        layer.apply_router_weight_on_input = False
+        layer.ascend_pertoken_scale = None
+        layer.activation = "silu"
+        self.quant_method.use_expert_weight_list = False
+        self.quant_method.in_dtype = torch.float32
+
+        x = torch.randn(4, self.hidden_size, dtype=torch.float32)
+        topk_weights = torch.randn(4, 2, dtype=torch.float32)
+        topk_ids = torch.randint(0, self.num_experts, (4, 2), dtype=torch.int64)
+
+        output = self.quant_method.apply(layer, x, topk_weights, topk_ids, None, None)
+
+        fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]
+        self.assertIs(fused_experts_input.weights.w1, layer.cann_mega_moe_w13_weight_list)
+        self.assertIs(fused_experts_input.weights.w2, layer.cann_mega_moe_w2_weight_list)
+        self.assertIs(fused_experts_input.weights.w1_scale, layer.cann_mega_moe_fused_w1_scale_list)
+        self.assertIs(fused_experts_input.weights.w2_scale, layer.cann_mega_moe_fused_w2_scale_list)
+        self.assertIsNone(fused_experts_input.weights.w1_scale_bias)
+        self.assertIsNone(fused_experts_input.weights.w2_scale_bias)
+        self.assertIs(output, expected_output)
 
     @patch("torch_npu.npu_format_cast")
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
@@ -264,3 +303,28 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(weight_views[1], layer.w2_weight_list)
         self.assertIs(weight_views[-2], layer.fused_w1_scale_list)
         self.assertIs(weight_views[-1], layer.fused_w2_scale_list)
+
+    @patch("torch_npu.npu_format_cast")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    def test_process_weights_after_loading_builds_megamoe_lists(self, mock_get_config, mock_format_cast):
+        mock_get_config.return_value.enable_fused_mc2 = 1
+        mock_format_cast.side_effect = lambda weight, _: weight
+        self.quant_method.use_expert_weight_list = False
+        layer = create_moe_layer(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+        )
+
+        self.quant_method.process_weights_after_loading(layer)
+
+        self.assertEqual(len(layer.cann_mega_moe_w13_weight_list), self.num_experts)
+        self.assertEqual(len(layer.cann_mega_moe_w2_weight_list), self.num_experts)
+        self.assertEqual(len(layer.cann_mega_moe_fused_w1_scale_list), self.num_experts)
+        self.assertEqual(len(layer.cann_mega_moe_fused_w2_scale_list), self.num_experts)
+        self.assertEqual(layer.cann_mega_moe_w13_weight_list[0].dtype, torch.int8)
+        self.assertEqual(layer.cann_mega_moe_w2_weight_list[0].dtype, torch.int8)
+        self.assertEqual(layer.cann_mega_moe_fused_w1_scale_list[0].dtype, torch.int64)
+        self.assertEqual(layer.cann_mega_moe_fused_w2_scale_list[0].dtype, torch.int64)
+        self.assertTrue(hasattr(layer, "w13_weight"))
+        self.assertTrue(hasattr(layer, "w2_weight"))

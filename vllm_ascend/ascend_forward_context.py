@@ -11,7 +11,7 @@ from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parall
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
@@ -31,7 +31,6 @@ _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", defa
 
 
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
-_DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
 
 
@@ -196,11 +195,7 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
     # keep the num_tokens_per_tp_rank less than fused_mc2 (mega_moe) tokens per rank limit
     if get_ascend_config().enable_fused_mc2:
-        if is_mega_moe_supported():
-            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
-        else:
-            num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT)
-
+        num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MEGA_MOE_TOKENS_PER_RANK_LIMIT)
     # keep the num_tokens_per_tp_rank less than mc2 tokens per rank limit
     else:
         num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, _MC2_TOKENS_PER_RANK_LIMIT)
@@ -253,12 +248,8 @@ def _select_a3_moe_comm_method(
 ) -> MoECommType:
     if get_ascend_config().enable_fused_mc2 == 1:
         # TODO: drop the EP-size guard when mega_moe supports larger EP size
-        if is_mega_moe_supported():
-            if get_ep_group().world_size <= 64:
-                return MoECommType.FUSED_MC2
-        else:
-            if get_ep_group().world_size <= 32:
-                return MoECommType.FUSED_MC2
+        if get_ep_group().world_size <= 64:
+            return MoECommType.FUSED_MC2
 
     if num_tokens is None or num_tokens <= mc2_tokens_capacity:
         return MoECommType.MC2
@@ -320,10 +311,10 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
     elif lora_config is not None and vllm_config.parallel_config.enable_expert_parallel:
-        # LoRA + EP requires AlltoAll because the MC2/FusedMC2 paths
-        # Ascend MoE LoRA cannot patch FusedMC2 path for dispatch_ffn_combine/mega_moe
-        # is a single fused C++ op. This covers both normal model
-        # forward and _dummy_run during profile_run.
+        # LoRA + EP requires AlltoAll because Ascend MoE LoRA cannot
+        # patch the FusedMC2 path: mega_moe is a single fused C++ op.
+        # This covers both normal model forward and _dummy_run during
+        # profile_run.
         moe_comm_type = MoECommType.ALLTOALL
     elif soc_version == AscendDeviceType.A2:
         moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)

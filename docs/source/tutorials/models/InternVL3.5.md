@@ -167,7 +167,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 Some configurations for optimization are shown below:
 
-- `additional_config.enable_fused_mc2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
+- `additional_config.enable_fused_mc2`: Enable the mega_moe fused operator.
 - The above parameters are validated in a specific test environment for reference only. Please adjust `--max-model-len`, `--max-num-seqs`, `--max-num-batched-tokens`, and `--gpu-memory-utilization` based on your actual input/output length, concurrency, and hardware configuration.
 - For Ascend-specific options passed through `--additional-config`, refer to [Additional Configuration](../../user_guide/configuration/additional_config.md). For Ascend-specific environment variables, refer to [Environment Variables](../../user_guide/configuration/env_vars.md).
 

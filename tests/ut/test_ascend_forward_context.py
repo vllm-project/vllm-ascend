@@ -223,8 +223,10 @@ def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tok
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
+        (128, 64, MoECommType.FUSED_MC2),
         (128, 128, MoECommType.MC2),
         (4097, 8, MoECommType.FUSED_MC2),
+        (4097, 64, MoECommType.FUSED_MC2),
         (4097, 128, MoECommType.ALLTOALL),
     ],
 )
@@ -401,7 +403,6 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
 
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
 
-
 def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     vllm_config = _make_vllm_config()
     seen: dict[str, object] = {"config": None, "inside": False}
@@ -441,3 +442,18 @@ def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
         assert seen["config"] is vllm_config
 
     assert seen["inside"] is False
+
+def test_set_mc2_tokens_capacity_fused_mc2_uses_megamoe_limit(monkeypatch):
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=1,
+        ),
+    )
+    vllm_config = _make_vllm_config(tensor_parallel_size=1)
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=5000, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == 4096

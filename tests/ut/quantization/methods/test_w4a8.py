@@ -7,6 +7,7 @@ from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
 from vllm_ascend.quantization.methods.w4a8.w4a8 import AscendW4A8DynamicFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
+from vllm_ascend.ascend_forward_context import MoECommType
 
 
 class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
@@ -213,6 +214,48 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
     @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz")
     @patch("torch.Tensor.npu", new=lambda self: self, create=True)
+    def test_process_weights_after_loading_builds_megamoe_lists(
+        self, mock_maybe_trans_nz, mock_get_ascend_config
+    ):
+        mock_maybe_trans_nz.side_effect = identity
+        mock_get_ascend_config.return_value.enable_fused_mc2 = 1
+        self.quant_method.use_expert_weight_list = False
+        layer = self.build_layer()
+
+        self.quant_method.process_weights_after_loading(layer)
+
+        list_names = (
+            "cann_mega_moe_w13_weight_list",
+            "cann_mega_moe_w2_weight_list",
+            "cann_mega_moe_w13_weight_scale_list",
+            "cann_mega_moe_w2_weight_scale_list",
+            "cann_mega_moe_w13_scale_bias_list",
+            "cann_mega_moe_w2_scale_bias_list",
+        )
+        for list_name in list_names:
+            self.assertEqual(len(getattr(layer, list_name)), self.experts)
+
+        self.assertEqual(layer.cann_mega_moe_w13_weight_list[0].dtype, torch.int8)
+        self.assertEqual(layer.cann_mega_moe_w2_weight_list[0].dtype, torch.int8)
+        self.assertEqual(layer.cann_mega_moe_w13_weight_scale_list[0].dtype, torch.int64)
+        self.assertEqual(layer.cann_mega_moe_w2_weight_scale_list[0].dtype, torch.int64)
+        self.assertEqual(layer.cann_mega_moe_w13_scale_bias_list[0].dtype, torch.float32)
+        self.assertEqual(layer.cann_mega_moe_w2_scale_bias_list[0].dtype, torch.float32)
+
+        tensor_names = (
+            "w13_weight",
+            "w2_weight",
+            "w13_weight_scale",
+            "w2_weight_scale",
+            "w13_scale_bias",
+            "w2_scale_bias",
+        )
+        for tensor_name in tensor_names:
+            self.assertFalse(hasattr(layer, tensor_name))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
+    @patch("torch.Tensor.npu", new=lambda self: self, create=True)
     def test_process_weights_after_loading_compressed_tensors(self, mock_maybe_trans_nz, mock_get_ascend_config):
         mock_maybe_trans_nz.side_effect = identity
         mock_get_ascend_config.return_value.enable_fused_mc2 = 0
@@ -298,3 +341,45 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         mock_comm.fused_experts.assert_called_once()
         self.assertEqual(mock_comm.fused_experts.call_args.kwargs["fused_experts_input"], mock_fused_input)
         self.assertTrue(torch.equal(output, expected_output))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a8._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w4a8.build_fused_experts_input")
+    def test_apply_fused_mc2_uses_megamoe_lists(self, mock_build_input, mock_ctx, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.enable_fused_mc2 = 1
+        mock_ctx.moe_comm_type = MoECommType.FUSED_MC2
+        mock_comm = Mock()
+        mock_ctx.moe_comm_method = mock_comm
+        expected_output = torch.randn(4, self.output_size, dtype=torch.bfloat16)
+        mock_comm.fused_experts.return_value = expected_output
+        mock_build_input.return_value = Mock()
+
+        layer = torch.nn.Module()
+        layer.cann_mega_moe_w13_weight_list = [torch.empty(2, 3, dtype=torch.int8)]
+        layer.cann_mega_moe_w2_weight_list = [torch.empty(3, 2, dtype=torch.int8)]
+        layer.cann_mega_moe_w13_weight_scale_list = [torch.empty(3, dtype=torch.int64)]
+        layer.cann_mega_moe_w2_weight_scale_list = [torch.empty(2, dtype=torch.int64)]
+        layer.cann_mega_moe_w13_scale_bias_list = [torch.empty(3, dtype=torch.bfloat16)]
+        layer.cann_mega_moe_w2_scale_bias_list = [torch.empty(2, dtype=torch.bfloat16)]
+        layer.ascend_expert_map = None
+        layer.global_redundant_expert_num = 0
+        layer.ascend_mc2_mask = None
+        layer.apply_router_weight_on_input = False
+        layer.ascend_pertoken_scale = None
+        layer.activation = "silu"
+        self.quant_method.use_expert_weight_list = False
+
+        x = torch.randn(4, self.output_size, dtype=torch.bfloat16)
+        topk_weights = torch.randn(4, 2, dtype=torch.float32)
+        topk_ids = torch.randint(0, self.experts, (4, 2), dtype=torch.int64)
+
+        output = self.quant_method.apply(layer, x, topk_weights, topk_ids, None, None)
+
+        build_kwargs = mock_build_input.call_args.kwargs
+        self.assertIs(build_kwargs["w1"], layer.cann_mega_moe_w13_weight_list)
+        self.assertIs(build_kwargs["w2"], layer.cann_mega_moe_w2_weight_list)
+        self.assertIs(build_kwargs["w1_scale"], layer.cann_mega_moe_w13_weight_scale_list)
+        self.assertIs(build_kwargs["w2_scale"], layer.cann_mega_moe_w2_weight_scale_list)
+        self.assertTrue(all(bias.dtype == torch.float32 for bias in build_kwargs["w1_scale_bias"]))
+        self.assertTrue(all(bias.dtype == torch.float32 for bias in build_kwargs["w2_scale_bias"]))
+        self.assertIs(output, expected_output)

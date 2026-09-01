@@ -427,6 +427,28 @@ class TestAscendConfig(TestBase):
             warning_messages,
         )
 
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.ascend_config.AscendConfig._is_megamoe_supported_by_config", return_value=False,)
+    @patch("vllm_ascend.ascend_config.logger.warning_once")
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(
+        self, mock_fix_incompatible_config, mock_warning_once, mock_is_megamoe
+        ):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "enable_fused_mc2": 1,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.enable_fused_mc2, 0)
+        mock_is_megamoe.assert_called_once_with(test_vllm_config)
+        mock_warning_once.assert_any_call(
+            "MegaMoe is not supported for this model config, "
+            "VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+    )
+
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_msmonitor_daemon_uses_additional_config(self, mock_fix_incompatible_config):
@@ -993,7 +1015,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 131072)
 
     @_clean_up
-    @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
     @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_fused_mc2_rolls_back_even_when_config_supported(self, mock_fix, mock_megamoe_supported):

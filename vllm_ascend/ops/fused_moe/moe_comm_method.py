@@ -22,7 +22,7 @@ import torch
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
@@ -259,13 +259,10 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
-        if is_mega_moe_supported():
-            self.mega_moe_symm_buffer = None
-            self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
+
+        self.mega_moe_symm_buffer = None
         if get_ascend_config().enable_fused_mc2 == 1:
-            self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
-        else:
-            self.expert_token_nums = None
+            self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
 
         self.swiglu_limit = 0.0 if moe_config.swiglu_limit is None else moe_config.swiglu_limit
         self.swiglu_alpha = 1.0 if moe_config.swiglu_alpha is None else moe_config.swiglu_alpha
@@ -402,11 +399,6 @@ class FusedMC2CommImpl(MoECommMethod):
             weight1_type=weight_type,
             weight2_type=weight_type,
         )
-        # NOTE: self.expert_token_nums is only used by the
-        # mega_moe path (enable_fused_mc2 == 1) as a
-        # pre-allocated in/out buffer. The MegaMoe op returns a fresh
-        # expert_tokens tensor that is consumed by the caller via the
-        # return value, so there is nothing to keep on the instance.
         return out, expert_tokens
 
     def fused_experts(
@@ -419,33 +411,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
-            if is_mega_moe_supported():
-                out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input)
-            else:
-                assert not (
-                    fused_experts_input.weights.w1_scale_bias is None
-                    or fused_experts_input.weights.w2_scale_bias is None
-                ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
-
-                out = torch.empty_like(fused_experts_input.hidden_states)
-                torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
-                    x=fused_experts_input.hidden_states,
-                    weight1=fused_experts_input.weights.w1,
-                    weight2=fused_experts_input.weights.w2,
-                    expert_idx=fused_experts_input.topk_ids,
-                    scale1=fused_experts_input.weights.w1_scale,
-                    scale2=fused_experts_input.weights.w2_scale,
-                    bias1=fused_experts_input.weights.w1_scale_bias,
-                    bias2=fused_experts_input.weights.w2_scale_bias,
-                    probs=fused_experts_input.topk_weights.to(torch.float32),
-                    group=self.token_dispatcher.moe_all_to_all_group_name,
-                    max_output_size=get_ascend_config().mega_moe_max_tokens,
-                    swiglu_limit=self.swiglu_limit,
-                    x_active_mask=fused_experts_input.routing.mc2_mask,
-                    out=out,
-                    expert_token_nums=self.expert_token_nums,
-                )
-                expert_tokens = self.expert_token_nums
+            out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input)
         else:
             raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
         return FusedExpertsResult(

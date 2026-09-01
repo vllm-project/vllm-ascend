@@ -1240,7 +1240,7 @@ In addition to the single-node and multi-node parameters described above, the fo
 
 **Prefill node-specific configurations:**
 
-- `additional_config.enable_fused_mc2=1`: Enables fused MC2 operators (`dispatch_ffn_combine`/`mega_moe`) to optimize MoE communication. Constraints: `dispatch_ffn_combine` only for w8a8 and EP≤32; `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP and dynamic EPLB.
+- `additional_config.enable_fused_mc2=1`: Enables fused MC2 operators (`mega_moe`) to optimize MoE communication. Constraints: `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP and dynamic EPLB.
 - `--additional-config '{"enable_dsa_cp": true}'`: Enables DSA context parallelism on prefill nodes to accelerate long-context prefill. Required for handling prompts up to 128K tokens.
 
 **Decode node-specific configurations:**

@@ -415,7 +415,7 @@ The parameter classification and descriptions refer to the vLLM official [Engine
 | `--compilation-config.cudagraph_mode` | `FULL_DECODE_ONLY` | ACL graph captures only the decode stage, reducing capture peak memory |
 | `--compilation-config.cudagraph_capture_sizes` | text-only `[16]`; image `[16]`; audio `[4,8,16]` | Graph capture batch sizes; TP16 + sequence parallelism requires multiples of 16, and audio `[4,8]` are automatically removed at startup |
 | `--compilation-config.max_cudagraph_capture_size` | 16 (text-only / audio) | Maximum graph capture batch size, `= max_num_seqs × (1 + num_speculative_tokens) = 4 × 4` |
-| `--additional-config.enable_fused_mc2` | `1` | Enables FusedMC2 (fused `dispatch_ffn_combine` / `mega_moe` operators for MoE) |
+| `--additional-config.enable_fused_mc2` | `1` | Enables FusedMC2 (fused `mega_moe` operators for MoE) |
 
 ### 5.6 Service Verification
 
