@@ -253,7 +253,6 @@ class AscendDflashProposer(AscendEagleProposer):
                 ),
                 dtype=torch.int32,
                 device=self.device,
-                pin_memory=self.runner.pin_memory,
             )
 
         context_positions = self._context_positions_buffer[:num_input_tokens]
