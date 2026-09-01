@@ -23,13 +23,9 @@ class OProjWeightSwitchMixin:
     def _get_o_proj_weight_switch_method(self) -> WeightSwitchMixin:
         quant_method = self.o_proj.quant_method
         linear_method = getattr(quant_method, "quant_method", quant_method)
-        if (
-            not isinstance(linear_method, WeightSwitchMixin)
-            or not linear_method.supports_weight_switch
-        ):
+        if not isinstance(linear_method, WeightSwitchMixin) or not linear_method.supports_weight_switch:
             raise RuntimeError(
-                "Weight switching requires a weight-switch capable linear "
-                f"method, got {type(linear_method).__name__}."
+                f"Weight switching requires a weight-switch capable linear method, got {type(linear_method).__name__}."
             )
         return linear_method
 

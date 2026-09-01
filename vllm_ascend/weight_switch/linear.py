@@ -371,8 +371,7 @@ class WeightSwitchMixin:
 
         if wrapped_params == 0:
             raise RuntimeError(
-                "Loader-time weight sharding found no input-sharded parameters on "
-                f"{getattr(layer, 'prefix', layer)}."
+                f"Loader-time weight sharding found no input-sharded parameters on {getattr(layer, 'prefix', layer)}."
             )
 
         load_state = WeightSwitchLoadState(

@@ -42,10 +42,10 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 from vllm_ascend.utils import (
     maybe_trans_nz,
 )
+from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
 def unquantized_gemm(
