@@ -152,6 +152,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logger = logging.getLogger(__name__)
 
+
+class UpstreamHTTPError(Exception):
+    def __init__(self, response: httpx.Response):
+        self.response = response
+        super().__init__(f"upstream returned HTTP {response.status_code}")
+
 try:
     import uvloop  # type: ignore[import-not-found]
 
@@ -900,6 +906,8 @@ async def send_request_to_service(
     for attempt in range(1, max_retries + 1):
         try:
             response = await client.post(endpoint, json=req_data, headers=headers)
+            if 400 <= response.status_code < 500:
+                raise UpstreamHTTPError(response)
             response.raise_for_status()
             return response
         except (httpx.RequestError, httpx.HTTPStatusError) as exc:
@@ -1167,6 +1175,16 @@ async def handle_completions_impl(api: str, request: Request):
 
         media_type = "text/event-stream; charset=utf-8" if stream_flag else "application/json"
         return StreamingResponse(generate_stream(), media_type=media_type)
+    except UpstreamHTTPError as exc:
+        if not request_released and "instance_info" in locals():
+            await _finish_instance(runtime, instance_info, release_prefill_kv=True)
+            request_released = True
+        upstream = exc.response
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type"),
+        )
     except Exception:
         import traceback
 
