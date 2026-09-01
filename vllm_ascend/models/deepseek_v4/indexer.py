@@ -45,11 +45,7 @@ from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, 
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-    npu_stream_switch,
-)
+from vllm_ascend.utils import npu_stream_switch
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -94,7 +90,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             self.dtype = torch.float8_e4m3fn
             if not is_a5_bf16_kv_enabled(vllm_config):
                 vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
@@ -112,7 +108,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
-            scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
+            scale_dtype=torch.float
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else torch.float16,
         )
 
     def forward(self): ...
@@ -292,8 +290,11 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.int8
+        k_dtype = (
+            torch.float8_e4m3fn
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else torch.int8
+        )
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
