@@ -126,7 +126,6 @@ def _mock_npu_env():
     _mock = _MockTPGroup()
     mock_cfg = MagicMock()
     mock_cfg.enable_context_parallel = False
-    mock_cfg.enable_flashcomm1 = False
     mock_cfg.weight_nz_mode = 1
     mock_cfg.enable_mlapo = True
     mock_cfg.enable_fused_mc2 = 0

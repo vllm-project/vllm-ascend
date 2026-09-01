@@ -8,22 +8,22 @@ This document will show the main verification steps of the model, including supp
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64G × 16) node** or **2 Atlas 800 A2 (64G × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -109,7 +109,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -121,7 +121,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ### 5.1 Single-node Deployment
 
-- Quantized model `DeepSeek-V3.2-w8a8` can be deployed on 1 Atlas 800 A3 (64G × 16).
+- Quantized model `DeepSeek-V3.2-w8a8` can be deployed on 1 Atlas 800 A3 (64GB × 16).
 
 Run the following script to execute online inference.
 
@@ -131,11 +131,9 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
 --host 0.0.0.0 \
 --port 8000 \
 --data-parallel-size 2 \
@@ -157,7 +155,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
 
 ### 5.2 Multi-node Deployment
 
-- `DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64G × 8).
+- `DeepSeek-V3.2-w8a8`: require at least 2 Atlas 800 A2 (64GB × 8).
 
 Run the following scripts on two nodes respectively.
 
@@ -184,11 +182,9 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=10
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --data-parallel-size 2 \
@@ -231,11 +227,9 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=10
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -282,14 +276,12 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=100
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --data-parallel-size 2 \
@@ -333,14 +325,12 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=100
     export VLLM_USE_V1=1
     export HCCL_BUFFSIZE=200
-    export VLLM_ASCEND_ENABLE_MLAPO=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
     export HCCL_CONNECT_TIMEOUT=120
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 \
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8 --additional-config '{"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8077 \
     --headless \
@@ -400,7 +390,7 @@ Parameter descriptions:
 
     ```shell
     nic_name="enp48s3u1u1" # change to your own nic name
-    local_ip=141.61.39.105 # change to your own ip
+    local_ip=192.xx.xx.105 # change to your own ip
 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -424,7 +414,6 @@ Parameter descriptions:
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
@@ -473,7 +462,7 @@ Parameter descriptions:
 
     ```shell
     nic_name="enp48s3u1u1" # change to your own nic name
-    local_ip=141.61.39.113 # change to your own ip
+    local_ip=192.xx.xx.113 # change to your own ip
 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -497,7 +486,6 @@ Parameter descriptions:
 
     export ASCEND_RT_VISIBLE_DEVICES=$1
 
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/Eco-Tech/DeepSeek-V3.2-w8a8-mtp-QuaRot \
         --host 0.0.0.0 \
@@ -545,7 +533,7 @@ Parameter descriptions:
 
     ```shell
     nic_name="enp48s3u1u1" # change to your own nic name
-    local_ip=141.61.39.117 # change to your own ip
+    local_ip=192.xx.xx.117 # change to your own ip
 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -619,7 +607,7 @@ Parameter descriptions:
 
     ```shell
     nic_name="enp48s3u1u1" # change to your own nic name
-    local_ip=141.61.39.181 # change to your own ip
+    local_ip=192.xx.xx.181 # change to your own ip
 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
@@ -696,13 +684,13 @@ Parameter descriptions:
 
     ```shell
     # Prefill node 0, change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address 141.61.39.105 --dp-rpc-port 12890 --vllm-start-port 9100
+    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 0 --dp-address 192.xx.xx.105 --dp-rpc-port 12890 --vllm-start-port 9100
     # Prefill node 1, change ip to your own
-    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address 141.61.39.105 --dp-rpc-port 12890 --vllm-start-port 9100
+    python launch_online_dp.py --dp-size 2 --tp-size 16 --dp-size-local 1 --dp-rank-start 1 --dp-address 192.xx.xx.105 --dp-rpc-port 12890 --vllm-start-port 9100
     # Decode node 0, change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address 192.xx.xx.117 --dp-rpc-port 12777 --vllm-start-port 9100
     # Decode node 1, change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 141.61.39.117 --dp-rpc-port 12777 --vllm-start-port 9100
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address 192.xx.xx.117 --dp-rpc-port 12777 --vllm-start-port 9100
     ```
 
 3. Run the `proxy.sh` script on the prefill master node
@@ -715,25 +703,25 @@ Parameter descriptions:
 
     python load_balance_proxy_server_example.py \
         --port 8000 \
-        --host 141.61.39.105 \
+        --host 192.xx.xx.105 \
         --prefiller-hosts \
-        141.61.39.105 \
-        141.61.39.113 \
+        192.xx.xx.105 \
+        192.xx.xx.113 \
         --prefiller-ports \
         9100 \
         9100 \
         --decoder-hosts \
-        141.61.39.117 \
-        141.61.39.117 \
-        141.61.39.117 \
-        141.61.39.117 \
-        141.61.39.181 \
-        141.61.39.181 \
-        141.61.39.181 \
-        141.61.39.181 \
+        192.xx.xx.117 \
+        192.xx.xx.117 \
+        192.xx.xx.117 \
+        192.xx.xx.117 \
+        192.xx.xx.181 \
+        192.xx.xx.181 \
+        192.xx.xx.181 \
+        192.xx.xx.181 \
         --decoder-ports \
         9100 9101 9102 9103 \
-        9100 9101 9102 9103 \
+        9100 9101 9102 9103
     ```
 
     ```shell
@@ -741,7 +729,7 @@ Parameter descriptions:
     bash proxy.sh
     ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -840,4 +828,4 @@ Refer to [DeepSeek-V3.2 Usage Guide](https://docs.vllm.ai/projects/recipes/en/la
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

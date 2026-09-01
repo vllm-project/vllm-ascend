@@ -63,8 +63,6 @@ env_prefill: &env_prefill
   <<: *env_common
   HCCL_CONNECT_TIMEOUT: "6000"
   HCCL_BUFFSIZE: "1024"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 env_decode: &env_decode
@@ -121,7 +119,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_dsa_cp": true}'
+      - '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 
@@ -173,7 +171,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 1,"method": "mtp"}'
       - --additional-config
-      - '{"enable_cpu_binding": true, "enable_dsa_cp": true}'
+      - '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 8}, "decode": {"dp_size": 16, "tp_size": 2}}}'
 

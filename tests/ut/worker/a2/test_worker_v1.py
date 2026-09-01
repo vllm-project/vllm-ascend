@@ -8,6 +8,8 @@ from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -366,6 +368,8 @@ class TestNPUWorker(TestBase):
         )
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+        worker.model_runner = MagicMock()
+        worker.model_runner.model.named_buffers.return_value = []
         worker.sleep_wakeup_manager = MagicMock()
 
         worker.sleep()
@@ -479,7 +483,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("torch.npu.set_device")
     @patch("torch.npu.empty_cache")
     @patch("torch.npu.mem_get_info")
@@ -495,11 +499,11 @@ class TestNPUWorker(TestBase):
         mock_current_platform,
     ):
         """Test _init_device method"""
-        from vllm_ascend.worker.worker import AscendDeviceType, NPUWorker
+        from vllm_ascend.worker.worker import NPUWorker
 
         # Setup mock
         mock_mem_get_info.return_value = (1000, 2000)
-        mock_get_device_type.return_value = AscendDeviceType.A2
+        mock_get_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
 
         # Mock MemorySnapshot
         mock_snapshot = MagicMock()
@@ -764,6 +768,117 @@ class TestNPUWorker(TestBase):
             # Verify call
             mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
 
+    @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_sparse_kv_offload_memory_constraints_disabled(
+        self,
+        mock_get_ascend_config,
+        mock_plan_memory,
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+        worker = NPUWorker.__new__(NPUWorker)
+
+        self.assertEqual(
+            worker._apply_kv_offload_decode_memory_constraints(1234.9),
+            1234,
+        )
+        mock_plan_memory.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_sparse_kv_offload_memory_constraints_use_planner_budget(
+        self,
+        mock_get_ascend_config,
+        mock_plan_memory,
+    ):
+        from vllm_ascend.worker.worker import GiB_bytes, NPUWorker
+
+        sparse_config = SimpleNamespace(
+            enabled=True,
+            dram_size_per_dp_GB=4,
+            keep_device_kv_cache=True,
+        )
+        mock_get_ascend_config.return_value.sparse_kv_offload_config = sparse_config
+        mock_plan_memory.return_value = SimpleNamespace(
+            npu_limit_blocks=10,
+            dram_limit_blocks=20,
+            workload_limit_blocks=30,
+            final_num_blocks=10,
+            final_planner_bytes=4096,
+            planned_host_bytes=2048,
+            planned_device_bytes=4096,
+            host_alignment_reserve_bytes=1024,
+            limiting_factor="npu",
+        )
+        cached_spec = {"layer": MagicMock()}
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.kv_cache_spec = cached_spec
+        worker.vllm_config = MagicMock()
+
+        result = worker._apply_kv_offload_decode_memory_constraints(8192)
+
+        self.assertEqual(result, 4096)
+        mock_plan_memory.assert_called_once_with(
+            kv_cache_spec=cached_spec,
+            vllm_config=worker.vllm_config,
+            available_device_memory_bytes=8192,
+            dram_limit_bytes=4 * GiB_bytes,
+            keep_device_kv_cache=True,
+        )
+
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_sparse_kv_offload_memory_constraints_fetch_kv_specs(
+        self,
+        mock_get_ascend_config,
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_get_ascend_config.return_value.sparse_kv_offload_config = SimpleNamespace(
+            enabled=True,
+            dram_size_per_dp_GB=1,
+            keep_device_kv_cache=False,
+        )
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = MagicMock()
+        worker.get_kv_cache_spec = MagicMock(return_value={"layer": MagicMock()})
+
+        with patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory") as mock_plan_memory:
+            mock_plan_memory.return_value = SimpleNamespace(
+                npu_limit_blocks=1,
+                dram_limit_blocks=1,
+                workload_limit_blocks=1,
+                final_num_blocks=1,
+                final_planner_bytes=1024,
+                planned_host_bytes=512,
+                planned_device_bytes=512,
+                host_alignment_reserve_bytes=0,
+                limiting_factor="npu",
+            )
+
+            self.assertEqual(
+                worker._apply_kv_offload_decode_memory_constraints(1024),
+                1024,
+            )
+
+        worker.get_kv_cache_spec.assert_called_once_with()
+
+    def test_explicit_kv_cache_memory_applies_sparse_offload_constraints(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
+        worker.model_runner = MagicMock()
+        worker.init_snapshot = SimpleNamespace(free_memory=16384)
+        worker._apply_kv_offload_decode_memory_constraints = MagicMock(return_value=4096)
+
+        result = worker.determine_available_memory()
+
+        self.assertEqual(result, 4096)
+        worker.model_runner.profile_run.assert_called_once_with()
+        worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(8192)
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.reset_peak_memory_stats")
@@ -817,6 +932,9 @@ class TestNPUWorker(TestBase):
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
             worker.device = torch.device("npu:0")
+            worker._apply_kv_offload_decode_memory_constraints = MagicMock(
+                wraps=worker._apply_kv_offload_decode_memory_constraints
+            )
 
             # Mock torch.npu.memory_stats for profile_torch_peak
             # profile_torch_peak = memory_stats()["allocated_bytes.all.peak"] = 2000
@@ -830,6 +948,7 @@ class TestNPUWorker(TestBase):
             # result = requested_memory(8000) - non_kv_cache_memory(3500) = 4500
             expected_result = int(10000 * 0.8 - 3500)
             self.assertEqual(result, expected_result)
+            worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(expected_result)
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
@@ -1271,8 +1390,7 @@ class TestNPUWorker(TestBase):
             self.assertIn("Sleep mode can only be", str(cm.exception))
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
-    @patch("vllm_ascend.worker.worker.AscendDeviceType")
+    @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
@@ -1281,7 +1399,6 @@ class TestNPUWorker(TestBase):
         mock_warm_up_atb,
         mock_logger,
         mock_get_ascend_config,
-        mock_ascend_device_type,
         mock_get_ascend_device_type,
         mock_set_random_seed,
     ):
@@ -1291,7 +1408,7 @@ class TestNPUWorker(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.enable_cpu_binding = False
         mock_get_ascend_config.return_value = mock_ascend_config
-        mock_get_ascend_device_type.return_value = mock_ascend_device_type.A9B
+        mock_get_ascend_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
@@ -1336,8 +1453,7 @@ class TestNPUWorker(TestBase):
             mock_kernel_warmup.assert_called_once_with(worker)
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
-    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
-    @patch("vllm_ascend.worker.worker.AscendDeviceType")
+    @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
     @patch("vllm_ascend.worker.worker.CUDAGraphMode")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
@@ -1348,7 +1464,6 @@ class TestNPUWorker(TestBase):
         mock_logger,
         mock_get_ascend_config,
         mock_cudagraph_mode,
-        mock_ascend_device_type,
         mock_get_ascend_device_type,
         mock_set_random_seed,
     ):
@@ -1358,7 +1473,7 @@ class TestNPUWorker(TestBase):
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         mock_ascend_config.enable_cpu_binding = False
         mock_get_ascend_config.return_value = mock_ascend_config
-        mock_get_ascend_device_type.return_value = mock_ascend_device_type.A9B
+        mock_get_ascend_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
         mock_cudagraph_mode.NONE = mock_cudagraph_mode.NONE
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -1669,10 +1784,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        # The runtime AscendConfig is authoritative even when the deprecated
-        # environment variable still carries a stale import-time value.
-        with patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "1"}):
-            worker.start_weight_update()
+        worker.start_weight_update()
 
         engine.start_weight_update.assert_called_once_with()
         self.assertTrue(worker._weight_update_active)
@@ -1693,10 +1805,7 @@ class TestNPUWorkerWeightUpdate(TestBase):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)
 
-        with (
-            patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"}),
-            self.assertRaises(ValueError),
-        ):
+        with self.assertRaises(ValueError):
             worker.start_weight_update()
 
     def test_update_weights_requires_start(self):
@@ -1705,7 +1814,6 @@ class TestNPUWorkerWeightUpdate(TestBase):
         with self.assertRaises(RuntimeError):
             worker.update_weights({"names": [], "dtype_names": [], "shapes": []})
 
-    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_update_weights_dispatches_to_engine(self):
         engine = MagicMock()
         worker = self._make_worker(engine=engine)

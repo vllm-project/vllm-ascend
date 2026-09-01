@@ -67,7 +67,7 @@ from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
-from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import adapt_patch, vllm_version_is  # noqa E402
 
 adapt_patch(True)
 adapt_patch(False)
@@ -1924,6 +1924,41 @@ def olmoe_lora_files():
     return snapshot_download(repo_id="vllm-ascend/olmoe-instruct-text2sql-spider")
 
 
+@pytest.fixture(scope="session")
+def qwen2vl_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2-vl-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
+def qwen25vl_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen25-vl-lora-pokemon")
+
+
+@pytest.fixture(scope="session")
+def qwen25vl_vision_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2.5-3b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen3vl_vision_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen3-4b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_language_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-language")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_connector_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-tower-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen2vl-flickr-lora-tower")
+
+
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
     return [
@@ -1957,6 +1992,14 @@ PROMPT_CONFIGS = {
         "model": "vllm-ascend/HunyuanOCR",
         "prompt_fn": hunyuan_prompt,
         "mm_processor_kwargs": {},
+        **(
+            {
+                "skip": "HunyuanVL is not supported on vLLM >= 0.27.1 "
+                "(upstream vllm-project/vllm#53272 removed native Hunyuan V1/VL)."
+            }
+            if not vllm_version_is("0.27.1")
+            else {}
+        ),
     },
 }
 

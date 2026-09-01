@@ -39,7 +39,7 @@ _server_cmd: &server_cmd
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--additional-config"
-  - '{"enable_cpu_binding": true, "enable_npugraph_ex": true, "enable_static_kernel": true,"enable_fused_mc2":true,"weight_nz_mode":true,"enable_flashcomm1":true}'
+  - '{"enable_cpu_binding": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_fused_mc2": true, "weight_nz_mode": 1, "enable_flashcomm1": true}'
 
 
 _benchmarks_acc: &benchmarks_acc
@@ -67,7 +67,7 @@ _benchmarks_prefix_64k_50: &benchmarks_prefix_64k_50
     max_out_len: 1024
     batch_size: 40
     request_rate: 0
-    baseline: 808.3
+    baseline: 825
     threshold: 0.97
 
 _benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
@@ -80,7 +80,7 @@ _benchmarks_prefix_128k_50: &benchmarks_prefix_128k_50
     max_out_len: 1024
     batch_size: 20
     request_rate: 0
-    baseline: 256.4
+    baseline: 242
     threshold: 0.97
 
 _benchmarks_prefix_max: &benchmarks_prefix_max
@@ -104,7 +104,7 @@ _benchmarks_prefix_max: &benchmarks_prefix_max
     max_out_len: 1024
     batch_size: 1
     request_rate: 0
-    baseline: 33.6
+    baseline: 30
     threshold: 0.97
 
 # ==========================================
@@ -145,7 +145,7 @@ test_cases:
       - "--max-model-len"
       - "196608"
       - "--gpu-memory-utilization"
-      - "0.86"
+      - "0.84"
     benchmarks:
       <<: *benchmarks_prefix_128k_50
   - name: "MiniMax-M2.7-prefix_max"

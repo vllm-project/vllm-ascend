@@ -28,7 +28,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.9"
       - "--additional-config"
-      - '{"enable_weight_nz_layout": true}'
+      - '{"weight_nz_mode": 1}'
     test_content:
       - "benchmark_comparisons"
     benchmark_comparisons_args:

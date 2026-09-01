@@ -20,7 +20,7 @@
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -45,14 +45,26 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_sfa_qsfa_packed_head_dim
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    get_sfa_qsfa_packed_head_dim,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    calc_split_factor,
+    enable_sfa,
+    enable_sfa_dcp_replicated_indexer,
+    get_ascend_device_type,
+)
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -64,6 +76,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    sfa_dcp_replicated_indexer_size = (
+        vllm_config.parallel_config.decode_context_parallel_size
+        if enable_sfa_dcp_replicated_indexer(vllm_config)
+        else 1
+    )
 
     if get_ascend_device_type() == AscendDeviceType.A5:
         c8_k_cache_dtype = torch.float8_e4m3fn
@@ -127,6 +144,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 scale_dim=1 if cache_sparse_li_c8 else 0,
                 scale_dtype=c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
                 cache_sparse_li_c8=cache_sparse_li_c8,
+                sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
             )
             continue
 
@@ -161,6 +179,7 @@ def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
     num_reqs: int,
+    num_actual_reqs: int | None = None,
     num_tokens: int,
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
@@ -181,6 +200,7 @@ def build_attn_metadata(
     num_actual_tokens: int | None = None,
     num_input_tokens: int | None = None,
     is_prefilling: torch.Tensor | None = None,
+    pcp_context: "AscendPCPAttentionContext | None" = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
@@ -204,6 +224,8 @@ def build_attn_metadata(
         num_actual_tokens = num_tokens
     if num_input_tokens is None:
         num_input_tokens = num_tokens
+    if num_actual_reqs is None:
+        num_actual_reqs = num_reqs
 
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
@@ -220,6 +242,10 @@ def build_attn_metadata(
             if model_specific_attn_metadata is not None
             else {}
         )
+        common_is_prefilling = common_attn_metadata_extra_kwargs.pop(
+            "is_prefilling",
+            is_prefilling,
+        )
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -235,17 +261,20 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
-            is_prefilling=is_prefilling,
+            is_prefilling=common_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
+            dcp_local_seq_lens=dcp_local_seq_lens,
             **common_attn_metadata_extra_kwargs,
         )
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             if for_cudagraph_capture:
+                # All backends use the capture wrapper; DSA overrides it internally.
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(common_attn_metadata)
             else:
+                is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
                 attn_metadata_extra_kwargs = (
                     model_specific_attn_metadata.get_extra_attn_kwargs(
                         attn_metadata_builder,
@@ -254,17 +283,23 @@ def build_attn_metadata(
                     if model_specific_attn_metadata is not None
                     else {}
                 )
-                if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
+                if is_dsa_builder:
+                    # DSA cache groups share request-level metadata during replay.
                     attn_metadata_extra_kwargs.update(
-                        num_reqs_actual=num_reqs,
+                        num_actual_reqs=num_actual_reqs,
                         common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     )
+                    if pcp_context is not None:
+                        attn_metadata_extra_kwargs.update(
+                            pcp_context=pcp_context,
+                            pcp_cache_group_idx=i,
+                        )
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
-                if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
+                if is_dsa_builder:
                     # Preserve sharing even if a builder replaces one of the
                     # dictionaries while constructing its metadata.
                     common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]

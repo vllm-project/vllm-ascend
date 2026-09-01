@@ -31,6 +31,8 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
@@ -74,107 +76,220 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     May extend to more general cases in the future.
     """
 
-    def __init__(
-        self,
-        kv_cache_config: KVCacheConfig,
-        max_model_len: int,
-        use_eagle: bool,
-        enable_caching: bool,
-        enable_kv_cache_events: bool,
-        dcp_world_size: int,
-        pcp_world_size: int,
-        hash_block_size: int,
-        eagle_attn_layer_names: list[str] | None = None,
-        metrics_collector: KVCacheMetricsCollector | None = None,
-        max_in_flight_tokens: int | None = None,
-        max_num_batched_tokens: int | None = None,
-        scheduler_block_size: int | None = None,
-    ):
-        # Keep pcp_world_size in this patched constructor for compatibility
-        # with the upstream coordinator interface. PCP is rejected by the platform.
-        del pcp_world_size
-        self.dcp_world_size = dcp_world_size
-        self.scheduler_block_size = scheduler_block_size
-        self.kv_cache_config = kv_cache_config
-        self.max_model_len = max_model_len
-        self.enable_caching = enable_caching
-        # Fall back to `max_model_len` when unset so the recycling-aware
-        # admission cap (vLLM PR #40946) collapses to the prior uncapped
-        # behavior. The scheduler always supplies the real value at runtime.
-        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
-        self.max_in_flight_tokens = token_budget
-        self.max_num_batched_tokens = token_budget
-        self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
-        validate_retention_interval = getattr(
-            vllm_kv_cache_coordinator,
-            "_validate_prefix_cache_retention_interval",
-            None,
-        )
-        if self.retention_interval is not None and validate_retention_interval is not None:
-            validate_retention_interval(
-                self.retention_interval,
-                self.scheduler_block_size,
-                kv_cache_config,
+    if vllm_version_is("0.27.1"):
+
+        def __init__(
+            self,
+            kv_cache_config: KVCacheConfig,
+            max_model_len: int,
+            use_eagle: bool,
+            enable_caching: bool,
+            enable_kv_cache_events: bool,
+            dcp_world_size: int,
+            pcp_world_size: int,
+            hash_block_size: int,
+            eagle_attn_layer_names: list[str] | None = None,
+            metrics_collector: KVCacheMetricsCollector | None = None,
+            max_in_flight_tokens: int | None = None,
+            max_num_batched_tokens: int | None = None,
+            scheduler_block_size: int | None = None,
+        ):
+            # Keep pcp_world_size in this patched constructor for compatibility
+            # with the upstream coordinator interface. PCP is rejected by the platform.
+            del pcp_world_size
+            self.dcp_world_size = dcp_world_size
+            self.scheduler_block_size = scheduler_block_size
+            self.kv_cache_config = kv_cache_config
+            self.max_model_len = max_model_len
+            self.enable_caching = enable_caching
+            # Fall back to `max_model_len` when unset so the recycling-aware
+            # admission cap (vLLM PR #40946) collapses to the prior uncapped
+            # behavior. The scheduler always supplies the real value at runtime.
+            token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+            self.max_in_flight_tokens = token_budget
+            self.max_num_batched_tokens = token_budget
+            self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+            validate_retention_interval = getattr(
+                vllm_kv_cache_coordinator,
+                "_validate_prefix_cache_retention_interval",
+                None,
             )
-        self.block_pool = BlockPool(
-            num_gpu_blocks=kv_cache_config.num_blocks,
-            enable_caching=enable_caching,
-            hash_block_size=hash_block_size,
-            enable_kv_cache_events=enable_kv_cache_events,
-            metrics_collector=metrics_collector,
-        )
-
-        # KV cache group indices that get the EAGLE last-block drop.
-        self.eagle_group_ids: set[int] = {i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group}
-        # Conservatively fall back to flag all groups when no group is flagged.
-        if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
-
-        extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
-        extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
-        self.single_type_managers = tuple(
-            get_manager_for_kv_cache_spec(
-                kv_cache_spec=kv_cache_group.kv_cache_spec,
-                block_pool=self.block_pool,
+            if self.retention_interval is not None and validate_retention_interval is not None:
+                validate_retention_interval(
+                    self.retention_interval,
+                    self.scheduler_block_size,
+                    kv_cache_config,
+                )
+            self.block_pool = BlockPool(
+                num_gpu_blocks=kv_cache_config.num_blocks,
                 enable_caching=enable_caching,
-                kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
-                pcp_world_size=1,
-                max_in_flight_tokens=token_budget,
-                max_model_len=max_model_len,
-                **extra_mgr_kwargs,
+                hash_block_size=hash_block_size,
+                enable_kv_cache_events=enable_kv_cache_events,
+                metrics_collector=metrics_collector,
             )
-            for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
-        )
 
-        # hash_block_size: the block size used to compute block hashes.
-        # The actual block size usually equals hash_block_size, but in cases where
-        # different KV cache groups have different block sizes, the actual block size
-        # can be a multiple of hash_block_size.
-        self.hash_block_size = hash_block_size
-        if enable_caching:
-            assert all(
-                self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
+            # KV cache group indices that get the EAGLE last-block drop.
+            self.eagle_group_ids: set[int] = {
+                i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
+            }
+            # Conservatively fall back to flag all groups when no group is flagged.
+            if use_eagle and not self.eagle_group_ids:
+                self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+
+            extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
+            extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
+            self.single_type_managers = tuple(
+                get_manager_for_kv_cache_spec(
+                    kv_cache_spec=kv_cache_group.kv_cache_spec,
+                    block_pool=self.block_pool,
+                    enable_caching=enable_caching,
+                    kv_cache_group_id=i,
+                    dcp_world_size=dcp_world_size,
+                    pcp_world_size=1,
+                    max_in_flight_tokens=token_budget,
+                    max_model_len=max_model_len,
+                    **extra_mgr_kwargs,
+                )
+                for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
+            )
+
+            # hash_block_size: the block size used to compute block hashes.
+            # The actual block size usually equals hash_block_size, but in cases where
+            # different KV cache groups have different block sizes, the actual block size
+            # can be a multiple of hash_block_size.
+            self.hash_block_size = hash_block_size
+            if enable_caching:
+                assert all(
+                    self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
+                    for g in kv_cache_config.kv_cache_groups
+                ), "block_size must be divisible by hash_block_size"
+            self.enable_partial_hash_hits = dcp_world_size == 1 and any(
+                isinstance(g.kv_cache_spec, MambaSpec)
+                and g.kv_cache_spec.mamba_cache_mode == "align"
+                and g.kv_cache_spec.block_size > hash_block_size
                 for g in kv_cache_config.kv_cache_groups
-            ), "block_size must be divisible by hash_block_size"
-        self.enable_partial_hash_hits = dcp_world_size == 1 and any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            and g.kv_cache_spec.mamba_cache_mode == "align"
-            and g.kv_cache_spec.block_size > hash_block_size
-            for g in kv_cache_config.kv_cache_groups
-        )
-        self.verify_and_split_kv_cache_groups()
+            )
+            self.verify_and_split_kv_cache_groups()
 
-        # Align the WRITE-path mask granularity (reachable_block_mask) with the
-        # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager
-        # only caches blocks that land on a boundary where future cache hits can
-        # actually be matched.
-        # TODO (Csrayz): Consider unified all single_type_managers to simplify logic.
-        for mgr in self.single_type_managers:
-            if isinstance(mgr, SlidingWindowManager):
-                mgr.scheduler_block_size = self.lcm_block_size
+            # Align the WRITE-path mask granularity (reachable_block_mask) with the
+            # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager
+            # only caches blocks that land on a boundary where future cache hits can
+            # actually be matched.
+            # TODO (Csrayz): Consider unified all single_type_managers to simplify logic.
+            for mgr in self.single_type_managers:
+                if isinstance(mgr, SlidingWindowManager):
+                    mgr.scheduler_block_size = self.lcm_block_size
 
-        self.use_eagle = use_eagle
+            self.use_eagle = use_eagle
+
+    else:
+
+        def __init__(  # type: ignore[misc]
+            self,
+            kv_cache_config: KVCacheConfig,
+            max_model_len: int,
+            use_eagle: bool,
+            enable_caching: bool,
+            enable_kv_cache_events: bool,
+            dcp_world_size: int,
+            pcp_world_size: int,
+            hash_block_size: int,
+            eagle_attn_layer_names: list[str] | None = None,
+            metrics_collector: KVCacheMetricsCollector | None = None,
+            max_in_flight_tokens: int | None = None,
+            max_num_batched_tokens: int | None = None,
+            scheduler_block_size: int | None = None,
+            num_prefill_lookahead: int = 0,
+        ):
+            # Keep pcp_world_size in this patched constructor for compatibility
+            # with the upstream coordinator interface. PCP is rejected by the platform.
+            del pcp_world_size
+            # main (cdc4824a21): upstream cache_blocks reads num_reprefillable_tokens
+            self.num_reprefillable_tokens = max(0, num_prefill_lookahead - 1)
+            self.dcp_world_size = dcp_world_size
+            self.scheduler_block_size = scheduler_block_size
+            self.kv_cache_config = kv_cache_config
+            self.max_model_len = max_model_len
+            self.enable_caching = enable_caching
+            # Fall back to `max_model_len` when unset so the recycling-aware
+            # admission cap (vLLM PR #40946) collapses to the prior uncapped
+            # behavior. The scheduler always supplies the real value at runtime.
+            token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+            self.max_in_flight_tokens = token_budget
+            self.max_num_batched_tokens = token_budget
+            self.retention_interval = getattr(envs_vllm, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None)
+            validate_retention_interval = getattr(
+                vllm_kv_cache_coordinator,
+                "_validate_prefix_cache_retention_interval",
+                None,
+            )
+            if self.retention_interval is not None and validate_retention_interval is not None:
+                validate_retention_interval(
+                    self.retention_interval,
+                    self.scheduler_block_size,
+                    kv_cache_config,
+                )
+            self.block_pool = BlockPool(
+                num_gpu_blocks=kv_cache_config.num_blocks,
+                enable_caching=enable_caching,
+                hash_block_size=hash_block_size,
+                enable_kv_cache_events=enable_kv_cache_events,
+                metrics_collector=metrics_collector,
+            )
+
+            # KV cache group indices that get the EAGLE last-block drop.
+            self.eagle_group_ids: set[int] = {  # type: ignore[no-redef]
+                i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
+            }
+            # Conservatively fall back to flag all groups when no group is flagged.
+            if use_eagle and not self.eagle_group_ids:
+                self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
+
+            extra_mgr_kwargs: dict = {"scheduler_block_size": scheduler_block_size}
+            extra_mgr_kwargs["needs_kv_cache_zeroing"] = kv_cache_config.needs_kv_cache_zeroing
+            self.single_type_managers = tuple(
+                get_manager_for_kv_cache_spec(
+                    kv_cache_spec=kv_cache_group.kv_cache_spec,
+                    block_pool=self.block_pool,
+                    enable_caching=enable_caching,
+                    kv_cache_group_id=i,
+                    dcp_world_size=dcp_world_size,
+                    pcp_world_size=1,
+                    max_in_flight_tokens=token_budget,
+                    max_model_len=max_model_len,
+                    **extra_mgr_kwargs,
+                )
+                for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
+            )
+
+            # hash_block_size: the block size used to compute block hashes.
+            # The actual block size usually equals hash_block_size, but in cases where
+            # different KV cache groups have different block sizes, the actual block size
+            # can be a multiple of hash_block_size.
+            self.hash_block_size = hash_block_size
+            if enable_caching:
+                assert all(
+                    self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
+                    for g in kv_cache_config.kv_cache_groups
+                ), "block_size must be divisible by hash_block_size"
+            self.enable_partial_hash_hits = dcp_world_size == 1 and any(
+                isinstance(g.kv_cache_spec, MambaSpec)
+                and g.kv_cache_spec.mamba_cache_mode == "align"
+                and g.kv_cache_spec.block_size > hash_block_size
+                for g in kv_cache_config.kv_cache_groups
+            )
+            self.verify_and_split_kv_cache_groups()
+
+            # Align the WRITE-path mask granularity (reachable_block_mask) with the
+            # READ-path hit granularity (find_longest_cache_hit) so SlidingWindowManager
+            # only caches blocks that land on a boundary where future cache hits can
+            # actually be matched.
+            # TODO (Csrayz): Consider unified all single_type_managers to simplify logic.
+            for mgr in self.single_type_managers:
+                if isinstance(mgr, SlidingWindowManager):
+                    mgr.scheduler_block_size = self.lcm_block_size
+
+            self.use_eagle = use_eagle
 
     @property
     def _cache_hit_alignment_tokens(self) -> int:
@@ -383,26 +498,60 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         return cache_hit_blocks, hit_length, longest_hit_length - hit_length
 
 
-def get_kv_cache_coordinator(
-    kv_cache_config: KVCacheConfig,
-    max_model_len: int,
-    max_in_flight_tokens: int | None = None,
-    use_eagle: bool = False,
-    enable_caching: bool = True,
-    enable_kv_cache_events: bool = False,
-    dcp_world_size: int = 1,
-    pcp_world_size: int = 1,
-    hash_block_size: int = 0,
-    scheduler_block_size: int | None = None,
-    eagle_attn_layer_names: list[str] | None = None,
-    metrics_collector: KVCacheMetricsCollector | None = None,
-    max_num_batched_tokens: int | None = None,
-) -> KVCacheCoordinator:
-    # Keep pcp_world_size in this patched function for upstream call
-    # compatibility; platform validation guarantees that it is one.
-    del pcp_world_size
-    token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
-    if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+if vllm_version_is("0.27.1"):
+
+    def get_kv_cache_coordinator(
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        max_in_flight_tokens: int | None = None,
+        use_eagle: bool = False,
+        enable_caching: bool = True,
+        enable_kv_cache_events: bool = False,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+        hash_block_size: int = 0,
+        scheduler_block_size: int | None = None,
+        eagle_attn_layer_names: list[str] | None = None,
+        metrics_collector: KVCacheMetricsCollector | None = None,
+        max_num_batched_tokens: int | None = None,
+    ) -> KVCacheCoordinator:
+        # Keep pcp_world_size in this patched function for upstream call
+        # compatibility; platform validation guarantees that it is one.
+        del pcp_world_size
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+            return AscendHybridKVCacheCoordinator(
+                kv_cache_config,
+                max_model_len,
+                use_eagle,
+                enable_caching,
+                enable_kv_cache_events,
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=1,
+                hash_block_size=hash_block_size,
+                eagle_attn_layer_names=eagle_attn_layer_names,
+                metrics_collector=metrics_collector,
+                max_in_flight_tokens=token_budget,
+                max_num_batched_tokens=token_budget,
+                scheduler_block_size=scheduler_block_size,
+            )
+
+        if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+            orig_kwargs = dict(
+                kv_cache_config=kv_cache_config,
+                max_model_len=max_model_len,
+                use_eagle=use_eagle,
+                enable_caching=enable_caching,
+                enable_kv_cache_events=enable_kv_cache_events,
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=1,
+                hash_block_size=hash_block_size,
+                metrics_collector=metrics_collector,
+            )
+            orig_kwargs["max_in_flight_tokens"] = token_budget
+            orig_kwargs["scheduler_block_size"] = scheduler_block_size
+            return _orig_get_kv_cache_coordinator(**orig_kwargs)
+
         return AscendHybridKVCacheCoordinator(
             kv_cache_config,
             max_model_len,
@@ -419,37 +568,79 @@ def get_kv_cache_coordinator(
             scheduler_block_size=scheduler_block_size,
         )
 
-    if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
-        orig_kwargs = dict(
-            kv_cache_config=kv_cache_config,
-            max_model_len=max_model_len,
-            use_eagle=use_eagle,
-            enable_caching=enable_caching,
-            enable_kv_cache_events=enable_kv_cache_events,
+else:
+
+    def get_kv_cache_coordinator(  # type: ignore[misc]
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        max_in_flight_tokens: int | None = None,
+        use_eagle: bool = False,
+        enable_caching: bool = True,
+        enable_kv_cache_events: bool = False,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+        hash_block_size: int = 0,
+        scheduler_block_size: int | None = None,
+        eagle_attn_layer_names: list[str] | None = None,
+        metrics_collector: KVCacheMetricsCollector | None = None,
+        max_num_batched_tokens: int | None = None,
+        num_prefill_lookahead: int = 0,
+    ) -> KVCacheCoordinator:
+        # Keep pcp_world_size in this patched function for upstream call
+        # compatibility; platform validation guarantees that it is one.
+        del pcp_world_size
+        token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+        if _is_deepseek_v4_kv_cache_config(kv_cache_config):
+            return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
+                kv_cache_config,
+                max_model_len,
+                use_eagle,
+                enable_caching,
+                enable_kv_cache_events,
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=1,
+                hash_block_size=hash_block_size,
+                eagle_attn_layer_names=eagle_attn_layer_names,
+                metrics_collector=metrics_collector,
+                max_in_flight_tokens=token_budget,
+                max_num_batched_tokens=token_budget,
+                scheduler_block_size=scheduler_block_size,
+                num_prefill_lookahead=num_prefill_lookahead,
+            )
+
+        if len(kv_cache_config.kv_cache_groups) == 1 or not enable_caching:
+            orig_kwargs = dict(
+                kv_cache_config=kv_cache_config,
+                max_model_len=max_model_len,
+                use_eagle=use_eagle,
+                enable_caching=enable_caching,
+                enable_kv_cache_events=enable_kv_cache_events,
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=1,
+                hash_block_size=hash_block_size,
+                metrics_collector=metrics_collector,
+            )
+            orig_kwargs["max_in_flight_tokens"] = token_budget
+            orig_kwargs["scheduler_block_size"] = scheduler_block_size
+            orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
+            return _orig_get_kv_cache_coordinator(**orig_kwargs)
+
+        return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
+            kv_cache_config,
+            max_model_len,
+            use_eagle,
+            enable_caching,
+            enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=1,
             hash_block_size=hash_block_size,
+            eagle_attn_layer_names=eagle_attn_layer_names,
             metrics_collector=metrics_collector,
+            max_in_flight_tokens=token_budget,
+            max_num_batched_tokens=token_budget,
+            scheduler_block_size=scheduler_block_size,
+            num_prefill_lookahead=num_prefill_lookahead,
         )
-        orig_kwargs["max_in_flight_tokens"] = token_budget
-        orig_kwargs["scheduler_block_size"] = scheduler_block_size
-        return _orig_get_kv_cache_coordinator(**orig_kwargs)
-
-    return AscendHybridKVCacheCoordinator(
-        kv_cache_config,
-        max_model_len,
-        use_eagle,
-        enable_caching,
-        enable_kv_cache_events,
-        dcp_world_size=dcp_world_size,
-        pcp_world_size=1,
-        hash_block_size=hash_block_size,
-        eagle_attn_layer_names=eagle_attn_layer_names,
-        metrics_collector=metrics_collector,
-        max_in_flight_tokens=token_budget,
-        max_num_batched_tokens=token_budget,
-        scheduler_block_size=scheduler_block_size,
-    )
 
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]

@@ -188,6 +188,8 @@ def test_hccl_weight_transfer_updates_server_weights():
         "--port",
         str(port),
         "--trust-remote-code",
+        "--additional-config",
+        '{"weight_nz_mode": 0}',
     ]
     # The dev-mode endpoints (/init_weight_transfer_engine, /update_weights,
     # /pause, /resume, ...) are only registered when VLLM_SERVER_DEV_MODE=1.
@@ -195,7 +197,6 @@ def test_hccl_weight_transfer_updates_server_weights():
     env_dict = {
         "VLLM_SERVER_DEV_MODE": "1",
         "ASCEND_RT_VISIBLE_DEVICES": "0",
-        "VLLM_ASCEND_ENABLE_NZ": "0",
     }
 
     _log(f"starting server on port {port} (device 0, dummy weights) ...")

@@ -14,7 +14,7 @@ This document is validated and written based on **vLLM-Ascend 0.23.0**. The curr
 
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
 ## 3 Prerequisites
 
@@ -22,23 +22,23 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature
 
 The following model weights are available:
 
-- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
-- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
-- `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
+- `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
+- `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
+- `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) or 1 Ascend950PR series (128GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
-=== "Ascend950DT series"
+=== "Ascend950DT/PR series"
 
     Start the docker image on each node.
 
@@ -157,11 +157,11 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using Python](../../installation.md#set-up-using-python).
+You can also build and install `vllm-ascend` from source. Refer to [set up using Python](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -221,6 +221,58 @@ Before starting the service:
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+
+=== "Ascend950PR series"
+
+    The following example is for Ascend950PR series. Quantized versions need `--quantization ascend`. On Ascend950PR, `Qwen3.8-27B-w8a8` is the current recommended weight; switch to `Qwen3.8-27B-w8a8-mxfp8` later after further optimization.
+
+    ```bash
+    #!/bin/sh
+    # Load model from ModelScope to speed up download
+    export VLLM_USE_MODELSCOPE=True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    export HCCL_BUFFSIZE=512
+    # To reduce memory fragmentation and avoid out of memory
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
+    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
+
+    vllm serve $MODEL_PATH \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --data-parallel-size 1 \
+        --tensor-parallel-size 1 \
+        --quantization ascend \
+        --served-model-name qwen3.8 \
+        --max-num-seqs 32 \
+        --max-model-len 256000 \
+        --max-num-batched-tokens 16384 \
+        --trust-remote-code \
+        --enable-prefix-caching \
+        --gpu-memory-utilization 0.9 \
+        --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+        --additional-config '{"enable_cpu_binding":true}'
+    ```
+
+    Key Parameter Descriptions:
+
+    - `--data-parallel-size 1` and `--tensor-parallel-size 1` are common settings for data parallelism (DP) and tensor parallelism (TP) sizes.
+    - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request.
+    - `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
+    - `--max-num-batched-tokens` represents the maximum number of tokens that the model can process in a single step. Currently, vLLM v1 scheduling enables ChunkPrefill/SplitFuse by default, which means:
+        - (1) If the input length of a request is greater than `--max-num-batched-tokens`, it will be divided into multiple rounds of computation according to `--max-num-batched-tokens`;
+        - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
+        - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
+    - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
+    - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
+    - `--enable-prefix-caching` enables automatic prefix caching.
+    - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
+    - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
+        - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
+        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+    - `--additional-config '{"enable_cpu_binding":true}'` binds OMP threads to fixed CPU cores. On a single Ascend950PR this is the single largest lever measured: single-stream decode goes from 32 tok/s without it to 63 tok/s with it.
 
 === "Atlas 800 A3 / Atlas 800 A2"
 
@@ -358,6 +410,12 @@ Run performance evaluation of `Qwen3.8-27B-w8a8` as an example.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
+| Parameter | Standard deployment | Performance test |
+| --- | ---: | ---: |
+| `--max-model-len` | 256000 | 250000 |
+| `--max-num-batched-tokens` | 16384 | 8192 |
+| `--gpu-memory-utilization` | 0.9 | 0.95 |
+
 There are three `vllm bench` subcommands:
 
 - `latency`: Benchmark the latency of a single batch of requests.
@@ -385,7 +443,7 @@ After about several minutes, you can get the performance evaluation result.
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Model-Specific Optimizations
 
@@ -408,4 +466,4 @@ The following optimizations are enabled by default and require no additional con
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, refer to the [Public FAQs](../../faqs.md).

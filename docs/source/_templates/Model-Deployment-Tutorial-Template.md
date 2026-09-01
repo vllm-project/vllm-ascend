@@ -59,8 +59,8 @@ Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for fe
 
 **Example:**
 
-- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
+- `DeepSeek-V3.2-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Model Weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
 
@@ -68,7 +68,7 @@ It is recommended to download the model weight to a shared directory across mult
 
 **Example:**
 
-If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../installation.md#verify-multi-node-communication) guide for communication verification.
+If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../getting_started/installation.md#installation-multi-node-interconnect) guide for communication verification.
 
 ## 4 Installation
 
@@ -123,7 +123,7 @@ Startup Command:
 # Omitted
 ```
 
-Common Issues Tip: If you encounter XXX issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter XXX issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
 
 Service Verification:
 
@@ -248,7 +248,7 @@ If no special tuning is involved, directly provide a feature combination table a
 **Example:**
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Model-Specific Optimizations (Optional)
 
@@ -273,8 +273,7 @@ The following optimizations are enabled by default and require no additional con
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | --------------------- | -------------------- | ----------------- | ------------------- | ----------- |
-| FlashComm_v1 | High-concurrency, Tensor Parallelism (TP) scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
-| Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
+| Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling sequence parallelism | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as sequence parallelism, has threshold protection |
 
 ## 10 FAQ
 
