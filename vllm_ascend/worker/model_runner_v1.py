@@ -119,6 +119,7 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -158,6 +159,7 @@ from vllm_ascend.utils import (
     is_hidden_state_cache_spec,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
+    mlp_tp_enable,
     oproj_tp_enable,
     set_potential_max_tokens,
     set_weight_prefetch_method,
@@ -685,6 +687,31 @@ class NPUModelRunner(GPUModelRunner):
             return num_tokens, None, cudagraph_mode
 
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
+            # Fine-grained MLP TP collectives are formed across DP ranks.
+            # In graph mode, align the token bucket within each MLP TP group
+            # before the second cudagraph dispatch; otherwise ranks in one
+            # group can replay different buckets (for example 1 vs 2 tokens).
+            if self._use_aclgraph() and (mlp_tp_enable() or oproj_tp_enable()):
+                if mlp_tp_enable() and oproj_tp_enable():
+                    mlp_group = get_mlp_tp_group()
+                    oproj_group = get_otp_group()
+                    tp_group = (
+                        mlp_group.device_group
+                        if mlp_group.world_size >= oproj_group.world_size
+                        else oproj_group.device_group
+                    )
+                elif mlp_tp_enable():
+                    tp_group = get_mlp_tp_group().device_group
+                else:
+                    tp_group = get_otp_group().device_group
+                tp_tokens = torch.tensor([num_tokens], device="npu", dtype=torch.int32)
+                dist.all_reduce(tp_tokens, op=dist.ReduceOp.MAX, group=tp_group)
+                max_tp_tokens = int(tp_tokens.item())
+                num_tokens_after_padding = torch.tensor(
+                    [max_tp_tokens] * self.dp_size, device="cpu", dtype=torch.int32
+                )
+                return max_tp_tokens, num_tokens_after_padding, cudagraph_mode
+
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
