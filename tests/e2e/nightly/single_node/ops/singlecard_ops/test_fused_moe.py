@@ -97,7 +97,7 @@ def torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map):
     return (out.view(B, -1, w2.shape[1]) * topk_weights.view(B, -1, 1).to(out.dtype)).sum(dim=1)
 
 
-@pytest.mark.skip("Probabilistic failure, need zengiant after fix")
+# @pytest.mark.skip("Probabilistic failure, need zengiant after fix")
 @pytest.mark.parametrize("m", [1, 1024 * 128])
 @pytest.mark.parametrize("n", [128, 2048])
 @pytest.mark.parametrize("k", [128, 1024])
@@ -177,7 +177,7 @@ def test_token_dispatcher_with_all_gather(
     torch.npu.reset_peak_memory_stats()
 
 
-@pytest.mark.skip("Probabilistic failure, need zengiant after fix")
+# @pytest.mark.skip("Probabilistic failure, need zengiant after fix")
 @pytest.mark.parametrize("m", [1, 33, 64])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 511, 1024])
