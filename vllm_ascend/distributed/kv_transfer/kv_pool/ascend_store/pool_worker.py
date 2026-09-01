@@ -1122,7 +1122,7 @@ class KVPoolWorker:
         size_list: list[list[int]] = []
         block_id_list: list[int] = []
         c128_load_plan: dict[int, list[TransferChunkWithBlockId]] = {}
-        c128_total_chunks = 0
+        c128_page_count = 0
         load_masks = self.token_database.load_mask(request.block_hashes, token_len)
         for (
             group_id,
@@ -1145,7 +1145,6 @@ class KVPoolWorker:
                     continue
                 if is_c128_group:
                     c128_load_plan.setdefault(group_id, []).append(chunk)
-                    c128_total_chunks += 1
                     continue
                 addr, size, block_id = self.token_database.prepare_transfer_value(
                     chunk,
@@ -1156,13 +1155,17 @@ class KVPoolWorker:
                 addr_list.append(addr)
                 size_list.append(size)
                 block_id_list.append(block_id)
+        c128_page_count = sum(
+            len(aggregate_c128_page_chunks(chunks, self.hybrid_cache_c128_config.c128_slots_per_page))
+            for chunks in c128_load_plan.values()
+        )
         return (
             key_list,
             addr_list,
             size_list,
             block_id_list,
             c128_load_plan,
-            c128_total_chunks,
+            c128_page_count,
         )
 
     def _load_direct_sync_chunks(
@@ -1196,24 +1199,35 @@ class KVPoolWorker:
         request: ReqMeta,
         c128_load_plan: dict[int, list[TransferChunkWithBlockId]],
     ) -> None:
-        for group_id, page_chunks in c128_load_plan.items():
-            staging_addrs, staging_sizes = self._get_c128_staging_value(group_id)
+        """Load one complete physical C128 page per aggregated page key."""
+        for group_id, chunks in c128_load_plan.items():
+            page_chunks = aggregate_c128_page_chunks(chunks, self.hybrid_cache_c128_config.c128_slots_per_page)
+            key_list: list[str] = []
+            addr_list: list[list[int]] = []
+            size_list: list[list[int]] = []
+            block_id_list: list[int] = []
             for chunk in page_chunks:
-                # A C128 group currently has one reusable staging page per worker.
-                # Each get overwrites that page, so get and merge must stay
-                # sequential unless multiple staging pages are introduced.
-                ret = self.m_store.get(
-                    [chunk.key.to_string()],
-                    [staging_addrs],
-                    [staging_sizes],
+                block_ids = list(chunk.block_ids) or [chunk.block_id]
+                addr, size, block_id = self.token_database.prepare_transfer_value(
+                    chunk,
+                    block_ids,
+                    kv_cache_group_id=group_id,
                 )
-                if ret is not None and len(ret) == 1 and ret[0] == 0:
-                    # Mooncake's synchronous get returns the completed byte
-                    # count/status. The merge then synchronizes its NPU copy
-                    # before this staging page is reused.
-                    self._merge_c128_staging_chunk(group_id, chunk)
-                else:
-                    self._record_sync_load_failures(request, [chunk.block_id], ret)
+                if not addr:
+                    continue
+                key_list.append(chunk.key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+                block_id_list.append(block_id)
+            if not key_list:
+                continue
+            rotation = self.tp_rank % len(key_list)
+            key_list = key_list[rotation:] + key_list[:rotation]
+            addr_list = addr_list[rotation:] + addr_list[:rotation]
+            size_list = size_list[rotation:] + size_list[:rotation]
+            block_id_list = block_id_list[rotation:] + block_id_list[:rotation]
+            ret = self.m_store.get(key_list, addr_list, size_list)
+            self._record_sync_load_failures(request, block_id_list, ret)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
