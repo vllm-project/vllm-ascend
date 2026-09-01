@@ -178,7 +178,6 @@ Select an image based on your machine type and start the docker image on your no
         -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
         -v /etc/ascend_install.info:/etc/ascend_install.info \
         -v /root/.cache:/root/.cache \
-        -p 8080:8080 \
         -it $IMAGE bash
     ```
 
@@ -384,7 +383,7 @@ Before starting the service:
 
         vllm serve $MODEL_PATH \
             --host 127.0.0.1 \
-            --port 8080 \
+            --port 8000 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.8 \
             --max-num-seqs 128 \
