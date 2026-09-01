@@ -260,7 +260,7 @@ class TestAscendStoreConnector(unittest.TestCase):
         """Regression guard for the #14465 / #15291 connector flag.
 
         The connector must stay a pure forwarder: it no longer derives
-        ``use_gva_layerwise`` (#14465 dropped the copy that this method
+        the layerwise gate itself (#14465 dropped the copy that this method
         read, crashing MultiConnector init; #15291 restored it). The gate
         now lives in KVPoolWorker.set_external_slot_release_waiter, so
         this test also pins that the connector keeps no flag of its own.

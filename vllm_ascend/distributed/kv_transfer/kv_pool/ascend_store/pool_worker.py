@@ -465,13 +465,18 @@ class KVPoolWorker:
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
         """Accept the MultiConnector composite slot-release waiter.
 
-        The GVA layerwise mode is the only mode whose receive threads wait on
-        an externally supplied slot-release callback, so the gate lives here
+        Only the layerwise transfer mode has receive threads waiting on an
+        externally supplied slot-release callback, so the gate lives here
         (at the data-plane consumer) instead of at the connector proxy.
         """
         if not self.use_layerwise_transfer:
             return False
         self.external_slot_release_waiter = waiter
+        # The receive thread snapshots the waiter at construction; if it is
+        # already running, hand the waiter over directly so a late
+        # registration still takes effect.
+        if isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
+            self.kv_recv_thread.external_slot_release_waiter = waiter
         return True
 
     def _start_kv_transfer_threads(self) -> None:

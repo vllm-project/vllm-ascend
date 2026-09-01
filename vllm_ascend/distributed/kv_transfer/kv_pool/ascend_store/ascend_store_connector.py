@@ -196,10 +196,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker Side Methods
     ############################################################
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
-        """Pure forwarder: the GVA-layerwise gate is evaluated by the worker.
+        """Pure forwarder: the layerwise transfer gate is evaluated by the worker.
 
-        The connector must not derive ``use_gva_layerwise`` — the copy here
-        was dropped by #14465 while this method still read it (crashing
+        The connector must not derive the gate itself — the copy here was
+        dropped by #14465 while this method still read it (crashing
         MultiConnector init), and restored by #15291. Gating at the
         data-plane consumer, where the flag is already derived, makes that
         class of regression structurally impossible and supersedes the

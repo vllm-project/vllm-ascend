@@ -15,9 +15,6 @@ from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
-    MemcacheBackend,
-)
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -1322,7 +1319,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
-        """Pre-compute shared block data for all layers (GVA path)."""
+        """Pre-compute shared block data for all layers."""
         if self.group_builders is not None:
             builder = self.group_builders[task.group_id]
         else:
@@ -1332,11 +1329,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
     def _handle_request(  # type: ignore[override]
         self, transfer_tasks: list[LayerTransferTask]
     ):
-        # Layerwise threads only run when the use_gva_layerwise gate is on,
-        # i.e. the memcache backend; the assert fails fast (at thread entry)
-        # if that gate invariant is ever broken, instead of surfacing as a
-        # NotImplementedError from the base-class stubs on the first call.
-        assert isinstance(self.m_store, MemcacheBackend)
+        # Layerwise threads only run when the worker-side
+        # use_layerwise_transfer gate is on; every store call below sits on
+        # the Backend ABC, so the thread stays backend-agnostic.
         if len(transfer_tasks) == 0:
             self.request_queue.task_done()
             return
@@ -1465,7 +1460,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             )
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
-        """Pre-compute shared block data for all layers (GVA path)."""
+        """Pre-compute shared block data for all layers."""
         if self.group_builders is not None:
             builder = self.group_builders[task.group_id]
         else:
@@ -1489,11 +1484,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
     ):
-        # Layerwise threads only run when the use_gva_layerwise gate is on,
-        # i.e. the memcache backend; the assert fails fast (at thread entry)
-        # if that gate invariant is ever broken, instead of surfacing as a
-        # NotImplementedError from the base-class stubs on the first call.
-        assert isinstance(self.m_store, MemcacheBackend)
+        # Layerwise threads only run when the worker-side
+        # use_layerwise_transfer gate is on; every store call below sits on
+        # the Backend ABC, so the thread stays backend-agnostic.
         wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id

@@ -1005,6 +1005,21 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         self.assertTrue(worker.set_external_slot_release_waiter(waiter))
         self.assertIs(worker.external_slot_release_waiter, waiter)
 
+    def test_set_external_slot_release_waiter_updates_running_recv_thread(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+            KVCacheStoreLayerRecvingThread,
+        )
+
+        waiter = MagicMock()
+
+        worker = self._make_worker()
+        worker.use_layerwise_transfer = True
+        worker.kv_recv_thread = MagicMock(spec=KVCacheStoreLayerRecvingThread)
+        self.assertTrue(worker.set_external_slot_release_waiter(waiter))
+        # A waiter registered after the receive thread started is handed
+        # over to the thread directly, not just stored on the worker.
+        self.assertIs(worker.kv_recv_thread.external_slot_release_waiter, waiter)
+
     def test_process_layer_data_empty_requests(self):
         worker = self._make_worker()
         worker.process_layer_data([])
