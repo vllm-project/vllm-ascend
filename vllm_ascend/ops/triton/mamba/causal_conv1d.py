@@ -69,30 +69,6 @@ def causal_conv1d_update_ascendc(
                 D = x.shape[-1]
                 orig_dtype = x.dtype
                 x_c = x.to(conv_state.dtype).contiguous()
-                # Stage ONLY the slot-table cells into a small contiguous SD
-                # pool (one staging row per table cell, identity-indexed) and
-                # scatter the updated rows back afterwards. The model hands us
-                # a DS-layout view of the pool (kda.py transposes to
-                # (..., dim, width-1)); handing the op a full-pool
-                # transpose+contiguous() COPY silently discards every
-                # verify-step state update — the copy gets written, the pool
-                # never does — freezing the conv state at its prefill value
-                # while recurrent_kda keeps advancing. Mirrors the
-                # plain-decode staging below (~0.02ms per row).
-                tab = conv_state_indices.to(torch.long)
-                keep = tab != PAD_SLOT_ID
-                flat = tab.clamp(min=0).reshape(-1)            # [K], K = seq*(N+1)
-                sub_ds = conv_state[flat]                      # [K, D, S] gather
-                staging = sub_ds.transpose(1, 2).contiguous()  # [K, S, D] SD pool
-                indices_c = (
-                    torch.arange(
-                        flat.numel(),
-                        dtype=conv_state_indices.dtype,
-                        device=flat.device,
-                    )
-                    .view_as(conv_state_indices)
-                    .contiguous()
-                )
                 if weight.shape[0] == D:
                     weight_t = weight.to(conv_state.dtype).transpose(0, 1).contiguous()
                 else:
@@ -105,40 +81,56 @@ def causal_conv1d_update_ascendc(
                     or (isinstance(activation, str) and activation in ("silu", "swish"))
                 ) else 0
                 out = torch.empty_like(x_c)
-                result = torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    out,
-                    x_c,
-                    weight_t,
-                    conv_state=staging,
-                    bias_opt=bias_c,
-                    query_start_loc_opt=query_start_loc.contiguous(),
-                    cache_indices_opt=indices_c,
-                    initial_state_mode_opt=None,
-                    num_accepted_tokens_opt=num_accepted_tokens.contiguous(),
-                    activation_mode=act_mode,
-                    pad_slot_id=PAD_SLOT_ID,
-                    run_mode=1,
-                )
-                # Scatter the updated staging rows back into the pool view.
-                # PAD cells staged pool row 0 (the null line) purely to keep
-                # shapes static; write them back to row 0 so real slots are
-                # never touched. Row 0 is the reserved NULL_BLOCK_ID line, so
-                # the stray write is harmless by convention.
-                if torch.npu.is_current_stream_capturing():
-                    keep_flat = keep.reshape(-1)
-                    safe_idx = torch.where(
-                        keep_flat, flat, torch.zeros_like(flat)
+                # The op requires a contiguous SD pool; the model hands us a
+                # DS-layout view (kda.py transposes the natively-SD pool for
+                # the triton kernels). One unified graph-safe writeback:
+                #   sd_view = DS.transpose(1, 2)  - the pool in SD form, zero-copy
+                #   shadow  = sd_view.contiguous() - op input (== sd_view, zero-copy,
+                #                                     when the pool is already contiguous)
+                #   sd_view.copy_(shadow)         - write the update back
+                # Measured on the real GLM53 pool (460 lines, line stride
+                # conv+ssm interleaved): full-pool copy through the SD view
+                # costs ~0.07ms, through the DS view ~35ms - 500x - so every
+                # write MUST go through the SD form. All plain device ops:
+                # no host syncs, no dynamic shapes, ACL-graph capturable,
+                # identical code for eager and capture. The writeback line is
+                # what the original implementation was missing entirely (it
+                # returned after the op, leaving the conv state frozen at its
+                # prefill value while recurrent_kda kept advancing).
+                sd_view = conv_state.transpose(1, 2) if conv_state.dim() == 3 else None
+                if sd_view is not None:
+                    if globals().get("_CONV_PATH_N", 0) < 2:
+                        globals()["_CONV_PATH_N"] = globals().get("_CONV_PATH_N", 0) + 1
+                        import sys as _sys
+
+                        print(
+                            f"[conv-ascendc] SPEC sd-shadow path (pool "
+                            f"{tuple(conv_state.shape)} sd_contig="
+                            f"{sd_view.is_contiguous()})",
+                            flush=True, file=_sys.stderr,
+                        )
+                    shadow = sd_view.contiguous()
+                    result = torch.ops._C_ascend.npu_causal_conv1d_custom(
+                        out,
+                        x_c,
+                        weight_t,
+                        conv_state=shadow,
+                        bias_opt=bias_c,
+                        query_start_loc_opt=query_start_loc.contiguous(),
+                        cache_indices_opt=conv_state_indices.contiguous(),
+                        initial_state_mode_opt=None,
+                        num_accepted_tokens_opt=num_accepted_tokens.contiguous(),
+                        activation_mode=act_mode,
+                        pad_slot_id=PAD_SLOT_ID,
+                        run_mode=1,
                     )
-                    safe_rows = staging * keep_flat.view(-1, 1, 1)
-                    conv_state.index_copy_(0, safe_idx, safe_rows.transpose(1, 2))
-                else:
-                    flat_host = flat.tolist()
-                    keep_host = keep.reshape(-1).tolist()
-                    for k in range(len(flat_host)):
-                        if keep_host[k]:
-                            conv_state[flat_host[k]] = staging[k].t()
-                _CONV_CUSTOM_AVAILABLE = True
-                return result.to(orig_dtype)
+                    sd_view.copy_(shadow)
+                    _CONV_CUSTOM_AVAILABLE = True
+                    return result.to(orig_dtype)
+                raise RuntimeError(
+                    "unexpected conv_state rank for spec path: "
+                    f"{conv_state.dim()}"
+                )
             except Exception as _op_err:
                 if _CONV_CUSTOM_AVAILABLE is True:
                     raise
@@ -161,15 +153,47 @@ def causal_conv1d_update_ascendc(
             # pool cache may be fp32 while activations are bf16 (the 310P
             # fallback casts internally as well).
             x_c = x.to(conv_state.dtype).contiguous()
-            # The operator requires conv_state (num_cache_lines, state_len, dim)
-            # and updates the rows selected by cache_indices in place. The
-            # aliasing KV pool hands us a NON-CONTIGUOUS DS-layout view of the
-            # whole pool; transposing + copying the full pool costs ~0.2ms and
-            # writing the full pool back through the strided view up to
-            # ~3.7ms per call (measured). Instead, gather ONLY the selected
-            # rows into a small contiguous SD pool, run the operator on it,
-            # and scatter the (few) updated rows back with plain slice
-            # assignments (0.02ms each).
+            # Unified SD-shadow path (same pattern as the spec branch): the
+            # op gets a contiguous SD shadow, updates the selected rows in
+            # place, and the full pool is written back through the SD view
+            # (~0.07ms measured; the DS-form write is ~35ms and must be
+            # avoided). When the underlying pool is already contiguous the
+            # shadow IS the pool (zero-copy) and the copy back is a no-op.
+            sd_view = conv_state.transpose(1, 2) if conv_state.dim() == 3 else None
+            if sd_view is not None and conv_state_indices is not None:
+                if weight.shape[0] == D:
+                    weight_t = weight.to(conv_state.dtype).transpose(0, 1).contiguous()
+                else:
+                    weight_t = weight.to(conv_state.dtype).contiguous()
+                bias_c = (
+                    bias.to(conv_state.dtype).contiguous() if bias is not None else None
+                )
+                shadow = sd_view.contiguous()
+                out = torch.empty_like(x_c)
+                result = torch.ops._C_ascend.npu_causal_conv1d_custom(
+                    out,
+                    x_c,
+                    weight_t,
+                    conv_state=shadow,
+                    bias_opt=bias_c,
+                    query_start_loc_opt=None,
+                    cache_indices_opt=conv_state_indices.contiguous(),
+                    initial_state_mode_opt=None,
+                    num_accepted_tokens_opt=None,
+                    activation_mode=1 if activation in ("silu", "swish") else 0,
+                    pad_slot_id=PAD_SLOT_ID,
+                    run_mode=1,
+                )
+                sd_view.copy_(shadow)
+                if not _CONV_CUSTOM_AVAILABLE:
+                    import sys as _sys
+
+                    print("[conv-ascendc] plain sd-shadow path active",
+                          flush=True, file=_sys.stderr)
+                _CONV_CUSTOM_AVAILABLE = True
+                return result.to(orig_dtype)
+            # Legacy staging for exotic pool layouts the SD-shadow path does
+            # not cover (rank != 3): keep the historical behavior below.
             small_pool = None
             if conv_state_indices is not None:
                 idx_src = conv_state_indices
@@ -188,10 +212,6 @@ def causal_conv1d_update_ascendc(
                 conv_state_t = conv_state.contiguous()
                 indices_c = None
             if weight.shape[0] == D:
-                # vLLM hands us (dim, width); the operator wants (width, dim).
-                # GLM-5.3-Flash keeps its conv weight in fp32 — the operator's
-                # SupportInfo requires every tensor in one dtype (fp16 or
-                # bf16), so cast to the cache dtype.
                 weight_t = weight.to(conv_state.dtype).transpose(0, 1).contiguous()
             else:
                 weight_t = weight.to(conv_state.dtype).contiguous()
@@ -206,41 +226,6 @@ def causal_conv1d_update_ascendc(
                 )
             activation_mode = 1 if activation in ("silu", "swish") else 0
             out = torch.empty_like(x_c)
-            # DIAGNOSTIC: snapshot inputs BEFORE the op mutates the pool, plus
-            # an on-the-spot 310P reference computed on the same snapshot.
-            _dump = None
-            if os.environ.get("GLM53_CONV_DUMP") == "1" and globals().get("_CONV_SYNC_N", 0) < 8:
-                _pre_state = conv_state_t.clone()
-                _ref_out = None
-                try:
-                    from vllm_ascend._310p.ops.causal_conv1d import (
-                        causal_conv1d_update as _p310,
-                    )
-
-                    _w310 = (
-                        weight.to(torch.float32).transpose(0, 1).contiguous()
-                        if weight.shape[0] == D
-                        else weight.to(torch.float32).contiguous()
-                    )
-                    _ref_out = _p310(
-                        x.to(_pre_state.dtype),
-                        _pre_state.transpose(1, 2).contiguous()
-                        if _pre_state.shape[-2] != D
-                        else _pre_state.clone(),
-                        _w310,
-                        bias.to(torch.float32) if bias is not None else None,
-                        activation_mode == 1,
-                        conv_state_indices,
-                        None, None,
-                    )
-                    torch.npu.synchronize()
-                except Exception as _ref_err:
-                    _ref_out = repr(_ref_err)[:200]
-                _dump = {
-                    "x": x_c, "conv_state_sd_pre": _pre_state,
-                    "weight": weight_t, "indices": indices_c,
-                    "bias": bias_c, "act": activation_mode,
-                }
             try:
                 result = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     out,
@@ -257,17 +242,6 @@ def causal_conv1d_update_ascendc(
                     run_mode=1,
                 )
                 if small_pool is not None:
-                    # Scatter the updated rows back into the pool view. The
-                    # scatter target must be the ORIGINAL slot ids (`rows`,
-                    # content-dynamic so replays pick up current slots), NOT
-                    # the identity staging indices — writing to arange(0..B-1)
-                    # would stomp pool lines 0..B-1 of unrelated requests on
-                    # every replay. PAD cells write back to line 0 (the
-                    # reserved NULL_BLOCK_ID line, harmless by convention).
-                    # Capture forbids host syncs, so the capture path uses a
-                    # tensorized scatter; eager uses plain slice assignments
-                    # (0.02ms each, ~200x faster than advanced indexing into
-                    # the strided view).
                     if torch.npu.is_current_stream_capturing():
                         keep = rows_raw != PAD_SLOT_ID
                         safe_idx = torch.where(
@@ -286,15 +260,7 @@ def causal_conv1d_update_ascendc(
                                 conv_state[rows_host[b]] = small_pool[b].t()
                 elif conv_state_t.data_ptr() != conv_state.data_ptr() or not conv_state.is_contiguous():
                     conv_state.copy_(conv_state_t.transpose(1, 2))
-                if not _CONV_CUSTOM_AVAILABLE:
-                    import sys as _sys
-                    print("[conv-ascendc] active (first call ok)", flush=True, file=_sys.stderr)
                 _CONV_CUSTOM_AVAILABLE = True
-                if _dump is not None:
-                    globals()["_CONV_SYNC_N"] = globals().get("_CONV_SYNC_N", 0) + 1
-                    _dump["out"] = result
-                    _dump["conv_state_sd_post"] = conv_state_t.clone()
-                    torch.save(_dump, f"/tmp/conv_dump_{_CONV_SYNC_N}.pt")
                 return result.to(orig_dtype)
             except Exception as _op_err:
                 if _CONV_CUSTOM_AVAILABLE is True:
@@ -303,12 +269,8 @@ def causal_conv1d_update_ascendc(
                 print(
                     "[conv-ascendc] op failed, falling back:",
                     repr(_op_err)[:1200],
-                    "| x:", tuple(x.shape), x.dtype, "contig" if x.is_contiguous() else "noncontig",
-                    "| st:", tuple(conv_state.shape), conv_state.dtype, "contig" if conv_state.is_contiguous() else "noncontig",
-                    "| w:", tuple(weight.shape), weight.dtype,
                     flush=True, file=_sys.stderr,
                 )
-                # Operator missing/broken on this build: latch and fall back.
                 _CONV_CUSTOM_AVAILABLE = False
 
     return causal_conv1d_update_npu(
