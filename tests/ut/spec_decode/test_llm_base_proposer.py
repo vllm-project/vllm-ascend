@@ -44,14 +44,17 @@ NON_FULL_CUDAGRAPH_MODES = [
 ]
 
 
-def test_draft_vllm_config_uses_draft_model_config():
-    draft_model_config = SimpleNamespace(runner_type="draft")
-    base_vllm_config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
-    expected_vllm_config = SimpleNamespace(model_config=draft_model_config)
-    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
-    proposer.speculative_config = SimpleNamespace(
-        draft_model_config=draft_model_config,
+def test_draft_vllm_config_marks_draft_without_replacing_model_config():
+    target_model_config = SimpleNamespace(runner_type="generate")
+    base_vllm_config = SimpleNamespace(
+        model_config=target_model_config,
+        additional_config={"existing": "value"},
     )
+    expected_vllm_config = SimpleNamespace(
+        model_config=target_model_config,
+        additional_config={"existing": "value", "_ascend_is_draft_model": True},
+    )
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
 
     with (
         patch(
@@ -68,7 +71,7 @@ def test_draft_vllm_config_uses_draft_model_config():
     assert draft_vllm_config is expected_vllm_config
     mock_replace.assert_called_once_with(
         base_vllm_config,
-        model_config=draft_model_config,
+        additional_config={"existing": "value", "_ascend_is_draft_model": True},
     )
 
 

@@ -934,7 +934,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
 
         self.speculative_config = self.vllm_config.speculative_config
-        self.is_draft_model = self.vllm_config.model_config.runner_type == "draft"
+        additional_config = self.vllm_config.additional_config or {}
+        self.is_draft_model = bool(additional_config.get("_ascend_is_draft_model", False))
         self.enable_mlapo = not self.is_draft_model and enabling_mlapo(self.vllm_config)
         self.enable_mla_fia_split = envs_ascend.VLLM_ASCEND_MLA_FIA_SPLIT
         if self.enable_mla_fia_split:

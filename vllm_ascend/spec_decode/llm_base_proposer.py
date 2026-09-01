@@ -124,16 +124,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Expose the validated draft model config during model construction.
+        """Mark the cloned config while constructing a draft model.
 
-        ``_get_model`` calls this hook before ``get_model`` installs the
-        returned config as the current vLLM config. Attention constructors can
-        then identify the draft model from ``runner_type="draft"``.
+        The release vLLM loader relies on ``vllm_config.model_config`` still
+        referring to the target config so that draft attention layers receive
+        distinct prefixes. Carry only the Ascend-specific marker needed by
+        attention constructors instead of replacing the model config.
         """
         draft_vllm_config = super()._create_draft_vllm_config()
+        additional_config = dict(draft_vllm_config.additional_config or {})
+        additional_config["_ascend_is_draft_model"] = True
         return replace(
             draft_vllm_config,
-            model_config=self.speculative_config.draft_model_config,
+            additional_config=additional_config,
         )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
