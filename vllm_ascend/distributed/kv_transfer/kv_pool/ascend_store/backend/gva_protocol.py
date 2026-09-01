@@ -14,84 +14,27 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Layerwise GVA transfer protocol (memcache backend).
+"""Backward-compatible alias for the layerwise transfer protocol.
 
-GVA is a memcache-exclusive protocol. The backend registry entry for
-memcache points at this module (``layerwise_protocol``), and the generic
-layers resolve it through backend/__init__.py — they never import this
-module by name. Key formats are centralized here so the worker-side and
-scheduler-side constructions cannot drift apart; the strings are
-byte-for-byte identical to the pre-refactor ``pool_worker`` /
-``pool_scheduler`` implementations.
-``tests/ut/distributed/ascend_store/test_gva_protocol.py`` locks the
-memcache exclusivity of the GVA store methods and the key formats with
-snapshot assertions.
+The protocol implementation moved into the memcache backend module; this
+module keeps the pre-move import surface (``GVAKeyFactory`` /
+``extract_layout_config``) working until the generic layers switch to the
+protocol functions and this file is deleted.
 """
 
-from __future__ import annotations
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+    extract_layout_config,
+    make_full_key,
+    make_hit_check_keys,
+    make_partial_key,
+)
 
-from typing import Any
-
-
-def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the connector's extra config when it opts into the layerwise
-    GVA transfer, None otherwise.
-
-    Called by the generic layout layer through the backend registry; the
-    protocol itself owns the opt-in check so the layout layer never spells
-    out the gate.
-    """
-    if extra_config.get("use_layerwise", False):
-        return extra_config
-    return None
+__all__ = ["GVAKeyFactory", "extract_layout_config"]
 
 
 class GVAKeyFactory:
-    """String formats for the layerwise GVA keys.
+    """Static-method view over the memcache layerwise key functions."""
 
-    Single-group models use the PR #11585 format (model@hash@rank) for
-    backward compatibility. Multi-group models include group_id
-    (model@group_id@hash@rank) to distinguish groups.
-    """
-
-    @staticmethod
-    def full_key(
-        model_name: str,
-        group_id: int,
-        block_hash_hex: str,
-        head_or_tp_rank: int,
-        num_groups: int,
-    ) -> str:
-        if num_groups > 1:
-            return f"{model_name}@{group_id}@{block_hash_hex}@{head_or_tp_rank}"
-        else:
-            return f"{model_name}@{block_hash_hex}@{head_or_tp_rank}"
-
-    @staticmethod
-    def partial_key(
-        model_name: str,
-        req_id: str,
-        group_id: int,
-        block_index: int,
-        end_token: int,
-        head_or_tp_rank: int,
-    ) -> str:
-        return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}@{head_or_tp_rank}"
-
-    @staticmethod
-    def hit_check_keys(
-        model_name: str,
-        group_id: int,
-        block_hash_hex: str,
-        num_ranks: int,
-        num_groups: int,
-    ) -> list[str]:
-        """All-rank GVA keys for scheduler-side hit check.
-
-        Returns one key per head_or_tp_rank (ranks in the same put_step
-        group share one key for MLA).
-        """
-        if num_groups > 1:
-            return [f"{model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(num_ranks)]
-        else:
-            return [f"{model_name}@{block_hash_hex}@{h}" for h in range(num_ranks)]
+    full_key = staticmethod(make_full_key)
+    partial_key = staticmethod(make_partial_key)
+    hit_check_keys = staticmethod(make_hit_check_keys)
