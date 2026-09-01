@@ -491,6 +491,10 @@ class KVPoolWorker:
                     self.tp_size,
                     self.dcp_size,
                     ready_event,
+                    self._invalid_block_ids,
+                    self._invalid_block_ids_lock,
+                    self._get_c128_staging_value,
+                    self._merge_c128_staging_chunk,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -943,6 +947,273 @@ class KVPoolWorker:
             block_id_list = block_id_list[rotation:] + block_id_list[:rotation]
             ret = self.m_store.get(key_list, addr_list, size_list)
             self._record_sync_load_failures(request, block_id_list, ret)
+
+    def _create_c128_staging_buffers(self) -> tuple[list[int], list[int]]:
+        """Create one reusable full-page staging value for every C128 tensor."""
+        self.c128_staging_tensors: dict[int, list[torch.Tensor]] = {}
+        config = self.hybrid_cache_c128_config
+        if not config.enabled:
+            return [], []
+        assert config.c128_group_id is not None
+        if config.c128_slots_per_page is None:
+            raise RuntimeError("C128 slot geometry is missing from the hybrid cache configuration.")
+        group_id = config.c128_group_id
+        if group_id not in self.group_kv_cache_tensors:
+            raise RuntimeError(f"C128 cache group {group_id} has no registered KV cache tensors.")
+        staging_tensors: list[torch.Tensor] = []
+        ptrs: list[int] = []
+        lengths: list[int] = []
+        for cache, block_size_scale in zip(
+            self.group_kv_cache_tensors[group_id],
+            self.group_block_size_scales[group_id],
+            strict=True,
+        ):
+            first_page = cache.narrow(0, 0, block_size_scale)
+            if not first_page.is_contiguous():
+                raise ValueError("hybrid C128 transfer requires contiguous external KV cache pages.")
+            if first_page.numel() % config.c128_slots_per_page != 0:
+                raise ValueError(
+                    "The C128 external page cannot be divided into "
+                    f"{config.c128_slots_per_page} cache slots."
+                )
+            staging = torch.empty_like(first_page, memory_format=torch.contiguous_format)
+            if not staging.is_contiguous():
+                raise ValueError("hybrid C128 transfer requires a contiguous staging page.")
+            staging_tensors.append(staging)
+            ptrs.append(staging.data_ptr())
+            lengths.append(staging.numel() * staging.element_size())
+        self.c128_staging_tensors[group_id] = staging_tensors
+        return ptrs, lengths
+
+    def _get_c128_staging_value(self, group_id: int) -> tuple[list[int], list[int]]:
+        staging_tensors = self.c128_staging_tensors.get(group_id)
+        if not staging_tensors:
+            raise RuntimeError(f"C128 staging buffers are not registered for cache group {group_id}.")
+        return (
+            [tensor.data_ptr() for tensor in staging_tensors],
+            [tensor.numel() * tensor.element_size() for tensor in staging_tensors],
+        )
+
+    def _merge_c128_staging_chunk(self, group_id: int, chunk: TransferChunkWithBlockId) -> None:
+        """Copy only the key-authoritative slots from staging into a target page."""
+        slots_per_page = self.hybrid_cache_c128_config.c128_slots_per_page
+        if slots_per_page is None:
+            raise RuntimeError("C128 slot geometry is missing from the hybrid cache configuration.")
+        if chunk.value_start < 0 or chunk.value_end > slots_per_page:
+            raise ValueError(
+                "Invalid C128 authoritative range "
+                f"[{chunk.value_start}, {chunk.value_end}) for {slots_per_page} slots."
+            )
+        if chunk.value_start >= chunk.value_end:
+            raise ValueError("The C128 authoritative range must not be empty.")
+
+        target_tensors = self.group_kv_cache_tensors[group_id]
+        block_size_scales = self.group_block_size_scales[group_id]
+        staging_tensors = self.c128_staging_tensors[group_id]
+        for target_cache, block_size_scale, staging in zip(
+            target_tensors,
+            block_size_scales,
+            staging_tensors,
+            strict=True,
+        ):
+            target_start = chunk.block_id * block_size_scale
+            if target_start < 0 or target_start + block_size_scale > target_cache.shape[0]:
+                raise ValueError(f"C128 target block id {chunk.block_id} is outside the KV cache allocation.")
+            target_page = target_cache.narrow(0, target_start, block_size_scale)
+            if not target_page.is_contiguous():
+                raise ValueError("hybrid C128 transfer requires contiguous target pages.")
+            if target_page.numel() != staging.numel():
+                raise ValueError("C128 target and staging pages must have identical sizes.")
+            if target_page.numel() % slots_per_page != 0:
+                raise ValueError(
+                    f"The C128 external page cannot be divided into {slots_per_page} cache slots."
+                )
+
+            elements_per_slot = target_page.numel() // slots_per_page
+            element_offset = chunk.value_start * elements_per_slot
+            element_count = (chunk.value_end - chunk.value_start) * elements_per_slot
+            target_page.view(-1).narrow(0, element_offset, element_count).copy_(
+                staging.view(-1).narrow(0, element_offset, element_count)
+            )
+
+        # copy_ is asynchronous on NPU. A single staging page is reused by the
+        # next Mooncake get, so its authoritative range must be consumed first.
+        if staging_tensors and staging_tensors[0].device.type == "npu":
+            torch.npu.current_stream().synchronize()
+
+    def _record_sync_load_failures(
+        self,
+        request: ReqMeta,
+        block_ids: list[int],
+        results: list[int] | None,
+    ) -> None:
+        if results is None:
+            results = [1] * len(block_ids)
+        if not any(result != 0 for result in results):
+            return
+        missing_block_ids = record_failed_blocks(block_ids, results)
+        if len(request.block_ids_by_group) == 1:
+            self._invalid_block_ids.update(missing_block_ids)
+        elif missing_block_ids:
+            logger.error(
+                "KV load failed for hybrid request %s. "
+                "Skip invalid-block fallback to avoid scheduler crash. "
+                "failed_blocks=%s",
+                request.req_id,
+                missing_block_ids,
+            )
+
+    def _build_sync_load_group_plan(
+        self,
+        request: ReqMeta,
+        load_group_ids: list[int],
+    ) -> list[tuple[int, list[int], int, bool, bool]]:
+        """Precompute group-level sync load state once per request."""
+        load_spec = request.load_spec
+        assert load_spec is not None
+        is_c128_enabled = self.hybrid_cache_c128_config.enabled
+        c128_mask_num = 0
+        if is_c128_enabled:
+            c128_chunk_tokens = self.hybrid_cache_c128_config.chunk_tokens
+            assert c128_chunk_tokens is not None
+            c128_mask_num = (
+                load_spec.vllm_cached_tokens // c128_chunk_tokens * c128_chunk_tokens
+            )
+
+        group_plan: list[tuple[int, list[int], int, bool, bool]] = []
+        for group_id in load_group_ids:
+            if group_id >= len(request.block_ids_by_group):
+                continue
+            block_ids = request.block_ids_by_group[group_id]
+            if is_c128_enabled:
+                mask_num = c128_mask_num
+            else:
+                group_block_size = self.grouped_block_size[group_id]
+                mask_num = (
+                    load_spec.vllm_cached_tokens // group_block_size * group_block_size
+                )
+            skip_null = (
+                group_id < len(self.group_uses_align_state)
+                and self.group_uses_align_state[group_id]
+            )
+            is_c128_group = (
+                is_c128_enabled and self.token_database.is_c128_group(group_id)
+            )
+            group_plan.append(
+                (group_id, block_ids, mask_num, skip_null, is_c128_group)
+            )
+        return group_plan
+
+    def _collect_sync_load_chunks(
+        self,
+        request: ReqMeta,
+        token_len: int,
+        load_group_ids: list[int],
+    ) -> tuple[
+        list[str],
+        list[list[int]],
+        list[list[int]],
+        list[int],
+        dict[int, list[TransferChunkWithBlockId]],
+        int,
+    ]:
+        key_list: list[str] = []
+        addr_list: list[list[int]] = []
+        size_list: list[list[int]] = []
+        block_id_list: list[int] = []
+        c128_load_plan: dict[int, list[TransferChunkWithBlockId]] = {}
+        c128_total_chunks = 0
+        load_masks = self.token_database.load_mask(request.block_hashes, token_len)
+        for (
+            group_id,
+            block_ids,
+            mask_num,
+            skip_null,
+            is_c128_group,
+        ) in self._build_sync_load_group_plan(request, load_group_ids):
+            for chunk in self.token_database.process_transfer_chunks_with_block_ids(
+                token_len,
+                request.block_hashes,
+                block_ids,
+                mask_num,
+                kv_cache_group_id=group_id,
+                skip_null_blocks=skip_null,
+            ):
+                if not self.token_database.mask_allows_chunk(
+                    load_masks, group_id, chunk.raw_start
+                ):
+                    continue
+                if is_c128_group:
+                    c128_load_plan.setdefault(group_id, []).append(chunk)
+                    c128_total_chunks += 1
+                    continue
+                addr, size, block_id = self.token_database.prepare_transfer_value(
+                    chunk,
+                    block_ids,
+                    kv_cache_group_id=group_id,
+                )
+                key_list.append(chunk.key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+                block_id_list.append(block_id)
+        return (
+            key_list,
+            addr_list,
+            size_list,
+            block_id_list,
+            c128_load_plan,
+            c128_total_chunks,
+        )
+
+    def _load_direct_sync_chunks(
+        self,
+        request: ReqMeta,
+        token_len: int,
+        load_group_ids: list[int],
+        key_list: list[str],
+        addr_list: list[list[int]],
+        size_list: list[list[int]],
+        block_id_list: list[int],
+    ) -> None:
+        rotation = self.tp_rank % len(key_list)
+        key_list_c = key_list[rotation:] + key_list[:rotation]
+        addr_list_c = addr_list[rotation:] + addr_list[:rotation]
+        size_list_c = size_list[rotation:] + size_list[:rotation]
+        block_id_list_c = block_id_list[rotation:] + block_id_list[:rotation]
+        logger.debug(
+            "KV pool worker calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
+            request.req_id,
+            token_len,
+            load_group_ids,
+            len(key_list_c),
+            key_list_c[:3],
+        )
+        ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+        self._record_sync_load_failures(request, block_id_list_c, ret)
+
+    def _load_c128_sync_chunks(
+        self,
+        request: ReqMeta,
+        c128_load_plan: dict[int, list[TransferChunkWithBlockId]],
+    ) -> None:
+        for group_id, page_chunks in c128_load_plan.items():
+            staging_addrs, staging_sizes = self._get_c128_staging_value(group_id)
+            for chunk in page_chunks:
+                # A C128 group currently has one reusable staging page per worker.
+                # Each get overwrites that page, so get and merge must stay
+                # sequential unless multiple staging pages are introduced.
+                ret = self.m_store.get(
+                    [chunk.key.to_string()],
+                    [staging_addrs],
+                    [staging_sizes],
+                )
+                if ret is not None and len(ret) == 1 and ret[0] == 0:
+                    # Mooncake's synchronous get returns the completed byte
+                    # count/status. The merge then synchronizes its NPU copy
+                    # before this staging page is reused.
+                    self._merge_c128_staging_chunk(group_id, chunk)
+                else:
+                    self._record_sync_load_failures(request, [chunk.block_id], ret)
 
     def _align_kv_ptrs(self, registered_regions: dict[int, tuple[int, int]]):
         """
