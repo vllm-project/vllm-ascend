@@ -23,7 +23,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -109,7 +109,7 @@ You can use our official docker image to run `DeepSeek-V3.2` directly.
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
