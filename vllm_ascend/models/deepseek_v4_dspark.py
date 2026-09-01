@@ -31,7 +31,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.models.deepseek_v4 import (
     DeepseekV2DecoderLayer,
@@ -267,7 +269,9 @@ class DeepseekV4DSparkModel(nn.Module):
 
 
 @support_torch_compile
-class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
+class DSparkDeepseekV4ForCausalLM(
+    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts
+):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -310,7 +314,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> torch.Tensor:
+        del intermediate_tensors
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -364,8 +370,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         )
 
         # (param_name, checkpoint shard name, shard_id) for non-expert
-        # stacked parameters. Ascend keeps wq_a and wkv as separate parameters.
+        # stacked parameters.
         stacked_params_mapping = [
+            ("self_attn.wq_a_kv", "self_attn.wq_a", 0),
+            ("self_attn.wq_a_kv", "self_attn.wkv", 1),
             ("mlp.gate_up_proj", "mlp.gate_proj", 0),
             ("mlp.gate_up_proj", "mlp.up_proj", 1),
             ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
@@ -421,9 +429,21 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
                         break
                 continue
 
+            is_layer_param = name.startswith("model.layers.")
+            # Draft context KV precomputation uses the redundant wkv, while
+            # regular attention uses the fused wq_a_kv shard loaded below. Load
+            # both projections from the same checkpoint tensor.
+            if is_layer_param and ".self_attn.wkv." in name:
+                redundant_param = params_dict[name]
+                redundant_loader = getattr(
+                    redundant_param,
+                    "weight_loader",
+                    default_weight_loader,
+                )
+                redundant_loader(redundant_param, loaded_weight)
+                loaded_params.add(name)
             # Stacked rules only apply to decoder-layer weights. Head-stack
             # parameters load directly through the fallback below.
-            is_layer_param = name.startswith("model.layers.")
             for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
                 if not is_layer_param or f".{weight_name}." not in name:
                     continue

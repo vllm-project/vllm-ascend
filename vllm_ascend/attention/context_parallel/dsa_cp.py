@@ -12,8 +12,17 @@ from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_compressor import (
+    CompressorExecutor,
+    CompressorSPMetadata,
+    CompressorSPMetadataBuilder,
+    CompressorSPPending,
+    IndexerCompressorExecutor,
+    rotate_activation,
+)
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
@@ -38,30 +47,33 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     enable_dsa_cp_with_o_proj_tp,
     get_ascend_device_type,
+    npu_stream_switch,
     olora_tp_enable,
 )
 
+_DSV4_OVERLAP_STREAMS = dict()
 
-def hadamard_transform_ref(
-    x: torch.Tensor,
-    hadamard: torch.Tensor,
-    scale: float = 1.0,  # type: ignore[assignment]
-):
-    x_shape = x.shape
-    dim = x.shape[-1]
-    x = x.reshape(-1, dim)
-    log_dim = math.ceil(math.log2(dim))
-    dim_padded = 2**log_dim
-    if dim != dim_padded:
-        x = F.pad(x, (0, dim_padded - dim))
-    out = F.linear(x, hadamard)
-    out = out * scale
-    return out[..., :dim].reshape(*x_shape)
+def dsv4_overlap_stream(name: str) -> torch.npu.Stream:
+    global _DSV4_OVERLAP_STREAMS
+    if name not in _DSV4_OVERLAP_STREAMS:
+        _DSV4_OVERLAP_STREAMS[name] = torch_npu.npu.Stream()
+    return _DSV4_OVERLAP_STREAMS[name]
 
 
-def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
-    hidden_size = x.size(-1)
-    return hadamard_transform_ref(x, hadamard=hadamard, scale=hidden_size**-0.5)
+_DSV4_SWA_OVERLAP_STREAM = None
+_DSV4_QUERY_OVERLAP_STREAM = None
+
+_COMPRESSOR_SP_METADATA_KEY = "_compressor_sp_metadata"
+_COMPRESSOR_SP_STATE_KEY = "_compressor_sp_state"
+_MAIN_COMPRESSOR = "main"
+_INDEXER_COMPRESSOR = "indexer"
+
+
+def dsv4_swa_overlap_stream() -> torch.npu.Stream:
+    global _DSV4_SWA_OVERLAP_STREAM
+    if _DSV4_SWA_OVERLAP_STREAM is None:
+        _DSV4_SWA_OVERLAP_STREAM = torch_npu.npu.Stream()
+    return _DSV4_SWA_OVERLAP_STREAM
 
 
 @dataclass
@@ -76,6 +88,7 @@ class DSACPMetadata:
     num_tokens_pad: int
     local_sin: torch.Tensor = None
     local_cos: torch.Tensor = None
+    compressor_sp: CompressorSPMetadata | None = None
 
 
 @dataclass
@@ -156,8 +169,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     aclgraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     hadamard = None
     start_pos_prefill: torch.Tensor
-    req_sas_metadata: torch.Tensor
-    req_qli_metadata: torch.Tensor
+    req_sas_metadata: torch.Tensor | None
+    req_qli_metadata: torch.Tensor | None
     block_size: int = 128
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -197,6 +210,78 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             raise ValueError("DSA-CP metadata builder requires at least one layer name")
         # vLLM assigns one builder result to every layer in an attention group.
         self.cache_group_key = layer_names[0]
+
+        # Output cache specs retain their compressor ratio, while state caches
+        # use a sliding-window spec that does not. Identify state groups first
+        # so they are not mistaken for ordinary attention/SWA groups.
+        is_indexer_compressor_state = (
+            ".indexer.compressor.state_cache" in self.cache_group_key and kv_cache_spec.dtype == torch.float32
+        )
+        is_main_compressor_state = (
+            ".compressor.state_cache" in self.cache_group_key
+            and not is_indexer_compressor_state
+            and kv_cache_spec.dtype == torch.float32
+        )
+        self.is_compressor_state = is_indexer_compressor_state or is_main_compressor_state
+        self.is_compressor_output = self.compressor_ratio in (4, 128)
+        self.is_indexer_compressor_output = (
+            self.is_compressor_output and ".indexer.k_cache" in self.cache_group_key
+        )
+        # Main attention consumes SAS metadata, LI consumes QLI metadata, and
+        # compressor state groups consume neither.
+        self.needs_sas_metadata = not self.is_compressor_state and not self.is_indexer_compressor_output
+        self.needs_qli_metadata = self.is_indexer_compressor_output
+        # Output and state cache groups are built independently. This key lets
+        # their SP metadata rendezvous through common_ratio_to_sas_metadata.
+        self.compressor_sp_output_key: tuple[str, int] | None = None
+        if self.is_compressor_output:
+            owner = _INDEXER_COMPRESSOR if self.is_indexer_compressor_output else _MAIN_COMPRESSOR
+            self.compressor_sp_output_key = (owner, self.compressor_ratio)
+
+        # Allocate the fixed SP workspaces only on configurations that can
+        # actually enter the Compressor SP execution path.
+        additional_config = getattr(vllm_config, "additional_config", None) or {}
+        ascend_device_type = get_ascend_device_type()
+        compressor_sp_enabled = (
+            bool(additional_config.get("enable_compressor_sp", False))
+            and vllm_config.parallel_config.tensor_parallel_size > 1
+            and ascend_device_type == AscendDeviceType.A3
+        )
+        self.compressor_sp_metadata_builder: CompressorSPMetadataBuilder | None = None
+        if compressor_sp_enabled and self.compressor_sp_output_key is not None:
+            coff = 2 if self.compressor_ratio == 4 else 1
+            output_dim = (
+                self.model_config.hf_text_config.index_head_dim
+                if self.is_indexer_compressor_output
+                else self.model_config.hf_text_config.head_dim
+            )
+            self.compressor_sp_metadata_builder = CompressorSPMetadataBuilder(
+                max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
+                max_num_seqs=scheduler_config.max_num_seqs,
+                tp_size=vllm_config.parallel_config.tensor_parallel_size,
+                compress_ratio=self.compressor_ratio,
+                coff=coff,
+                hidden_dim=self.model_config.get_hidden_size(),
+                output_dim=output_dim,
+                dtype=self.model_config.dtype,
+                device=self.device,
+            )
+        self.compressor_sp_state_key: tuple[str, int] | None = None
+        state_dim = getattr(kv_cache_spec, "head_size", 0)
+        if compressor_sp_enabled:
+            # State cache specs do not retain the compressor ratio, so derive
+            # the rendezvous key from the state identity and current layout.
+            # LI currently exists only for C4. Main state stores KV and score
+            # state with shape 2 * coff * head_dim: C4 has coff=2 (4D), while
+            # C128 has coff=1 (2D).
+            if is_indexer_compressor_state:
+                self.compressor_sp_state_key = (_INDEXER_COMPRESSOR, 4)
+            elif is_main_compressor_state:
+                if state_dim == 4 * self.model_config.hf_text_config.head_dim:
+                    self.compressor_sp_state_key = (_MAIN_COMPRESSOR, 4)
+                elif state_dim == 2 * self.model_config.hf_text_config.head_dim:
+                    self.compressor_sp_state_key = (_MAIN_COMPRESSOR, 128)
+
         hf_config = self.model_config.hf_config
 
         if AscendDSACPMetadataBuilder.hadamard is None:
@@ -225,8 +310,12 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                         hadamard(dim_padded, dtype=float), dtype=torch.float, device=self.device
                     ).to(torch.bfloat16)
         self.start_pos_prefill = torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
-        self.req_sas_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
-        self.req_qli_metadata = torch.zeros(1024, dtype=torch.int32, device=self.device)
+        self.req_sas_metadata = (
+            torch.zeros(1024, dtype=torch.int32, device=self.device) if self.needs_sas_metadata else None
+        )
+        self.req_qli_metadata = (
+            torch.zeros(1024, dtype=torch.int32, device=self.device) if self.needs_qli_metadata else None
+        )
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
@@ -239,7 +328,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if ascend_device_type in {AscendDeviceType.A5}:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -258,11 +347,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 for _ in range(spec_token_num)
             ]
             self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, (
-                f"decode_threshold exceeded \
+            assert self.decode_threshold <= 16, f"decode_threshold exceeded \
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
-            )
 
         self.reorder_batch_threshold = self.decode_threshold
         # Note(qcs): we use two dimension slot_mapping for kvcache with shape
@@ -340,8 +427,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens = self.common_ratio_to_sas_metadata["seq_lens"]
             self.seq_lens_cpu = self.common_ratio_to_sas_metadata["seq_lens_cpu"]
 
-        slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
-        self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
+        # Compressor metadata generates its own compressed-cache slots. Only
+        # state and ordinary/SWA groups need the original-token slot mapping.
+        if not self.is_compressor_output:
+            slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
+            self.slot_mapping[:num_input_tokens] = DeviceOperator.format_dsa_slot_mapping(slot_mapping, self.block_size)
 
         self.block_table = common_attn_metadata.block_table_tensor[:num_reqs]
 
@@ -615,7 +705,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         """
         cache = self.common_ratio_to_sas_metadata.get("_device_local")
         if cache is None:
-            # Calc and cache device tensor results
+            # The first cache group computes the shared partition once.
             (
                 local_start,
                 local_end_with_pad,
@@ -642,7 +732,8 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 "sp": self.start_pos_prefill[:num_reqs].clone(),
             }
         else:
-            # copy from cache
+            # Each builder owns fixed output buffers, so later groups copy the
+            # shared values into their own stable tensor addresses.
             assert cache is not None
             local_start = cache["local_start"]
             local_end_with_pad = cache["local_end"]
@@ -718,18 +809,23 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc=query_start_loc_cpu,
                 seq_lens=self.seq_lens_cpu[:num_reqs],
             )
+            local_seq_lens_q_cpu = (
+                local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
+            )
+            max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
+            max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
             self.common_ratio_to_sas_metadata["_cpu_local"] = {
                 "qsl_cpu": local_query_start_loc_cpu.clone(),
                 "sl_cpu": local_seq_lens_cpu.clone(),
+                "max_query_len": max_local_query_len,
+                "max_seq_lens": max_local_seq_lens,
             }
         else:
             assert cpu_cache is not None
             local_query_start_loc_cpu = cpu_cache["qsl_cpu"]
             local_seq_lens_cpu = cpu_cache["sl_cpu"]
-        local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
-        local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
-        max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
-        max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
+            max_local_query_len = cpu_cache["max_query_len"]
+            max_local_seq_lens = cpu_cache["max_seq_lens"]
 
         if num_reqs_actual is None:
             num_reqs_actual = num_reqs
@@ -741,7 +837,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         # --- Compressed positions ---
         full_compress_cos, full_compress_sin = None, None
-        cu_cmp_seqlens = self._get_cmp_seqlens_for_metadata(has_prefill)
+        cu_cmp_seqlens = self._get_cmp_seqlens_for_metadata(has_prefill) if self.needs_sas_metadata else None
 
         if self.compressor_ratio > 1:
             layer_name = f"c{self.compressor_ratio}"
@@ -754,30 +850,87 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_compressed_tokens = None
             slot_mapping = self.slot_mapping[: self.num_actual_tokens]
 
-        # --- SAS metadata (all requests combined) ---
-        num_heads = self.model_config.hf_config.num_attention_heads
-        index_topk = self.model_config.hf_config.index_topk
+        # Main attention and ordinary/SWA groups consume SAS metadata.
+        sas_metadata = None
+        if self.needs_sas_metadata:
+            local_seq_lens_q = local_query_start_loc[1 : num_reqs + 1] - local_query_start_loc[:num_reqs]
+            sas_metadata = self._build_sas_metadata(
+                num_heads=self.model_config.hf_config.num_attention_heads,
+                query_start_loc=local_query_start_loc,
+                seq_lens=local_seq_lens,
+                seq_lens_q=local_seq_lens_q,
+                max_query_len=max_local_query_len,
+                max_seq_lens=max_local_seq_lens,
+                index_topk=self.model_config.hf_config.index_topk,
+                num_reqs=num_reqs,
+                has_prefill=has_prefill,
+                cu_cmp_seqlen_list=cu_cmp_seqlens,
+            )
 
-        sas_metadata = self._build_sas_metadata(
-            num_heads=num_heads,
-            query_start_loc=local_query_start_loc,
-            seq_lens=local_seq_lens,
-            seq_lens_q=local_seq_lens_q,
-            max_query_len=max_local_query_len,
-            max_seq_lens=max_local_seq_lens,
-            index_topk=index_topk,
-            num_reqs=num_reqs,
-            has_prefill=has_prefill,
-            cu_cmp_seqlen_list=cu_cmp_seqlens,
-        )
+        # Only the LI compressed-output group consumes QLI metadata.
+        qli_metadata = None
+        if self.needs_qli_metadata:
+            qli_metadata = self._build_qli_metadata(
+                query_start_loc=local_query_start_loc,
+                seq_lens=local_seq_lens,
+                max_seqlen_q=max_local_query_len,
+                max_seqlen_k=max_local_seq_lens,
+                num_reqs=num_reqs,
+            )
 
-        # --- QLI metadata (all requests combined) ---
-        qli_metadata = self._build_qli_metadata(
-            query_start_loc=local_query_start_loc,
-            seq_lens=local_seq_lens,
-            seq_lens_q=local_seq_lens_q,
-            num_reqs=num_reqs,
-        )
+        # SP is a pure-prefill optimization. Initialization has already gated
+        # this builder by device type, TP size, and enable_compressor_sp.
+        is_pure_prefill = has_prefill and self.num_decodes == 0
+        compressor_sp_metadata = None
+        if is_pure_prefill and self.compressor_sp_metadata_builder is not None:
+            assert self.compressor_sp_output_key is not None
+            assert self.num_actual_tokens is not None
+            tp_group = get_tp_group()
+            compressor_sp_metadata = self.compressor_sp_metadata_builder.build_sp(
+                query_start_loc=query_start_loc_cpu[: num_reqs + 1].tolist(),
+                seq_lens=self.seq_lens_cpu[:num_reqs].tolist(),
+                num_actual_tokens=self.num_actual_tokens,
+                num_input_tokens=num_input_tokens,
+                tp_rank=tp_group.rank_in_group,
+                num_reqs_actual=num_reqs_actual,
+            )
+            metadata_key = (_COMPRESSOR_SP_METADATA_KEY, *self.compressor_sp_output_key)
+            state_key = (_COMPRESSOR_SP_STATE_KEY, *self.compressor_sp_output_key)
+            # The output group owns the SP plan/workspaces. If its state group
+            # ran first, complete that pending state-slot binding now.
+            self.common_ratio_to_sas_metadata[metadata_key] = compressor_sp_metadata
+            pending_state = self.common_ratio_to_sas_metadata.pop(state_key, None)
+            if pending_state is not None:
+                CompressorSPMetadataBuilder.bind_state_slots(
+                    metadata=compressor_sp_metadata,
+                    state_slot_mapping=pending_state[0],
+                    local_token_start=pending_state[1],
+                    tokens_per_rank=pending_state[2],
+                    num_tokens_pad=pending_state[3],
+                )
+
+        if is_pure_prefill and self.compressor_sp_state_key is not None:
+            assert slot_mapping is not None
+            metadata_key = (_COMPRESSOR_SP_METADATA_KEY, *self.compressor_sp_state_key)
+            state_key = (_COMPRESSOR_SP_STATE_KEY, *self.compressor_sp_state_key)
+            target_sp_metadata = self.common_ratio_to_sas_metadata.get(metadata_key)
+            # Cache-group order is not part of the contract: bind immediately
+            # when the output plan exists, otherwise leave slots pending.
+            if target_sp_metadata is None:
+                self.common_ratio_to_sas_metadata[state_key] = (
+                    slot_mapping,
+                    local_start,
+                    tokens_per_rank,
+                    num_tokens_pad,
+                )
+            else:
+                CompressorSPMetadataBuilder.bind_state_slots(
+                    metadata=target_sp_metadata,
+                    state_slot_mapping=slot_mapping,
+                    local_token_start=local_start,
+                    tokens_per_rank=tokens_per_rank,
+                    num_tokens_pad=num_tokens_pad,
+                )
 
         cp_metadata = DSACPMetadata(
             local_query_start_loc=local_query_start_loc,
@@ -788,6 +941,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_tokens_pad=num_tokens_pad,
             local_sin=local_sin,
             local_cos=local_cos,
+            compressor_sp=compressor_sp_metadata,
         )
 
         return AscendDSAReqMetadata(
@@ -935,6 +1089,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         has_prefill,
         cu_cmp_seqlen_list,
     ):
+        assert self.req_sas_metadata is not None
         cmp_ratio = self.compressor_ratio if self.compressor_ratio > 1 else 1
         cache_key = f"cp_sas_c{cmp_ratio}"
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
@@ -996,16 +1151,14 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.req_sas_metadata[:1024] = metadata
         return self.req_sas_metadata[:1024]
 
-    def _build_qli_metadata(self, query_start_loc, seq_lens, seq_lens_q, num_reqs):
-        if self.compressor_ratio != 4:
-            return None
+    def _build_qli_metadata(self, query_start_loc, seq_lens, max_seqlen_q, max_seqlen_k, num_reqs):
+        assert self.compressor_ratio == 4
+        assert self.req_qli_metadata is not None
 
         cache_key = "cp_qli"
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
         if metadata is None:
-            max_seqlen_q = max(1, int(seq_lens_q.max().item()))
-            max_seqlen_k = max(1, int(seq_lens.max().item()))
             metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
                 actual_seq_lengths_query=query_start_loc[1:].clone(),
                 actual_seq_lengths_key=seq_lens.clone(),
@@ -1100,12 +1253,15 @@ class AscendDSACPImpl(DSAAttentionImpl):
         self.wq_a = kwargs["wq_a"]
         self.wq_b = kwargs["wq_b"]
         self.wkv = kwargs["wkv"]
+        self.wq_a_kv = kwargs["wq_a_kv"]
         self.q_norm = kwargs["q_norm"]
         self.q_norm_without_weight = kwargs.get("q_norm_without_weight")
         self.kv_norm = kwargs["kv_norm"]
 
         self.indexer = kwargs.get("indexer")
         self.compressor = kwargs.get("compressor")
+        self.compressor_executor: CompressorExecutor | None = None
+        self.indexer_compressor_executor: IndexerCompressorExecutor | None = None
 
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
@@ -1122,6 +1278,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         self.vllm_config = get_current_vllm_config()
 
+        ascend_config = get_ascend_config()
+        self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
+        self.eliminate_dsa_cp_comm = ascend_config.eliminate_dsa_cp_comm and (
+            get_ascend_device_type() != AscendDeviceType.A5
+        )
+
         # indexer param
         if self.indexer is not None:
             self.indexer_heads: int = self.indexer.n_heads
@@ -1130,35 +1292,21 @@ class AscendDSACPImpl(DSAAttentionImpl):
             self.weights_proj = self.indexer.weights_proj
             self.indexer_softmax_scale = self.inderxer_dim**-0.5
 
-            self.indexer_compress = self.indexer.compressor
-
-            # indexer_compressor
-            self.indexcom_ape = self.indexer.compressor.ape
-            self.indexcom_wkv = self.indexer.compressor.wkv
-            self.indexcom_wgate = self.indexer.compressor.wgate
-            self.indexcom_norm = self.indexer.compressor.norm
-
             self.indexcom_head_dim = self.indexer.compressor.head_dim
-            self.indexcom_rotate = self.indexer.compressor.rotate
             self.index_topk = self.indexer.index_topk
+            self.indexer_compressor_executor = IndexerCompressorExecutor(
+                self.indexer.compressor,
+                self.rope_head_dim,
+                self.tp_group,
+            )
 
         # compress param
         if self.compressor is not None:
-            self.compressor_head_dim = self.compressor.head_dim
-            self.compressor_overlap = self.compressor.overlap
-            self.compressor_rotate = self.compressor.rotate
-
-            self.compressor_ape = self.compressor.ape
-            self.compressor_wkv = self.compressor.wkv
-            self.compressor_wgate = self.compressor.wgate
-            self.compressor_norm = self.compressor.norm
-            self.compressor_norm_eps = self.compressor.norm_eps
-
-    def _compute_compressor_metadata(
-        self,
-        metadata: AscendDSAReqMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return get_or_compute_compressor_metadata(metadata, self.compress_ratio)
+            self.compressor_executor = CompressorExecutor(
+                self.compressor,
+                self.rope_head_dim,
+                self.tp_group,
+            )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.attn_sink.numel() != self.num_heads:
@@ -1330,14 +1478,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
             local_attn_output,
             layer_name,
             attn_metadata[0],
-            skip_all_to_all=full_gather_wo_a_enabled,
+            skip_all_to_all=full_gather_wo_a_enabled or self.eliminate_dsa_cp_comm,
         )
         num_tokens = o_proj_input.shape[0]
 
         # o
         if full_gather_wo_a_enabled:
             self._switch_o_proj_to_full_weight(o_proj_full_handles)
-        o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
+        o_proj_groups = self.n_group if full_gather_wo_a_enabled or self.eliminate_dsa_cp_comm else self.n_local_groups
         try:
             if get_ascend_device_type() in {AscendDeviceType.A5}:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
@@ -1363,108 +1511,63 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 else:
                     # wo_a = self.wo_a.weight.view(o_proj_groups, self.o_lora_rank, -1)
                     # o = torch.einsum("tgd,grd->tgr", o, wo_a)
-                    o_proj_input = torch_npu.npu_transpose_batchmatmul(
-                        o_proj_input,
-                        self.wo_a.weight,
-                        bias=None,
-                        scale=None,
-                        perm_x1=(1, 0, 2),
-                        perm_x2=(0, 1, 2),
-                        perm_y=(1, 0, 2),
-                        batch_split_factor=1,
-                    )
+                    if full_gather_wo_a_enabled or self.eliminate_dsa_cp_comm:
+                        o_proj_input = torch.bmm(
+                            o_proj_input.permute(1, 0, 2).contiguous(),
+                            self.wo_a.weight,
+                        )
+                        o_proj_input = o_proj_input.permute(1, 0, 2).contiguous()
+                    else:
+                        o_proj_input = torch_npu.npu_transpose_batchmatmul(
+                            o_proj_input,
+                            self.wo_a.weight,
+                            bias=None,
+                            scale=None,
+                            perm_x1=(1, 0, 2),
+                            perm_x2=(0, 1, 2),
+                            perm_y=(1, 0, 2),
+                            batch_split_factor=1,
+                        )
                 o_proj_input = o_proj_input.reshape(num_tokens, -1)
                 output[...] = self._apply_wo_b(o_proj_input, full_gather_wo_a_enabled)
         finally:
             if full_gather_wo_a_enabled:
                 self._switch_o_proj_to_tp_weight()
 
+        if self.compress_ratio > 1 and self.multistream_dsv4_dsa_overlap:
+            state_stream = dsv4_overlap_stream("state")
+            torch.npu.current_stream().wait_stream(state_stream)
+        notify_kv_cache_written(layer_name)
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output
 
-    def _forward(
-        self,
-        layer_name,
-        hidden_states_local: torch.Tensor,
-        kv_cache: tuple,
-        attn_metadata: list[M],
-        need_gather_q_kv: bool = False,
-        full_gather_wo_a_enabled: bool = False,
-    ):
-        """Run full-sequence KV cache updates and local-token attention."""
-        (compress_kv_cache, swa_kv_cache, state_cache, _, _, _) = DeviceOperator.unpack_dsa_forward_kv_cache(
-            kv_cache, self.compress_ratio
-        )
-        if self.compress_ratio == 4:
-            (compressor_attn_metadata, compressor_kv_state_metadata, _, _, swa_metadata) = attn_metadata
-        elif self.compress_ratio == 128:
-            (compressor_attn_metadata, compressor_kv_state_metadata, swa_metadata) = attn_metadata
+    def _forward_query(self, hidden_states_local, local_cos, local_sin):
+        if self.wq_a_kv is not None:
+            q_a_kv = self.wq_a_kv(hidden_states_local)
+            q_a, kv = torch.split(q_a_kv, [self.q_lora_rank, self.head_dim], dim=-1)
         else:
-            (swa_metadata,) = attn_metadata
-        common_attn_metadata = attn_metadata[0]
-
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-
-        assert common_attn_metadata.req_metadata is not None
-        assert swa_metadata.req_metadata is not None
-        req_metadata = common_attn_metadata.req_metadata
-        cp_metadata = req_metadata.cp_metadata
-        cos = req_metadata.cos[layer_name]
-        sin = req_metadata.sin[layer_name]
-        local_cos = cp_metadata.local_cos[layer_name]
-        local_sin = cp_metadata.local_sin[layer_name]
-        actual_seq_lengths_query = req_metadata.query_start_loc
-        local_seq_lengths_query = cp_metadata.local_query_start_loc
-        local_seq_lengths_key = cp_metadata.local_seq_lens
-        has_prefill = common_attn_metadata.num_prefills > 0
-        swa_req_metadata = swa_metadata.req_metadata
-        hidden_states_cache = hidden_states[: common_attn_metadata.num_actual_tokens]
+            q_a = self.wq_a(hidden_states_local)
+            kv = None
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
         ):
-            q_a = self.wq_a(hidden_states_local)
             qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 q_a, self.q_norm.weight, epsilon=self.eps
             )
-            if getattr(self.wq_b, "_chunk_size", 0):
-                bias = self.wq_b.bias
-                chunk_size = self.wq_b._chunk_size
-                bias_1 = bias[:chunk_size] if bias is not None else None
-                bias_2 = bias[chunk_size:] if bias is not None else None
-                q = torch.cat(
-                    [
-                        torch_npu.npu_quant_matmul(
-                            qr_local,
-                            self.wq_b.weight_1,
-                            self.wq_b.weight_1_scale,
-                            pertoken_scale=qr_pertoken_scale_local,
-                            bias=bias_1,
-                            output_dtype=hidden_states_local.dtype,
-                        ),
-                        torch_npu.npu_quant_matmul(
-                            qr_local,
-                            self.wq_b.weight_2,
-                            self.wq_b.weight_2_scale,
-                            pertoken_scale=qr_pertoken_scale_local,
-                            bias=bias_2,
-                            output_dtype=hidden_states_local.dtype,
-                        ),
-                    ],
-                    dim=-1,
-                )
-            else:
-                q = torch_npu.npu_quant_matmul(
-                    qr_local,
-                    self.wq_b.weight,
-                    self.wq_b.weight_scale,
-                    pertoken_scale=qr_pertoken_scale_local,
-                    bias=self.wq_b.bias,
-                    output_dtype=hidden_states_local.dtype,
-                )
+            qr_kv_ready_evt = torch.npu.current_stream().record_event()
+            q = torch_npu.npu_quant_matmul(
+                qr_local,
+                self.wq_b.weight,
+                self.wq_b.weight_scale,
+                pertoken_scale=qr_pertoken_scale_local,
+                bias=self.wq_b.bias,
+                output_dtype=hidden_states_local.dtype,
+            )
         else:
-            qr_local = self.q_norm(self.wq_a(hidden_states_local))
+            qr_local = self.q_norm(q_a)
+            qr_kv_ready_evt = torch.npu.current_stream().record_event()
             q = self.wq_b(qr_local)
             qr_pertoken_scale_local = None
 
@@ -1479,74 +1582,300 @@ class AscendDSACPImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
+        return q, qr_local, qr_pertoken_scale_local, kv, qr_kv_ready_evt
 
-        kv = self.wkv(hidden_states_cache)
+    def _forward_swa_kv(
+        self,
+        attn_metadata,
+        kv_cache,
+        layer_name,
+        hidden_states_local,
+        kv: torch.Tensor | None = None,
+        need_gather_q_kv: bool = False,
+    ):
+        _, swa_kv_cache, _, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
+        swa_metadata = attn_metadata[-1] if self.compress_ratio > 1 else attn_metadata[0]
+        common_attn_metadata = attn_metadata[0]
+        cp_metadata = common_attn_metadata.req_metadata.cp_metadata
+
+        local_cos = cp_metadata.local_cos[layer_name]
+        local_sin = cp_metadata.local_sin[layer_name]
+
+        if kv is None:
+            assert self.wkv is not None
+            kv = self.wkv(hidden_states_local)
+
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
         kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             kv.unsqueeze(1),
-            cos[: kv.shape[0]],
-            sin[: kv.shape[0]],
+            local_cos[: kv.shape[0]],
+            local_sin[: kv.shape[0]],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+        kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv, need_gather_q_kv)[
+            : common_attn_metadata.num_actual_tokens
+        ]
         DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_metadata.req_metadata.slot_mapping)
+
+    def _forward_compressor_kv(
+        self,
+        kv_cache,
+        compressor_input: torch.Tensor,
+        compressor_output_metadata: M,
+        compressor_state_metadata: M,
+        sp_metadata: CompressorSPMetadata | None,
+        comm_stream: torch.npu.Stream | None = None,
+    ) -> CompressorSPPending | None:
+        """Run the main Compressor with separately built output/state metadata.
+
+        With ``comm_stream`` the SP row all-gather is only launched here and the
+        caller must finalize the returned tail before attention reads the cache;
+        otherwise the whole update completes inline as before.
+        """
+        compress_kv_cache, _, state_cache, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(
+            kv_cache, self.compress_ratio
+        )
+        assert self.compressor_executor is not None
+        assert compressor_output_metadata.req_metadata is not None
+        assert compressor_state_metadata.req_metadata is not None
+        if comm_stream is not None:
+            assert sp_metadata is not None
+            return self.compressor_executor.launch_sp(
+                compressor_input,
+                state_cache,
+                compress_kv_cache,
+                metadata=compressor_output_metadata.req_metadata,
+                state_block_table=compressor_state_metadata.req_metadata.block_table,
+                sp_metadata=sp_metadata,
+                comm_stream=comm_stream,
+            )
+        self.compressor_executor.run(
+            compressor_input,
+            state_cache,
+            compress_kv_cache,
+            metadata=compressor_output_metadata.req_metadata,
+            state_block_table=compressor_state_metadata.req_metadata.block_table,
+            sp_metadata=sp_metadata,
+            delay_sync_sp_state=self.multistream_dsv4_dsa_overlap,
+        )
+        return None
+
+    def _forward(
+        self,
+        layer_name,
+        hidden_states_local: torch.Tensor,
+        kv_cache: tuple,
+        attn_metadata: list[M],
+        need_gather_q_kv: bool = False,
+        full_gather_wo_a_enabled: bool = False,
+    ):
+        """Run full-sequence KV cache updates and local-token attention."""
+        compress_kv_cache, swa_kv_cache, _, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(
+            kv_cache, self.compress_ratio
+        )
+
+        # Cache-group order is fixed by the hybrid KV-cache manager. Give each
+        # role an explicit name before the execution path starts.
+        if self.compress_ratio == 4:
+            (
+                main_compressor_output_metadata,
+                main_compressor_state_metadata,
+                indexer_compressor_state_metadata,
+                indexer_compressor_output_metadata,
+                swa_metadata,
+            ) = attn_metadata
+        elif self.compress_ratio == 128:
+            main_compressor_output_metadata, main_compressor_state_metadata, swa_metadata = attn_metadata
+            indexer_compressor_state_metadata = None
+            indexer_compressor_output_metadata = None
+        else:
+            (swa_metadata,) = attn_metadata
+            indexer_compressor_state_metadata = None
+            indexer_compressor_output_metadata = None
+        common_attn_metadata = attn_metadata[0]
+
+        assert common_attn_metadata.req_metadata is not None
+        assert swa_metadata.req_metadata is not None
+        req_metadata = common_attn_metadata.req_metadata
+        cp_metadata = req_metadata.cp_metadata
+        local_cos = cp_metadata.local_cos[layer_name]
+        local_sin = cp_metadata.local_sin[layer_name]
+        local_seq_lengths_query = cp_metadata.local_query_start_loc
+        local_seq_lengths_key = cp_metadata.local_seq_lens
+        has_prefill = common_attn_metadata.num_prefills > 0
+        swa_req_metadata = swa_metadata.req_metadata
+
+        main_compressor_sp_metadata = None
+        indexer_compressor_sp_metadata = None
+        if self.compress_ratio > 1:
+            assert main_compressor_output_metadata.req_metadata is not None
+            main_compressor_sp_metadata = (
+                main_compressor_output_metadata.req_metadata.cp_metadata.compressor_sp
+            )
+            if self.compress_ratio == 4:
+                assert indexer_compressor_output_metadata is not None
+                assert indexer_compressor_output_metadata.req_metadata is not None
+                indexer_compressor_sp_metadata = (
+                    indexer_compressor_output_metadata.req_metadata.cp_metadata.compressor_sp
+                )
+                if (main_compressor_sp_metadata is None) != (indexer_compressor_sp_metadata is None):
+                    raise ValueError("Main and indexer compressors must use the same SP execution mode")
+
+        # One FIFO stream carries every Compressor SP collective, so the
+        # all-gathers keep a single deterministic order across TP ranks and stay
+        # off the compute streams. Graph capture cannot host-wait on a handle, so
+        # it keeps the inline collectives; the results are byte-identical either
+        # way, only the join point moves.
+        compressor_sp_comm_stream = None
+        if (
+            main_compressor_sp_metadata is not None
+            and self.multistream_dsv4_dsa_overlap
+            and not torch.npu.is_current_stream_capturing()
+        ):
+            compressor_sp_comm_stream = dsv4_overlap_stream("compressor_sp_comm")
+
+        hs_local_ready_evt = torch.npu.current_stream().record_event()
+
+        query_aux_stream = dsv4_overlap_stream("query")
+        with npu_stream_switch(query_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+            torch.npu.current_stream().wait_event(hs_local_ready_evt)
+            q, qr_local, qr_pertoken_scale_local, kv, qr_kv_ready_evt = self._forward_query(hidden_states_local, local_cos, local_sin)
+
+        # The existing weight all-gather can overlap with subsequent computation.
+        o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
 
         compress_topk_idxs = None
         if self.compress_ratio > 1:
-            assert compressor_attn_metadata.req_metadata is not None
-            assert compressor_kv_state_metadata.req_metadata is not None
+            assert main_compressor_output_metadata.req_metadata is not None
+            assert main_compressor_state_metadata.req_metadata is not None
+            assert self.compressor_executor is not None
+
+            # Main and LI share one prepared input. Non-SP restores the global
+            # hidden batch; SP gathers only boundary suffixes and packs locally.
+            if main_compressor_sp_metadata is None:
+                compressor_input = self.compressor_executor.prepare_non_sp_input(
+                    hidden_states_local,
+                    common_attn_metadata.num_actual_tokens,
+                    need_gather_q_kv,
+                )
+            else:
+                # Every TP rank must enter this collective, including ranks whose
+                # packed compressor input is empty.
+                compressor_input = self.compressor_executor.prepare_sp_input(
+                    hidden_states_local,
+                    main_compressor_sp_metadata,
+                )
+            compressor_input_ready_evt = torch.npu.current_stream().record_event()
+
+            # Launch the main Compressor first so its all-gather is already in
+            # flight while the Indexer computes. Both ranks reach the collective
+            # on shape-balanced local work, so no rank waits at the rendezvous.
+            main_compressor_aux_stream = dsv4_overlap_stream("main_compressor_aux_stream")
+            with npu_stream_switch(main_compressor_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+                torch.npu.current_stream().wait_event(compressor_input_ready_evt)
+                main_compressor_pending = self._forward_compressor_kv(
+                    kv_cache,
+                    compressor_input,
+                    main_compressor_output_metadata,
+                    main_compressor_state_metadata,
+                    main_compressor_sp_metadata,
+                    comm_stream=compressor_sp_comm_stream,
+                )
+
             if self.compress_ratio == 4:
-                self._update_indexer_cache(
-                    x=hidden_states_cache,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                )
-                compress_topk_idxs = self._indexer_select_topk(
-                    x=hidden_states_local,
-                    qr=qr_local,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    cos=local_cos,
-                    sin=local_sin,
-                    actual_seq_lengths_query=local_seq_lengths_query,
-                    actual_seq_lengths_key=local_seq_lengths_key,
-                    qr_pertoken_scale=qr_pertoken_scale_local,
-                )
+                assert indexer_compressor_state_metadata is not None
+                assert indexer_compressor_output_metadata is not None
+                indexer_aux_stream = dsv4_overlap_stream("indexer")
+                with npu_stream_switch(indexer_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+                    torch.npu.current_stream().wait_event(compressor_input_ready_evt)
+                    indexer_compressor_pending = self._update_indexer_cache(
+                        compressor_input=compressor_input,
+                        kv_cache=kv_cache,
+                        indexer_state_metadata=indexer_compressor_state_metadata,
+                        indexer_output_metadata=indexer_compressor_output_metadata,
+                        sp_metadata=indexer_compressor_sp_metadata,
+                        comm_stream=compressor_sp_comm_stream,
+                    )
+                    if indexer_compressor_pending is not None:
+                        # TopK below reads the Indexer caches, so the gathered
+                        # rows must be written before it runs.
+                        self.indexer_compressor_executor.finalize_sp(indexer_compressor_pending)
+                    indexer_compressor_done_evt = torch.npu.current_stream().record_event()
 
-            coff = 2 if self.compressor_overlap else 1
-            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
-                compressor_attn_metadata.req_metadata,
+                    torch.npu.current_stream().wait_event(qr_kv_ready_evt)
+                    qr_local.record_stream(torch.npu.current_stream())
+                    compress_topk_idxs = self._indexer_select_topk(
+                        x=hidden_states_local,
+                        qr=qr_local,
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        cos=local_cos,
+                        sin=local_sin,
+                        actual_seq_lengths_query=local_seq_lengths_query,
+                        actual_seq_lengths_key=local_seq_lengths_key,
+                        qr_pertoken_scale=qr_pertoken_scale_local,
+                    )
+
+            if main_compressor_pending is not None:
+                # Only attention reads these rows, so the join comes last: the
+                # Indexer local Compressor, its finalize and TopK have already
+                # covered the main collective.
+                with npu_stream_switch(main_compressor_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+                    self.compressor_executor.finalize_sp(main_compressor_pending)
+
+        # SWA does not depend on preprocessing communication, so it is scheduled later.
+        # Launch SWA all-gather last to avoid blocking compressor communication.
+        swa_aux_stream = dsv4_overlap_stream("swa")
+        with npu_stream_switch(swa_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+            if kv is not None:
+                torch.npu.current_stream().wait_event(qr_kv_ready_evt)
+                kv.record_stream(torch.npu.current_stream())
+            self._forward_swa_kv(
+                attn_metadata,
+                kv_cache,
+                layer_name,
+                hidden_states_local,
+                kv,
+                need_gather_q_kv,
             )
-            compressed_kv = torch.ops._C_ascend.compressor(
-                hidden_states_cache,
-                self.compressor_wkv.weight,
-                self.compressor_wgate.weight,
-                state_cache.squeeze(-2),
-                self.compressor_ape,
-                self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
-                state_block_table=compressor_kv_state_metadata.req_metadata.block_table,
-                cu_seqlens=actual_seq_lengths_query,
-                seqused=None,
-                start_pos=req_metadata.start_pos,
-                rope_head_dim=self.rope_head_dim,
-                cmp_ratio=self.compress_ratio,
-                coff=coff,
-                norm_eps=self.compressor_norm_eps,
-                rotary_mode=2,
-                cache_mode=1,
-            )
 
-            if compressed_kv.numel() == 0:
-                compressed_kv = None
-            DeviceOperator.dsa_kv_compress_scatter(compress_kv_cache, compressed_kv, compress_slot_mapping)
+        if self.multistream_dsv4_dsa_overlap:
+            # main stream wait for aux streams to finish before running attention kernel
+            torch.npu.current_stream().wait_stream(query_aux_stream)
+            torch.npu.current_stream().wait_stream(swa_aux_stream)
+            if self.compress_ratio > 1:
+                if self.compress_ratio == 4:
+                    torch.npu.current_stream().wait_stream(indexer_aux_stream)
+                torch.npu.current_stream().wait_stream(main_compressor_aux_stream)
+            q.record_stream(torch.npu.current_stream())
 
-        notify_kv_cache_written(layer_name)
+            # State cache is not required by attention, so it can be written asynchronously on
+            # a separate stream. To avoid impacting compressor execution, perform the state-cache
+            # write only after the compressor completion event.
+            if self.compress_ratio > 1 and main_compressor_sp_metadata is not None:
+                state_stream = dsv4_overlap_stream("state")
+                with npu_stream_switch(state_stream, enabled=True):
+                    torch.npu.current_stream().wait_stream(main_compressor_aux_stream)
+                    if self.compress_ratio == 4:
+                        torch.npu.current_stream().wait_event(indexer_compressor_done_evt)
+
+                    main_state_cache = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)[2]
+                    self.compressor_executor._sync_sp_state(
+                        main_state_cache,
+                        main_compressor_sp_metadata,
+                        compressor_sp_comm_stream,
+                    )
+                    if self.compress_ratio == 4:
+                        indexer_state_cache = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)[0]
+                        self.indexer_compressor_executor._sync_sp_state(
+                            indexer_state_cache,
+                            indexer_compressor_sp_metadata,
+                            compressor_sp_comm_stream,
+                        )
+
         record_attention_compute_start()
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()
@@ -1583,7 +1912,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 **common_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
-            assert compressor_attn_metadata.req_metadata is not None
+            assert main_compressor_output_metadata.req_metadata is not None
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
@@ -1593,13 +1922,13 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 cmp_kv=compress_kv_cache,
                 cmp_sparse_indices=compress_topk_idxs,
                 ori_block_table=swa_metadata.req_metadata.block_table,
-                cmp_block_table=compressor_attn_metadata.req_metadata.block_table,
+                cmp_block_table=main_compressor_output_metadata.req_metadata.block_table,
                 metadata=req_metadata.sas_metadata,
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
         else:
-            assert compressor_attn_metadata.req_metadata is not None
+            assert main_compressor_output_metadata.req_metadata is not None
             DeviceOperator.add_dsa_sparse_attn_extra_kwargs(
                 common_attn_kwargs, cu_seqlens_cmp_kv=req_metadata.cu_cmp_seqlen_list
             )
@@ -1608,8 +1937,8 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 ori_kv=swa_kv_cache,
                 cmp_kv=compress_kv_cache,
                 ori_block_table=swa_metadata.req_metadata.block_table,
-                cmp_block_table=compressor_attn_metadata.req_metadata.block_table,
-                metadata=compressor_attn_metadata.req_metadata.sas_metadata,
+                cmp_block_table=main_compressor_output_metadata.req_metadata.block_table,
+                metadata=main_compressor_output_metadata.req_metadata.sas_metadata,
                 cmp_mask_mode=3,
                 **common_attn_kwargs,
             )[0]
@@ -1649,62 +1978,50 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
     def _update_indexer_cache(
         self,
-        x: torch.Tensor,
+        compressor_input: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: list[M],
-        actual_seq_lengths_query: torch.Tensor,
-    ) -> None:
-        (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
+        indexer_state_metadata: M,
+        indexer_output_metadata: M,
+        sp_metadata: CompressorSPMetadata | None,
+        comm_stream: torch.npu.Stream | None = None,
+    ) -> CompressorSPPending | None:
+        """Run LI Compressor and update its K, scale, and full-value caches.
+
+        With ``comm_stream`` only the local Compressor and its row all-gather are
+        issued here; the caller must finalize the returned tail before TopK reads
+        the Indexer caches.
+        """
+        indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache = (
             DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
         )
-        (_, _, indexer_kv_state_metadata, indexer_kv_scale_metadata, _) = attn_metadata
-        coff = 2 if self.compressor_overlap else 1
-        assert indexer_kv_scale_metadata is not None
-        assert indexer_kv_state_metadata is not None
-        assert indexer_kv_scale_metadata.req_metadata is not None
-        assert indexer_kv_state_metadata.req_metadata is not None
-        assert self.indexer is not None
-        compressed_cos, compressed_sin, indexer_slot_mapping = self._compute_compressor_metadata(
-            indexer_kv_scale_metadata.req_metadata,
-        )
-        kv = torch.ops._C_ascend.compressor(
-            x,
-            self.indexcom_wkv.weight,
-            self.indexcom_wgate.weight,
-            indexer_state_cache.squeeze(-2),
-            self.indexcom_ape,
-            self.indexcom_norm.weight,
-            compressed_sin.view(-1, compressed_sin.shape[-1]),
-            compressed_cos.view(-1, compressed_cos.shape[-1]),
-            state_block_table=indexer_kv_state_metadata.req_metadata.block_table,
-            cu_seqlens=actual_seq_lengths_query,
-            seqused=None,
-            start_pos=indexer_kv_scale_metadata.req_metadata.start_pos,
-            rope_head_dim=self.rope_head_dim,
-            cmp_ratio=self.compress_ratio,
-            coff=coff,
-            norm_eps=self.compressor_norm_eps,
-            rotary_mode=2,
-            cache_mode=1,
-        )
-
-        if kv.numel() == 0:
-            return
-        if self.indexer.compressor.rotate:
-            kv = rotate_activation(kv, indexer_kv_scale_metadata.hadamard)
-
-        _, kv_scale = DeviceOperator.indexer_quant_scatter_part1(
-            kv,
-            indexer_k_cache,
-            indexer_full_cache,
-            indexer_slot_mapping,
-        )
-        if kv_scale is not None:
-            DeviceOperator.dsa_indexer_scatter_scale_part3(
-                kv_scale,
-                indexer_scale_cache,
-                indexer_slot_mapping,
+        assert indexer_output_metadata.req_metadata is not None
+        assert indexer_state_metadata.req_metadata is not None
+        assert self.indexer_compressor_executor is not None
+        if comm_stream is not None:
+            assert sp_metadata is not None
+            return self.indexer_compressor_executor.launch_sp(
+                compressor_input,
+                indexer_state_cache,
+                (indexer_k_cache, indexer_scale_cache, indexer_full_cache),
+                metadata=indexer_output_metadata.req_metadata,
+                state_block_table=indexer_state_metadata.req_metadata.block_table,
+                sp_metadata=sp_metadata,
+                hadamard=indexer_output_metadata.hadamard,
+                comm_stream=comm_stream,
             )
+        self.indexer_compressor_executor.run(
+            compressor_input,
+            indexer_state_cache,
+            (indexer_k_cache, indexer_scale_cache, indexer_full_cache),
+            metadata=indexer_output_metadata.req_metadata,
+            state_block_table=indexer_state_metadata.req_metadata.block_table,
+            sp_metadata=sp_metadata,
+            hadamard=indexer_output_metadata.hadamard,
+            # The deferred state stream owns the replication when overlap is on,
+            # so it must not also run inline here.
+            delay_sync_sp_state=self.multistream_dsv4_dsa_overlap,
+        )
+        return None
 
     def _indexer_select_topk(
         self,
@@ -1718,9 +2035,9 @@ class AscendDSACPImpl(DSAAttentionImpl):
         actual_seq_lengths_key: torch.Tensor,
         qr_pertoken_scale: torch.Tensor = None,
     ):
-        (_, indexer_k_cache, indexer_scale_cache, _) = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
-        (_, _, _, indexer_kv_scale_metadata, _) = attn_metadata
-        assert indexer_kv_scale_metadata is not None
+        _, indexer_k_cache, indexer_scale_cache, _ = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
+        _, _, _, indexer_output_metadata, _ = attn_metadata
+        assert indexer_output_metadata is not None
 
         if (
             (not isinstance(self.inderxer_wq_b.quant_method, AscendUnquantizedLinearMethod))
@@ -1746,14 +2063,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.indexcom_head_dim - self.rope_head_dim, self.indexcom_head_dim],
         )
-        q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
+        q = rotate_activation(q, indexer_output_metadata.hadamard)
         weights = self.weights_proj(x) * (self.indexer_softmax_scale * self.indexer_heads**-0.5)
 
         q, q_scale = DeviceOperator.indexer_quantize_query(q)
 
-        assert indexer_kv_scale_metadata.req_metadata is not None
-        qli_metadata = indexer_kv_scale_metadata.req_metadata.qli_metadata
-        block_table = indexer_kv_scale_metadata.req_metadata.block_table
+        assert indexer_output_metadata.req_metadata is not None
+        qli_metadata = indexer_output_metadata.req_metadata.qli_metadata
+        block_table = indexer_output_metadata.req_metadata.block_table
         topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
             query=q,
             key=indexer_k_cache,

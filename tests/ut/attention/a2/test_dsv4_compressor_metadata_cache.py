@@ -7,7 +7,7 @@ from unittest.mock import patch
 import torch
 from vllm.forward_context import ForwardContext, override_forward_context
 
-from vllm_ascend.attention.dsa_v1 import (
+from vllm_ascend.attention.dsa_compressor import (
     get_or_compute_compressor_metadata,
     reset_compressor_metadata_cache,
 )

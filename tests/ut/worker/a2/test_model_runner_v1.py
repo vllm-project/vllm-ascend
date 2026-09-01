@@ -14,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
@@ -111,6 +112,185 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
         )
 
         self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
+
+
+class TestProbabilisticDraftProbHandoff(unittest.TestCase):
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.lmhead_tp_enable",
+        return_value=False,
+    )
+    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
+    def test_pp1_caches_and_forwards_reordered_draft_probs(
+        self,
+        mock_get_pp_group,
+        _mock_lmhead_tp_enable,
+    ):
+        mock_get_pp_group.return_value = SimpleNamespace(world_size=1)
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        spec_config = SimpleNamespace(
+            disable_padded_drafter_batch=False,
+            method="dspark",
+            use_eagle=MagicMock(return_value=True),
+            uses_draft_model=MagicMock(return_value=False),
+            uses_extract_hidden_states=MagicMock(return_value=False),
+        )
+        runner.speculative_config = spec_config
+        runner.vllm_config = SimpleNamespace(speculative_config=spec_config)
+        runner.input_batch = SimpleNamespace(
+            req_ids=["req_c", "req_a", "req_b"],
+            sampling_metadata=SimpleNamespace(top_k=None),
+            update_async_output_token_ids=MagicMock(),
+        )
+        runner.input_ids = SimpleNamespace(gpu=torch.arange(3, dtype=torch.int64))
+        runner.requests = {}
+        runner.discard_request_indices = SimpleNamespace(
+            gpu=torch.zeros(3, dtype=torch.int64)
+        )
+        runner.num_discarded_requests = 0
+        runner.use_aux_hidden_state_outputs = False
+        runner.dcp_size = 1
+        runner._log_propose_draft_token_ids_entry = MagicMock()
+        runner._copy_valid_sampled_token_count = MagicMock()
+        runner._get_positions = MagicMock(
+            return_value=torch.arange(3, dtype=torch.int64)
+        )
+        runner.get_model = MagicMock(
+            return_value=SimpleNamespace(get_mtp_target_hidden_states=lambda: None)
+        )
+
+        draft_probs = torch.arange(3 * 3 * 4, dtype=torch.float32).reshape(3, 3, 4)
+        runner.drafter = MagicMock()
+        runner.drafter.prepare_next_token_ids_padded.return_value = (
+            torch.tensor([10, 11, 12]),
+            torch.ones(3, dtype=torch.int32),
+        )
+        runner.drafter._propose.return_value = torch.tensor(
+            [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+        )
+        runner.drafter.take_last_draft_probs.return_value = draft_probs
+        scheduler_output = SimpleNamespace(
+            num_spec_tokens_to_schedule=3,
+            num_scheduled_tokens={"req_c": 1, "req_a": 1, "req_b": 1},
+        )
+
+        NPUModelRunner.propose_draft_token_ids(
+            runner,
+            valid_sampled_token_ids=torch.tensor([[1], [2], [3]]),
+            sampling_metadata=runner.input_batch.sampling_metadata,
+            scheduler_output=scheduler_output,
+            spec_decode_metadata=None,
+            spec_decode_common_attn_metadata=MagicMock(),
+            positions=torch.arange(3),
+            num_scheduled_tokens=3,
+            hidden_states=torch.zeros((3, 4)),
+        )
+
+        self.assertIs(runner._draft_probs, draft_probs)
+        self.assertEqual(runner._draft_prob_req_ids, ["req_c", "req_a", "req_b"])
+
+        runner.input_batch.req_ids = ["req_a", "req_b", "req_c"]
+        runner.rejection_sampler = MagicMock(return_value="sampler_output")
+        runner.sampler = MagicMock()
+        spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+            [[1, 2], [], [3]],
+            device=torch.device("cpu"),
+        )
+        output = NPUModelRunner._sample(
+            runner,
+            torch.randn(6, 4),
+            spec_decode_metadata,
+        )
+
+        self.assertEqual(output, "sampler_output")
+        passed_draft_probs = runner.rejection_sampler.call_args.args[1]
+        expected_draft_probs = torch.cat(
+            [
+                draft_probs[1, :2],
+                draft_probs[0, :1],
+            ],
+            dim=0,
+        )
+        self.assertTrue(torch.equal(passed_draft_probs, expected_draft_probs))
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.logger.warning",
+    )
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.lmhead_tp_enable",
+        return_value=False,
+    )
+    def test_mixed_batch_fills_missing_padding_probs(
+        self,
+        _mock_lmhead_tp_enable,
+        mock_warning,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.input_batch = SimpleNamespace(
+            req_ids=["req_cached", "req_padding"],
+            sampling_metadata=SimpleNamespace(top_k=None),
+            update_async_output_token_ids=MagicMock(),
+        )
+        cached_probs = torch.arange(3 * 4, dtype=torch.float32).reshape(1, 3, 4)
+        runner._draft_probs = cached_probs
+        runner._draft_prob_req_ids = ["req_cached"]
+        runner.rejection_sampler = MagicMock(return_value="sampler_output")
+        spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+            [[1, 2], [-1, -1]],
+            device=torch.device("cpu"),
+        )
+
+        output = NPUModelRunner._sample(
+            runner,
+            torch.randn(6, 4),
+            spec_decode_metadata,
+            {"req_padding": 2},
+        )
+
+        self.assertEqual(output, "sampler_output")
+        passed_draft_probs = runner.rejection_sampler.call_args.args[1]
+        expected_draft_probs = torch.cat(
+            [cached_probs[0, :2], torch.zeros((2, 4))],
+            dim=0,
+        )
+        self.assertTrue(torch.equal(passed_draft_probs, expected_draft_probs))
+        mock_warning.assert_not_called()
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.logger.warning",
+    )
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.lmhead_tp_enable",
+        return_value=False,
+    )
+    def test_mixed_batch_warns_for_missing_real_draft_probs(
+        self,
+        _mock_lmhead_tp_enable,
+        mock_warning,
+    ):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.input_batch = SimpleNamespace(
+            req_ids=["req_cached", "req_padding", "req_missing"],
+            sampling_metadata=SimpleNamespace(top_k=None),
+            update_async_output_token_ids=MagicMock(),
+        )
+        runner._draft_probs = torch.ones((1, 3, 4))
+        runner._draft_prob_req_ids = ["req_cached"]
+        runner.rejection_sampler = MagicMock(return_value="sampler_output")
+        spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+            [[1], [-1], [2]],
+            device=torch.device("cpu"),
+        )
+
+        output = NPUModelRunner._sample(
+            runner,
+            torch.randn(6, 4),
+            spec_decode_metadata,
+            {"req_padding": 1},
+        )
+
+        self.assertEqual(output, "sampler_output")
+        self.assertIsNone(runner.rejection_sampler.call_args.args[1])
+        mock_warning.assert_called_once()
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

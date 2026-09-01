@@ -234,6 +234,29 @@ def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     return hadamard_transform_ref(x, scale=hidden_size**-0.5)
 
 
+def apply_quarot_block_rotation(
+    x: torch.Tensor,
+    rotation_blocks: torch.Tensor,
+    *,
+    transpose: bool = False,
+) -> torch.Tensor:
+    """Apply Q (or Q^T) without materializing the full hidden-size matrix.
+
+    DSV4's global rotation consists of independent square blocks. Reshaping
+    the hidden dimension exposes those blocks as a batch of small matmuls.
+    """
+    num_blocks, block_size, block_width = rotation_blocks.shape
+    if block_size != block_width or x.shape[-1] != num_blocks * block_size:
+        raise ValueError(
+            "QuaRot block shape is incompatible with the hidden dimension: "
+            f"hidden={x.shape[-1]}, blocks={tuple(rotation_blocks.shape)}"
+        )
+    matrices = rotation_blocks.transpose(-1, -2) if transpose else rotation_blocks
+    x_blocks = x.reshape(-1, num_blocks, block_size)
+    rotated = torch.matmul(x_blocks.unsqueeze(-2), matrices).squeeze(-2)
+    return rotated.reshape(*x.shape)
+
+
 def precompute_freqs_cis_cpu(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow) -> torch.Tensor:
     """
     Precomputes frequency-based complex exponential values for rotary positional embeddings.
@@ -719,6 +742,7 @@ class DeepseekV4Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        is_draft_layer: bool = False,
     ) -> None:
         super().__init__()
         layer_idx = int(prefix.split(sep=".")[-2])
@@ -740,17 +764,11 @@ class DeepseekV4Attention(nn.Module):
         self.norm_eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
         self.enable_dsa_cp = enable_dsa_cp()
+        self.replicated_wo = self.enable_dsa_cp and get_ascend_config().eliminate_dsa_cp_comm
 
         attn_sink_heads = self.n_heads if self.enable_dsa_cp else self.n_local_heads
         self.attn_sink = nn.Parameter(torch.empty(attn_sink_heads, dtype=torch.float32))
-        self.wq_a = ReplicatedLinear(
-            self.dim,
-            self.q_lora_rank,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wq_a",
-            return_bias=False,
-        )
+
         self.q_norm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
         self.q_norm_without_weight = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
         wq_b_cls = ReplicatedLinear if self.enable_dsa_cp else ColumnParallelLinear
@@ -763,16 +781,34 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
         )
 
-        self.wkv = ReplicatedLinear(
+        # Keep a redundant KV-only projection for draft context KV
+        # precomputation; regular draft attention uses wq_a_kv below.
+        if is_draft_layer:
+            self.wkv = ReplicatedLinear(
+                self.dim,
+                self.head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.wkv",
+                return_bias=False,
+            )
+        else:
+            self.wkv = None
+
+        self.wq_a = None
+        self.wq_a_kv = MergedColumnParallelLinear(
             self.dim,
-            self.head_dim,
+            [self.q_lora_rank, self.head_dim],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.wkv",
+            disable_tp=True,
+            prefix=f"{prefix}.wq_a_kv",
             return_bias=False,
         )
+
         self.kv_norm = RMSNorm(self.head_dim, self.norm_eps)
-        self.wo_a = ColumnParallelLinear(
+        wo_a_linear_class = ReplicatedLinear if self.replicated_wo else ColumnParallelLinear
+        self.wo_a = wo_a_linear_class(
             self.n_heads * self.head_dim // self.n_groups,
             self.n_groups * config.o_lora_rank,
             bias=False,
@@ -780,7 +816,8 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_a",
             return_bias=False,
         )
-        self.wo_b = RowParallelLinear(
+        wo_b_linear_class = ReplicatedLinear if self.replicated_wo else RowParallelLinear
+        self.wo_b = wo_b_linear_class(
             self.n_groups * config.o_lora_rank,
             self.dim,
             bias=False,
@@ -869,6 +906,7 @@ class DeepseekV4Attention(nn.Module):
             q_norm_without_weight=self.q_norm_without_weight,
             wq_b=self.wq_b,
             wkv=self.wkv,
+            wq_a_kv=self.wq_a_kv,
             kv_norm=self.kv_norm,
             wo_a=self.wo_a,
             wo_b=self.wo_b,
@@ -946,6 +984,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            is_draft_layer=is_draft_layer,
         )
 
         self.mlp = DeepseekV4MoE(
@@ -1218,6 +1257,7 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle3):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "wq_a_kv": ["wq_a", "wkv"],
     }
     model_cls = DeepseekV4Model
 
@@ -1238,6 +1278,9 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             )
         else:
             self.lm_head = PPMissingLayer()
+        # Populated only when the target aliases the unrotated DSpark head.
+        # This is runtime boundary metadata, not a checkpoint parameter.
+        self.register_buffer("_dspark_lm_head_transform_blocks", None, persistent=False)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
         # Set MoE hyperparameters
@@ -1282,8 +1325,42 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        if self._dspark_lm_head_transform_blocks is not None:
+            # The checkpoint relation is W_target = (W_draft * g) @ Q.
+            # Q^T and g are already folded into the block transform below,
+            # so the online boundary only needs one block matmul.
+            input_dtype = hidden_states.dtype
+            hidden_states = apply_quarot_block_rotation(
+                hidden_states.float(),
+                self._dspark_lm_head_transform_blocks,
+            ).to(input_dtype)
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def configure_dspark_shared_lm_head(
+        self,
+        rotation_blocks: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> None:
+        """Precompute the target-side transform needed by the shared DSpark head."""
+        hidden_size = self.config.hidden_size
+        if rotation_blocks.ndim != 3 or rotation_blocks.shape[1] != rotation_blocks.shape[2]:
+            raise ValueError(f"Invalid QuaRot blocks: {tuple(rotation_blocks.shape)}")
+        if (
+            rotation_blocks.shape[0] * rotation_blocks.shape[1] != hidden_size
+            or scale.shape != (hidden_size,)
+        ):
+            raise ValueError(
+                "QuaRot lm_head boundary is incompatible with the model hidden size: "
+                f"hidden={hidden_size}, blocks={tuple(rotation_blocks.shape)}, scale={tuple(scale.shape)}"
+            )
+        # (x @ Q^T) * g = x @ (Q^T @ diag(g)). Scale the output columns of
+        # each transposed block once during loading instead of on every token.
+        num_blocks, block_size, _ = rotation_blocks.shape
+        scale_blocks = scale.to(dtype=torch.float32).reshape(num_blocks, 1, block_size)
+        self._dspark_lm_head_transform_blocks = (
+            rotation_blocks.to(dtype=torch.float32).transpose(-1, -2) * scale_blocks
+        ).contiguous()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
@@ -1313,6 +1390,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("self_attn.wq_a_kv", "self_attn.wq_a", 0),
+            ("self_attn.wq_a_kv", "self_attn.wkv", 1),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales

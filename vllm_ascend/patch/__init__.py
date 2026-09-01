@@ -32,8 +32,7 @@
 # =================
 # Entries are listed in alphabetical order by file name.
 #
-# ** 1. Files: platform/patch_async_scheduler.py, platform/patch_balance_schedule.py,
-#              platform/patch_kv_delivery_preemption.py**
+# ** 1. File: platform/patch_balance_schedule.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
 #      `vllm.v1.core.sched.scheduler.Scheduler`
@@ -48,39 +47,6 @@
 #       https://github.com/vllm-project/vllm/pull/29721
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
-#
-#   2. `vllm.v1.core.sched.async_scheduler.AsyncScheduler._update_request_with_output`
-#    Why:
-#       vLLM #48245 adds lossless stale-output handling for async scheduling.
-#       AsyncScheduler owns placeholder accounting, so this method cannot
-#       inherit the implementation from the scheduler patch.
-#    How:
-#       Replace only `_update_request_with_output` with the #48245 version.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/48245
-#    Future Plan:
-#       Remove this patch when the supported vLLM version includes PR #48245.
-#
-#   3. `vllm.v1.core.sched.scheduler.Scheduler`
-#      `vllm.v1.request.Request`
-#      `vllm.distributed.kv_transfer.kv_connector.v1.*`
-#    Why:
-#       vLLM #48245/#50297 prevent preemption from losing or reordering
-#       in-flight output while a producer connector still requires reliable KV
-#       delivery. This correctness requirement is independent of balance
-#       scheduling.
-#    How:
-#       Install `KVDeliveryScheduler` first with all affected scheduler methods
-#       and request/connector contracts. `BalanceScheduler` derives from it and
-#       keeps its own vLLM `v0.26.0`-based balance `schedule()`. When balance
-#       is disabled,
-#       that method delegates to `KVDeliveryScheduler.schedule()`; when enabled,
-#       it runs only the original balance scheduling logic.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/48245
-#       https://github.com/vllm-project/vllm/pull/50297
-#    Future Plan:
-#       Remove this patch when the supported vLLM version includes both PRs.
 #
 # ** 2. File: platform/patch_camem_allocator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -484,96 +450,6 @@
 #       Find a way to support daemon=False in vLLM
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
-#
-# ** 18. File: platform/patch_pp_mtp.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.outputs.ModelRunnerOutput`
-#    Why:
-#       PP + MTP mixed deployment needs the model runner to return the draft
-#       tokens produced for the same scheduler output. Upstream output objects
-#       do not carry `spec_token_ids` on all supported vLLM revisions.
-#    How：
-#       Add a backward-compatible `spec_token_ids` field to `ModelRunnerOutput`
-#       and `EMPTY_MODEL_RUNNER_OUTPUT` when the field is missing.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once the supported vLLM version carries PP-safe
-#       speculative token metadata in `ModelRunnerOutput`.
-#
-#   2. `vllm.v1.engine.core.EngineCore.post_step`
-#    Why:
-#       With PP batch queue, synchronous scheduling can schedule the next batch
-#       before the previous model output is consumed. Calling `post_step` in that
-#       window updates `request.spec_token_ids` from live request state that may
-#       already belong to the newer schedule step.
-#    How：
-#       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
-#       execution and let scheduler output processing perform the spec token
-#       writeback from the corresponding `ModelRunnerOutput`.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch when upstream makes spec token writeback output-owned
-#       for PP batch queue.
-#
-#   3. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
-#      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
-#    Why:
-#       PP async scheduling must not schedule the same decode request again
-#       before the previous output has written sampled/spec tokens back. Without
-#       this request-level in-flight fence, the next step may use stale sampled
-#       tokens and produce incorrect target-model output. Intermediate prefill
-#       chunks do not depend on sampled/spec writeback and should remain
-#       schedulable to keep the PP pipeline filled.
-#    How：
-#       After scheduling, set a temporary decode fence for final prefill/decode
-#       chunks in PP IPC mode. Release the fence in `update_from_output` after
-#       the matching output is processed. For PP + MTP, also filter zero-token
-#       placeholder requests before delegating to upstream scheduler accounting,
-#       then write `request.spec_token_ids` from `model_runner_output.spec_token_ids`.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream supports request-level PP async fences
-#       and output-owned spec token writeback.
-#
-#   4. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
-#    Why:
-#       Upstream PP async scheduling relies on direct PP-rank GPU broadcast for
-#       sampled-token handoff and omits `new_token_ids` from cached request data.
-#       vLLM Ascend routes PP sampled-token handoff through scheduler IPC, so
-#       non-last PP ranks need the previous sampled token in both sync and async
-#       scheduling. This also avoids copying draft tokens as confirmed tokens in
-#       PP + MTP mixed deployment.
-#    How：
-#       Temporarily build cached request data with sync-PP semantics in PP IPC
-#       mode, then fill the last confirmed output token for requests whose
-#       clamped upstream slice is empty.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream provides a scheduler-owned PP sampled
-#       token handoff path that works for both sync and async scheduling.
-#
-#   5. `vllm.config.model.ModelConfig.verify_with_parallel_config`
-#    Why:
-#       Local Eagle/MTP drafters are loaded on the last PP stage rather than
-#       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
-#       validates against `pipeline_parallel_size`, which fails for these drafters
-#       since they run locally with effective PP=1.
-#    How：
-#       Monkey-patch `verify_with_parallel_config` to detect Eagle/MTP drafter
-#       models (by `model_type` and `architectures`) when `runner="draft"` and
-#       `pipeline_parallel_size > 1`. For such configs, call the original verify
-#       with a patched `pipeline_parallel_size=1` copy, preserving normal target-model
-#       validation for non-drafter models.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once upstream vLLM's `ModelConfig.verify_with_parallel_config`
-#       supports local drafter models with PP > 1, or moves the PP validation to a
-#       separate hook that can be overridden per-model-type.
 #
 # ** 19. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

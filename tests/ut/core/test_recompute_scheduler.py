@@ -91,6 +91,7 @@ def test_finish_recomputed_request_uses_normal_abort_cleanup():
     scheduler.ec_connector = None
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
+    scheduler._pending_sampled_token_ids = {}
     scheduler._free_request_blocks = MagicMock()
 
     recomputed_reqs: list[RecomputeReqInfo] = []

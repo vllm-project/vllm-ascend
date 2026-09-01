@@ -18,6 +18,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.abstract import DSAAttentionImpl
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.dsa_compressor import (
+    get_or_compute_compressor_metadata,
+    rotate_activation,
+)
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     maybe_save_kv_layer_to_connector,
@@ -57,63 +61,6 @@ BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
-CompressorMetadataOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-_COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
-
-
-def reset_compressor_metadata_cache() -> None:
-    """Release metadata outputs before a composite forward changes substeps."""
-    get_forward_context().additional_kwargs.pop(_COMPRESSOR_METADATA_CACHE_KEY, None)
-
-
-def get_or_compute_compressor_metadata(
-    metadata: Any,
-    compress_ratio: int,
-) -> CompressorMetadataOutput:
-    """Build compressor metadata once per cache group in the current substep."""
-    forward_context = get_forward_context()
-    cache: dict[tuple[str, type], CompressorMetadataOutput] = forward_context.additional_kwargs.setdefault(
-        _COMPRESSOR_METADATA_CACHE_KEY,
-        {},
-    )
-    cache_group_key = metadata.cache_group_key
-    if not cache_group_key:
-        raise ValueError("DSV4 compressor metadata requires a cache-group key")
-    # The pre-refactor v0.26 DSA path invokes prefill and decode separately
-    # within one mixed-batch forward. They share a cache group but require
-    # different compressor metadata, so keep the metadata phases isolated.
-    cache_key = (cache_group_key, type(metadata))
-    cached_metadata = cache.get(cache_key)
-    if cached_metadata is not None:
-        return cached_metadata
-
-    assert metadata.full_compress_cos is not None
-    assert metadata.full_compress_sin is not None
-    assert metadata.num_compressed_tokens is not None
-    assert metadata.start_pos is not None
-    assert metadata.num_reqs_actual is not None
-    full_compress_cos = metadata.full_compress_cos.view(
-        metadata.full_compress_cos.shape[0],
-        metadata.full_compress_cos.shape[-1],
-    )
-    full_compress_sin = metadata.full_compress_sin.view(
-        metadata.full_compress_sin.shape[0],
-        metadata.full_compress_sin.shape[-1],
-    )
-    computed_metadata = torch.ops._C_ascend.compressor_metadata(
-        full_compress_cos,
-        full_compress_sin,
-        metadata.query_start_loc,
-        metadata.start_pos,
-        metadata.block_table,
-        metadata.block_size,
-        DeviceOperator.get_dsa_compressor_slot_mapping_format(),
-        compress_ratio,
-        metadata.num_compressed_tokens,
-        metadata.num_reqs_actual,
-    )
-    cache[cache_key] = computed_metadata
-    return computed_metadata
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -124,28 +71,6 @@ def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
 
 
 # mypy: disable-error-code="has-type"
-
-
-def hadamard_transform_ref(
-    x: torch.Tensor,
-    hadamard: torch.Tensor,
-    scale: float = 1.0,
-):
-    x_shape = x.shape
-    dim = x.shape[-1]
-    x = x.reshape(-1, dim)
-    log_dim = math.ceil(math.log2(dim))
-    dim_padded = 2**log_dim
-    if dim != dim_padded:
-        x = F.pad(x, (0, dim_padded - dim))
-    out = F.linear(x, hadamard)
-    out = out * scale
-    return out[..., :dim].reshape(*x_shape)
-
-
-def rotate_activation(x: torch.Tensor, hadamard: torch.Tensor) -> torch.Tensor:
-    hidden_size = x.size(-1)
-    return hadamard_transform_ref(x, hadamard=hadamard, scale=hidden_size**-0.5)
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -1561,14 +1486,19 @@ class AscendDSAImpl(DSAAttentionImpl):
         self.wq_a = kwargs["wq_a"]
         self.wq_b = kwargs["wq_b"]
         self.wkv = kwargs["wkv"]
+        self.wq_a_kv = kwargs["wq_a_kv"]
         self.q_norm = kwargs["q_norm"]
         self.q_norm_without_weight = kwargs["q_norm_without_weight"]
         self.kv_norm = kwargs["kv_norm"]
 
+        assert self.wq_a_kv is not None, \
+            "[PERF_DEV] wq_a and wkv must be fused into wq_a_kv"
+
         # CV wrapper: split wq_a/wkv/wq_b into quantize(Vector) + matmul(Cube)
-        self.cv_wq_a = CVLinearWrapper(self.wq_a)
-        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_a = CVLinearWrapper(self.wq_a) if self.wq_a is not None else None
+        self.cv_wkv = CVLinearWrapper(self.wkv) if self.wkv is not None else None
         self.cv_wq_b = CVLinearWrapper(self.wq_b)
+        self.cv_wq_a_kv = CVLinearWrapper(self.wq_a_kv)
 
         self.indexer = kwargs.get("indexer")
         self.compressor = kwargs.get("compressor")
@@ -1608,7 +1538,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         # compress param
         if self.compressor is not None:
             self.compressor_head_dim = self.compressor.head_dim
-            self.compressor_overlap = self.compressor.overlap
             self.compressor_rotate = self.compressor.rotate
 
             self.compressor_ape = self.compressor.ape
@@ -1880,8 +1809,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         """3-block multi-stream: 3-stage CV parallel + serial tail
 
         Block partition (V: Vector, C: Cube, AIV: AI Vector):
-          Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
-          Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
+          Part1: q_quant[V] -> q_a_kv_down[C]
+          Part2: q_norm[V] + q_b_quant[V]
           Part3: q_b_matmul[C]             ||  kv_norm[V] + rope[V] + scatter[AIV]
           Tail:  q_rms[V] + rope[V] (wait for auxiliary stream to complete)
 
@@ -1893,25 +1822,13 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
-        # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
-        q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
+        # Part1: q_quant[V] -> q_a_down[C]
+        q_quant, q_pertoken_scale = self.cv_wq_a_kv.quantize(hidden_states)
 
-        e_q_quant_done = main_stream.record_event()
+        wq_a_kv_result = self.cv_wq_a_kv.matmul(q_quant, q_pertoken_scale)
+        wq_a_result, kv = wq_a_kv_result.split([self.q_lora_rank, self.head_dim], dim=-1)
 
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_q_quant_done)
-            kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
-
-        wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
-        main_stream.wait_stream(aux_stream)
-
-        # Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
-        e_part2_start = main_stream.record_event()
-
-        with npu_stream_switch(aux_stream, enabled=True):
-            torch.npu.current_stream().wait_event(e_part2_start)
-            kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
-
+        # Part2: q_norm[V] + q_b_quant[V]
         if is_prefill:
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
@@ -1925,8 +1842,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             qr = self.q_norm(wq_a_result)
             q_b_quant, q_b_scale = qr, None
             qr_pertoken_scale = None
-
-        main_stream.wait_stream(aux_stream)
 
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
         e_part3_start = main_stream.record_event()
@@ -2018,19 +1933,20 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
         else:
             # mlaprolog
-            share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
+            share_hs_quant = _is_w8a8_dynamic(self.wq_a_kv)
             if share_hs_quant:
                 hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-                q_a = torch_npu.npu_quant_matmul(
+                q_a_kv = torch_npu.npu_quant_matmul(
                     hs_int8,
-                    self.wq_a.weight,
-                    self.wq_a.weight_scale,
+                    self.wq_a_kv.weight,
+                    self.wq_a_kv.weight_scale,
                     pertoken_scale=hs_pertoken_scale,
-                    bias=self.wq_a.bias,
+                    bias=self.wq_a_kv.bias,
                     output_dtype=hidden_states.dtype,
                 )
             else:
-                q_a = self.wq_a(hidden_states)
+                q_a_kv = self.wq_a_kv(hidden_states)
+            q_a, kv = q_a_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
 
             # q
             if _is_w8a8_dynamic(self.wq_b):
@@ -2059,17 +1975,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
             # win kv & tok_dis
-            if share_hs_quant:
-                kv = torch_npu.npu_quant_matmul(
-                    hs_int8,
-                    self.wkv.weight,
-                    self.wkv.weight_scale,
-                    pertoken_scale=hs_pertoken_scale,
-                    bias=self.wkv.bias,
-                    output_dtype=hidden_states.dtype,
-                )
-            else:
-                kv = self.wkv(hidden_states)
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
@@ -2151,7 +2056,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
 
-            coff = 2 if self.compressor_overlap else 1
+            coff = self.compressor.coff
             compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
                 compressor_prefill_metadata,
             )
@@ -2332,23 +2237,25 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             # Share one dynamic-quant of hidden_states between wq_a (main stream)
             # and wkv (attention stream) when both sides are W8A8 dynamic.
-            share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
+            share_hs_quant = _is_w8a8_dynamic(self.wq_a_kv)
             if share_hs_quant:
                 hs_int8, hs_pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
             # q
             if _is_w8a8_dynamic(self.wq_b):
                 if share_hs_quant:
-                    q_a = torch_npu.npu_quant_matmul(
+                    q_a_kv = torch_npu.npu_quant_matmul(
                         hs_int8,
-                        self.wq_a.weight,
-                        self.wq_a.weight_scale,
+                        self.wq_a_kv.weight,
+                        self.wq_a_kv.weight_scale,
                         pertoken_scale=hs_pertoken_scale,
-                        bias=self.wq_a.bias,
+                        bias=self.wq_a_kv.bias,
                         output_dtype=hidden_states.dtype,
                     )
                 else:
-                    q_a = self.wq_a(hidden_states)
+                    q_a_kv = self.wq_a_kv(hidden_states)
+                q_a, kv = q_a_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+
                 qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                     q_a, self.q_norm.weight, epsilon=self.eps
                 )
@@ -2387,17 +2294,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
 
             # win kv & tok_dis
-            if share_hs_quant:
-                kv = torch_npu.npu_quant_matmul(
-                    hs_int8,
-                    self.wkv.weight,
-                    self.wkv.weight_scale,
-                    pertoken_scale=hs_pertoken_scale,
-                    bias=self.wkv.bias,
-                    output_dtype=hidden_states.dtype,
-                )
-            else:
-                kv = self.wkv(hidden_states)
             kv = self.kv_norm(kv)
             assert self.rope_head_dim is not None
             kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
@@ -2449,7 +2345,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
 
-            coff = 2 if self.compressor_overlap else 1
+            coff = self.compressor.coff
             compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
                 compressor_decode_metadata,
             )
@@ -2648,7 +2544,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
 
         q = rotate_activation(q, indexer_kv_scale_metadata.hadamard)
-        coff = 2 if self.compressor_overlap else 1
+        coff = self.indexer.compressor.coff
 
         if with_prefill:
             indexer_state_prefill_metadata = _require_prefill_metadata(indexer_kv_state_metadata)
@@ -2874,7 +2770,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             qr_quant_ready, qr_scale_ready = self.cv_inderxer_wq_b.quantize(qr)
 
-        coff = 2 if self.compressor_overlap else 1
+        coff = self.indexer.compressor.coff
 
         if with_prefill:
             indexer_state_prefill_metadata = _require_prefill_metadata(indexer_kv_state_metadata)

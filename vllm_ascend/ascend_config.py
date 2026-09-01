@@ -176,6 +176,20 @@ class AscendConfig:
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
 
+        self.eliminate_dsa_cp_comm = additional_config.get("eliminate_dsa_cp_comm", False)
+        if self.eliminate_dsa_cp_comm:
+            if not additional_config.get("enable_dsa_cp", False):
+                logger.warning_once(
+                    "eliminate_dsa_cp_comm is enabled, but enable_dsa_cp is not. "
+                    "eliminate_dsa_cp_comm has no effect without enable_dsa_cp."
+                )
+            else:
+                logger.info_once(
+                    "eliminate_dsa_cp_comm is enabled. DSA CP will skip all-to-all communication "
+                    "for wo_a and wo_b by replicating their weights. This reduces communication "
+                    "at the cost of additional device memory and may reduce KV cache capacity."
+                )
+
         self.enable_fused_mc2 = self._get_config_value(
             additional_config,
             "enable_fused_mc2",
@@ -347,6 +361,8 @@ class AscendConfig:
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
+
+        self.reuse_dsv4_lm_head = additional_config.get("reuse_dsv4_lm_head", False)
 
         # Enable Block Verify and Entropy Verify in Rejection Sampler
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})

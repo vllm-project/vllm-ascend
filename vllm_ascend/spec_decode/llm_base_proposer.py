@@ -390,7 +390,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         from safetensors.torch import load_file
 
-        descriptor_path = Path(target_model_path) / "quant_model_description.json"
+        model_path = Path(target_model_path)
+        descriptor_path = model_path / "quant_model_description.json"
         if not descriptor_path.exists():
             logger.info(
                 "[spec_decode/quarot] No descriptor found at %s; treating the target as non-QuaRot.",
@@ -414,13 +415,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             return None
 
-        rotation_path = Path(target_model_path) / relative_path
+        rotation_path = model_path / relative_path
+        default_rotation_path = model_path / "optional/quarot.safetensors"
         if not rotation_path.exists():
-            logger.warning(
-                "[spec_decode/quarot] Rotation file %s is missing; skipping draft alignment.",
-                rotation_path,
-            )
-            return None
+            if default_rotation_path.exists():
+                logger.warning(
+                    "[spec_decode/quarot] Configured rotation file %s is missing; using %s.",
+                    rotation_path,
+                    default_rotation_path,
+                )
+                rotation_path = default_rotation_path
+            else:
+                logger.warning(
+                    "[spec_decode/quarot] Rotation file %s is missing; skipping draft alignment.",
+                    rotation_path,
+                )
+                return None
         logger.info("[spec_decode/quarot] Loading global rotation from %s.", rotation_path)
         try:
             return load_file(rotation_path)["global_rotation"]
@@ -665,10 +675,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     " lm_head."
                 )
             elif draft_has_own_lm_head and self.method == "dspark":
-                logger.info(
-                    "[spec_decode/base] Detected DSpark model with distinct lm_head weights."
-                    " Keeping separate lm_head weights from the target model."
-                )
+                maybe_share = getattr(self, "_maybe_share_dspark_lm_head", None)
+                if maybe_share is None or not maybe_share(model):
+                    logger.info(
+                        "[spec_decode/base] Detected DSpark model with distinct lm_head weights."
+                        " Keeping separate lm_head weights from the target model."
+                    )
             else:
                 logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
                 target_lm_head = None
@@ -1413,15 +1425,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # We changed `flash_comm_v1_enabled` to avoid `markov_emb` from being split.
                 with _disable_flash_comm_v1_context():
                     raw_logits = self.model.compute_logits(sample_hidden_states)
-                    logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
-                    num_blk = logits.shape[0]
-                    draft_token_ids = self._dspark_draft_buffer[:num_blk]
-                    draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
-                    for idx in range(self.num_speculative_tokens):
-                        markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
-                        logits_bias = self.model.markov_bias(markov_emb)
-                        logits[:, idx].add_(logits_bias)
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                    draft_token_ids = self._sample_dspark_tokens(raw_logits)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1528,7 +1532,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # A merged speculative forward reuses one ForwardContext while
                 # each substep has different compressor inputs. Drop the prior
                 # substep's outputs before entering the next model invocation.
-                from vllm_ascend.attention.dsa_v1 import reset_compressor_metadata_cache
+                from vllm_ascend.attention.dsa_compressor import (
+                    reset_compressor_metadata_cache,
+                )
 
                 reset_compressor_metadata_cache()
 

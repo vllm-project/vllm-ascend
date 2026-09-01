@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import Any
 
 import torch
+import torch.nn as nn
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
+from vllm_ascend.models.deepseek_v4 import apply_quarot_block_rotation
+from vllm_ascend.models.deepseek_v4_dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.transformers_utils.configs.kimi_k3 import (
@@ -52,10 +58,16 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "additional_config.finegrained_tp_config."
                 "lmhead_tensor_parallel_size=0."
             )
-        if vllm_config.speculative_config.draft_sample_method == "probabilistic":
+        draft_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        target_vocab_size = vllm_config.model_config.get_vocab_size()
+        draft_vocab_size = getattr(draft_hf_config, "draft_vocab_size", None) or getattr(
+            draft_hf_config, "vocab_size", target_vocab_size
+        )
+        if draft_vocab_size != target_vocab_size:
             raise ValueError(
-                "DSpark probabilistic draft sampling is not supported on the v1 "
-                "model runner; use greedy (the default) instead."
+                "DSpark on the v1 model runner does not support reduced-vocabulary "
+                f"drafts: draft_vocab_size={draft_vocab_size}, "
+                f"target_vocab_size={target_vocab_size}."
             )
         super().__init__(vllm_config, device, runner=runner)
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
@@ -67,6 +79,17 @@ class AscendDSparkProposer(AscendDflashProposer):
         blk = 1 + self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
+        self._dspark_draft_probs: torch.Tensor | None = None
+        if self._enable_probabilistic_draft_probs:
+            self._dspark_draft_probs = torch.empty(
+                (
+                    self.max_batch_size,
+                    self.num_speculative_tokens,
+                    vllm_config.model_config.get_vocab_size(),
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
         # DSpark is not supported in vllm v1, so related property needs to be reset here.
         del self.hidden_size, self.hidden_states, self._dflash_hidden_states  # type: ignore[has-type]
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
@@ -126,6 +149,202 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
+
+    @staticmethod
+    def _extract_quarot_blocks(rotation: torch.Tensor, block_size: int = 32) -> torch.Tensor:
+        """Compact a dense block-diagonal Q before retaining it at runtime."""
+        hidden_size = rotation.shape[0]
+        if rotation.ndim != 2 or rotation.shape[1] != hidden_size or hidden_size % block_size != 0:
+            raise ValueError(
+                f"Expected a square block-diagonal QuaRot matrix with block size {block_size}, "
+                f"got {tuple(rotation.shape)}"
+            )
+        num_blocks = hidden_size // block_size
+        rotation_4d = rotation.reshape(num_blocks, block_size, num_blocks, block_size)
+        indices = torch.arange(num_blocks, device=rotation.device)
+        blocks = rotation_4d[indices, :, indices, :].contiguous()
+        total_norm_sq = torch.linalg.vector_norm(rotation.float()).square()
+        block_norm_sq = torch.linalg.vector_norm(blocks.float()).square()
+        off_diagonal_ratio = torch.sqrt(
+            torch.clamp(total_norm_sq - block_norm_sq, min=0) / total_norm_sq
+        )
+        if off_diagonal_ratio.item() > 1e-6:
+            raise ValueError(
+                "QuaRot matrix is not block diagonal: "
+                f"off_diagonal_l2_ratio={off_diagonal_ratio.item():.8g}"
+            )
+        return blocks
+
+    @staticmethod
+    def _compute_dspark_lm_head_scale_stats(
+        target_weight: torch.Tensor,
+        draft_weight: torch.Tensor,
+        rotation_blocks: torch.Tensor,
+        chunk_rows: int = 256,
+    ) -> torch.Tensor:
+        """Compute this vocab shard's least-squares numerator and denominator.
+
+        With T = (D * g) @ Q, T @ Q^T / diag(Q @ Q^T) recovers D * g.
+        Summing D * (D * g) and D^2 over vocab rows gives two hidden-size
+        vectors from which g can be recovered after TP aggregation.
+        """
+        if target_weight.shape != draft_weight.shape:
+            raise ValueError(
+                "Target and draft lm_head shards must have the same shape: "
+                f"target={tuple(target_weight.shape)}, draft={tuple(draft_weight.shape)}"
+            )
+        hidden_size = target_weight.shape[1]
+        if rotation_blocks.shape[0] * rotation_blocks.shape[1] != hidden_size:
+            raise ValueError(
+                "QuaRot blocks do not cover lm_head hidden size: "
+                f"hidden={hidden_size}, blocks={tuple(rotation_blocks.shape)}"
+            )
+
+        gram = torch.matmul(rotation_blocks.float(), rotation_blocks.float().transpose(-1, -2))
+        gram_diagonal = torch.diagonal(gram, dim1=-2, dim2=-1)
+        off_diagonal = gram - torch.diag_embed(gram_diagonal)
+        if off_diagonal.abs().max().item() > 1e-5 * gram_diagonal.abs().max().item():
+            raise ValueError("QuaRot blocks are not orthogonal enough to recover the folded lm_head scale")
+        gram_diagonal = gram_diagonal.reshape(hidden_size)
+
+        # Chunk over vocab rows to avoid materializing a full FP32 head shard.
+        stats = torch.zeros((2, hidden_size), dtype=torch.float32, device=target_weight.device)
+        with torch.no_grad():
+            for start in range(0, target_weight.shape[0], chunk_rows):
+                end = min(start + chunk_rows, target_weight.shape[0])
+                draft_chunk = draft_weight[start:end].float()
+                unrotated_target = apply_quarot_block_rotation(
+                    target_weight[start:end].float(),
+                    rotation_blocks,
+                    transpose=True,
+                )
+                unrotated_target.div_(gram_diagonal)
+                stats[0].add_((draft_chunk * unrotated_target).sum(dim=0))
+                stats[1].add_(draft_chunk.square().sum(dim=0))
+        return stats
+
+    @classmethod
+    def _recover_dspark_lm_head_scale(
+        cls,
+        target_weight: torch.Tensor,
+        draft_weight: torch.Tensor,
+        rotation_blocks: torch.Tensor,
+        reduce_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Recover one identical g on every rank from vocab-sharded heads."""
+        stats = cls._compute_dspark_lm_head_scale_stats(target_weight, draft_weight, rotation_blocks)
+        if reduce_fn is not None:
+            # Both rows are additive over vocab, so TP communicates only 2H
+            # FP32 values instead of gathering either lm_head shard.
+            stats = reduce_fn(stats)
+        if not torch.all(stats[1] > 0):
+            raise ValueError("Cannot recover folded lm_head scale because a draft weight column is zero")
+        scale = stats[0] / stats[1]
+        if not torch.isfinite(scale).all():
+            raise ValueError("Recovered folded lm_head scale contains non-finite values")
+        return scale
+
+    @staticmethod
+    def _validate_dspark_shared_lm_head(
+        target_weight: torch.Tensor,
+        draft_weight: torch.Tensor,
+        rotation_blocks: torch.Tensor,
+        scale: torch.Tensor,
+        reduce_fn: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    ) -> float:
+        """Check the recovered relation on a small local vocab slice."""
+        sample_rows = min(256, target_weight.shape[0])
+        reconstructed = apply_quarot_block_rotation(
+            draft_weight[:sample_rows].float() * scale,
+            rotation_blocks,
+        )
+        error = reconstructed - target_weight[:sample_rows].float()
+        norm_stats = torch.stack(
+            (
+                error.square().sum(),
+                target_weight[:sample_rows].float().square().sum(),
+            )
+        )
+        if reduce_fn is not None:
+            norm_stats = reduce_fn(norm_stats)
+        return torch.sqrt(norm_stats[0] / norm_stats[1]).item()
+
+    def _maybe_share_dspark_lm_head(self, model: nn.Module) -> bool:
+        if not isinstance(self.model, DSparkDeepseekV4ForCausalLM):
+            return False
+
+        if not get_ascend_config().reuse_dsv4_lm_head:
+            return False
+
+        rotation = getattr(self, "_quarot_rotation", None)
+        draft_lm_head = getattr(self.model, "lm_head", None)
+        target_lm_head = getattr(model, "lm_head", None)
+        configure_target = getattr(model, "configure_dspark_shared_lm_head", None)
+        if rotation is None or draft_lm_head is None or target_lm_head is None or not callable(configure_target):
+            return False
+        target_weight = getattr(target_lm_head, "weight", None)
+        draft_weight = getattr(draft_lm_head, "weight", None)
+        if not isinstance(target_weight, nn.Parameter) or not isinstance(draft_weight, nn.Parameter):
+            return False
+
+        target_group = getattr(target_lm_head, "comm_group", None)
+        draft_group = getattr(draft_lm_head, "comm_group", None)
+        if target_group is None or draft_group is None:
+            logger.warning("[spec_decode/quarot] DSV4 lm_head modules do not expose their TP communication groups.")
+            return False
+        if target_group.world_size != draft_group.world_size or getattr(
+            target_group, "unique_name", None
+        ) != getattr(draft_group, "unique_name", None):
+            logger.warning(
+                "[spec_decode/quarot] Target and draft lm_head TP groups differ; keeping separate weights."
+            )
+            return False
+
+        try:
+            # Use the head's own group: it is the regular TP group normally,
+            # and the fine-grained lmhead-TP group when that feature is active.
+            rotation_blocks = self._extract_quarot_blocks(rotation)
+            reduce_fn = target_group.all_reduce if target_group.world_size > 1 else None
+            scale = self._recover_dspark_lm_head_scale(
+                target_weight,
+                draft_weight,
+                rotation_blocks,
+                reduce_fn,
+            )
+            relative_error = self._validate_dspark_shared_lm_head(
+                target_weight,
+                draft_weight,
+                rotation_blocks,
+                scale,
+                reduce_fn,
+            )
+            if relative_error > 1e-2:
+                logger.warning(
+                    "[spec_decode/quarot] Recovered DSV4 lm_head scale failed validation "
+                    "(relative_l2=%.8g); keeping separate weights.",
+                    relative_error,
+                )
+                return False
+            configure_target(rotation_blocks, scale)
+            # Alias only the Parameter. Each module keeps its own quantization
+            # method and communication metadata, while the large storage is shared.
+            target_lm_head.weight = draft_lm_head.weight
+        except (RuntimeError, ValueError) as error:
+            logger.warning(
+                "[spec_decode/quarot] Failed to share DSV4 lm_head after recovering its folded scale: %s",
+                error,
+            )
+            return False
+
+        logger.info(
+            "[spec_decode/quarot] Sharing DSV4 target/draft lm_head weight after TP-reduced scale recovery "
+            "(tp_size=%d, relative_l2=%.8g, scale_min=%.8g, scale_max=%.8g).",
+            target_group.world_size,
+            relative_error,
+            scale.min().item(),
+            scale.max().item(),
+        )
+        return True
 
     @staticmethod
     def _resolve_kernel_block_size(
@@ -256,6 +475,55 @@ class AscendDSparkProposer(AscendDflashProposer):
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
+
+    def _sample_dspark_tokens(
+        self,
+        raw_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the Markov correction and sample one DSpark block."""
+        sampling_metadata = self.runner.input_batch.sampling_metadata
+        logits = raw_logits.view(
+            -1,
+            self.num_speculative_tokens,
+            raw_logits.shape[-1],
+        )
+        num_reqs = logits.shape[0]
+        draft_token_ids = self._dspark_draft_buffer[:num_reqs]
+        draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_reqs])
+
+        self._last_draft_probs = None
+        use_probabilistic = (
+            self._dspark_draft_probs is not None
+            and sampling_metadata is not None
+            and not sampling_metadata.all_greedy
+        )
+        draft_probs = None
+        if use_probabilistic:
+            assert self._dspark_draft_probs is not None
+            if logits.shape[-1] != self._dspark_draft_probs.shape[-1]:
+                raise RuntimeError(
+                    "DSpark draft/target vocabulary mismatch for probabilistic "
+                    f"sampling: draft={logits.shape[-1]}, "
+                    f"target={self._dspark_draft_probs.shape[-1]}"
+                )
+            draft_probs = self._dspark_draft_probs[:num_reqs]
+
+        for idx in range(self.num_speculative_tokens):
+            markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+            logits[:, idx].add_(self.model.markov_bias(markov_emb))
+            if draft_probs is None:
+                next_token_ids = logits[:, idx].argmax(dim=-1)
+            else:
+                next_token_ids, probs = self._sample_from_logits(
+                    logits[:, idx],
+                    sampling_metadata,
+                )
+                assert probs is not None
+                draft_probs[:, idx].copy_(probs)
+            draft_token_ids[:, idx + 1].copy_(next_token_ids)
+
+        self._last_draft_probs = draft_probs
+        return draft_token_ids
 
     def set_inputs_first_pass(
         self,

@@ -41,11 +41,12 @@ from vllm_ascend.utils import (
 class DSAModules:
     """Modules used in SFA V2."""
 
-    wq_a: torch.nn.Module
+    wq_a: torch.nn.Module | None
     q_norm: torch.nn.Module
     q_norm_without_weight: torch.nn.Module
     wq_b: torch.nn.Module
-    wkv: torch.nn.Module
+    wkv: torch.nn.Module | None
+    wq_a_kv: torch.nn.Module
     kv_norm: torch.nn.Module
     wo_a: torch.nn.Module
     wo_b: torch.nn.Module
@@ -101,6 +102,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.q_norm_without_weight = dsa_modules.q_norm_without_weight
         self.wq_b = dsa_modules.wq_b
         self.wkv = dsa_modules.wkv
+        self.wq_a_kv = dsa_modules.wq_a_kv
         self.kv_norm = dsa_modules.kv_norm
         self.wo_a = dsa_modules.wo_a
         self.wo_b = dsa_modules.wo_b
@@ -135,6 +137,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             wq_a=self.wq_a,
             wq_b=self.wq_b,
             wkv=self.wkv,
+            wq_a_kv=self.wq_a_kv,
             q_norm=self.q_norm,
             q_norm_without_weight=self.q_norm_without_weight,
             kv_norm=self.kv_norm,
