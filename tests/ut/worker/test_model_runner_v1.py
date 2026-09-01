@@ -140,7 +140,12 @@ class TestDeviceMetadataFullGraphWait(unittest.TestCase):
         runner.use_aux_hidden_state_outputs = False
         runner.use_compress = False
         runner._finalize_dump_data = MagicMock()
-        runner._model_forward = MagicMock(side_effect=lambda *args: events.append("forward") or torch.zeros((4, 1)))
+
+        def model_forward(*args):
+            events.append("forward")
+            return torch.zeros((4, 1))
+
+        runner._model_forward = MagicMock(side_effect=model_forward)
         executor = MagicMock(submission_in_flight=True)
         executor.wait_all.side_effect = lambda: events.append("wait_all")
         executor.release.side_effect = lambda: events.append("release")
