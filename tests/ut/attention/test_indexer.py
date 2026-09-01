@@ -17,7 +17,13 @@ def test_sfa_indexer_backend_contract():
     assert AscendSFAIndexerBackend.accept_output_buffer
     assert AscendSFAIndexerBackend.get_name() == "ASCEND_SFA_INDEXER"
     assert AscendSFAIndexerBackend.get_builder_cls() is AscendSFAIndexerMetadataBuilder
-    assert AscendSFAIndexerBackend.get_kv_cache_shape(8, 128, 1, 160) == (
+    assert AscendSFAIndexerBackend.get_kv_cache_shape(
+        8,
+        128,
+        1,
+        160,
+        cache_dtype_str="auto",
+    ) == (
         8,
         128,
         1,

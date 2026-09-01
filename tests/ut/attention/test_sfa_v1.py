@@ -72,7 +72,13 @@ class TestAscendSFABackend(TestBase):
         self.assertEqual(AscendSFABackend.get_builder_cls(), AscendSFAMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
-        result = AscendSFABackend.get_kv_cache_shape(2, 4, 8, 128)
+        result = AscendSFABackend.get_kv_cache_shape(
+            2,
+            4,
+            8,
+            128,
+            cache_dtype_str="auto",
+        )
         self.assertEqual(result, (2, 4, 8, 128))
 
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")

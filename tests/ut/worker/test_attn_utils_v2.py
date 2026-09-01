@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
-from zlib import adler32
 
 import numpy as np
 import pytest
@@ -61,6 +60,7 @@ def test_mrv2_sparse_mla_spec_is_host_resident(monkeypatch):
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto"),
         model_config=SimpleNamespace(dtype=torch.bfloat16),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
     monkeypatch.setattr(attn_utils, "MLAAttention", FakeMLAAttention)
     monkeypatch.setattr(
@@ -75,36 +75,6 @@ def test_mrv2_sparse_mla_spec_is_host_resident(monkeypatch):
     spec = specs["model.layers.0.self_attn.attn"]
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.store_on_host is True
-
-
-def test_mrv2_sparse_metadata_maps_requests_and_tokens():
-    model_state = AscendModelState.__new__(AscendModelState)
-    model_state.sparse_kv_offload_enabled = True
-    model_state._offload_req_ids_cpu = torch.zeros(4, dtype=torch.int64)
-    model_state._offload_token_to_req_cpu = torch.zeros(8, dtype=torch.int32)
-    model_state._offload_req_ids_tensor = torch.zeros(4, dtype=torch.int64)
-    model_state._offload_token_to_req = torch.zeros(8, dtype=torch.int32)
-    input_batch = SimpleNamespace(
-        req_ids=["request-a", "request-b"],
-        num_reqs=2,
-        num_tokens=3,
-        query_start_loc_np=np.array([0, 2, 3], dtype=np.int32),
-    )
-
-    req_ids, token_to_req = model_state._prepare_sparse_kv_offload_metadata(
-        input_batch,
-        num_reqs=4,
-        num_tokens=5,
-    )
-
-    assert req_ids is not None
-    assert token_to_req is not None
-    assert req_ids[:2].tolist() == [
-        adler32(b"request-a"),
-        adler32(b"request-b"),
-    ]
-    assert req_ids[2:].tolist() == [0, 0]
-    assert token_to_req.tolist() == [0, 0, 1, 0, 0]
 
 
 @pytest.mark.parametrize(
@@ -225,6 +195,14 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         attn_utils,
         "get_current_vllm_config",
         lambda: vllm_config,
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            is_sparse_li_c8_layer=lambda _layer_name: False,
+        ),
     )
     monkeypatch.setattr(
         upstream_attn_utils,
@@ -527,6 +505,8 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=torch.arange(8, dtype=torch.int32),
             attn_state=None,
+            offload_req_ids=None,
+            offload_token_to_req=None,
         )
         metadata = model_state.prepare_attn(
             input_batch=input_batch,

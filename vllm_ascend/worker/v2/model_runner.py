@@ -73,7 +73,11 @@ if not vllm_version_is("0.27.1"):
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.input_batch import (
+    AscendInputBatch,
+    AscendInputBuffers,
+    prepare_sparse_kv_offload_metadata,
+)
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
@@ -197,6 +201,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
+            enable_sparse_kv_offload=self.sparse_kv_offload_enabled,
         )
 
         # we need to copy num_computed_tokens back to cpu to help
@@ -547,6 +552,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+            input_batch = prepare_sparse_kv_offload_metadata(input_batch, self.input_buffers)
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
@@ -768,6 +774,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+            input_batch = prepare_sparse_kv_offload_metadata(input_batch, self.input_buffers)
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)

@@ -190,7 +190,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             target_attn_groups,
         )
 
-        if getattr(model_state, "_offload_req_ids_tensor", None) is not None:
+        if getattr(target_input_buffers, "offload_req_ids", None) is not None:
             # Draft decode always has one token per request. Keep the mapping
             # at a stable address so captured graphs can reuse it at replay.
             self._offload_draft_token_to_req = torch.arange(
@@ -392,7 +392,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_tokens_padded: int,
         num_query_per_req: int,
     ) -> None:
-        req_ids_tensor = getattr(self.model_state, "_offload_req_ids_tensor", None)
+        req_ids_tensor = getattr(self.target_input_buffers, "offload_req_ids", None)
         if req_ids_tensor is None:
             return
         if num_query_per_req != 1 or num_tokens_padded > num_reqs_padded:
@@ -414,7 +414,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             metadata.token_to_req = token_to_req
 
         if not self._offload_draft_metadata_logged:
-            logger.info("Sparse KV offload MTP draft metadata uses ModelRunner V2 model state.")
+            logger.info("Sparse KV offload MTP draft metadata uses ModelRunner V2 input buffers.")
             self._offload_draft_metadata_logged = True
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
