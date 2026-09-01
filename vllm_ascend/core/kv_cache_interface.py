@@ -233,7 +233,14 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(model_version_set) == 1, (
             "All attention layers in the same KV cache group must use the same model version."
         )
-
+        page_size_padded_set = set(spec.page_size_padded for spec in specs)
+        assert len(page_size_padded_set) == 1, (
+            "All attention layers in the same KV cache group must use the same padded page size."
+        )
+        model_version_set = set(spec.model_version for spec in specs)
+        assert len(model_version_set) == 1, (
+            "All attention layers in the same KV cache group must use the same model version."
+        )
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
