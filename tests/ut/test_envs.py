@@ -35,7 +35,9 @@ class TestEnvVariables(TestBase):
                     self.assertEqual(getattr(envs_ascend, var_name), var_handler())
 
                     handler_source = inspect.getsource(var_handler)
-                    if "int(" in handler_source:
+                    if var_name == "VLLM_ASCEND_ENABLE_GMM_SITU_QUANT":
+                        test_vals = ["0", "1"]
+                    elif "int(" in handler_source:
                         test_vals = ["123", "456"]
                     elif "bool(int(" in handler_source:
                         test_vals = ["0", "1"]
@@ -51,6 +53,32 @@ class TestEnvVariables(TestBase):
                         os.environ.pop(var_name, None)
                     else:
                         os.environ[var_name] = original_val
+
+    def test_gmm_situ_quant_binary_env(self):
+        var_name = "VLLM_ASCEND_ENABLE_GMM_SITU_QUANT"
+        original_val = os.environ.get(var_name)
+        try:
+            os.environ.pop(var_name, None)
+            self.assertEqual(envs_ascend.VLLM_ASCEND_ENABLE_GMM_SITU_QUANT, 0)
+
+            for value, expected in (("0", 0), ("1", 1)):
+                with self.subTest(value=value):
+                    os.environ[var_name] = value
+                    self.assertEqual(
+                        envs_ascend.VLLM_ASCEND_ENABLE_GMM_SITU_QUANT,
+                        expected,
+                    )
+
+            for value in ("", "2", "true", "-1"):
+                with self.subTest(value=value):
+                    os.environ[var_name] = value
+                    with self.assertRaisesRegex(ValueError, "must be 0 or 1"):
+                        getattr(envs_ascend, var_name)
+        finally:
+            if original_val is None:
+                os.environ.pop(var_name, None)
+            else:
+                os.environ[var_name] = original_val
 
     def test_dir_and_getattr(self):
         self.assertEqual(sorted(envs_ascend.__dir__()), sorted(self.env_vars))

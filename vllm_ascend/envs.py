@@ -22,6 +22,14 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+
+def _binary_env(name: str, default: str) -> int:
+    value = os.getenv(name, default)
+    if value not in ("0", "1"):
+        raise ValueError(f"{name} must be 0 or 1, but got {value!r}")
+    return int(value)
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -71,6 +79,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable the A5 Kimi K3 W4A8MXFP GMM+SiTU fused operator. Unset/0 disables it;
+    # 1 enables it. This is process-static and requires restart; not sensitive.
+    "VLLM_ASCEND_ENABLE_GMM_SITU_QUANT": lambda: _binary_env("VLLM_ASCEND_ENABLE_GMM_SITU_QUANT", "0"),
 }
 
 # end-env-vars-definition

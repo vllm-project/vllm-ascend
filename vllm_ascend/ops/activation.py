@@ -17,6 +17,8 @@
 
 import torch
 import torch_npu
+from dataclasses import dataclass
+
 from vllm.model_executor.layers.activation import (
     QuickGELU,
     SiluAndMul,
@@ -24,6 +26,14 @@ from vllm.model_executor.layers.activation import (
     SwigluOAIAndMul,
     SwigluStepAndMul,
 )
+
+
+@dataclass
+class SituActivationConfig:
+    """SiTU activation parameters forwarded to the grouped-matmul SiTU-quant op."""
+
+    beta: float = 1.0
+    linear_beta: float = 1.0
 
 
 class AscendQuickGELU(QuickGELU):
