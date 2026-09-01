@@ -842,7 +842,9 @@ class KVCacheRecvingThread(threading.Thread):
 
             def in_partition(metadata_layer_idx: int) -> bool:
                 transformer_layer = (
-                    metadata_layer_idx - self.index_cache_plane_base if is_index_cache_plane else metadata_layer_idx
+                    metadata_layer_idx - self.index_cache_plane_base
+                    if is_index_cache_plane and metadata_layer_idx >= self.index_cache_plane_base
+                    else metadata_layer_idx
                 )
                 return first_layer_index <= transformer_layer < end_layer_index
 
