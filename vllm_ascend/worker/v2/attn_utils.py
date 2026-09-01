@@ -232,8 +232,6 @@ def build_attn_metadata(
     # while Ascend backends (DSA/MLA/SFA) read ``positions`` to seed their
     # static RoPE cos/sin buffers. The metadata is rebuilt with the real
     # positions before every graph replay, so zeros only shape the buffers here.
-    # Any non-capture caller omitting positions is a bug and must fail loudly
-    # rather than silently computing RoPE at position 0.
     if positions is None:
         positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
 
