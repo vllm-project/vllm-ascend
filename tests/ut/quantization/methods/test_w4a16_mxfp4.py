@@ -23,6 +23,7 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         mock_ascend.return_value = create_mock_ascend_config()
         mock_ep.return_value = Mock()
         mock_ensure.return_value = None
+        mock_ep_group.return_value = Mock()
         self.scheme = AscendW4A16MXFP4FusedMoEMethod()
 
     @pytest.mark.skip("Execute after the issue is fixed")
