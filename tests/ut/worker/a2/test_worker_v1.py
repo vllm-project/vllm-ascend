@@ -1742,6 +1742,30 @@ class TestNPUWorker(TestBase):
             )
 
 
+class TestNPUModelRunnerLifecycle(TestBase):
+    def test_shutdown_stops_dynamic_eplb_planner(self):
+        from contextlib import nullcontext
+
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+        from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+        model_runner = NPUModelRunner.__new__(NPUModelRunner)
+        model_runner.eplb_updator = MagicMock()
+
+        with (
+            patch.object(GPUModelRunner, "shutdown") as upstream_shutdown,
+            patch(
+                "vllm_ascend.worker.model_runner_v1._torch_cuda_wrapper",
+                return_value=nullcontext(),
+            ),
+        ):
+            model_runner.shutdown()
+
+        model_runner.eplb_updator.shutdown.assert_called_once_with()
+        upstream_shutdown.assert_called_once_with()
+
+
 class TestNPUWorkerWeightUpdate(TestBase):
     def _make_worker(self, engine=None):
         from vllm_ascend.worker.worker import NPUWorker

@@ -14,7 +14,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from multiprocessing import Process, Queue
+from contextlib import suppress
+from queue import Empty, Full, Queue
+from threading import Event, Thread
 from typing import Any
 
 import numpy as np
@@ -45,14 +47,13 @@ class EplbWorker:
 
     def do_update(self):
         # put data in to queue
-        # in process self.policy.generate_policy()
+        # in background worker self.policy.generate_policy()
         # get epxert table && tensor
 
         # async stream
         # D2D
         # H2D
         # Get initial expert_map
-        torch.set_num_threads(1)
         if self.old_expert_maps is None:
             self.old_expert_maps = self.get_init_expert_maps()
             if self.old_expert_maps is not None:
@@ -107,7 +108,7 @@ class EplbWorker:
 
         update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
-        logger.debug("[eplb/worker] EPLB Process compute complete")
+        logger.debug("[eplb/worker] EPLB planner compute complete")
 
         packed_update_info = self.pack_update_info(update_info)
 
@@ -227,7 +228,7 @@ class EplbWorker:
 
     def fetch_and_sum_load_info(self):
         """
-        Each time the subprocess is awakened, read the latest moe_load
+        Each time the background planner is awakened, read the latest moe_load
         (shape: [num_moe_layers, num_experts_per_layer]) from shared_dict.
         """
         return self.shared_dict.get("moe_load", None)
@@ -334,7 +335,18 @@ class EplbWorker:
         return np.array(hotnesses)
 
 
-class EplbProcess:
+class EplbPlannerThread:
+    """Run the legacy Dynamic EPLB placement policy in a managed thread.
+
+    vLLM workers are daemon processes, so they cannot create the nested Python
+    process previously used by Dynamic EPLB. The placement policy only
+    consumes CPU tensors and Python objects; keeping it in a worker-owned
+    thread preserves asynchronous policy calculation without replacing
+    vLLM's multiprocessing executor.
+    """
+
+    _STOP = object()
+
     def __init__(
         self,
         shared_dict,
@@ -344,15 +356,19 @@ class EplbProcess:
     ):
         """
         Args:
-            shared_dict: Cross-process shared dict returned by Manager().dict()
+            shared_dict: Worker-local state shared with the planner thread.
             policy_type: Integer passed to PolicyFactory.generate_policy
             enable_d2d: Whether to enable D2D loading
         """
         self.shared_dict = shared_dict
         self.policy_type = policy_type
         self.enable_d2d = enable_d2d
-        self.planner_q: Queue[Any] = Queue()
-        self.block_update_q: Queue[Any] = Queue(maxsize=1)
+        self._planner_q: Queue[object] = Queue()
+        self._result_q: Queue[tuple[bool, Any]] = Queue(maxsize=1)
+        self._stop_event = Event()
+        self._thread: Thread | None = None
+        self._failure: BaseException | None = None
+        self._closed = False
 
         # Create EplbWorker instance
         self.worker = EplbWorker(
@@ -362,11 +378,7 @@ class EplbProcess:
             tp_size=tp_size,
         )
 
-    def worker_process(self, planner_q, block_update_q):
-        """
-        Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up,
-        call do_update, then notify main process update is complete.
-        """
+    def _run(self) -> None:
         try:
             from ms_service_metric.adapters.vllm.adapter import get_vllm_adapter, initialize_vllm_metric  # type: ignore
 
@@ -376,35 +388,88 @@ class EplbProcess:
         except Exception as e:
             logger.warning("[EPLB metrics] Failed to initialize metrics: %s", e)
 
-        if self.policy_type == 3:
-            from vllm_ascend.eplb.core.policy.policy_flashlb import warm_up
+        try:
+            if self.policy_type == 3:
+                from vllm_ascend.eplb.core.policy.policy_flashlb import warm_up
 
-            warm_up()
-        while True:
-            try:
-                planner_q.get()
+                warm_up()
+
+            while not self._stop_event.is_set():
+                request = self._planner_q.get()
+                if request is self._STOP or self._stop_event.is_set():
+                    return
 
                 packed_update_info = self.worker.do_update()
-
-                while True:
-                    if not block_update_q.empty():
+                while not self._stop_event.is_set():
+                    try:
+                        self._result_q.put((True, packed_update_info), timeout=0.1)
+                        break
+                    except Full:
                         continue
-                    block_update_q.put(packed_update_info)
-                    break
+        except BaseException as exc:
+            self._failure = exc
+            with suppress(Full):
+                self._result_q.put_nowait((False, exc))
+            self._stop_event.set()
+            logger.exception(
+                "[eplb/worker] Background planner failed; Dynamic EPLB will stop. error=%s",
+                exc,
+            )
 
-            except Exception as e:
-                logger.warning(
-                    "[eplb/worker] Subprocess crashed, EPLB optimization will stop. error=%s",
-                    e,
-                    exc_info=True,
-                )
-                break
+    @property
+    def thread_name(self) -> str:
+        return self._thread.name if self._thread is not None else "EplbPlanner"
 
-    def _launch_process(self):
-        """
-        Use spawn method to launch subprocess and return (planner_q, block_update_q, proc).
-        """
-        proc = Process(target=self.worker_process, args=(self.planner_q, self.block_update_q), daemon=True)
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
-        proc.start()
-        return proc
+    def start(self) -> None:
+        if self._closed:
+            raise RuntimeError("Dynamic EPLB planner cannot be restarted after it exits.")
+        if self._thread is not None:
+            if self._thread.is_alive():
+                return
+            raise RuntimeError("Dynamic EPLB planner cannot be restarted after it exits.")
+
+        self._thread = Thread(
+            target=self._run,
+            name="EplbPlanner",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(self) -> None:
+        if not self.is_alive():
+            if self._failure is not None:
+                raise RuntimeError("Dynamic EPLB planner has failed.") from self._failure
+            raise RuntimeError("Dynamic EPLB planner is not running.")
+        self._planner_q.put_nowait(None)
+
+    def get_result(self) -> Any:
+        while True:
+            try:
+                succeeded, payload = self._result_q.get(timeout=0.1)
+            except Empty:
+                if self._failure is not None:
+                    raise RuntimeError("Dynamic EPLB planner failed while calculating a placement.") from self._failure
+                if not self.is_alive():
+                    raise RuntimeError("Dynamic EPLB planner exited without returning a placement.")
+                continue
+
+            if succeeded:
+                return payload
+            raise RuntimeError("Dynamic EPLB planner failed while calculating a placement.") from payload
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        self._closed = True
+        self._stop_event.set()
+        self._planner_q.put_nowait(self._STOP)
+        if self._thread is None:
+            return
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            logger.warning(
+                "[eplb/worker] Planner thread did not stop within %.1f seconds; "
+                "it remains daemonized and will exit with the vLLM worker.",
+                timeout,
+            )

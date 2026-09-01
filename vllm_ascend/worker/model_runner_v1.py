@@ -27,7 +27,6 @@ from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
 import numpy as np
@@ -145,7 +144,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
-from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.core.eplb_worker import EplbPlannerThread
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
@@ -487,16 +486,18 @@ class NPUModelRunner(GPUModelRunner):
             self.is_eplb_warmuped = False
             self.policy_type = eplb_config.eplb_policy_type
             self.eplb_loader = D2DExpertWeightLoader()
-            self.manager = Manager()
-            self.shared_dict = self.manager.dict({"expert_map": None, "moe_load": None, "expert_maps": None})
-            self.eplb_process = EplbProcess(
+            self.shared_dict = {"expert_map": None, "moe_load": None, "expert_maps": None}
+            self.eplb_planner = EplbPlannerThread(
                 shared_dict=self.shared_dict,
                 policy_type=self.policy_type,
                 enable_d2d=True,
                 tp_size=self.parallel_config.tensor_parallel_size,
             )
-            self.process = self.eplb_process._launch_process()
-            self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)
+            self.eplb_updator = EplbUpdator(
+                eplb_config,
+                self.eplb_loader,
+                self.eplb_planner,
+            )
             # In pd colocation scenarios, we find that prefill/decode requests result in different
             # expert workloads. To reduce expert imbalance more effectively, we can coolect eplb
             # heat exclusively on a single stage rather than both prefill/decode.
@@ -3744,6 +3745,13 @@ class NPUModelRunner(GPUModelRunner):
         else:
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
+
+    def shutdown(self) -> None:
+        eplb_updator = getattr(self, "eplb_updator", None)
+        if eplb_updator is not None:
+            eplb_updator.shutdown()
+        with _torch_cuda_wrapper():
+            super().shutdown()
 
     def load_model(self) -> None:
         load_model_start_time = time.perf_counter()
