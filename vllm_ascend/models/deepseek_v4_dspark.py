@@ -39,6 +39,7 @@ from vllm_ascend.models.deepseek_v4 import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.utils import enable_dsa_cp
 
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.scale$")
 
