@@ -454,8 +454,9 @@ sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] 
 # backend_map always stays in sync with the source of truth. The stub
 # package shadows the real package for these tests; without this, any
 # ``from ...backend import backend_map`` in the real modules would fail
-# with ImportError under the stub. (Submodules such as backend.gva_protocol
-# resolve through the stub package's __path__ and need no special casing.)
+# with ImportError under the stub. (Submodules such as
+# backend.memcache_backend resolve through the stub package's __path__ and
+# need no special casing.)
 # The scheduler/worker resolve the backend class dynamically via
 # ``importlib.import_module(path)``; tests that exercise those paths patch
 # ``<module>.importlib`` locally (see test_pool_scheduler.py /
