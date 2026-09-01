@@ -941,6 +941,32 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[3], [1024, 1024])
         mock_get_meta.assert_not_called()
 
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_replicated_indexer_when_regular_kv_shard_is_empty(self, mock_get_meta):
+        req = dict(self.test_req)
+        req["local_block_ids"] = [[]]
+        req["remote_block_ids"] = [[]]
+        req["local_block_ids_replicate_k"] = ([4, 5],)
+        req["remote_block_ids_replicate_k"] = ([7, 8],)
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread.enable_sfa_dcp_replicated_indexer = True
+            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000]]
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000]]}
+            self.thread.block_size_scale = [[1, 2]]
+            self.thread.block_len_per_addr = [[1024, 2048]]
+            self.thread.block_stride_per_addr = [[1024, 2048]]
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096, 8192]]
+
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        self.assertEqual(call_args[1], [0x2000 + 4 * 2048])
+        self.assertEqual(call_args[2], [0x4000 + 7 * 8192])
+        self.assertEqual(call_args[3], [2 * 2048])
+        mock_get_meta.assert_not_called()
+
     def test_append_mamba_transfer_meta_uses_block_stride_for_block_offsets(self):
         src_list: list[int] = []
         dst_list: list[int] = []
@@ -1227,6 +1253,7 @@ class TestMooncakeConnectorMetadata(unittest.TestCase):
         meta.add_new_req(
             request_id="req1",
             local_block_ids=[1, 2, 3],
+            local_full_block_ids=[0, 1, 2, 3],
             num_external_tokens=48,
             kv_transfer_params={
                 "remote_block_ids": [4, 5, 6],
@@ -1244,6 +1271,7 @@ class TestMooncakeConnectorMetadata(unittest.TestCase):
         req_meta = meta.requests["req1"]
         self.assertIsInstance(req_meta, ReqMeta)
         self.assertEqual(req_meta.local_block_ids, [1, 2, 3])
+        self.assertEqual(req_meta.local_full_block_ids, [0, 1, 2, 3])
         self.assertEqual(req_meta.remote_block_ids, [4, 5, 6])
         self.assertEqual(req_meta.remote_engine_id, "remote_engine")
         self.assertEqual(req_meta.remote_host, "localhost")
@@ -1281,9 +1309,7 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
 
     def test_build_connector_meta(self):
         request = MockRequest("req1")
-        blocks_mock = MagicMock()
-        blocks_mock.get_unhashed_block_ids.return_value = [4, 5, 6]
-        self.scheduler._reqs_need_recv["req1"] = (request, [4, 5, 6], 48)
+        self.scheduler._reqs_need_recv["req1"] = (request, [4, 5, 6], [0, 4, 5, 6], 48)
         request.kv_transfer_params = {
             "remote_block_ids": [1, 2, 3],
             "remote_engine_id": "remote",
@@ -1299,6 +1325,7 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertIsInstance(meta, MooncakeConnectorMetadata)
         self.assertEqual(len(meta.requests), 1)
         self.assertEqual(meta.requests["req1"].local_block_ids, [4, 5, 6])
+        self.assertEqual(meta.requests["req1"].local_full_block_ids, [0, 4, 5, 6])
         self.assertEqual(meta.requests["req1"].remote_block_ids, [1, 2, 3])
         self.assertEqual(meta.requests["req1"].num_computed_tokens, 16)
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
@@ -1399,6 +1426,9 @@ class MockKVCacheBlocks:
 
     def get_unhashed_block_ids_all_groups(self):
         return ([4, 5, 6],)
+
+    def get_block_ids(self):
+        return ([1, 2, 4, 5, 6],)
 
 
 class MockSchedulerOutput:
@@ -1539,6 +1569,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertEqual(len(self.scheduler._reqs_need_recv), 1)
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][0], request)
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][1], ([4, 5, 6],))
+        self.assertEqual(self.scheduler._reqs_need_recv["req1"][2], ([1, 2, 4, 5, 6],))
 
     def test_request_finished_no_remote_decode(self):
         request = MockRequest("req1")
@@ -1584,6 +1615,21 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         block_ids = self.scheduler._get_transfer_block_ids(([30, 31, 32, 33],), prompt_len=64)
 
         self.assertEqual(block_ids, ([30, 31],))
+
+    def test_get_transfer_block_ids_uses_cp_grouped_block_len(self):
+        self.scheduler.pcp_size = 1
+        self.scheduler.dcp_size = 4
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(  # type: ignore[list-item]
+                tokens_per_block=16,
+                blocks_per_window=0,
+                is_state_group=False,
+            )
+        ]
+
+        block_ids = self.scheduler._get_transfer_block_ids(([10, 11, 12, 13, 14],), prompt_len=65)
+
+        self.assertEqual(block_ids, ([10, 11],))
 
     def test_get_transfer_block_ids_trims_sliding_window_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
@@ -1656,6 +1702,28 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertEqual(params["remote_block_ids"], ([10, 11, 12],))
         self.assertEqual(params["num_prompt_blocks"], 3)
         self.assertIn("req_mtp", self.scheduler._reqs_need_send)
+
+    def test_request_finished_trims_cp_grouped_mtp_blocks_in_params(self):
+        self.scheduler.pcp_size = 1
+        self.scheduler.dcp_size = 4
+        self.scheduler.group_transfer_info = [
+            types.SimpleNamespace(
+                tokens_per_block=16,
+                blocks_per_window=0,
+                is_state_group=False,
+            )
+        ]
+        request = self._make_remote_decode_request(prompt_len=65, request_id="req_cp_mtp")
+
+        delay_free, params = self.scheduler.request_finished(request, ([10, 11, 12, 13, 14],))
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(params["remote_block_ids"], ([10, 11],))
+        # num_prompt_blocks stays in no-CP units for worker-side CP distribution.
+        self.assertEqual(params["num_prompt_blocks"], 5)
+        self.assertIn("req_cp_mtp", self.scheduler._reqs_need_send)
 
     def test_request_finished_clips_sliding_window_blocks_in_params(self):
         self.scheduler.group_transfer_info = [
@@ -2206,6 +2274,14 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(
             get_kv_split_metadata(True, 1, 2, 8, 0, 0, 8, 2, 2, 30000, [1, 2, 3], [1, 2, 3, 4, 5], 0)[:3],
             ([[30000], [30008]], [[1, 3, 5], [2, 4]], [[1, 2, 3], [1, 2]]),
+        )
+
+        # P cp size 4 -> D cp size 2: P block ids are per-CP local ids. D rank0
+        # must write cp0's [1,2,3] into local [1,3,5] and cp2's [1,2,3] into
+        # local [2,4,6], rather than slicing local blocks contiguously.
+        self.assertEqual(
+            get_kv_split_metadata(True, 1, 2, 8, 0, 0, 8, 1, 4, 30000, [1, 2, 3], [1, 2, 3, 4, 5, 6], 0)[:3],
+            ([[30000], [30002]], [[1, 3, 5], [2, 4, 6]], [[1, 2, 3], [1, 2, 3]]),
         )
 
         # check remote ptp size
@@ -2844,6 +2920,189 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         tp_num_need_pulls = worker._get_tp_num_need_pulls(prefill_tp_size=None)
         self.assertEqual(tp_num_need_pulls, 1)
+
+    def test_start_load_kv_puts_replicated_indexer_on_existing_transfer_port(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_send_thread = None
+        worker.kv_recv_thread = MagicMock()
+        worker._prefill_tp_size = 4
+        worker.remote_port_send_num = {"remote_engine": {31001: {"num": 1, "host": "localhost"}}}
+        worker._get_sfa_replicate_k_block_ids = MagicMock(return_value=(([40],), ([20],)))
+        worker._get_kv_split_metadata = MagicMock(
+            return_value=(
+                [[31001], [31003]],
+                [([10],), ([11],)],
+                [([30],), ([31],)],
+            )
+        )
+        worker._get_group_pulls_metadata = MagicMock(
+            return_value=[
+                [[GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1)]],
+                [[GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1)]],
+            ]
+        )
+        worker._get_remote_host_info_by_port = MagicMock(return_value=("localhost", "remote_engine"))
+        meta = types.SimpleNamespace(
+            remote_request_id="remote_req",
+            remote_engine_id="remote_engine",
+            remote_host="localhost",
+            remote_port=31000,
+            remote_pcp_size=2,
+            remote_dcp_size=2,
+            remote_ptp_size=4,
+            remote_multi_nodes_meta_mapping={},
+            remote_block_size=16,
+            local_block_ids=([10],),
+            remote_block_ids=([30],),
+            num_computed_tokens=0,
+        )
+        metadata = types.SimpleNamespace(reqs_in_batch=["req"], requests={"req": meta})
+
+        worker.start_load_kv(cast(MooncakeConnectorMetadata, metadata))
+
+        add_request_calls = worker.kv_recv_thread.add_request.call_args_list
+        self.assertEqual(len(add_request_calls), 2)
+        self.assertEqual(add_request_calls[0].kwargs["remote_handshake_port"], 31001)
+        self.assertEqual(add_request_calls[0].kwargs["local_block_ids_replicate_k"], ([40],))
+        self.assertEqual(add_request_calls[0].kwargs["remote_block_ids_replicate_k"], ([20],))
+        self.assertEqual(add_request_calls[1].kwargs["remote_handshake_port"], 31003)
+        self.assertIsNone(add_request_calls[1].kwargs["local_block_ids_replicate_k"])
+        self.assertIsNone(add_request_calls[1].kwargs["remote_block_ids_replicate_k"])
+
+    def test_get_kv_split_metadata_dp1_remote_port_send_num_uses_absolute_ports(self):
+        self.vllm_config.kv_transfer_config.kv_port = 30000
+        self.vllm_config.model_config.is_deepseek_mla = True
+        self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
+            "prefill": {"tp_size": 8, "dp_size": 2, "pp_size": 1},
+            "decode": {"tp_size": 4, "dp_size": 4, "pp_size": 1},
+        }.get(k, d)
+
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker.use_mla = True
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.tp_size = 4
+        worker.tp_rank = 0
+        worker.pcp_rank = 0
+        worker.dcp_rank = 0
+        worker.side_channel_port = 40000
+        worker.handshake_port = 40000
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size = 16
+        worker.num_key_value_heads = 1
+        worker.use_sparse = False
+        worker.block_size_scale = [[1]]
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "FullAttentionSpec",
+                    "layer_names": ["model.layers.0.self_attn"],
+                },
+                [0],
+            )
+        }
+
+        remote_mapping = {
+            str(offset): {
+                "host": f"host-{offset}",
+                "engine_id": f"engine-{offset}",
+                "handshake_port": 30000 + offset,
+            }
+            for offset in range(8, 16)
+        }
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=8,
+            remote_ptp_size=8,
+            remote_port=30008,
+            remote_block_ids=(list(range(100, 103)),),
+            local_block_ids=(list(range(200, 224)),),
+            num_external_tokens=24 * worker.block_size,
+            num_prompt_blocks=24,
+            num_computed_tokens=0,
+            remote_engine_id="remote_engine",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping=remote_mapping,
+            remote_block_size=16,
+        )
+
+        ports, _, _ = worker._get_kv_split_metadata("req_dp1", cast(ReqMeta, meta))
+        remote_port_send_num = worker.remote_port_send_num[meta.remote_engine_id]
+
+        self.assertEqual([port for shard in ports for port in shard], list(range(30008, 30016)))
+        self.assertEqual(set(remote_port_send_num), set(range(30008, 30016)))
+        self.assertNotIn(30016, remote_port_send_num)
+        self.assertEqual(remote_port_send_num[30008]["host"], "host-8")
+        self.assertEqual(remote_port_send_num[30015]["host"], "host-15")
+        self.assertEqual(
+            worker._get_remote_host_info_by_port(30008, 30015, "localhost", "remote_engine", remote_mapping),
+            ("host-15", "engine-15"),
+        )
+
+    def test_get_sfa_replicated_indexer_block_ids_uses_full_blocks_for_prefix(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.enable_sfa_dcp_replicated_indexer = True
+        worker.pcp_size = 1
+        worker.dcp_size = 2
+        worker.block_size = 16
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=2,
+            remote_block_ids=([10, 11],),
+            local_block_ids=([20],),
+            local_full_block_ids=([19, 20],),
+            num_external_tokens=32,
+            num_prompt_blocks=3,
+            num_computed_tokens=16,
+        )
+
+        local_ids, remote_ids = worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
+
+        self.assertEqual(local_ids, ([39, 40],))
+        self.assertEqual(remote_ids, ([21, 22],))
+
+    def test_get_sfa_replicated_indexer_block_ids_ignores_empty_regular_kv_shard(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.enable_sfa_dcp_replicated_indexer = True
+        worker.pcp_size = 1
+        worker.dcp_size = 2
+        worker.block_size = 16
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=2,
+            remote_block_ids=([10],),
+            local_block_ids=([],),
+            local_full_block_ids=([20],),
+            num_external_tokens=16,
+            num_prompt_blocks=1,
+            num_computed_tokens=0,
+        )
+
+        local_ids, remote_ids = worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
+
+        self.assertEqual(local_ids, ([40],))
+        self.assertEqual(remote_ids, ([20],))
+
+    def test_get_sfa_replicated_indexer_block_ids_requires_full_blocks_for_prefix(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.enable_sfa_dcp_replicated_indexer = True
+        worker.pcp_size = 1
+        worker.dcp_size = 2
+        worker.block_size = 16
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=2,
+            remote_block_ids=([10, 11],),
+            local_block_ids=([20],),
+            local_full_block_ids=tuple(),
+            num_external_tokens=32,
+            num_prompt_blocks=3,
+            num_computed_tokens=16,
+        )
+
+        with self.assertRaises(AssertionError):
+            worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
 
 
 if __name__ == "__main__":
