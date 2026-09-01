@@ -37,3 +37,12 @@ to get specific plans.
     __ of AutoRegressiveAclGraphManager.
 
     Location: `speculator.AscendEagleSpeculator.init_cudagraph_manager`.
+
+- [x] `extract_hidden_states` (MRV2)
+
+    Why: Upstream vLLM added Model Runner V2 support for
+    `extract_hidden_states`. Ascend reuses upstream
+    `ExtractHiddenStatesSpeculator` via `init_speculator` dispatch and keeps
+    HiddenStateCacheSpec on a single-tensor allocate/reshape path.
+    `use_aux_hidden_state_outputs` is enabled by upstream
+    `GPUModelRunner.__init__`.
