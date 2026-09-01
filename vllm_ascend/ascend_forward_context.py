@@ -225,10 +225,11 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
+
     ascend_config = get_ascend_config()
     use_mega_moe = use_cann_megamoe(vllm_config)
 
-    if ascend_config.enable_prefill_mc2 or use_mega_moe:
+    if not _is_decode_only_node(vllm_config):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
