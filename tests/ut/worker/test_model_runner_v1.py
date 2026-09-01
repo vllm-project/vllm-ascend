@@ -76,22 +76,27 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
             runner._dummy_run(1)
 
 
-class TestDeviceMetadataFullGraphWait(unittest.TestCase):
-    def test_waits_all_only_for_effective_full_mode(self):
-        for mode, should_wait in (
-            (CUDAGraphMode.FULL, True),
-            (CUDAGraphMode.PIECEWISE, False),
-            (CUDAGraphMode.NONE, False),
+class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
+    def test_full_mode_requires_external_events(self):
+        for mode, uses_external_events, should_raise in (
+            (CUDAGraphMode.FULL, False, True),
+            (CUDAGraphMode.FULL, True, False),
+            (CUDAGraphMode.PIECEWISE, False, False),
+            (CUDAGraphMode.NONE, False, False),
         ):
-            with self.subTest(mode=mode):
+            with self.subTest(mode=mode, uses_external_events=uses_external_events):
                 runner = NPUModelRunner.__new__(NPUModelRunner)
-                executor = MagicMock(submission_in_flight=True)
+                executor = SimpleNamespace(
+                    submission_in_flight=True,
+                    uses_external_events=uses_external_events,
+                )
                 runner.device_metadata_executor = executor
 
-                active_executor = runner._prepare_device_metadata_for_forward(mode)
-
-                self.assertIs(active_executor, executor)
-                self.assertEqual(executor.wait_all.call_count, int(should_wait))
+                if should_raise:
+                    with self.assertRaisesRegex(RuntimeError, "requires external events"):
+                        runner._prepare_device_metadata_for_forward(mode)
+                else:
+                    self.assertIs(runner._prepare_device_metadata_for_forward(mode), executor)
 
     def test_ignores_executor_without_active_submission(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -101,9 +106,8 @@ class TestDeviceMetadataFullGraphWait(unittest.TestCase):
         active_executor = runner._prepare_device_metadata_for_forward(CUDAGraphMode.FULL)
 
         self.assertIsNone(active_executor)
-        executor.wait_all.assert_not_called()
 
-    def test_dummy_full_waits_before_graph_forward(self):
+    def test_dummy_full_uses_external_events_without_global_wait(self):
         from contextlib import contextmanager, nullcontext
 
         events = []
@@ -147,7 +151,7 @@ class TestDeviceMetadataFullGraphWait(unittest.TestCase):
 
         runner._model_forward = MagicMock(side_effect=model_forward)
         executor = MagicMock(submission_in_flight=True)
-        executor.wait_all.side_effect = lambda: events.append("wait_all")
+        executor.uses_external_events = True
         executor.release.side_effect = lambda: events.append("release")
         runner.device_metadata_executor = executor
 
@@ -165,7 +169,7 @@ class TestDeviceMetadataFullGraphWait(unittest.TestCase):
         ):
             runner._dummy_run(4, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
 
-        self.assertEqual(events, ["wait_all", "context_enter", "forward", "context_exit", "release"])
+        self.assertEqual(events, ["context_enter", "forward", "context_exit", "release"])
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):
