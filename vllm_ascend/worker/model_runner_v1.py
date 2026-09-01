@@ -2526,7 +2526,10 @@ class NPUModelRunner(GPUModelRunner):
                 sample_hidden_states,
                 batch_desc,
             )
-            self._copy_draft_token_ids_to_cpu(scheduler_output)
+            if isinstance(self._draft_token_ids, torch.Tensor) and self._draft_token_ids.shape[-1] == 0:
+                self._draft_token_ids = None
+            if self._draft_token_ids is not None:
+                self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         output_spec_token_ids = None
         use_padded_batch = False

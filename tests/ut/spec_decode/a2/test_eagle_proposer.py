@@ -2675,6 +2675,31 @@ class TestRunMergedDraft(TestBase):
         )
         self.assertIs(forward_context.attn_metadata, multi_steps_attn_metadata[2])
 
+    def test_run_merged_draft_skips_output_gather_on_prefill_only_mtp(self):
+        self.proposer.method = "mtp"
+        self.proposer.num_speculative_tokens = 1
+        self.proposer.runner._is_pd_prefill_worker.return_value = True
+        self.proposer.model = MockDraftModel(returns_tuple=False)
+        self.proposer.input_ids[:4] = torch.tensor([279, 1196, 374, 8014], dtype=torch.int32)
+        self.proposer.positions[:4] = torch.tensor([17, 18, 19, 20], dtype=torch.int64)
+        self.proposer.hidden_states[:4] = torch.arange(16, dtype=torch.float32).view(4, 4)
+        self.proposer.maybe_all_gather_and_unpad.reset_mock()
+
+        draft_token_ids = self.proposer._run_merged_draft(
+            num_input_tokens=4,
+            batch_size=2,
+            token_indices_to_sample=torch.tensor([1, 3], dtype=torch.int64),
+            target_positions=self.proposer.positions[:4],
+            inputs_embeds=None,
+            multi_steps_attn_metadata=None,
+            num_tokens=4,
+            is_prefill=True,
+        )
+
+        self.assertEqual(tuple(draft_token_ids.shape), (2, 0))
+        self.assertEqual(len(self.proposer.model.calls), 1)
+        self.proposer.maybe_all_gather_and_unpad.assert_not_called()
+
     def test_run_merged_draft_early_return_conditions(self):
         test_cases = [
             (1, False, torch.tensor([1, 3], dtype=torch.int64), (2, 1)),

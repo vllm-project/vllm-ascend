@@ -541,6 +541,9 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         else:
             last_hidden_states, hidden_states = ret_hidden_states
 
+        if self._is_prefill_only_mtp():
+            return torch.empty((batch_size, 0), dtype=torch.int64, device=last_hidden_states.device)
+
         last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
             last_hidden_states, model_positions, hidden_states
         )
