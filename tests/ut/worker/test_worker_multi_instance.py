@@ -107,7 +107,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             with (
                 patch("vllm_ascend.worker.worker.memory_profiling", mock_profiling),
                 patch(
-                    "torch.npu.memory_stats",
+                    "vllm_ascend.worker.worker.torch.npu.memory_stats",
                     return_value={"allocated_bytes.all.peak": 0},
                 ),
             ):

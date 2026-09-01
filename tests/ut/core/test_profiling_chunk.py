@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from unittest.mock import MagicMock, patch
+from contextlib import ExitStack
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
@@ -331,14 +332,6 @@ class TestProfilingChunkScheduler(TestBase):
             cache_config=cache_config,
         )
         vllm_config.parallel_config.pipeline_parallel_size = 2
-        from unittest.mock import PropertyMock
-
-        type(model_config).is_encoder_decoder = PropertyMock(return_value=False)
-        if not vllm_version_is("0.27.1"):
-            # vLLM main (post-v0.27.1) reads model_config.uses_mrope in
-            # Scheduler.__init__, which infinitely recurses on a bare
-            # MagicMock hf_config. Override it to keep the UT runnable.
-            type(model_config).uses_mrope = PropertyMock(return_value=False)
         vllm_config.model_config.hf_config.is_encoder_decoder = False
 
         kv_cache_config = KVCacheConfig(
@@ -354,13 +347,24 @@ class TestProfilingChunkScheduler(TestBase):
         kv_cache_config.hash_block_size = BLOCK_SIZE
         cache_config.num_gpu_blocks = 10000
 
-        scheduler = ProfilingChunkScheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            block_size=BLOCK_SIZE,
-            log_stats=True,
-            structured_output_manager=MagicMock(spec=StructuredOutputManager),
-        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
+            )
+            if not vllm_version_is("0.27.1"):
+                # vLLM main (post-v0.27.1) reads model_config.uses_mrope in
+                # Scheduler.__init__, which infinitely recurses on a bare
+                # MagicMock hf_config. Override it to keep the UT runnable.
+                stack.enter_context(
+                    patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False)
+                )
+            scheduler = ProfilingChunkScheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                block_size=BLOCK_SIZE,
+                log_stats=True,
+                structured_output_manager=MagicMock(spec=StructuredOutputManager),
+            )
 
         should_advance = MagicMock()
         should_advance.return_value = False
