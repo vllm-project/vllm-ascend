@@ -1343,7 +1343,7 @@ def test_dyntra_lb_connector_lookup_helpers(monkeypatch):
     monkeypatch.setattr(scheduler.kv_cache_manager, "truncate_computed_blocks", None, raising=False)
     monkeypatch.setattr(scheduler.kv_cache_manager, "coordinator", FakeHybrid())
     monkeypatch.setattr(scheduler.kv_cache_manager, "create_kv_cache_blocks", lambda computed: empty_blocks)
-    monkeypatch.setattr(type(scheduler), "has_mamba_layers", True)
+    monkeypatch.setattr(scheduler, "has_mamba_layers", True)
     scheduler.kv_cache_manager.log_stats = True
     scheduler.kv_cache_manager.prefix_cache_stats = SimpleNamespace(record=lambda **kwargs: recorded.append(kwargs))
 
@@ -1442,7 +1442,7 @@ def test_dyntra_lb_caps_waiting_request_by_long_prefill_threshold():
 
 def test_dyntra_lb_waiting_mamba_split_limits_new_tokens(monkeypatch):
     scheduler = _sync_scheduler()
-    monkeypatch.setattr(type(scheduler), "need_mamba_block_aligned_split", True)
+    monkeypatch.setattr(scheduler, "need_mamba_block_aligned_split", True)
     monkeypatch.setattr(scheduler, "_mamba_block_aligned_split", lambda *args, **kwargs: 5)
     request = create_request(request_id=1, num_tokens=12, block_size=scheduler.block_size)
     scheduler.add_request(request)
@@ -1513,7 +1513,10 @@ def test_dyntra_lb_schedules_encoder_inputs_for_running_request(monkeypatch):
         "allocate",
         lambda req, idx: allocated.append(idx),
     )
-    scheduler.ec_connector = SimpleNamespace(update_state_after_alloc=lambda *args: None)
+    scheduler.ec_connector = SimpleNamespace(
+        update_state_after_alloc=lambda *args: None,
+        build_connector_meta=lambda scheduler_output: None,
+    )
     output = scheduler.schedule()
     assert request.request_id in output.num_scheduled_tokens
     assert allocated == [0, 1]
@@ -1542,7 +1545,7 @@ def test_dyntra_lb_schedule_connector_partial_tail_keep_local(monkeypatch):
     output = scheduler.schedule()
     assert request.request_id in output.num_scheduled_tokens
     assert request.status == RequestStatus.RUNNING
-    assert request.num_computed_tokens == 5
+    assert output.num_scheduled_tokens[request.request_id] == block_size - 5
 
 
 def test_dyntra_lb_schedule_reconciles_diverged_hybrid_hit(monkeypatch):
@@ -1580,7 +1583,7 @@ def test_dyntra_lb_async_kv_load_skips_zeroing_blocks(monkeypatch):
         block_size=vllm_config.cache_config.block_size,
     )
     scheduler.add_request(request)
-    monkeypatch.setattr(type(scheduler), "needs_kv_cache_zeroing", True)
+    monkeypatch.setattr(scheduler, "needs_kv_cache_zeroing", True)
     monkeypatch.setattr(
         scheduler.kv_cache_manager,
         "get_zeroing_block_ids_in_range",
@@ -1691,7 +1694,7 @@ def test_dyntra_lb_mamba_split_zero_skips_running_request(monkeypatch):
     scheduler.add_request(request)
     first = scheduler.schedule()
     scheduler.update_from_output(first, create_model_runner_output([request]))
-    monkeypatch.setattr(type(scheduler), "need_mamba_block_aligned_split", True)
+    monkeypatch.setattr(scheduler, "need_mamba_block_aligned_split", True)
     monkeypatch.setattr(scheduler, "_mamba_block_aligned_split", lambda *args, **kwargs: 0)
     output = scheduler.schedule()
     assert request.request_id not in output.num_scheduled_tokens
