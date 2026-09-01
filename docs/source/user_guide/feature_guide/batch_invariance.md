@@ -57,7 +57,7 @@ COMPILE_CUSTOM_KERNELS=1 VLLM_BATCH_INVARIANT=1 \
     pip install -e . --no-build-isolation
 ```
 
-#### Option 2: Install the operator packages after vllm-ascend is already installed
+#### Option 2: Install the operator packages if vllm-ascend is already installed
 
 Obtain a vllm-ascend source tree that matches the installed package version, then build and install the operator packages from that source tree.
 
