@@ -95,7 +95,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
@@ -113,8 +115,12 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        s_false = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
-        s_true = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
+        s_false = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
+        s_true = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True, is_drafting=False
+        )
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
@@ -138,9 +144,13 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        r1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        r1 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
-        r2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        r2 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         assert torch.equal(r1, r2), "gumbel_sample is non-deterministic with same seed"
@@ -159,8 +169,12 @@ class TestGumbelSampling:
         # Ensure seeds differ
         seed2[0] = seed1[0] + 1
 
-        r1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed1, pos, apply_temperature=False)
-        r2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed2, pos, apply_temperature=False)
+        r1 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed1, pos, apply_temperature=False, is_drafting=False
+        )
+        r2 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed2, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         # With 16 tokens and vocab 32000 at temp=1.0, identical results are astronomically unlikely
@@ -183,7 +197,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         assert sampled.shape == (num_tokens,)
@@ -215,10 +231,22 @@ class TestGumbelSampling:
             pos = torch.tensor([i], dtype=torch.int32, device=DEVICE)
 
             s_low = gumbel_sample(
-                logits_base.clone(), expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True
+                logits_base.clone(),
+                expanded_idx_mapping,
+                low_temp,
+                seed,
+                pos,
+                apply_temperature=True,
+                is_drafting=False,
             )
             s_high = gumbel_sample(
-                logits_base.clone(), expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True
+                logits_base.clone(),
+                expanded_idx_mapping,
+                high_temp,
+                seed,
+                pos,
+                apply_temperature=True,
+                is_drafting=False,
             )
             if s_low.item() == 0:
                 low_temp_winner_count += 1
@@ -255,7 +283,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         greedy = logits.argmax(dim=-1)
@@ -278,7 +308,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
@@ -303,7 +335,9 @@ class TestGumbelSampling:
         # Same pos -> same Gumbel noise
         pos = torch.tensor([5, 5], dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True, is_drafting=False
+        )
         torch.npu.synchronize()
 
         assert sampled[0].item() == sampled[1].item(), (
@@ -313,7 +347,9 @@ class TestGumbelSampling:
 
     def test_gumbel_sample_apply_temperature_true_nonzero(self):
         """apply_temperature=True with temp>0 must divide logits by temperature
-        before adding Gumbel noise. Verify via processed_logits output."""
+        before adding Gumbel noise. The logits cache stores the input logits
+        *before* temperature; consumers (the rejection sampler) divide by the
+        same temperature on load."""
         torch.manual_seed(77)
         num_tokens, num_reqs, vocab_size = 4, 4, 32000
         logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
@@ -322,7 +358,6 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        # Use processed_logits to verify temperature was applied
         out_logits = torch.zeros(num_reqs, vocab_size, dtype=torch.float32, device=DEVICE)
         gumbel_sample(
             logits,
@@ -331,21 +366,22 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=True,
-            output_processed_logits=out_logits,
+            is_drafting=False,
+            logits_cache=out_logits,
         )
         torch.npu.synchronize()
 
         for tok in range(num_tokens):
             req = expanded_idx_mapping[tok].item()
-            temp = temperature[req].item()
-            expected = logits[tok].float() / temp
+            # The cache stores the pre-temperature logits.
+            expected = logits[tok].float()
             assert torch.allclose(out_logits[req].float(), expected, atol=1e-4, rtol=1e-4), (
-                f"processed_logits mismatch at token {tok} (req {req}, temp={temp:.3f}): "
+                f"logits_cache mismatch at token {tok} (req {req}): "
                 f"max_diff={(out_logits[req].float() - expected).abs().max().item():.6f}"
             )
 
     def test_gumbel_sample_apply_temperature_false_nonzero(self):
-        """apply_temperature=False with temp>0: processed_logits must contain
+        """apply_temperature=False with temp>0: the logits cache must contain
         raw logits (no temperature division), but Gumbel noise is still added
         to sampling."""
         torch.manual_seed(78)
@@ -364,7 +400,8 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=False,
-            output_processed_logits=out_logits,
+            is_drafting=False,
+            logits_cache=out_logits,
         )
         torch.npu.synchronize()
 
@@ -373,12 +410,12 @@ class TestGumbelSampling:
             # Without temperature application, stored logits should match raw logits
             expected = logits[tok].float()
             assert torch.allclose(out_logits[req].float(), expected, atol=1e-4, rtol=1e-4), (
-                f"processed_logits should be raw logits when apply_temperature=False: "
+                f"logits_cache should be raw logits when apply_temperature=False: "
                 f"max_diff={(out_logits[req].float() - expected).abs().max().item():.6f}"
             )
 
-    def test_gumbel_sample_processed_logits_req_state_idx(self):
-        """Processed logits must be stored at req_state_idx position, not token_idx.
+    def test_gumbel_sample_logits_cache_req_state_idx(self):
+        """Cached logits must be stored at req_state_idx position, not token_idx.
 
         This tests the EAGLE speculative decoding scenario where the idx_mapping
         is non-contiguous (e.g., active requests [2,5,7,0] out of 8 slots).
@@ -405,17 +442,18 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=True,
-            output_processed_logits=out_logits,
+            is_drafting=False,
+            logits_cache=out_logits,
         )
         torch.npu.synchronize()
 
         for tok in range(num_tokens):
             req = expanded_idx_mapping[tok].item()
-            temp = temperature[req].item()
-            expected = logits[tok].float() / temp
+            # The cache stores the pre-temperature logits.
+            expected = logits[tok].float()
             actual = out_logits[req]
             assert torch.allclose(actual.float(), expected, atol=1e-4, rtol=1e-4), (
-                f"Req {req} (tok={tok}, temp={temp:.3f}): max_diff={(actual.float() - expected).abs().max().item():.6f}"
+                f"Req {req} (tok={tok}): max_diff={(actual.float() - expected).abs().max().item():.6f}"
             )
 
         # Also verify that unused request slots remain zero
@@ -424,8 +462,8 @@ class TestGumbelSampling:
             if req not in used_reqs:
                 assert (out_logits[req] == 0).all(), f"Unused request slot {req} should be all zeros"
 
-    def test_gumbel_sample_processed_logits_col(self):
-        """output_processed_logits_col selects which column (draft step) to write.
+    def test_gumbel_sample_logits_cache_col(self):
+        """logits_cache_col selects which column (draft step) to write.
 
         Simulates EAGLE with buffer [max_num_reqs, num_steps, vocab_size].
         """
@@ -453,15 +491,16 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=True,
-            output_processed_logits=draft_logits,
-            output_processed_logits_col=col_tensor,
+            is_drafting=False,
+            logits_cache=draft_logits,
+            logits_cache_col=col_tensor,
         )
         torch.npu.synchronize()
 
         for tok in range(num_tokens):
             req = expanded_idx_mapping[tok].item()
-            temp = temperature[req].item()
-            expected = logits[tok].float() / temp
+            # The cache stores the pre-temperature logits.
+            expected = logits[tok].float()
             # Data should be at draft_logits[req, 1, :]  (column 1)
             actual = draft_logits[req, 1, :]
             assert torch.allclose(actual.float(), expected, atol=1e-4, rtol=1e-4), (
@@ -471,12 +510,11 @@ class TestGumbelSampling:
             assert (draft_logits[req, 0, :] == 0).all(), f"Col 0 should be zeros for req {req}"
             assert (draft_logits[req, 2, :] == 0).all(), f"Col 2 should be zeros for req {req}"
 
-    def test_gumbel_sample_processed_logits_mixed_temp(self):
-        """Processed logits with mixed temperature (1:1 token-to-request mapping):
-        - temp=0: stored logits should be raw (no scaling)
-        - temp>0 with apply_temperature=True: stored logits should be logits/temp
+    def test_gumbel_sample_logits_cache_mixed_temp(self):
+        """Cached logits with mixed temperature (1:1 token-to-request mapping):
+        the cache always stores the raw input logits regardless of temperature.
 
-        Note: In practice, output_processed_logits is only used by EAGLE
+        Note: In practice, the logits cache is only used by EAGLE
         speculative decoding, which always has 1:1 token-to-request mapping.
         Multiple tokens per request would cause a write race (undefined order).
         """
@@ -500,20 +538,18 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=True,
-            output_processed_logits=out_logits,
+            is_drafting=False,
+            logits_cache=out_logits,
         )
         torch.npu.synchronize()
 
         for tok in range(num_tokens):
             req = expanded_idx_mapping[tok].item()
-            temp = temperature[req].item()
-            if temp == 0.0:
-                expected = logits[tok].float()
-            else:
-                expected = logits[tok].float() / temp
+            # The cache stores the pre-temperature logits.
+            expected = logits[tok].float()
             actual = out_logits[req]
             assert torch.allclose(actual.float(), expected, atol=1e-4, rtol=1e-4), (
-                f"Req {req} (tok={tok}, temp={temp:.3f}): max_diff={(actual.float() - expected).abs().max().item():.6f}"
+                f"Req {req} (tok={tok}): max_diff={(actual.float() - expected).abs().max().item():.6f}"
             )
 
     def test_gumbel_sample_single_token(self):
@@ -525,7 +561,9 @@ class TestGumbelSampling:
         seed = torch.tensor([12345], dtype=torch.int64, device=DEVICE)
         pos = torch.tensor([0], dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True, is_drafting=False
+        )
         torch.npu.synchronize()
 
         assert sampled.shape == (1,)
@@ -542,7 +580,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
@@ -559,12 +599,142 @@ class TestGumbelSampling:
 
         # Very low temperature (near-greedy)
         low_temp = torch.tensor([0.01, 0.01, 0.01, 0.01], dtype=torch.float32, device=DEVICE)
-        s1 = gumbel_sample(logits, expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True)
+        s1 = gumbel_sample(logits, expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True, is_drafting=False)
         torch.npu.synchronize()
         assert (s1 >= 0).all() and (s1 < vocab_size).all()
 
         # Very high temperature (near-uniform)
         high_temp = torch.tensor([100.0, 100.0, 100.0, 100.0], dtype=torch.float32, device=DEVICE)
-        s2 = gumbel_sample(logits, expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True)
+        s2 = gumbel_sample(
+            logits, expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True, is_drafting=False
+        )
         torch.npu.synchronize()
         assert (s2 >= 0).all() and (s2 < vocab_size).all()
+
+
+def _float_bits(t: torch.Tensor) -> torch.Tensor:
+    """Reinterpret floats as same-width ints, so equality is truly bitwise."""
+    int_dtype = torch.int32 if t.dtype == torch.float32 else torch.int16
+    return t.view(int_dtype)
+
+
+class TestGumbelSampleLogitsCache:
+    """Regression tests for the draft logits cache (upstream #50910)."""
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    @pytest.mark.parametrize("per_token_col", [False, True])
+    def test_logits_cache_stores_input_logits_bitwise(self, dtype: torch.dtype, per_token_col: bool):
+        """`logits_cache` must receive the input logits, pre-temperature and bit-exact.
+
+        The cache is kept in the head's dtype, which is only lossless because the
+        stored value is the input logit itself. Storing `logit / temp` instead would
+        generally not be representable there, and the rejection sampler -- which
+        divides by the same temperature on load -- would then verify against a `q`
+        the draft never sampled from. Temperatures 0.0 and 1.0 are included because
+        both make the divide a no-op and would mask such a bug.
+
+        Both column-addressing modes are covered: a 0-d column (one draft step per
+        call, as MTP/EAGLE do) and a [num_tokens] column (as DFlash does, sampling
+        every step in one call).
+        """
+        torch.manual_seed(0)
+        num_reqs, vocab_size, num_steps = 8, 4099, 3
+        logits = torch.randn(num_reqs, vocab_size, device=DEVICE, dtype=dtype)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+        temp = torch.tensor([0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 0.7, 1.0], dtype=torch.float32, device=DEVICE)
+        seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+        # NPU: pos is cast to int32 inside the kernel.
+        pos = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+
+        cache = torch.zeros(num_reqs, num_steps, vocab_size, device=DEVICE, dtype=dtype)
+        if per_token_col:
+            # Each token lands in its own column, cycling through the steps.
+            cols = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE) % num_steps
+        else:
+            cols = torch.tensor(1, dtype=torch.int32, device=DEVICE)
+
+        gumbel_sample(
+            logits,
+            idx_mapping,
+            temp,
+            seed,
+            pos,
+            apply_temperature=True,
+            is_drafting=False,
+            logits_cache=cache,
+            logits_cache_col=cols,
+        )
+        torch.npu.synchronize()
+
+        if per_token_col:
+            stored = cache[torch.arange(num_reqs, device=DEVICE), cols.long()]
+        else:
+            stored = cache[:, 1]
+            # Untouched columns must stay untouched.
+            assert not cache[:, 0].any() and not cache[:, 2].any()
+        assert torch.equal(_float_bits(stored), _float_bits(logits)), "cached logits differ from the input logits"
+
+    @pytest.mark.parametrize("extra_cache_cols", [0, 1])
+    def test_logits_cache_columns_stay_separate_across_steps(self, extra_cache_cols: int):
+        """Each drafting step must land in its own cache column.
+
+        `extra_cache_cols=1` is the shape a draft produces when it adds an
+        input-only mask/noise row to its embedding table but keeps a full-width
+        output head: N-wide logits cached into N+1-wide rows. Striding cache
+        columns by the logits width instead of the cache's own row width leaves
+        step 0 correct and silently misaligns every step after it.
+        """
+        torch.manual_seed(0)
+        num_reqs, vocab_size, num_steps = 4, 1031, 3
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+        temp = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE)
+        seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+        # NPU: pos is cast to int32 inside the kernel.
+        pos = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+
+        cache = torch.zeros(num_reqs, num_steps, vocab_size + extra_cache_cols, device=DEVICE)
+        cols = torch.arange(num_steps, dtype=torch.int32, device=DEVICE)
+        per_step = [torch.randn(num_reqs, vocab_size, device=DEVICE) for _ in range(num_steps)]
+
+        for step, logits in enumerate(per_step):
+            gumbel_sample(
+                logits,
+                idx_mapping,
+                temp,
+                seed,
+                pos,
+                apply_temperature=True,
+                is_drafting=False,
+                logits_cache=cache,
+                logits_cache_col=cols[step],
+            )
+        torch.npu.synchronize()
+
+        for step, logits in enumerate(per_step):
+            stored = cache[:, step, :vocab_size]
+            assert torch.equal(_float_bits(stored), _float_bits(logits)), f"step {step} was overwritten by a later step"
+        # Columns past the sampled width belong to no step and stay untouched.
+        assert not cache[:, :, vocab_size:].any()
+
+    def test_logits_cache_narrower_than_logits_is_rejected(self):
+        """A cache too narrow to hold a step would silently drop its tail."""
+        num_reqs, vocab_size, num_steps = 2, 64, 3
+        logits = torch.randn(num_reqs, vocab_size, device=DEVICE)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+        temp = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE)
+        seed = torch.zeros(num_reqs, dtype=torch.int64, device=DEVICE)
+        pos = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+        cache = torch.zeros(num_reqs, num_steps, vocab_size - 1, device=DEVICE)
+
+        with pytest.raises(AssertionError, match="narrower"):
+            gumbel_sample(
+                logits,
+                idx_mapping,
+                temp,
+                seed,
+                pos,
+                apply_temperature=True,
+                is_drafting=False,
+                logits_cache=cache,
+                logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
+            )
