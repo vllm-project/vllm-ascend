@@ -188,8 +188,9 @@ this repository. The table below documents the internal contract.
 
 ## Test Cases
 
-The accuracy test uses an independent PyTorch fp32 reference for residual
-logits, masking, block-local maxima, and argmax indices. `_npu_gumbel_block_argmax`
+The accuracy test uses an independent PyTorch fp32 reference for the
+block-local maxima and argmax indices of the greedy paths, which carry no Gumbel
+noise. `_npu_gumbel_block_argmax`
 is a device function inlined into `_resample_kernel` and is not tested on its
 own; it is covered through `_resample_kernel`, its only caller. Its
 `processed_logits` store and its `APPLY_TEMPERATURE=True` path are unreachable
@@ -212,10 +213,10 @@ greedy early return, ragged vocabulary tails, shuffled request-state rows,
 deterministic seeds and positions, both sampling distributions, and an
 end-to-end greedy call through `rejection_sample`.
 
-The fp32 score comparison uses `rtol=1e-5` and `atol=1e-5`. Token IDs are
-compared exactly, except that a different argmax is accepted when its reference
-score is within the same fp32 tolerance of the reference maximum. The
-statistical frequency comparison uses `atol=0.02`.
+The greedy paths compare block maxima with `rtol=1e-5` and `atol=1e-5`, and
+token IDs exactly. The sampling paths compare token IDs exactly against the
+single finite candidate of each block, and the statistical frequency comparison
+uses `atol=0.02`.
 
 ```bash
 pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_resample.py
