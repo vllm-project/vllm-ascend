@@ -6,6 +6,7 @@ import torch
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
+    _mask_empty_kv_shards,
     _npu_attention_update,
     _npu_attn_out_lse_update,
     _update_out_and_lse,
@@ -177,6 +178,45 @@ class TestCommonCP(unittest.TestCase):
         self.assertEqual(lse_final.shape, (2, 4, 1))
         self.assertIsInstance(out_final, torch.Tensor)
         self.assertIsInstance(lse_final, torch.Tensor)
+
+    def test_empty_kv_shard_is_online_softmax_identity(self):
+        attn_output = torch.tensor([[[[7.0, 9.0]]], [[[2.0, 3.0]]]])
+        softmax_lse = torch.tensor([[[[5.0]]], [[[4.0]]]])
+
+        output, lse = _mask_empty_kv_shards(
+            attn_output,
+            softmax_lse,
+            torch.tensor([0, 8]),
+        )
+
+        torch.testing.assert_close(output[0], torch.zeros_like(output[0]))
+        self.assertTrue(torch.isneginf(lse[0]).all())
+        torch.testing.assert_close(output[1], attn_output[1])
+        torch.testing.assert_close(lse[1], softmax_lse[1])
+
+    def test_empty_kv_shard_mask_graph_replay_is_dynamic(self):
+        compiled = torch.compile(_mask_empty_kv_shards, backend="eager", fullgraph=True)
+        attn_output = torch.tensor([[[[7.0, 9.0]]], [[[2.0, 3.0]]]])
+        softmax_lse = torch.tensor([[[[5.0]]], [[[4.0]]]])
+
+        first_output, first_lse = compiled(attn_output, softmax_lse, torch.tensor([0, 8]))
+        second_output, second_lse = compiled(attn_output, softmax_lse, torch.tensor([8, 0]))
+
+        torch.testing.assert_close(first_output[0], torch.zeros_like(first_output[0]))
+        torch.testing.assert_close(first_output[1], attn_output[1])
+        self.assertTrue(torch.isneginf(first_lse[0]).all())
+        torch.testing.assert_close(second_output[0], attn_output[0])
+        torch.testing.assert_close(second_output[1], torch.zeros_like(second_output[1]))
+        self.assertTrue(torch.isneginf(second_lse[1]).all())
+
+    def test_all_empty_lse_combine_returns_finite_zero_output(self):
+        outputs = torch.randn(2, 1, 1, 2)
+        lses = torch.full((2, 1, 1, 1), float("-inf"))
+
+        output, lse = _update_out_and_lse(outputs, lses)
+
+        torch.testing.assert_close(output, torch.zeros_like(output))
+        self.assertTrue(torch.isneginf(lse).all())
 
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_decode_context_model_parallel_world_size")
     @patch("torch_npu.npu_attention_update")

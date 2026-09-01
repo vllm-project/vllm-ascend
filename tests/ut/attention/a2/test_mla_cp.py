@@ -7,6 +7,10 @@ from unittest.mock import patch
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.fia_mla_heads import (
+    pad_fia_mla_query_heads,
+    trim_fia_mla_query_heads,
+)
 from vllm_ascend.attention.context_parallel.mla_cp import (
     AscendMLADCPDecodeMetadata,
     AscendMlaDCPImpl,
@@ -31,8 +35,56 @@ def test_mla_dcp_extends_v1_backend() -> None:
     assert AscendMlaDCPMetadataBuilder.decode_metadata_cls is (AscendMLADCPDecodeMetadata)
     base_fields = {field.name for field in fields(AscendMLADecodeMetadata)}
     dcp_fields = {field.name for field in fields(AscendMLADCPDecodeMetadata)}
-    assert {"cp_seq_len", "dcp_mtp_attn_mask"}.isdisjoint(base_fields)
-    assert {"cp_seq_len", "dcp_mtp_attn_mask"} <= dcp_fields
+    assert {"cp_seq_len", "cp_seq_len_tensor", "dcp_mtp_attn_mask"}.isdisjoint(base_fields)
+    assert {"cp_seq_len", "cp_seq_len_tensor", "dcp_mtp_attn_mask"} <= dcp_fields
+
+
+def test_kimi_k3_fia_query_heads_pad_and_trim() -> None:
+    q_nope = torch.arange(2 * 12 * 512, dtype=torch.float32).view(2, 12, 1, 512)
+    q_pe = torch.arange(2 * 12 * 64, dtype=torch.float32).view(2, 12, 1, 64)
+
+    padded_nope, padded_pe, padded_heads = pad_fia_mla_query_heads(q_nope, q_pe, "BNSD", 12)
+    output, lse = trim_fia_mla_query_heads(
+        padded_nope,
+        torch.arange(2 * 16, dtype=torch.float32).view(2, 16, 1, 1),
+        "BNSD",
+        12,
+    )
+
+    assert padded_heads == 16
+    torch.testing.assert_close(output, q_nope)
+    torch.testing.assert_close(lse, torch.arange(2 * 16, dtype=torch.float32).view(2, 16, 1, 1)[:, :12])
+    torch.testing.assert_close(padded_nope[:, 12:], torch.zeros_like(padded_nope[:, 12:]))
+    torch.testing.assert_close(padded_pe[:, 12:], torch.zeros_like(padded_pe[:, 12:]))
+
+
+def test_kimi_k3_fia_query_heads_pad_and_trim_bsnd() -> None:
+    q_nope = torch.randn(2, 1, 12, 512)
+    q_pe = torch.randn(2, 1, 12, 64)
+
+    padded_nope, padded_pe, padded_heads = pad_fia_mla_query_heads(q_nope, q_pe, "BSND", 12)
+    lse = torch.randn(2, 16, 1, 1)
+    output, trimmed_lse = trim_fia_mla_query_heads(padded_nope, lse, "BSND", 12)
+
+    assert padded_heads == 16
+    torch.testing.assert_close(output, q_nope)
+    torch.testing.assert_close(trimmed_lse, lse[:, :12])
+    torch.testing.assert_close(padded_pe[:, :, 12:], torch.zeros_like(padded_pe[:, :, 12:]))
+
+
+def test_kimi_k3_fia_query_head_padding_graph_replay() -> None:
+    compiled = torch.compile(pad_fia_mla_query_heads, backend="eager", fullgraph=True)
+    first = torch.ones(1, 12, 1, 512)
+    second = torch.full((1, 12, 1, 512), 2.0)
+    rope = torch.ones(1, 12, 1, 64)
+
+    first_padded, _, first_heads = compiled(first, rope, "BNSD", 12)
+    second_padded, _, second_heads = compiled(second, rope, "BNSD", 12)
+
+    assert first_heads == second_heads == 16
+    torch.testing.assert_close(first_padded[:, :12], first)
+    torch.testing.assert_close(second_padded[:, :12], second)
+    torch.testing.assert_close(second_padded[:, 12:], torch.zeros_like(second_padded[:, 12:]))
 
 
 def test_mla_dcp_reorg_decode_query_gathers_fused_query() -> None:
@@ -96,6 +148,30 @@ def test_mla_dcp_uses_padded_local_chunk_lengths() -> None:
     torch.testing.assert_close(impl.get_context_seq_len_npu(1, metadata), padded_lengths[1])
 
 
+def test_mla_dcp_decode_metadata_keeps_graph_stable_local_lengths() -> None:
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.num_decodes = 2
+    builder.graph_pad_size = 4
+    builder.cp_seq_len_tensor = torch.empty(8, dtype=torch.int32)
+    builder._require_dcp_metadata = lambda _metadata: SimpleNamespace(
+        draft_cp_seq_len=torch.tensor([8, 0], dtype=torch.int32),
+        dcp_mtp_attn_mask=None,
+    )
+    decode = AscendMLADCPDecodeMetadata(
+        input_positions=torch.arange(2),
+        block_table=torch.ones((2, 2), dtype=torch.int32),
+        seq_lens=torch.tensor([8, 0]),
+        max_seq_lens=8,
+        seq_lens_list=[8, 0],
+    )
+
+    with patch.object(AscendMLAMetadataBuilder, "build_decode_metadata", return_value=decode):
+        result = AscendMlaDCPMetadataBuilder.build_decode_metadata(builder, 0, SimpleNamespace())
+
+    assert result.cp_seq_len_tensor.data_ptr() == builder.cp_seq_len_tensor.data_ptr()
+    torch.testing.assert_close(result.cp_seq_len_tensor, torch.tensor([8, 0, 0, 0], dtype=torch.int32))
+
+
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
     SimpleNamespace(is_draft_model=False, capturing=False),
@@ -120,6 +196,7 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
         max_seq_lens=20,
         seq_lens_list=[20],
         cp_seq_len=torch.tensor([10], dtype=torch.int32),
+        cp_seq_len_tensor=torch.tensor([10], dtype=torch.int32),
         dcp_mtp_attn_mask=torch.zeros((1, 1, 4, 4)),
     )
     metadata = AscendMLAMetadata(
@@ -155,3 +232,72 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     assert call_kwargs["actual_seq_lengths"] == [4]
     assert call_kwargs["block_table"].shape[0] == 1
     assert call_kwargs["actual_seq_lengths_kv"].tolist() == [10]
+
+
+@patch(
+    "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+    SimpleNamespace(is_draft_model=False, capturing=False),
+)
+@patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
+def test_kimi_k3_dcp_decode_handles_graph_padded_local_lengths(mock_fia) -> None:
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.dcp_size = 1
+    impl.num_heads = 12
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 3
+    impl.qk_rope_head_dim = 2
+    impl.scale = 1.0
+    impl.speculative_config = None
+    merged = {}
+
+    def merge(output, lse, _head_size):
+        merged["output"] = output
+        merged["lse"] = lse
+        return output
+
+    impl._merge_dcp_attention_output = merge
+    impl._v_up_proj_batch_major = lambda output: output
+    metadata = AscendMLAMetadata(
+        num_actual_tokens=2,
+        slot_mapping=torch.arange(2),
+        query_start_loc=torch.tensor([0, 1, 2]),
+        seq_lens=torch.tensor([0, 8]),
+        seq_lens_cpu=torch.tensor([0, 8]),
+        block_tables=torch.ones((2, 2), dtype=torch.int32),
+        num_decodes=2,
+        num_decode_tokens=2,
+        num_prefills=0,
+        query_lens=[1, 1],
+        attn_state=AscendAttentionState.DecodeOnly,
+        decode=AscendMLADCPDecodeMetadata(
+            input_positions=torch.arange(2),
+            block_table=torch.ones((2, 2), dtype=torch.int32),
+            seq_lens=torch.tensor([0, 8]),
+            max_seq_lens=8,
+            seq_lens_list=[0, 8],
+            cp_seq_len=[0, 8],
+            cp_seq_len_tensor=torch.tensor([0, 8, 0, 0], dtype=torch.int32),
+        ),
+    )
+    mock_fia.return_value = (
+        torch.ones(2, 16, 1, 3),
+        torch.full((2, 16, 1, 1), 4.0),
+    )
+
+    impl._forward_decode(
+        torch.randn(2, 12, 3),
+        torch.randn(2, 12, 2),
+        torch.randn(2, 1, 2, 3),
+        torch.randn(2, 1, 2, 2),
+        2,
+        metadata,
+    )
+
+    query = mock_fia.call_args.args[0]
+    assert query.shape == (2, 16, 1, 3)
+    assert mock_fia.call_args.kwargs["num_heads"] == 16
+    torch.testing.assert_close(query[:, 12:], torch.zeros_like(query[:, 12:]))
+    assert merged["output"].shape == (2, 12, 3)
+    torch.testing.assert_close(merged["output"][0], torch.zeros_like(merged["output"][0]))
+    assert torch.isneginf(merged["lse"][0]).all()
+    torch.testing.assert_close(merged["output"][1], torch.ones_like(merged["output"][1]))
