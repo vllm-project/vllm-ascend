@@ -5,7 +5,13 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, ProfilerConfig, VllmConfig
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -199,6 +205,73 @@ class TestNPUWorker(TestBase):
         )
 
         self.assertEqual(memory_info, (3, 3, 1.0))
+
+    @unittest.skipIf(vllm_version_is("0.27.1"), "vLLM #51718 only changed the main planner")
+    def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        spec = MLAAttentionSpec(
+            block_size=512,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.float16,
+            tokens_per_state=4,
+            model_version="deepseek_v4",
+        )
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs({"attn": spec})
+        self.assertIsNotNone(uniform_spec)
+        assert uniform_spec is not None
+        groups = [
+            KVCacheGroupSpec(
+                layer_names=["attn"],
+                kv_cache_spec=uniform_spec,
+            )
+        ]
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace()
+        worker.get_kv_cache_spec = MagicMock(return_value={"attn": spec})
+
+        with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+            self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
+
+    @unittest.skipIf(vllm_version_is("0.27.1"), "vLLM #51718 only changed the main planner")
+    def test_hybrid_budget_scaling_follows_runner_backing_capability(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        attn_spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.float16,
+        )
+        mamba_spec = MambaSpec(
+            block_size=2,
+            shapes=((2, 4),),
+            dtypes=(torch.float32,),
+        )
+        groups = [
+            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attn_spec),
+            KVCacheGroupSpec(layer_names=["linear_attn"], kv_cache_spec=mamba_spec),
+        ]
+        layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
+        cache_config = SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            cache_config=cache_config,
+            kv_transfer_config=None,
+        )
+        worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
+
+        for supports_shared_backing, expected_budget in ((True, 12345), (False, 6172)):
+            with self.subTest(supports_shared_backing=supports_shared_backing):
+                worker.model_runner = SimpleNamespace(
+                    use_sparse=False,
+                    use_compress=False,
+                    supports_standardized_shared_kv_backing=supports_shared_backing,
+                )
+                with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
+                    self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
