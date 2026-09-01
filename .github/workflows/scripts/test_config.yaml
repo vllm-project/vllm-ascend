@@ -783,6 +783,16 @@
     - tests/e2e/pull_request/two_card/test_qwen3_moe_eplb.py
     - tests/e2e/pull_request/two_card/test_qwen3_5_35b_a3b_w8a8.py
 
+# === Nightly multi-node version comparison ===
+- name: multi_node_version_compare
+  optional: true
+  source_file_dependencies:
+    - tests/e2e/nightly/multi_node/internal_dp/scripts/multi_node_config.py
+    - tests/e2e/nightly/multi_node/internal_dp/scripts/test_multi_node.py
+    - tests/e2e/nightly/multi_node/scripts/benchmark_results.py
+  tests:
+    - tests/ut/tools/test_multi_node_version_compare.py
+
 # === Others ===
 - name: nightly_bisect
   optional: true

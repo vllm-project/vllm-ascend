@@ -169,6 +169,10 @@ a3:
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
+      - name: multi-node-minimax-m2.7-disagg-pd
+        config_file_path: MiniMax-M2.7-W8A8-QuaRot-disagg-pd.yaml
+        size: 2
+        testcase_timeout: 240
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8

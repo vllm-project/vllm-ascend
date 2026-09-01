@@ -4,9 +4,12 @@ import os
 import shlex
 import subprocess
 import sys
+import time
+from pathlib import Path
 from typing import Any
 
 import pytest
+import requests
 import vllm
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -17,6 +20,7 @@ from tests.e2e.nightly.multi_node.internal_dp.scripts.multi_node_config import (
 )
 from tests.e2e.nightly.multi_node.scripts.benchmark_results import (
     build_task_entry,
+    compare_version_results,
     extract_hardware,
     filter_environment,
     write_results_json,
@@ -131,17 +135,23 @@ def _build_serve_cmd(config: MultiNodeConfig) -> dict[str, Any]:
     return {"dp": {f"node{node.index}": node.server_cmd for node in config.nodes}}
 
 
-def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) -> None:
+def _save_benchmark_results_json(
+    config: MultiNodeConfig,
+    cases: list[dict],
+    results: list[Any],
+    version: str | None = None,
+) -> None:
     """Serialize acc & perf benchmark results to a JSON file under benchmark_results/."""
     runner = os.environ.get("VLLM_CI_RUNNER", "")
 
     # Filter out None benchmark cases; results align with the non-None ones in order
-    valid_items = [(case["case_name"], case) for case in config.benchmark_cases]
+    valid_items = [(case["case_name"], case) for case in cases]
 
     tasks = [build_task_entry(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)]
 
     output: dict[str, Any] = {
         "model_name": config.model,
+        "version": version or "default",
         "hardware": extract_hardware(runner),
         "dtype": _extract_dtype(config),
         "feature": _extract_features(config.nodes[0].server_cmd, config.envs),
@@ -153,7 +163,131 @@ def _save_benchmark_results_json(config: MultiNodeConfig, results: list[Any]) ->
     }
 
     job_name = os.environ.get("BENCHMARK_JOB_NAME", "")
-    write_results_json(output, job_name=job_name)
+    if version:
+        write_results_json(
+            output,
+            job_name=f"{job_name}_{version}",
+            output_dir=Path("/root/.cache/benchmark_results") / job_name,
+        )
+    else:
+        write_results_json(output, job_name=job_name)
+
+
+def _abort_marker_path() -> str:
+    """Return the shared-PVC path used by the leader to abort worker waiting."""
+    log_prefix = os.environ.get("LOG_PREFIX", "/tmp")
+    return os.path.join(log_prefix, "abort")
+
+
+def _version_done_marker_path(version_index: int) -> str:
+    """Return the shared-PVC path marking the end of a version run on the leader."""
+    log_prefix = os.environ.get("LOG_PREFIX", "/tmp")
+    return os.path.join(log_prefix, f"version_done_{version_index}")
+
+
+def _raise_if_aborted(marker_path: str) -> None:
+    if os.path.exists(marker_path):
+        raise RuntimeError(f"Leader aborted the multi-version run (abort marker: {marker_path})")
+
+
+def _hang_until_version_done(
+    health_url: str,
+    *,
+    done_marker: str,
+    abort_marker: str,
+    timeout_seconds: int = 2800,
+    max_consecutive_failures: int = 6,
+) -> None:
+    """Wait until the leader finishes the current version, failing fast on crashes.
+
+    The leader writes the done marker before shutting down its server, so a
+    healthy version transition always exits through the marker. If the leader
+    disappears without the marker, raise after several consecutive failed
+    health checks instead of returning normally (which would leave the worker
+    waiting for a leader that will never start the next version).
+    """
+    start = time.time()
+    consecutive_failures = 0
+    while time.time() - start < timeout_seconds:
+        _raise_if_aborted(abort_marker)
+        if os.path.exists(done_marker):
+            return
+        try:
+            resp = requests.get(health_url, timeout=5)
+            healthy = resp.status_code == 200
+        except requests.RequestException:
+            healthy = False
+        if healthy:
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                raise RuntimeError(
+                    f"Leader at {health_url} is unreachable for {consecutive_failures} consecutive "
+                    f"health checks without a done marker ({done_marker})"
+                )
+        time.sleep(5)
+    raise TimeoutError(f"Timed out after {timeout_seconds}s waiting for leader at {health_url}")
+
+
+def _run_single_version(
+    config: MultiNodeConfig,
+    *,
+    envs: dict[str, str] | None = None,
+    version: str | None = None,
+    version_index: int | None = None,
+    results_by_version: dict[str, dict[str, Any]] | None = None,
+    abort_marker: str | None = None,
+    benchmark_cases: list[dict] | None = None,
+) -> None:
+    node_envs = envs if envs is not None else config.envs
+    cases = benchmark_cases if benchmark_cases is not None else config.benchmark_cases
+    with (
+        ProxyLauncher(
+            nodes=config.nodes,
+            disagg_cfg=config.disagg_cfg,
+            envs=node_envs,
+            proxy_port=config.proxy_port,
+            cur_index=config.cur_index,
+        ) as proxy,
+        RemoteOpenAIServer(
+            model=config.model,
+            vllm_serve_args=config.server_cmd,
+            server_port=config.server_port,
+            server_host=config.master_ip,
+            env_dict=node_envs,
+            auto_port=False,
+            proxy_port=proxy.proxy_port,
+            disaggregated_prefill=config.disagg_cfg,
+            nodes_info=config.nodes,
+            max_wait_seconds=2800,
+        ) as server,
+    ):
+        host, port = config.benchmark_endpoint
+
+        if config.is_master:
+            results = run_aisbench_cases(
+                model=config.model,
+                port=port,
+                aisbench_cases=cases,
+                host_ip=host,
+            )
+            _save_benchmark_results_json(config, cases, results, version=version)
+            if results_by_version is not None and version is not None:
+                results_by_version[version] = {case["case_name"]: result for case, result in zip(cases, results)}
+            if version_index is not None:
+                Path(_version_done_marker_path(version_index)).touch()
+        else:
+            # We should keep listening on the master node's server url determining when to exit.
+            if abort_marker is None:
+                server.hang_until_terminated(f"http://{host}:{config.server_port}/health")
+            else:
+                assert version_index is not None, "version_index is required in multi-version mode"
+                _hang_until_version_done(
+                    f"http://{host}:{config.server_port}/health",
+                    done_marker=_version_done_marker_path(version_index),
+                    abort_marker=abort_marker,
+                )
 
     postprocess_benchmark_results(
         [(key, case_cfg, result) for (key, case_cfg), result in zip(valid_items, results)],
@@ -175,37 +309,54 @@ async def test_multi_node() -> None:
             ]
             subprocess.call(command)
 
-    with (
-        ProxyLauncher(
-            nodes=config.nodes,
-            disagg_cfg=config.disagg_cfg,
-            envs=config.envs,
-            proxy_port=config.proxy_port,
-            cur_index=config.cur_index,
-        ) as proxy,
-        RemoteOpenAIServer(
-            model=config.model,
-            vllm_serve_args=config.server_cmd,
-            server_port=config.server_port,
-            server_host=config.master_ip,
-            env_dict=config.envs,
-            auto_port=False,
-            proxy_port=proxy.proxy_port,
-            disaggregated_prefill=config.disagg_cfg,
-            nodes_info=config.nodes,
-            max_wait_seconds=2800,
-        ) as server,
-    ):
-        host, port = config.benchmark_endpoint
+    if not config.versions:
+        _run_single_version(config)
+        return
 
-        if config.is_master:
-            results = run_aisbench_cases(
-                model=config.model,
-                port=port,
-                aisbench_cases=config.benchmark_cases,
-                host_ip=host,
+    abort_marker = _abort_marker_path()
+    results_by_version: dict[str, dict[str, Any]] = {}
+    try:
+        for version_index, version in enumerate(config.versions):
+            version_name = version["name"]
+            version_envs = {**config.envs, **version["env"]}
+            selected = version.get("benchmarks")
+            version_cases = (
+                config.benchmark_cases
+                if selected is None
+                else [case for case in config.benchmark_cases if case["case_name"] in set(selected)]
             )
-            _save_benchmark_results_json(config, results)
-        else:
-            # We should keep listening on the master node's server url determining when to exit.
-            server.hang_until_terminated(f"http://{host}:{config.server_port}/health")
+            logger.info(
+                "Starting version %s with env overrides: %s, cases: %s",
+                version_name,
+                version["env"],
+                [case["case_name"] for case in version_cases],
+            )
+            _run_single_version(
+                config,
+                envs=version_envs,
+                version=version_name,
+                version_index=version_index,
+                results_by_version=results_by_version,
+                abort_marker=abort_marker,
+                benchmark_cases=version_cases,
+            )
+    except Exception:
+        if config.is_master:
+            try:
+                Path(abort_marker).touch()
+            except OSError:
+                logger.exception("Failed to write abort marker %s", abort_marker)
+        raise
+
+    if config.is_master:
+        baseline_versions = [version["name"] for version in config.versions if version["is_baseline"]]
+        report, passed = compare_version_results(
+            benchmark_cases=config.benchmark_cases,
+            results_by_version=results_by_version,
+            baseline_version_name=baseline_versions[0],
+            default_threshold=config.version_threshold,
+        )
+        for entry in report:
+            logger.info("Version comparison: %s", entry)
+            print(f"VERSION COMPARISON: {entry}")
+        assert passed, "Version performance comparison failed (see report above)"

@@ -288,6 +288,7 @@ jobs:
       bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
       bisect_config_base_path: ''
       request_id: ${{ inputs.request_id || '' }}
+      testcase_timeout: ${{ matrix.test_config.testcase_timeout || 120 }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (

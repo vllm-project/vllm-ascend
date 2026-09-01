@@ -177,12 +177,16 @@ class MultiNodeConfig:
         disaggregated_prefill: dict | None,
         benchmark_cases: list[dict],
         special_dependencies: dict,
+        versions: list[dict] | None = None,
+        version_threshold: float | None = None,
     ):
         self.model = model
         self.test_name = test_name
         self.nodes = nodes
         self.npu_per_node = npu_per_node
         self.benchmark_cases = benchmark_cases
+        self.versions = versions or []
+        self.version_threshold = version_threshold if version_threshold is not None else 0.97
 
         self.cur_index = self._resolve_cur_index()
         self.cur_node = self.nodes[self.cur_index]
@@ -255,6 +259,7 @@ class MultiNodeConfigLoader:
 
         nodes = cls._parse_nodes(config)
         benchmarks = cls._parse_benchmarks(config)
+        versions = cls._parse_versions(config)
 
         return MultiNodeConfig(
             model=config["model"],
@@ -264,6 +269,8 @@ class MultiNodeConfigLoader:
             disaggregated_prefill=config.get("disaggregated_prefill"),
             special_dependencies=config.get("special_dependencies", {}),
             benchmark_cases=list(benchmarks.values()),
+            versions=versions,
+            version_threshold=config.get("version_threshold"),
         )
 
     @classmethod
@@ -317,6 +324,43 @@ class MultiNodeConfigLoader:
         for name, case in benchmarks.items():
             case["case_name"] = name
         return benchmarks
+
+    @staticmethod
+    def _parse_versions(cfg: dict) -> list[dict]:
+        versions = cfg.get("versions") or []
+        if not isinstance(versions, list):
+            raise ValueError("versions must be a list")
+        benchmark_names = set((cfg.get("benchmarks") or {}).keys())
+        parsed: list[dict] = []
+        for version in versions:
+            if not isinstance(version, dict) or not isinstance(version.get("name"), str):
+                raise ValueError("each versions entry must be a dict with a string 'name'")
+            env = version.get("env", {})
+            if not isinstance(env, dict):
+                raise ValueError(f"versions[{version['name']!r}].env must be a dict")
+            benchmarks = version.get("benchmarks")
+            if benchmarks is not None:
+                if (
+                    not isinstance(benchmarks, list)
+                    or not benchmarks
+                    or not all(isinstance(name, str) for name in benchmarks)
+                ):
+                    raise ValueError(f"versions[{version['name']!r}].benchmarks must be a non-empty list of strings")
+                unknown = [name for name in benchmarks if name not in benchmark_names]
+                if unknown:
+                    raise ValueError(f"versions[{version['name']!r}].benchmarks has unknown cases: {unknown}")
+                benchmarks = list(benchmarks)
+            parsed.append(
+                {
+                    "name": version["name"],
+                    "env": dict(env),
+                    "is_baseline": bool(version.get("is_baseline", False)),
+                    "benchmarks": benchmarks,
+                }
+            )
+        if parsed and sum(1 for version in parsed if version["is_baseline"]) != 1:
+            raise ValueError("when versions is configured, exactly one entry must set 'is_baseline: true'")
+        return parsed
 
     @staticmethod
     def _resolve_cluster_ips(cfg: dict, num_nodes: int) -> list[str]:

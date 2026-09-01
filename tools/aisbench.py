@@ -60,6 +60,8 @@ class AisbenchRunner:
             ]
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
+        if self.num_warmups is not None:
+            aisbench_cmd.extend(["--num-warmups", str(self.num_warmups)])
         self.stdout_file = f"output_{self.task_type}.txt"
         aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
         print(f"running aisbench cmd: {aisbench_cmd}")
@@ -69,7 +71,11 @@ class AisbenchRunner:
         self.model = model
         self.dataset_path = aisbench_config.get("dataset_path_local")
         if not self.dataset_path:
-            self.dataset_path = maybe_download_from_modelscope(aisbench_config["dataset_path"], repo_type="dataset")
+            self.dataset_path = maybe_download_from_modelscope(
+                aisbench_config["dataset_path"],
+                repo_type="dataset",
+                local_files_only=False if aisbench_config.get("allow_dataset_download") else None,
+            )
         self.model_path = aisbench_config.get("model_path")
         if not self.model_path:
             self.model_path = maybe_download_from_modelscope(model)
@@ -82,6 +88,7 @@ class AisbenchRunner:
         self.request_conf = aisbench_config["request_conf"]
         self.dataset_conf = aisbench_config.get("dataset_conf")
         self.num_prompts = aisbench_config.get("num_prompts")
+        self.num_warmups = aisbench_config.get("num_warmups")
         self.max_out_len = aisbench_config["max_out_len"]
         self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
@@ -334,6 +341,7 @@ def maybe_download_from_modelscope(
     download_dir: str | None = None,
     ignore_patterns: str | list[str] | None = None,
     allow_patterns: list[str] | str | None = None,
+    local_files_only: bool | None = None,
 ) -> str:
     """
     Download model/dataset from ModelScope hub.
@@ -344,11 +352,13 @@ def maybe_download_from_modelscope(
     # downloading the same model weights at the same time.
     with get_lock(model, download_dir):
         if not os.path.exists(model):
+            if local_files_only is None:
+                local_files_only = huggingface_hub.constants.HF_HUB_OFFLINE
             model_path = snapshot_download(
                 model_id=model,
                 repo_type=repo_type,
                 cache_dir=download_dir,
-                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                local_files_only=local_files_only,
                 revision=revision,
                 ignore_file_pattern=ignore_patterns,
                 allow_patterns=allow_patterns,

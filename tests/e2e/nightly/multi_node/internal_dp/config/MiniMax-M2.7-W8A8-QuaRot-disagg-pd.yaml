@@ -1,0 +1,166 @@
+test_name: "multi-node-minimax-m2.7-disagg-pd"
+model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+num_nodes: 2
+npu_per_node: 16
+env_common: &env_common
+  VLLM_USE_MODELSCOPE: true
+  PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+  HCCL_BUFFSIZE: 1024
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 1
+  TASK_QUEUE_ENABLE: 1
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+  SERVER_PORT: 8080
+
+disaggregated_prefill:
+  enabled: true
+  prefiller_host_index: [0]
+  decoder_host_index: [1]
+
+deployment:
+  -
+    envs:
+      <<: *env_common
+    server_cmd: >
+        vllm serve "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-size 2
+        --data-parallel-size-local 2
+        --data-parallel-start-rank 0
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
+        --tensor-parallel-size 8
+        --seed 1024
+        --max-num-seqs 64
+        --max-model-len 196608
+        --max-num-batched-tokens 16384
+        --trust-remote-code
+        --gpu-memory-utilization 0.9
+        --quantization ascend
+        --enforce-eager
+        --kv-transfer-config
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  }
+            }
+        }'
+
+  -
+    envs:
+      <<: *env_common
+    server_cmd: >
+        vllm serve "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-size 2
+        --data-parallel-size-local 2
+        --data-parallel-start-rank 0
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
+        --tensor-parallel-size 8
+        --seed 1024
+        --max-num-seqs 64
+        --max-model-len 196608
+        --max-num-batched-tokens 16384
+        --trust-remote-code
+        --gpu-memory-utilization 0.9
+        --quantization ascend
+        --enforce-eager
+        --kv-transfer-config
+        '{"kv_connector": "MooncakeConnectorV1",
+        "kv_role": "kv_consumer",
+        "kv_port": "30100",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  }
+            }
+        }'
+
+versions:
+  - name: v1
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "0"
+    is_baseline: true
+    # V1 only runs the performance scenarios; accuracy is guarded on V2.
+    benchmarks:
+      - perf_128k
+      - perf_16k
+  - name: v2
+    env:
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    benchmarks:
+      - perf_128k
+      - perf_16k
+      - acc_gpqa
+
+version_threshold: 0.97
+
+benchmarks:
+  perf_128k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_Minimax
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 80
+    max_out_len: 1024
+    batch_size: 20
+    request_rate: 0
+    num_warmups: 2
+    # Fetch the GSM8K MiniMax dataset online on first run if it is not yet
+    # cached on the shared runner PVC (one-time ~539MB download).
+    allow_dataset_download: true
+    baseline: 1
+    threshold: 0.97
+    version_threshold: 0.97
+  perf_16k:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_Minimax
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 200
+    max_out_len: 1024
+    batch_size: 50
+    request_rate: 0
+    num_warmups: 2
+    # Fetch the GSM8K MiniMax dataset online on first run if it is not yet
+    # cached on the shared runner PVC (one-time ~13MB download).
+    allow_dataset_download: true
+    baseline: 1
+    threshold: 0.97
+    version_threshold: 0.97
+  # GPQA accuracy runs on the V2 service right after the performance
+  # scenarios (no extra service launch). max_out_len 65536 and batch_size 64
+  # saturate the service's --max-num-seqs 64. Record-only gate for the first
+  # run (baseline 0 / threshold 100 covers the full 0-100 range); replace with
+  # the measured V1 baseline aligned with the test-team exit baseline
+  # (A00302_05 C2) after the first green run.
+  acc_gpqa:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 65536
+    batch_size: 64
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 40
+    ignore_eos: false
+    baseline: 0
+    threshold: 100

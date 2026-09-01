@@ -25,6 +25,74 @@ PERF_METRIC_RENAME: dict[str, str] = {
 }
 
 
+def get_output_throughput(result: Any) -> float | None:
+    """Extract total output token throughput from an AisbenchRunner perf result."""
+    if not (isinstance(result, list) and len(result) == 2):
+        return None
+    try:
+        value = result[1].get("Output Token Throughput", {}).get("total", "")
+        return float(str(value).replace("token/s", "").strip())
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def compare_version_results(
+    benchmark_cases: list[dict],
+    results_by_version: dict[str, dict[str, Any]],
+    baseline_version_name: str,
+    default_threshold: float = 0.97,
+) -> tuple[list[dict], bool]:
+    """Compare candidate versions against a baseline for every performance case.
+
+    ``results_by_version`` maps version name to ``{case_name: result}`` so
+    different versions may run different benchmark subsets. Returns a per-case
+    report and whether all candidate/baseline throughput ratios meet their
+    thresholds.
+    """
+    report: list[dict] = []
+    passed = True
+    if baseline_version_name not in results_by_version:
+        report.append({"case_name": "", "error": f"baseline version {baseline_version_name!r} has no results"})
+        return report, False
+
+    candidate_names = [name for name in results_by_version if name != baseline_version_name]
+    if not candidate_names:
+        report.append({"case_name": "", "error": "no candidate version results to compare"})
+        return report, False
+
+    baseline_results = results_by_version[baseline_version_name]
+    for case in benchmark_cases:
+        if case.get("case_type") != "performance":
+            continue
+        case_name = case.get("case_name", "")
+        if not case_name:
+            continue
+        threshold = case.get("version_threshold", default_threshold)
+        baseline_ott = get_output_throughput(baseline_results.get(case_name))
+        for candidate_name in candidate_names:
+            candidate_ott = get_output_throughput(results_by_version[candidate_name].get(case_name))
+            entry = {
+                "case_name": case_name,
+                "dataset_path": case.get("dataset_path", ""),
+                "candidate_version": candidate_name,
+                "baseline_version": baseline_version_name,
+                "candidate_output_throughput": candidate_ott,
+                "baseline_output_throughput": baseline_ott,
+                "threshold": threshold,
+            }
+            if baseline_ott is None or candidate_ott is None or baseline_ott <= 0:
+                entry["ratio"] = None
+                entry["passed"] = False
+                passed = False
+            else:
+                ratio = candidate_ott / baseline_ott
+                entry["ratio"] = round(ratio, 4)
+                entry["passed"] = ratio >= threshold
+                passed = passed and entry["passed"]
+            report.append(entry)
+    return report, passed
+
+
 def extract_hardware(runner: str) -> str:
     runner_lower = runner.lower()
     for label in ("a3", "a2"):
@@ -91,7 +159,7 @@ def build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) ->
             except (ValueError, AttributeError):
                 pass
 
-    test_input_keys = ("num_prompts", "max_out_len", "batch_size", "request_rate")
+    test_input_keys = ("num_prompts", "max_out_len", "batch_size", "request_rate", "num_warmups")
     test_input = {key: case_config[key] for key in test_input_keys if key in case_config}
 
     target: dict[str, Any] = {}
