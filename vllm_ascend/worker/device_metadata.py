@@ -52,6 +52,7 @@ class DeviceMetadataExecutor:
         self._buffer_reusable = torch.npu.Event()
         self._has_reuse_fence = False
         self._submission_in_flight = False
+        self._submitted_frontiers: tuple[tuple[DeviceMetadataStage, int], ...] = ()
         self._waited_stages: set[tuple[DeviceMetadataStage, int]] = set()
 
     @property
@@ -70,6 +71,7 @@ class DeviceMetadataExecutor:
                 self._stage_ready[frontier] = torch.npu.Event()
 
         self._submission_in_flight = True
+        self._submitted_frontiers = tuple(dict.fromkeys((task.stage, task.group_id) for task in ordered_tasks))
         self._waited_stages.clear()
         self._inputs_ready.record(torch.npu.current_stream())
         with torch.npu.stream(self.stream):
@@ -92,6 +94,12 @@ class DeviceMetadataExecutor:
         if frontier not in self._waited_stages:
             torch.npu.current_stream().wait_event(self._stage_ready[frontier])
             self._waited_stages.add(frontier)
+
+    def wait_all(self) -> None:
+        if not self._submission_in_flight:
+            raise RuntimeError("No device metadata submission is in flight")
+        for stage, group_id in self._submitted_frontiers:
+            self.wait(stage, group_id)
 
     def release(self) -> None:
         if not self._submission_in_flight:

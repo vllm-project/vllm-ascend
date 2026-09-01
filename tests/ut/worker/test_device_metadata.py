@@ -153,6 +153,22 @@ def test_wait_records_each_stage_once_per_submission(executor_env):
     assert calls.count(("model", "wait", "indexer")) == 1
 
 
+def test_wait_all_waits_current_frontiers_once(executor_env):
+    executor, calls, _ = executor_env
+    tasks = (*_tasks(calls), _tasks(calls)[1])
+    executor.submit(tasks)
+
+    executor.wait_all()
+    executor.wait(DeviceMetadataStage.INDEXER, 2)
+
+    waits = [call for call in calls if call[:2] == ("model", "wait")]
+    assert waits == [
+        ("model", "wait", "compressor"),
+        ("model", "wait", "indexer"),
+        ("model", "wait", "attention"),
+    ]
+
+
 def test_submission_in_flight_tracks_release(executor_env):
     executor, calls, _ = executor_env
 

@@ -2363,9 +2363,7 @@ class NPUModelRunner(GPUModelRunner):
         defer_kv_connector_finalize = self.speculative_config is not None and (
             get_pp_group().is_last_rank or self.broadcast_pp_output
         )
-        active_device_metadata_executor = self.device_metadata_executor
-        if active_device_metadata_executor is not None and not active_device_metadata_executor.submission_in_flight:
-            active_device_metadata_executor = None
+        active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_mode)
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2947,6 +2945,16 @@ class NPUModelRunner(GPUModelRunner):
             self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
 
         return hidden_states
+
+    def _prepare_device_metadata_for_forward(
+        self, cudagraph_runtime_mode: CUDAGraphMode
+    ) -> DeviceMetadataExecutor | None:
+        executor = self.device_metadata_executor
+        if executor is None or not executor.submission_in_flight:
+            return None
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            executor.wait_all()
+        return executor
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -3710,9 +3718,7 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
-            active_device_metadata_executor = self.device_metadata_executor
-            if active_device_metadata_executor is not None and not active_device_metadata_executor.submission_in_flight:
-                active_device_metadata_executor = None
+            active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_runtime_mode)
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
