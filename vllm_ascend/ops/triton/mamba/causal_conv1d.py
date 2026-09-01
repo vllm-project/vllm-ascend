@@ -69,16 +69,30 @@ def causal_conv1d_update_ascendc(
                 D = x.shape[-1]
                 orig_dtype = x.dtype
                 x_c = x.to(conv_state.dtype).contiguous()
-                if conv_state.dim() == 3 and conv_state.shape[-2] == D and conv_state.shape[-1] != D:
-                    # DS-layout aliasing pool: the op addresses rows through
-                    # cache_indices on the pool it receives, so hand it a
-                    # transposed (SD) contiguous view of the whole pool. The
-                    # spec path runs once per verify step; the full-pool
-                    # transpose (~0.2ms) is acceptable here.
-                    conv_state_t = conv_state.transpose(1, 2).contiguous()
-                else:
-                    conv_state_t = conv_state.contiguous()
-                indices_c = conv_state_indices.contiguous()
+                # Stage ONLY the slot-table cells into a small contiguous SD
+                # pool (one staging row per table cell, identity-indexed) and
+                # scatter the updated rows back afterwards. The model hands us
+                # a DS-layout view of the pool (kda.py transposes to
+                # (..., dim, width-1)); handing the op a full-pool
+                # transpose+contiguous() COPY silently discards every
+                # verify-step state update — the copy gets written, the pool
+                # never does — freezing the conv state at its prefill value
+                # while recurrent_kda keeps advancing. Mirrors the
+                # plain-decode staging below (~0.02ms per row).
+                tab = conv_state_indices.to(torch.long)
+                keep = tab != PAD_SLOT_ID
+                flat = tab.clamp(min=0).reshape(-1)            # [K], K = seq*(N+1)
+                sub_ds = conv_state[flat]                      # [K, D, S] gather
+                staging = sub_ds.transpose(1, 2).contiguous()  # [K, S, D] SD pool
+                indices_c = (
+                    torch.arange(
+                        flat.numel(),
+                        dtype=conv_state_indices.dtype,
+                        device=flat.device,
+                    )
+                    .view_as(conv_state_indices)
+                    .contiguous()
+                )
                 if weight.shape[0] == D:
                     weight_t = weight.to(conv_state.dtype).transpose(0, 1).contiguous()
                 else:
@@ -95,7 +109,7 @@ def causal_conv1d_update_ascendc(
                     out,
                     x_c,
                     weight_t,
-                    conv_state=conv_state_t,
+                    conv_state=staging,
                     bias_opt=bias_c,
                     query_start_loc_opt=query_start_loc.contiguous(),
                     cache_indices_opt=indices_c,
@@ -105,6 +119,24 @@ def causal_conv1d_update_ascendc(
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
                 )
+                # Scatter the updated staging rows back into the pool view.
+                # PAD cells staged pool row 0 (the null line) purely to keep
+                # shapes static; write them back to row 0 so real slots are
+                # never touched. Row 0 is the reserved NULL_BLOCK_ID line, so
+                # the stray write is harmless by convention.
+                if torch.npu.is_current_stream_capturing():
+                    keep_flat = keep.reshape(-1)
+                    safe_idx = torch.where(
+                        keep_flat, flat, torch.zeros_like(flat)
+                    )
+                    safe_rows = staging * keep_flat.view(-1, 1, 1)
+                    conv_state.index_copy_(0, safe_idx, safe_rows.transpose(1, 2))
+                else:
+                    flat_host = flat.tolist()
+                    keep_host = keep.reshape(-1).tolist()
+                    for k in range(len(flat_host)):
+                        if keep_host[k]:
+                            conv_state[flat_host[k]] = staging[k].t()
                 _CONV_CUSTOM_AVAILABLE = True
                 return result.to(orig_dtype)
             except Exception as _op_err:
@@ -141,7 +173,8 @@ def causal_conv1d_update_ascendc(
             small_pool = None
             if conv_state_indices is not None:
                 idx_src = conv_state_indices
-                rows = idx_src.to(torch.long).clamp(min=0)
+                rows_raw = idx_src.to(torch.long)
+                rows = rows_raw.clamp(min=0)
                 sub_ds = conv_state[rows]                       # [B, D, S] gather
                 conv_state_t = sub_ds.transpose(1, 2).contiguous()  # [B, S, D]
                 small_pool = conv_state_t
@@ -154,9 +187,6 @@ def causal_conv1d_update_ascendc(
             else:
                 conv_state_t = conv_state.contiguous()
                 indices_c = None
-            _writeback_rows = (
-                rows if small_pool is not None else None
-            )
             if weight.shape[0] == D:
                 # vLLM hands us (dim, width); the operator wants (width, dim).
                 # GLM-5.3-Flash keeps its conv weight in fp32 — the operator's
@@ -227,32 +257,33 @@ def causal_conv1d_update_ascendc(
                     run_mode=1,
                 )
                 if small_pool is not None:
-                    # Scatter the updated rows back into the pool view.
-                    # ACL-graph capture forbids host syncs (tolist), so the
-                    # capture path uses tensorized scatter; eager uses plain
-                    # slice assignments (0.02ms each, ~200x faster than
-                    # advanced indexing into the strided view).
+                    # Scatter the updated rows back into the pool view. The
+                    # scatter target must be the ORIGINAL slot ids (`rows`,
+                    # content-dynamic so replays pick up current slots), NOT
+                    # the identity staging indices — writing to arange(0..B-1)
+                    # would stomp pool lines 0..B-1 of unrelated requests on
+                    # every replay. PAD cells write back to line 0 (the
+                    # reserved NULL_BLOCK_ID line, harmless by convention).
+                    # Capture forbids host syncs, so the capture path uses a
+                    # tensorized scatter; eager uses plain slice assignments
+                    # (0.02ms each, ~200x faster than advanced indexing into
+                    # the strided view).
                     if torch.npu.is_current_stream_capturing():
-                        keep = indices_c != PAD_SLOT_ID
+                        keep = rows_raw != PAD_SLOT_ID
                         safe_idx = torch.where(
-                            keep, indices_c.to(torch.long),
-                            torch.zeros_like(indices_c, dtype=torch.long),
+                            keep, rows,
+                            torch.zeros_like(rows),
                         )
                         safe_rows = small_pool * keep.view(-1, 1, 1)
                         conv_state.index_copy_(
                             0, safe_idx, safe_rows.transpose(1, 2)
                         )
                     else:
-                        valid_host = [
-                            int(i)
-                            for i, r in zip(
-                                _writeback_rows.tolist(),
-                                indices_c.tolist(),
-                            )
-                            if int(r) != PAD_SLOT_ID
-                        ]
-                        for b, i in enumerate(valid_host):
-                            conv_state[i] = small_pool[b].t()
+                        keep_host = (rows_raw != PAD_SLOT_ID).tolist()
+                        rows_host = rows.tolist()
+                        for b in range(rows.numel()):
+                            if keep_host[b]:
+                                conv_state[rows_host[b]] = small_pool[b].t()
                 elif conv_state_t.data_ptr() != conv_state.data_ptr() or not conv_state.is_contiguous():
                     conv_state.copy_(conv_state_t.transpose(1, 2))
                 if not _CONV_CUSTOM_AVAILABLE:
