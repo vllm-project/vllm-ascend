@@ -82,13 +82,15 @@ test_cases:
     benchmarks:
       <<: *benchmarks_perf1
   - name: "Dflassh_Acceptance_Rate_Test_05"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
       ASCEND_LAUNCH_BLOCKING: "0"
       OMP_NUM_THREADS: "100"
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
+      - "--quantization"
+      - "ascend"
       - "--speculative_config"
       - '{"method":"dflash","model":"/root/.cache/modelscope/hub/models/z-lab/Qwen3.6-27B-DFlash","enforce_eager":true,"num_speculative_tokens":3}'
       - "--additional-config"

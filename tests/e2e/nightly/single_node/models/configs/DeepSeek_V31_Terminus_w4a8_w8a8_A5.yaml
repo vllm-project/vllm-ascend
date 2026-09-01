@@ -464,7 +464,7 @@ test_cases:
       - "--tool-call-parser"
       - "deepseek_v31"
       - "--chat-template"
-      - "vllm-ascend/tool_chat_template_deepseekv31.jinja"
+      - "/root/.cache/modelscope/hub/models/vllm-ascend/tool_chat_template_deepseekv31.jinja"
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
       - "--compilation_config"
@@ -507,7 +507,7 @@ test_cases:
       - "--tool-call-parser"
       - "deepseek_v31"
       - "--chat-template"
-      - "vllm-ascend/tool_chat_template_deepseekv31.jinja"
+      - "/root/.cache/modelscope/hub/models/vllm-ascend/tool_chat_template_deepseekv31.jinja"
       - "--speculative-config"
       - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
       - "--compilation_config"

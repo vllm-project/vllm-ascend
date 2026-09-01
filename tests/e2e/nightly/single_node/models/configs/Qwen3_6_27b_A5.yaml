@@ -82,7 +82,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_perf1
   - name: "Dflassh_Acceptance_Rate_Test_05"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
       ASCEND_LAUNCH_BLOCKING: "0"
       OMP_NUM_THREADS: "100"

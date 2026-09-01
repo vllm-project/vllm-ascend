@@ -112,3 +112,17 @@ a5:
       - name: DeepSeek_V31_Terminus_w4a8_w8a8_A5
         os: linux-aarch64-a5-8
         config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml
+  multi_node:
+    test_config:
+      - name: cpp_acc_001_A5
+        size: 2
+        config_file_path: cpp_acc_001_A5.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+      - name: GLM51_w8a8c8_PD_2k2k_A5
+        size: 2
+        config_file_path: GLM51_w8a8c8_PD_2k2k_A5.yaml
+        config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+      - name: GLM51_w4a4c8_A5
+        size: 2
+        config_file_path: QGLM51_w4a4c8_A5.yaml
+        config_base_path: tests/e2e/weekly/multi_node/internal_dp/config

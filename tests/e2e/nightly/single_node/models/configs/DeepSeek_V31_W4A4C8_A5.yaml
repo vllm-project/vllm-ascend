@@ -71,7 +71,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_perf
   - name: "DeepSeekV31_A5_Single_Maximum_Context_Test_01"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       HCCL_BUFFSIZE: "512"
       OMP_PROC_BIND: "False"
