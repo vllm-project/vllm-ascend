@@ -1330,6 +1330,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         runner.synchronize_input_prep = nullcontext
         runner._update_states = MagicMock(return_value=None)
         runner.parallel_config = SimpleNamespace(distributed_executor_backend="external_launcher", data_parallel_size=2)
+        runner.uniform_decode_query_len = 8
         runner._dummy_run = MagicMock()
         runner._start_dump_data = MagicMock()
         runner.requests = {}
@@ -1337,7 +1338,11 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
 
         runner.execute_model(scheduler_output)
 
-        runner._dummy_run.assert_called_once_with(1)
+        runner._dummy_run.assert_called_once_with(
+            8,
+            uniform_decode=True,
+            skip_gdn_state_update=True,
+        )
         runner._start_dump_data.assert_not_called()
 
     @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
