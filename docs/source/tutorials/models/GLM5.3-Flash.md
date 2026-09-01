@@ -15,7 +15,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 ### 3.1 Model Weight
 
 - `GLM-5.3-Flash-w8a8 (Ascend950DT mxfp8 Quantized)`: requires 1 Ascend950DT (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
-- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
+- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -135,7 +135,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
   --enable-expert-parallel \
   --seed 1024 \
   --quantization ascend \
-  --served-model-name glm-5 \
+  --served-model-name glm \
   --max-num-seqs 128 \
   --max-model-len 132096 \
   --async-scheduling \
@@ -180,27 +180,25 @@ echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-vllm serve  /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-0829   \
+
+vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-0829   \
   --host 0.0.0.0 \
-  --port 8900 \
+  --port 8077 \
   --max-model-len 133120  \
+  --data-parallel-size 1 \
   --tensor-parallel-size 16 \
-  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
   --enable-expert-parallel \
   --seed 1024 \
   --served-model-name glm \
   --safetensors-load-strategy prefetch \
   --max-num-seqs 128 \
-  --max-num-batched-tokens 8196 \
+  --max-num-batched-tokens 8192 \
   --trust-remote-code \
   --quantization ascend \
+  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
   --gpu-memory-utilization 0.85 \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8,16,24]}' \
-  --profiler-config \
-'{"profiler": "torch",
-"torch_profiler_dir": "/home/d00945881/profiling/0828",
-"torch_profiler_with_stack": false}' \
+  --speculative-config '{"num_speculative_tokens": 2, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
   --enable-prefix-caching \
   --async-scheduling \
   --api-server-count 1
@@ -226,7 +224,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "glm-52",#todo
+        "model": "glm",#todo
         "prompt": "The future of AI is",
         "max_completion_tokens": 50,
     }'
@@ -256,38 +254,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
-## 9 Performance Tuning
-
-### 9.1 Recommended Configurations
-
-> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Tuning Guidelines](#92-tuning-guidelines) for tuning based on actual conditions.
-
-The tables below provide recommended parameter configurations for different deployment scenarios. All scenarios are categorized by use case (Low Latency, High Throughput, Long Context) and correspond to the deployment modes documented in [Deployment](#5-deployment).
-
-#### 9.1.1 Table 1: Scenario Overview
-
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs) or 1 Atlas 800 A2 server (64GB × 8 NPUs).
-
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
-|--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(128K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp4 tp8, fused MC2, MTP3, max-num-seqs 16, max-model-len 66000, DSA CP|
-
-#### 9.1.2 Table 2: Detailed Node Configuration
-
-> The TP/DP columns show the values **per node** as configured in the Deployment scripts (a node hosting 2 DP ranks of TP8, or 1 DP rank of TP16, uses 16 NPUs).
-
-**Notice:**
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the **[Deployment](#5-deployment)** chapter.
-
-|Scenario|Configuration|NPUs (per node)|TP|DP (per node)|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Spec Num|
-|--------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
-|High Throughput 64K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment]
-
-> On PD decode nodes, `--max-num-batched-tokens` is configured as `(MTP Spec Num + 1) × Max Num Seqs` — each sequence generates one target token plus the speculated MTP tokens per decode step.
->
-> For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Deployment](#5-deployment).
-
-## 10 FAQ
+## 9 FAQ
 
 - **Q: How to enable function calling for GLM-5.3-Flash?**
 
