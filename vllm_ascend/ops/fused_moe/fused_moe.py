@@ -273,8 +273,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         """Start the SP shared-input gather before the latent down projection."""
         gathered_input = hidden_states
         all_gather_done = None
+        shared_experts = self.ascend_shared_experts
         if self._can_overlap_sp_shared_with(self.routed_input_transform):
-            gathered_input, all_gather_done = self.ascend_shared_experts.start_input_all_gather(hidden_states)
+            assert shared_experts is not None
+            gathered_input, all_gather_done = shared_experts.start_input_all_gather(hidden_states)
         routed_input, shared_input = super().apply_routed_input_transform(hidden_states)
         if all_gather_done is not None:
             torch.npu.current_stream().wait_event(all_gather_done)
@@ -284,8 +286,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def apply_routed_output_transform(self, fused_output: torch.Tensor) -> torch.Tensor:
         """Run the latent up projection before joining the SP shared output."""
         fused_output = super().apply_routed_output_transform(fused_output)
+        shared_experts = self.ascend_shared_experts
         if self._can_overlap_sp_shared_with(self.routed_output_transform):
-            self.ascend_shared_experts.wait_for_output()
+            assert shared_experts is not None
+            shared_experts.wait_for_output()
         return fused_output
 
     def _maybe_apply_routed_scale_to_output(
@@ -293,16 +297,18 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         shared_output: torch.Tensor | None,
         fused_output: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        shared_experts = self.ascend_shared_experts
         if (
             shared_output is not None
             and fused_output.dtype == torch.float16
             and self.routed_scaling_factor != 1.0
             and self._can_overlap_sp_shared_with(self.routed_output_transform)
         ):
+            assert shared_experts is not None
             # The base FP16 overflow path scales shared_output in place. Join
             # a deferred SP reduce-scatter before that write; BF16 keeps the
             # overlap because only fused_output is touched.
-            self.ascend_shared_experts.wait_for_output()
+            shared_experts.wait_for_output()
         return super()._maybe_apply_routed_scale_to_output(shared_output, fused_output)
 
     if vllm_version_is("0.27.1"):
