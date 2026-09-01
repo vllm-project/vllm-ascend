@@ -840,9 +840,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             )
                         )
                         if block_size is not None:
+                            block_idx = start // group_block_size
+                            if block_idx >= len(all_hashes):
+                                continue
+                            current_hash = all_hashes[block_idx]
+                            parent_hash = all_hashes[block_idx - 1] if block_idx > 0 else None
                             stored_event = BlockStored(
-                                block_hashes=[new_block_hashes[index]],
-                                parent_block_hash=prev_key,
+                                block_hashes=[current_hash],
+                                parent_block_hash=parent_hash,
                                 token_ids=token_ids,
                                 block_size=block_size,
                                 lora_id=None,
@@ -850,7 +855,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                                 lora_name=None,
                             )
                             stored_events.append(stored_event)
-                            prev_key = new_block_hashes[index]
                             logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)
 
                 if self.kv_role == "kv_consumer":
