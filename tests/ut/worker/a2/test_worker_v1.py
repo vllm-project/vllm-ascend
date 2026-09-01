@@ -378,9 +378,10 @@ class TestNPUWorker(TestBase):
         mock_allocator_class.get_instance.return_value.sleep.assert_called_once_with(offload_tags=("weights",))
         self.assertEqual(mock_mem_get_info.call_count, 2)
 
+    @patch("vllm_ascend.worker.worker.NPUWorker.synchronize_device")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
-    def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class):
+    def test_wake_up_mode_enabled(self, mock_get_config, mock_allocator_class, mock_synchronize_device):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 0
         mock_config.rl_config.enabled = True
@@ -417,9 +418,21 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
+            mock_synchronize_device.assert_called_once_with()
 
             worker.wake_up(tags=["kv_cache"])
             mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
+            self.assertEqual(mock_synchronize_device.call_count, 2)
+
+    @patch("torch.npu.synchronize")
+    def test_synchronize_device_waits_for_npu_work(self, mock_synchronize):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+
+        worker.synchronize_device()
+
+        mock_synchronize.assert_called_once_with()
 
     @staticmethod
     def _make_unquantized_moe_model():
