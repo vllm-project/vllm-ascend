@@ -182,4 +182,4 @@ For multimodal models like GLM-4.1V, the standard text-only throughput performan
 
 ### Vision Tensor Memory Continuity
 
-To resolve the crash of underlying NPU operators caused by `pixel_values` (which typically become non-contiguous in memory due to multidimensional Slice and Concat operations during image preprocessing), an implicit `.contiguous()` patch (`patch_glm4v.py`) is applied to ensure the memory continuity of vision tensors before they are passed into the model's forward pass.
+To resolve crashes caused by non-contiguous vision tensors (which typically arise from multidimensional slice and concat operations during image preprocessing), `patch_glm4v.py` normalizes `pixel_values` / `pixel_values_videos` at `_process_image_input` / `_process_video_input` (with a legacy `forward` kwargs fallback) by aligning device, dtype, and memory layout before the vision tower runs.
