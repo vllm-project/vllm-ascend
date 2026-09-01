@@ -650,14 +650,20 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8, 64)
 
-    @patch("vllm_ascend.attention.attention_v1.using_paged_attention")
-    @patch("torch_npu._npu_paged_attention")
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu._npu_paged_attention")
+    @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
     def test_forward_paged_attention(
-        self, mock_get_forward_context, mock_npu_scatter_pa_kv_cache, mock_paged_attention, mock_using_paged_attention
+        self,
+        mock_using_paged_attention,
+        mock_paged_attention,
+        mock_reshape_and_cache,
+        mock_extra_ctx,
     ):
         """Test forward pass in DecodeOnly state"""
+        mock_extra_ctx.capturing = False
+
         query = torch.randn(4, 8 * 64)
         key = torch.randn(4, 8 * 64)
         value = torch.randn(4, 8 * 64)
@@ -672,14 +678,14 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.slot_mapping = torch.zeros(4, dtype=torch.long)
         metadata.num_decodes = 4
         metadata.num_prefills = 0
+        metadata.causal = True
+        metadata.model_runner_type = None
         layer = self.layer_no_quant
-        mock_using_paged_attention.return_value = True
-
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
 
         output = self.impl.forward(layer, query, key, value, kv_cache, metadata, output)
 
         mock_paged_attention.assert_called_once()
+        mock_reshape_and_cache.assert_called_once()
         assert output.shape == (4, 8 * 64)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -713,49 +719,55 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8, 64)
 
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("torch_npu.npu_fused_infer_attention_score_v2")
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu.npu_fused_infer_attention_score_v2")
     def test_forward_decode_only_swa_sink(
-        self, mock_npu_scatter_pa_kv_cache, mock_fused_infer_attention_score, mock_get_forward_context
+        self, mock_fused_infer_attention_score_v2, mock_reshape_and_cache, mock_extra_ctx
     ):
         """Test forward pass in DecodeOnly state"""
+        mock_extra_ctx.capturing = False
+
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
         value = torch.randn(10, 8 * 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         output = torch.empty(10, 8, 64)
 
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
-
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
         metadata.seq_lens = torch.tensor([10] * 10)
+        metadata.seq_lens_list = [10] * 10
+        metadata.actual_seq_lengths_q = [10]
         metadata.attn_mask = torch.randn(1, 1, 10, 10)
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 100
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         metadata.num_decodes = 10
         metadata.num_prefills = 0
+        metadata.causal = True
+        metadata.model_runner_type = None
         layer = self.layer_no_quant
-        mock_fused_infer_attention_score.return_value = (torch.ones(10, 8, 64), 1)
+        mock_fused_infer_attention_score_v2.return_value = (torch.ones(10, 8, 64), 1)
         output = self.impl_swa_sink.forward(layer, query, key, value, kv_cache, metadata, output)
-        print(output.shape)
-        mock_fused_infer_attention_score.assert_called_once()
+        mock_fused_infer_attention_score_v2.assert_called_once()
+        mock_reshape_and_cache.assert_called_once()
         assert output.shape == (10, 8, 64)
 
-    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    @patch("torch_npu._npu_paged_attention")
-    @patch("torch_npu.npu_fused_infer_attention_score")
-    @patch("torch_npu.npu_scatter_pa_kv_cache")
+    @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu._npu_paged_attention")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode_only_swa_seq_len_mismatch(
         self,
-        mock_npu_scatter_pa_kv_cache,
         mock_fused_infer_attention_score,
         mock_paged_attention,
-        mock_get_forward_context,
+        mock_reshape_and_cache,
+        mock_extra_ctx,
     ):
         """Test forward pass in DecodeOnly state when seq)len_mismatch"""
+        mock_extra_ctx.capturing = False
+
         query = torch.randn(10, 8, 64)
         key = torch.randn(10, 8, 64)
         value = torch.randn(10, 8, 64)
@@ -765,6 +777,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
         metadata.seq_lens = torch.tensor([10])  # len == 1 != query.size(0)==10
+        metadata.seq_lens_list = [10]
         metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
         metadata.num_actual_tokens = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
@@ -772,8 +785,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_decodes = 10
         metadata.num_prefills = 0
         metadata.actual_seq_lengths_q = [10]
-
-        mock_get_forward_context.return_value = MagicMock(capturing=False)
+        metadata.causal = True
+        metadata.model_runner_type = None
 
         mock_fused_infer_attention_score.return_value = (torch.ones(10, 8, 64), torch.ones(10, 8, 64))
 
@@ -781,12 +794,13 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         mock_paged_attention.assert_not_called()
         mock_fused_infer_attention_score.assert_called_once()
+        mock_reshape_and_cache.assert_called_once()
 
         assert output.shape == (10, 8, 64)
 
-    @patch("torch.npu.stream")
-    @patch("torch.npu.graph_task_update_begin")
-    @patch("torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.stream")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_begin")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_end")
     @patch("torch_npu.npu_fused_infer_attention_score")
     @patch("vllm_ascend.attention.attention_v1.get_graph_params")
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
@@ -836,11 +850,11 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertEqual(attn_module._ATTN_KEYS_BUFFER, expected)
         self.assertEqual(mock_fia.out.call_count, 3)
 
-    @patch("torch.npu.stream")
-    @patch("torch.npu.graph_task_update_begin")
-    @patch("torch.npu.graph_task_update_end")
-    @patch("torch_npu._npu_paged_attention")
-    @patch("torch_npu._npu_paged_attention_get_workspace", return_value=MagicMock())
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.stream")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_begin")
+    @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu._npu_paged_attention")
+    @patch("vllm_ascend.attention.attention_v1.torch_npu._npu_paged_attention_get_workspace", return_value=MagicMock())
     @patch("vllm_ascend.attention.attention_v1.get_graph_params")
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
     @patch("vllm_ascend.attention.attention_v1.using_paged_attention", return_value=True)
@@ -889,7 +903,11 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         forward_context = MagicMock()
         forward_context.attn_metadata = {
-            "model.layers.0.self_attn.attn": MagicMock(seq_lens=current_seq_lens),
+            "model.layers.0.self_attn.attn": MagicMock(
+                seq_lens=current_seq_lens,
+                block_tables=block_table,
+                seq_lens_list=[10],
+            ),
         }
 
         self.impl.update_graph_params(self.mock_stream, forward_context, 1, self.mock_vllm_config)

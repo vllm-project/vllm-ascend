@@ -357,7 +357,7 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.cache_config.num_gpu_blocks, 100)
             self.assertEqual(worker.cache_config.num_cpu_blocks, 50)
 
-    @patch("torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
+    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info", side_effect=[(100, 200), (150, 200)])
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_sleep_uses_rl_extra_cleanup(self, mock_get_config, mock_allocator_class, mock_mem_get_info):
@@ -484,11 +484,15 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
     @patch("vllm_ascend.worker.worker.get_current_hardware_profile")
-    @patch("torch.npu.set_device")
-    @patch("torch.npu.empty_cache")
-    @patch("torch.npu.mem_get_info")
+    @patch("vllm_ascend.worker.worker.torch.npu.set_device")
+    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
+    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
+    @patch("vllm_ascend.worker.worker.torch.npu.device_count", return_value=1)
+    @patch("vllm_ascend.worker.worker.torch.npu.is_available", return_value=True)
     def test_init_device(
         self,
+        mock_is_available,
+        mock_device_count,
         mock_mem_get_info,
         mock_empty_cache,
         mock_set_device,
@@ -881,10 +885,10 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
-    @patch("torch.npu.reset_peak_memory_stats")
-    @patch("torch.npu.empty_cache")
-    @patch("torch_npu.npu.memory_stats")
-    @patch("torch_npu.npu.mem_get_info")
+    @patch("vllm_ascend.worker.worker.torch.npu.reset_peak_memory_stats")
+    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
+    @patch("vllm_ascend.worker.worker.torch.npu.memory_stats")
+    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
     @patch("vllm_ascend.worker.worker.logger")
     def test_determine_available_memory_normal_case(
         self,
@@ -931,7 +935,7 @@ class TestNPUWorker(TestBase):
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
-            worker.device = torch.device("npu:0")
+            worker.device = "npu:0"
             worker._apply_kv_offload_decode_memory_constraints = MagicMock(
                 wraps=worker._apply_kv_offload_decode_memory_constraints
             )
@@ -952,10 +956,10 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
-    @patch("torch.npu.reset_peak_memory_stats")
-    @patch("torch.npu.empty_cache")
-    @patch("torch_npu.npu.memory_stats")
-    @patch("torch_npu.npu.mem_get_info")
+    @patch("vllm_ascend.worker.worker.torch.npu.reset_peak_memory_stats")
+    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
+    @patch("vllm_ascend.worker.worker.torch.npu.memory_stats")
+    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
     def test_determine_available_memory_with_non_torch_allocations(
         self,
         mock_torch_mem_get_info,
@@ -1000,7 +1004,7 @@ class TestNPUWorker(TestBase):
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.9
             worker.cache_config.kv_cache_memory_bytes = None
-            worker.device = torch.device("npu:0")
+            worker.device = "npu:0"
 
             mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 1500}
 
@@ -1048,7 +1052,7 @@ class TestNPUWorker(TestBase):
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
-            worker.device = torch.device("npu:0")
+            worker.device = "npu:0"
 
             # Test should throw assertion error
             with self.assertRaises(AssertionError) as cm:
@@ -1058,10 +1062,10 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
-    @patch("torch.npu.reset_peak_memory_stats")
-    @patch("torch.npu.empty_cache")
-    @patch("torch_npu.npu.memory_stats")
-    @patch("torch_npu.npu.mem_get_info")
+    @patch("vllm_ascend.worker.worker.torch.npu.reset_peak_memory_stats")
+    @patch("vllm_ascend.worker.worker.torch.npu.empty_cache")
+    @patch("vllm_ascend.worker.worker.torch.npu.memory_stats")
+    @patch("vllm_ascend.worker.worker.torch.npu.mem_get_info")
     def test_determine_available_memory_negative_result(
         self,
         mock_torch_mem_get_info,
@@ -1106,7 +1110,7 @@ class TestNPUWorker(TestBase):
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.8
             worker.cache_config.kv_cache_memory_bytes = None
-            worker.device = torch.device("npu:0")
+            worker.device = "npu:0"
 
             mock_torch_memory_stats.return_value = {"allocated_bytes.all.peak": 9000}
 
