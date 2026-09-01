@@ -238,6 +238,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(fused_experts_input.routing.mc2_mask, mc2_mask)
         self.assertIs(fused_experts_input.routing.pertoken_scale, pertoken_scale)
         self.assertIs(fused_experts_input.topk_weights, topk_weights)
+        self.assertEqual(fused_experts_input.topk_weights.dtype, torch.float32)
         self.assertIs(fused_experts_input.topk_ids, topk_ids)
         self.assertIs(fused_experts_input.lora_context, lora_context)
 

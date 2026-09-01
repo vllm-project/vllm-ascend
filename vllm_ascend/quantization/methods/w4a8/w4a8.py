@@ -200,8 +200,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        topk_weights = topk_weights.to(x.dtype)
-
         use_mega_moe = (
             _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
             and get_ascend_config().enable_fused_mc2 == 1
