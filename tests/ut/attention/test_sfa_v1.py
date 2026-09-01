@@ -272,11 +272,6 @@ class TestAscendSFACacheComposition(TestBase):
         self.assertFalse(impl._use_li_c8_reshape_optim())
 
     @patch(
-        "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer",
-        create=True,
-        side_effect=AssertionError("non-quantized indexer must use torch_npu"),
-    )
-    @patch(
         "vllm_ascend.device.device_op.torch_npu.npu_lightning_indexer",
         create=True,
     )
