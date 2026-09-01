@@ -1197,15 +1197,6 @@ def refresh_block_size(vllm_config):
         # logic rather than the generic platform default.
         return
 
-    if cache_config.mamba_page_size_padded is not None:
-        # The shared cache_config was already sized for a hybrid attention+mamba
-        # model: block_size was aligned to the mamba page by the hybrid model
-        # config verify. A non-hybrid view of the same object — e.g. the MTP
-        # draft VllmConfig built via dataclasses.replace in the V2 speculator,
-        # which re-runs this hook on the shared cache_config — must not
-        # downgrade the aligned block size back to the generic default.
-        return
-
     if cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
