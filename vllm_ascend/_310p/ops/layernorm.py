@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.layernorm import RMSNormGated
 
+from vllm_ascend._310p.ops.adn_rms_norm import adn_rms_norm_or_fallback
 from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
 
 
@@ -18,7 +19,11 @@ class AscendRMSNorm310(AscendRMSNorm):
                 x.add_(self.bias)
             return x, residual
 
-        x, _ = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
+        x = adn_rms_norm_or_fallback(
+            x,
+            self.weight,
+            self.variance_epsilon,
+        )
         if self.bias is not None:
             x.add_(self.bias)
         return x
@@ -60,7 +65,11 @@ class AscendRMSNormGated310(RMSNormGated):
         if z is not None and not self.norm_before_gate:
             x = torch.mul(x, self._apply_activation(z))
 
-        x, _ = torch_npu.npu_rms_norm(x, self.weight, self.eps)
+        x = adn_rms_norm_or_fallback(
+            x,
+            self.weight,
+            self.eps,
+        )
 
         if z is not None and self.norm_before_gate:
             x = torch.mul(x, self._apply_activation(z))

@@ -683,6 +683,34 @@ npu_copy_and_expand_dflash_inputs_meta(
             out_context_positions, out_context_slot_mapping, out_token_indices};
 }
 
+at::Tensor adn_rms_norm_meta(
+    const at::Tensor& x,
+    const at::Tensor& gamma,
+    double epsilon)
+{
+    TORCH_CHECK(x.scalar_type() == at::kHalf,
+                "adn_rms_norm only supports FP16 x");
+    TORCH_CHECK(gamma.scalar_type() == at::kHalf,
+                "adn_rms_norm only supports FP16 gamma");
+    TORCH_CHECK(x.dim() > 0,
+                "adn_rms_norm requires x to have at least one dimension");
+    const c10::SymInt hiddenSize = x.sym_size(-1);
+    TORCH_CHECK(hiddenSize == c10::SymInt(128) ||
+                    hiddenSize == c10::SymInt(256) ||
+                    hiddenSize == c10::SymInt(2048),
+                "adn_rms_norm requires x.shape[-1] in {128, 256, 2048}");
+    // Do not call numel() here: the leading dimensions can be symbolic while
+    // torch.compile traces a decode graph.  Empty concrete inputs are rejected
+    // by the Python dispatcher and the NPU binding before kernel launch.
+    TORCH_CHECK(gamma.dim() == 1 && gamma.sym_size(0) == hiddenSize,
+                "adn_rms_norm requires one-dimensional gamma with size x.shape[-1]");
+    // Hidden-size checks above use SymInt so the changing decode row dimension
+    // remains symbolic.  Contiguity is validated by the concrete-device
+    // binding because calling
+    // is_contiguous() on a FakeTensor can specialize its symbolic row count.
+    return at::empty_symint(x.sym_sizes(), x.options());
+}
+
 at::Tensor npu_causal_conv1d_custom_meta(
     const at::Tensor& output,
     const at::Tensor& x,
@@ -1741,6 +1769,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_compute_wy", &vllm_ascend::meta::chunk_gated_delta_rule_compute_wy_meta);
     // CopyAndExpandDflashInputs
     ops.impl("npu_copy_and_expand_dflash_inputs", &vllm_ascend::meta::npu_copy_and_expand_dflash_inputs_meta);
+    // AdnRmsNorm
+    ops.impl("adn_rms_norm", &vllm_ascend::meta::adn_rms_norm_meta);
 }
 }
 #else

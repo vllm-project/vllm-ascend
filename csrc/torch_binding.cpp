@@ -714,6 +714,39 @@ npu_copy_and_expand_dflash_inputs(
             out_context_positions, out_context_slot_mapping, out_token_indices};
 }
 
+at::Tensor adn_rms_norm(
+    const at::Tensor& x,
+    const at::Tensor& gamma,
+    double epsilon)
+{
+    TORCH_CHECK(
+        x.is_privateuseone() && gamma.is_privateuseone() &&
+            x.device() == gamma.device(),
+        "adn_rms_norm requires x and gamma on the same NPU device");
+    const c10_npu::OptionalNPUGuard npuGuard(x.device());
+    TORCH_CHECK(x.scalar_type() == at::kHalf,
+                "adn_rms_norm only supports FP16 x");
+    TORCH_CHECK(gamma.scalar_type() == at::kHalf,
+                "adn_rms_norm only supports FP16 gamma");
+    TORCH_CHECK(x.dim() > 0,
+                "adn_rms_norm requires x to have at least one dimension");
+    const int64_t hiddenSize = x.size(-1);
+    TORCH_CHECK(hiddenSize == 128 || hiddenSize == 256 || hiddenSize == 2048,
+                "adn_rms_norm requires x.shape[-1] in {128, 256, 2048}, got ",
+                hiddenSize);
+    TORCH_CHECK(x.numel() > 0,
+                "adn_rms_norm requires a non-empty x");
+    TORCH_CHECK(gamma.dim() == 1 && gamma.size(0) == hiddenSize,
+                "adn_rms_norm requires one-dimensional gamma with size x.shape[-1], got ",
+                gamma.sizes(), " and hidden size ", hiddenSize);
+    TORCH_CHECK(x.is_contiguous() && gamma.is_contiguous(),
+                "adn_rms_norm requires contiguous tensors");
+
+    at::Tensor y = at::empty_like(x);
+    EXEC_NPU_CMD(aclnnAdnRmsNorm, x, gamma, epsilon, y);
+    return y;
+}
+
 at::Tensor npu_causal_conv1d_custom(
     const at::Tensor& output,
     const at::Tensor& x,
@@ -2253,6 +2286,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor out_context_positions, Tensor out_context_slot_mapping, Tensor out_token_indices)"
     );
     ops.impl("npu_copy_and_expand_dflash_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_dflash_inputs);
+
+    ops.def(
+        "adn_rms_norm(Tensor x, Tensor gamma, float epsilon=1e-6) -> Tensor");
+    ops.impl("adn_rms_norm", torch::kPrivateUse1, &vllm_ascend::adn_rms_norm);
 }
 #else
 // Pybind on other platform
