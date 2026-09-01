@@ -18,9 +18,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import set_current_vllm_config
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+from vllm.model_executor.layers.activation import FastGELU, NewGELU, QuickGELU, SiluAndMul
 
 from vllm_ascend.ops.activation import (
+    AscendFastGELU,
+    AscendNewGELU,
     AscendQuickGELU,
     AscendSiluAndMul,
     AscendSwigluOAIAndMul,
@@ -44,6 +46,42 @@ def default_vllm_config():
 
     with set_current_vllm_config(mock_config):
         yield mock_config
+
+
+@patch("torch_npu.npu_gelu", side_effect=lambda x, approximate: x + 1)
+def test_FastGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
+    layer = FastGELU()
+    out = layer.forward(dummy_tensor)
+
+    assert torch.allclose(out, dummy_tensor + 1)
+    mock_gelu.assert_called_once_with(dummy_tensor, approximate="tanh")
+
+
+@patch("torch_npu.npu_gelu", side_effect=lambda x, approximate: x + 1)
+def test_AscendFastGELU_forward_oot(mock_gelu, dummy_tensor, default_vllm_config):
+    layer = AscendFastGELU()
+    out = layer.forward_oot(dummy_tensor)
+
+    assert torch.allclose(out, dummy_tensor + 1)
+    mock_gelu.assert_called_once_with(dummy_tensor, approximate="tanh")
+
+
+@patch("torch_npu.npu_gelu", side_effect=lambda x, approximate: x + 1)
+def test_NewGELU_forward(mock_gelu, dummy_tensor, default_vllm_config):
+    layer = NewGELU()
+    out = layer.forward(dummy_tensor)
+
+    assert torch.allclose(out, dummy_tensor + 1)
+    mock_gelu.assert_called_once_with(dummy_tensor, approximate="tanh")
+
+
+@patch("torch_npu.npu_gelu", side_effect=lambda x, approximate: x + 1)
+def test_AscendNewGELU_forward_oot(mock_gelu, dummy_tensor, default_vllm_config):
+    layer = AscendNewGELU()
+    out = layer.forward_oot(dummy_tensor)
+
+    assert torch.allclose(out, dummy_tensor + 1)
+    mock_gelu.assert_called_once_with(dummy_tensor, approximate="tanh")
 
 
 @patch("torch_npu.npu_fast_gelu", side_effect=lambda x: x + 1)
