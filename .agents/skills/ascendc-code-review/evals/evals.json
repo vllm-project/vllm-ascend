@@ -1,0 +1,162 @@
+{
+  "skill_name": "ascendc-code-review",
+  "eval_mode": "text",
+  "evals": [
+    {
+      "id": 1,
+      "title": "代码检视工作流路由",
+      "config": {
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "ascendc-code-review 技能在接收到代码检视请求时，如何根据用户输入选择合适的工作流？请介绍该技能支持的主要工作流类型以及各自的路由逻辑。不需要执行任何工具调用。",
+      "expected_output": "回复应介绍 ascendc-code-review 的主要工作流类型及其基本的路由逻辑。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 2,
+      "title": "代码检视检查项与规范",
+      "config": {
+        "disabled": true,
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "在使用 ascendc-code-review 技能进行 Ascend C 代码检视时，主要检查哪些方面的内容？有哪些检视规则和规范文档可以参考？检视完成后如何输出结果？不需要执行任何工具调用。",
+      "expected_output": "回复应介绍代码检视的主要检查维度（安全编码、API 最佳实践、性能约束等）、可参考的规范文档，以及检视结果的输出方式。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 3,
+      "title": "Ascend C 代码检视请求（正向看护）",
+      "config": {
+        "max_tokens": 320000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 576000,
+          "glm-5": 544000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "distractor_skills": [
+          "ascendc-st-design"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "请帮我快速检视以下 Ascend C 代码是否存在问题：\n\n```cpp\n__aicore__ void Add(GM_ADDR x, GM_ADDR y, GM_ADDR z) {\n    LocalTensor<half> xLocal;\n    LocalTensor<half> yLocal;\n    LocalTensor<half> zLocal;\n    DataCopy(xLocal, xGM);\n    DataCopy(yLocal, yGM);\n    Add(zLocal, xLocal, yLocal);\n    DataCopy(zGM, zLocal);\n}\n```\n\n请加载 ascendc-code-review 技能完成检视。",
+      "expected_output": "回复应对提交的 Ascend C 代码给出检视意见：涵盖安全编码、API 使用、边界条件等检视维度。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 4,
+      "title": "通用 Python 代码风格咨询（负向看护）",
+      "config": {
+        "max_tokens": 160000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "请帮我 review 以下 Python 代码是否符合 PEP 8 规范，有没有潜在的性能问题：\n\n```python\ndef processData(n):\n    result=[]\n    for i in range(n):\n        temp = i*2\n        result.append(temp+1)\n    return result\n```\n\n我不需要 Ascend C 相关的内容。",
+      "expected_output": "回复应关注 Python 代码规范和性能优化，指出命名风格（如 snake_case）、列表推导式等可改进的点。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 5,
+      "title": "PR 检视流程（关键能力）",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我负责的算子仓提交了一个 PR，想用 ascendc-code-review 对它做全量检视。PR 检视是怎么做的？从获取 diff 到出具报告要经过哪些阶段？检视时怎么判断代码侧别？",
+      "expected_output": "应说明走 pr-review 工作流：提取 PR 链接并判断托管平台，派发子 Agent 获取 diff 与完整源码（code-fetch），按变更文件数与行数判断是否切换大型 PR 流程，并行派发代码概要/API 预研（仅 Kernel 侧）/设计文档探测，产出检视计划（通用分组+专项清单+跳过清单），按波次逐条检视，行号校对，撰写报告；PR 检视时优先从完整 URL 推断 gitcode.com/cann 下常用算子仓（ops-transformer/ops-math/ops-nn/ops-cv）的 repo 名。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 6,
+      "title": "大型 PR 自动切换（关键能力）",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "有个 PR 一次改动了 30 个文件、上万行代码，直接全量检视太慢。ascendc-code-review 对这类大型 PR 有什么处理策略？触发切换的条件是什么？",
+      "expected_output": "应说明大型 PR 处理机制：当变更文件数 >20 且总变更行数 ≥3000 时自动切换大型 PR 检视流程（pr-large-review）；该流程按文件组拆分并行检视（file-split 文件分组、global-pre-scan 全局预扫描、clause-grouping 条例分组、synthesize 合并、merge 汇总），避免单上下文承载过大。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 7,
+      "title": "设计一致性检查（对照 DESIGN.md）",
+      "config": {
+        "disabled": true,
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我新写的算子实现和算子仓里的 DESIGN.md 设计文档有些对不上，设计文档就在仓里，想对照设计文档做一次设计一致性检查，看看实现有没有偏离设计。这个应该怎么检视？",
+      "expected_output": "应说明走文件检视流程中的设计一致性检查（design-check）：用 docs-detect 自动探测设计文档路径（docs_input，优先自动探测算子仓内的设计文档，而不是直接向用户索要文件路径），读取并执行 steps/common.design-check.md，派发专项 design-check 子 agent 并与通用检视并行执行，对照 DESIGN.md 逐项核对实现代码，输出设计决策与实现的一致性偏差及修改建议。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 8,
+      "title": "红线问题清单（必须拦截）",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "检视 Ascend C 算子代码时，有哪些红线问题是必须拦截的高危问题？比如除法和数组索引这类。Kernel 侧还有什么特殊的红线？",
+      "expected_output": "应说明红线问题清单（ascendc-red-line.md）共 10 条且严重级别均为高：All 侧 7 条（除法/余数运算除零保护、数组索引校验、有符号整数运算不溢出、无符号整数运算不回绕、禁止使用未初始化的变量、指针操作使用前判空、避免数据竞争）；Kernel 侧 3 条（资源泄露防护、gm 内存偏移或大小必须用 int64 表示、支持 superKernel 场景禁止直接对 GM 地址读写需改用 GetValue/SetValue）。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 9,
+      "title": "假设检验驱动的检视方法论",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "检视代码时怎么判定一段代码有没有问题？我听说有假设检验的方法，原假设和备择假设分别是什么？置信度怎么评估？负向证据有什么要求？",
+      "expected_output": "应说明假设检验驱动的检视流程（core/methodology.md）：代码段识别→建立原假设 H0（代码段安全）与备择假设 H1（存在风险，自信值初始 0%）→收集并评估证据：正向证据（规范违反 +40%、上下文防御缺失 +30%、PR 归属 +20%、调用链/数据流风险 +15%、领域关联 +10%）与负向证据（防御存在 -20%、上游校验 -15%、范围外 -50%）→判定结论；负向证据必须附可验证的代码引用（格式 [文件路径]:[行号] [具体代码行内容]），否则该条证据得分为 0。",
+      "expectations": [],
+      "files": []
+    }
+  ]
+}

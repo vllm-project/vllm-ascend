@@ -1,0 +1,52 @@
+{
+  "workflow": {
+    "name": "<工作流名称>",
+    "cannbot-skills commit": "<git rev-parse HEAD>",
+    "framework": "<工具名>@<版本>"
+  },
+  "operator": {
+    "name": "<算子名>",
+    "arch": "<架构>",
+    "dtypes": []
+  },
+  "env_summary": {
+    "device": "<芯片型号>",
+    "cann_version": "<CANN 版本>",
+    "compiler": "<编译器名>",
+    "compiler_version": "<编译器版本>"
+  },
+  "results": {
+    "build": null,
+    "precision": null,
+    "performance": null
+  },
+  "stages": {
+    "1": {"status": "pending"},
+    "CP1": {"status": "pending"},
+    "2": {"status": "pending"},
+    "CP2": {"status": "pending"},
+    "2.5": {"status": "pending"},
+    "CP2.5": {"status": "pending"},
+    "3": {"status": "pending"},
+    "CP3": {"status": "pending"},
+    "4": {"status": "pending"},
+    "CP4": {"status": "pending"},
+    "5": {"status": "pending"},
+    "CP5": {"status": "pending"},
+    "6": {"status": "pending"},
+    "6a": {"status": "pending"},
+    "6b": {"status": "pending"},
+    "CP6": {"status": "pending"},
+    "7": {"status": "pending"}
+  },
+  "usage": {
+    "conversation_rounds": null,
+    "tool_calls": null,
+    "tokens": {
+      "input": null,
+      "output": null,
+      "cache_read": null,
+      "total": null
+    }
+  }
+}

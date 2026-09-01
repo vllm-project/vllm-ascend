@@ -1,0 +1,38 @@
+{
+  "brand": "CANNBot",
+  "version": "1.2.5",
+  "team": "ops-direct-invoke",
+  "level": "project",
+  "tool": "opencode",
+  "installed_skills": [
+    "ascendc-tiling-design",
+    "npu-arch",
+    "ascendc-api-best-practices",
+    "ascendc-regbase-best-practice",
+    "ascendc-blaze-best-practice",
+    "ascendc-blaze-migration",
+    "ascendc-mc2-best-practice",
+    "ops-precision-standard",
+    "ascendc-docs-search",
+    "ascendc-env-check",
+    "ascendc-precision-debug",
+    "ops-profiling",
+    "ascendc-direct-invoke-template",
+    "torch-ascendc-op-extension",
+    "ascendc-runtime-debug",
+    "ascendc-crash-debug",
+    "ascendc-code-review",
+    "gitcode-toolkit",
+    "gitcode-pr-handler",
+    "gitcode-issue-gen",
+    "gitcode-issue-handler"
+  ],
+  "installed_agents": [
+    "ascendc-kernel-architect.md",
+    "ascendc-kernel-design-reviewer.md",
+    "ascendc-kernel-developer.md",
+    "ascendc-kernel-reviewer.md"
+  ],
+  "brand_dir": "D:\\project\\opsdv2\\.opencode",
+  "install_time": "2026-08-22T17:57:12.062Z"
+}

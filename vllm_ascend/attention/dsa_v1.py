@@ -1649,7 +1649,11 @@ class AscendDSAImpl(DSAAttentionImpl):
             x = x_rot.reshape(1, num_tokens, -1, rotary_dim)
         return x
 
-    def _forward_o_proj(self, o_proj_input: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+    def _forward_o_proj(
+        self,
+        o_proj_input: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
@@ -1810,7 +1814,12 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         if has_decode:
             assert attn_metadata[0].decode is not None
-            output_decode = self._forward_decode(layer_name, decode_hidden_states, kv_cache, attn_metadata)
+            output_decode = self._forward_decode(
+                layer_name,
+                decode_hidden_states,
+                kv_cache,
+                attn_metadata,
+            )
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
             sin = attn_metadata[0].decode.sin[layer_name]
@@ -1971,7 +1980,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
             q, qr, _ = self._mla_prolog_multistream(
-                hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
+                hidden_states,
+                cos,
+                sin,
+                swa_kv_cache,
+                swa_prefill_metadata.slot_mapping,
+                is_prefill=True,
             )
         else:
             # mlaprolog
@@ -2284,7 +2298,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
             q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
-                hidden_states, cos, sin, swa_kv_cache, swa_decode_metadata.slot_mapping, is_prefill=False
+                hidden_states,
+                cos,
+                sin,
+                swa_kv_cache,
+                swa_decode_metadata.slot_mapping,
+                is_prefill=False,
             )
         else:
             # Share one dynamic-quant of hidden_states between wq_a (main stream)

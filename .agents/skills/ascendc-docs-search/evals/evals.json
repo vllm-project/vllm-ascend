@@ -1,0 +1,195 @@
+{
+  "eval_mode": "text",
+  "evals": [
+    {
+      "id": 1,
+      "title": "API 变体搜索（关键能力）",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我在写一个用 ReduceMax 归约的算子，在 $ASC_DEVKIT_DIR/docs/zh/api/ 下发现可能存在多个带数字后缀的 ReduceMax 变体文档，每个变体的函数签名和功能可能都不同。我该怎么系统性地列出所有变体并逐一确认功能差异，才能选对版本？",
+      "expected_output": "回复应说明 Ascend C 存在 240+ 个带数字后缀的 API 变体（如 `ReduceMax.md`、`ReduceMax-35.md`、`ReduceMax-92.md`），不同变体的函数签名、参数和功能可能完全不同。应说明必须先用 `find \"$ASC_DEVKIT_DIR/docs/zh/api/\" -name \"ReduceMax*.md\"` 列出所有变体，然后逐一查阅每个变体的函数签名和参数说明确认功能差异，最后选择符合需求的版本。应强调禁止只读单个文件就下结论。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 2,
+      "title": "搜索示例代码",
+      "config": {
+        "disabled": true,
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我想找一个双缓冲（double buffer）+ 流水线的 Ascend C 实现参考，应该去哪里找？",
+      "expected_output": "回复应推荐查看 `$ASC_DEVKIT_DIR/examples/00_introduction/01_add/basic_api_memory_allocator_add/` 目录，这是官方的高性能模板示例，包含双缓冲+流水线的标准实现。应说明该示例位于示例代码目录的 `00_introduction` 分类下，是入门高性能算子开发的推荐参考。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 3,
+      "title": "本地资源不足时使用在线搜索兜底",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我在本地文档里找不到关于 Ascend C 临时内存申请（TempTensor）的详细说明，想从华为昇腾社区在线搜索更详细的官方资料。请告诉我应该运行什么命令来在线搜索，以及如何获取搜索结果的详细内容。",
+      "expected_output": "回复应说明当本地 `$ASC_DEVKIT_DIR` 文档未覆盖相关内容时，可以使用在线搜索兜底。应推荐使用 `ascend_search_client.py` 脚本搜索华为昇腾社区文档，示例命令如 `python skills/ascendc-docs-search/scripts/ascend_search_client.py \"Ascend C 临时内存申请\" --max_results 5`，并说明可使用 `ascend_content_fetcher.py` 获取详细内容。应提及推荐使用中文关键词搜索，版本过滤建议使用 8.5.0。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 4,
+      "title": "正向看护-多 skill 环境下正确触发目标 skill",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "distractor_skills": [
+          "ascendc-docs-gen",
+          "ascendc-api-best-practices",
+          "ascendc-tiling-design",
+          "ascendc-env-check"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我想查一下 Ascend C 中 Exp 和 Log API 的参数说明和使用示例，应该用什么工具搜索？",
+      "expected_output": "回复应正确激活 ascendc-docs-search skill，说明通过 `$ASC_DEVKIT_DIR/docs/zh/api/` 搜索 Exp 和 Log 的 API 文档，使用 `find` 命令查找所有变体，并在 `$ASC_DEVKIT_DIR/examples/` 中搜索使用示例。即使在 ascendc-docs-gen、ascendc-api-best-practices 等相似 skill 共存的环境下，也应正确选择 ascendc-docs-search。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 5,
+      "title": "边界场景-模糊查询时主动追问",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "帮我找个 API",
+      "expected_output": "回复应识别到用户查询过于模糊，主动追问具体需要查找哪个 API、想了解什么信息（函数签名、参数说明、使用示例、兼容性等）。不应在缺少具体 API 名称或搜索目标的情况下直接执行搜索或输出大量无关文档列表。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 6,
+      "title": "HCCL 通信 API 文档定位",
+      "config": {
+        "disabled": true,
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我想在算子里调用 hccl.alltoallv，HCCL 通信类的 API 文档在哪个目录下？",
+      "expected_output": "回复应说明 HCCL 通信 API 文档位于 `$ASC_DEVKIT_DIR/docs/zh/api/SIMD-API/高阶API/HCCL通信类/`，分三个子目录：HCCL-Kernel侧接口、HCCL-Tiling侧接口、HCCL-Context。应建议先读 HCCL使用说明.md 和 HCCL-Tiling使用说明.md 获取完整调用流程和代码示例，再按需查阅单个 API 文档。应提供 find 命令示例。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 7,
+      "title": "HCCL Kernel 侧调用流程",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "HCCL Kernel 侧的完整调用流程是什么？InitV2、SetCcTilingV2、AlltoAllV、Wait、Finalize 怎么配合使用？",
+      "expected_output": "回复应说明 HCCL Kernel 侧的 6 步调用流程：1. 创建 Hccl 对象并调用 InitV2 初始化；2. 调用 SetCcTilingV2 设置通信算法 Tiling 地址；3. 调用 AlltoAllV 等 Prepare 接口异步下发通信任务获取 handleId；4. 调用 Commit 通知服务端执行；5. 调用 Wait 等待通信完成；6. 调用 Finalize 通知服务端退出。应说明可以通过 GetHcclContext 获取通信上下文。应建议查阅 HCCL使用说明.md 获取完整代码示例。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 8,
+      "title": "资料查找优先级链路（多级检索）",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我要开发一个 Ascend C 算子，需要先定位某个 API（比如 Add）的完整文档、示例代码和实现参考，按照什么顺序去检索资料最合理？",
+      "expected_output": "回复应说明按本技能的「资料查找优先级」执行多级检索：0 先查 references/api-index.md 定位 API 所属大类和子目录路径；1 再到 $ASC_DEVKIT_DIR/docs/zh/api/ 下按定位的子目录用 find 搜索 .md 文档；2 找不到再到 $ASC_DEVKIT_DIR/examples/ 示例代码（587 个）中查找；3 仍找不到则到 $ASC_DEVKIT_DIR/impl/ 实现代码中查找；4 最后才用在线搜索（华为昇腾社区）兜底。应强调本地优先、在线兜底，先文档后示例再实现。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 9,
+      "title": "环境兼容性确认（CANN 8.5.0 / A3）",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我在 A3 服务器上用 CANN 8.5.0 开发算子，查到某个新 API 的文档，想确认它是否兼容当前环境。项目里有哪些可参考的兼容性资料？确认 API 是否支持当前 NPU 架构、对齐要求以及 CANN 版本要求的具体步骤是什么？",
+      "expected_output": "回复应说明当前项目环境为 A3 服务器、CANN 8.5.0，可参考 references/compatibility.md 环境兼容性表；查阅资料时必须确认 API/方法适用于当前环境。应建议查看 API 文档的 Restriction 章节确认支持的 NPU 架构与对齐要求（如 DataCopy 512 字节对齐），并核对 CANN 版本要求——部分新 API 可能需要更高版本（如 asc-devkit 9.0.0）支持，使用前需在当前环境验证兼容性。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 10,
+      "title": "Explore Agent 检索参考实现（关键能力）",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我要写一个 Sin 三角函数算子，想借助 Explore 子代理高效检索类似算子的参考实现和实现方式。请问应该使用 Task 工具的哪种 subagent 类型来检索，并如何组织搜索目标？",
+      "expected_output": "回复应说明可使用 Task 工具并指定 subagent_type=Explore，提供明确的搜索目标和范围来检索；适用场景包括查找 API 文档/实现示例、了解某个技术点的实现方式、搜索类似算子的参考实现、遇到错误时查找相关解决方案、方案走通后探索更优实现。可给出示例提示词如『搜索 $ASC_DEVKIT_DIR 中 Exp API 的使用示例』、『查找双缓冲的实现参考』、『搜索类似的三角函数算子实现』。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 11,
+      "title": "库函数/矢量计算示例代码定位",
+      "config": {
+        "disabled": true,
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我想在算子中参考官方示例，看看库函数（addcdiv）和矢量计算（vector add）怎么用，应该去哪个目录找？",
+      "expected_output": "回复应说明库函数示例位于 $ASC_DEVKIT_DIR/examples/03_libraries/00_math/addcdiv/addcdiv_custom.asc（库函数使用），矢量计算示例位于 $ASC_DEVKIT_DIR/examples/00_introduction/11_vectoradd/vector_add_custom.asc（矢量 API）。可参考 SKILL.md 的示例代码索引，还包括多输入加法 addn.asc、减法 sub_custom.asc、printf 调试、assert 断言等示例；更多内容可查阅 references/example-catalog.md。",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 12,
+      "title": "在线搜索版本过滤与文档类型",
+      "config": {
+        "max_tokens": 160000,
+        "ascend_platforms": [
+          "A2"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "我想在线搜索 Ascend C 的 API 文档（比如 Add 接口原型），并且希望限定在 CANN 8.5.0 版本，应该怎么操作？",
+      "expected_output": "回复应说明使用 ascend_search_client.py 在线搜索华为昇腾社区文档；可用 --version \"8.5.0\" 过滤版本（推荐使用与当前环境一致的 8.5.0），用 --doc_type API 指定搜索 API 文档，--lang 设置语言（默认 zh），--max_results 控制返回数量（1-10，默认 10）。示例命令如 python skills/ascendc-docs-search/scripts/ascend_search_client.py \"AscendC::Add 接口原型\" --max_results 8；获取详细内容用 ascend_content_fetcher.py。",
+      "expectations": [],
+      "files": []
+    }
+  ],
+  "skill_name": "ascendc-docs-search"
+}

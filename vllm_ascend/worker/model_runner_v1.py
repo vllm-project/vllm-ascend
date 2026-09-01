@@ -1988,7 +1988,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
-
                 self._sanitize_placeholder_input_ids_for_forward(
                     scheduler_output,
                     num_tokens_padded,

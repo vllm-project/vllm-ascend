@@ -1,0 +1,3 @@
+Device_id,OP Type,Core Type,Count,Total Time(us),Min Time(us),Avg Time(us),Max Time(us),Ratio(%)
+0,GroupedMatmul,MIX_AIC,1,26.721,26.721,26.721,26.721,68.025
+0,OnesLike,AI_VECTOR_CORE,2,12.56,4.28,6.28,8.28,31.975
