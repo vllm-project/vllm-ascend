@@ -254,7 +254,8 @@ class AisbenchRunner:
         assert float(input_throughput) >= self.input_throughput_threshold * self.input_throughput_baseline, (
             "Input Token verification failed. "
             f"The current Input Token Throughput is {input_throughput} token/s, "
-            f"which is not greater than or equal to {self.input_throughput_threshold} * baseline {self.input_throughput_baseline}."
+            f"which is not greater than or equal to "
+            f"{self.input_throughput_threshold} * baseline {self.input_throughput_baseline}."
         )
 
         if self.tpot_threshold is not None:
