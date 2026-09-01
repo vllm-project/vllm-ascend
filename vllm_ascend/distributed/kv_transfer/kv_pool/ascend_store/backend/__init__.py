@@ -14,7 +14,12 @@
 # limitations under the License.
 #
 
-backend_map = {
+from typing import Any
+
+# Entries are heterogeneous (a marker boolean next to path/name strings), so
+# the registry is annotated explicitly: without it mypy joins the per-backend
+# dicts to object and every .get()/[] on an entry fails to type-check.
+backend_map: dict[str, dict[str, Any]] = {
     "mooncake": {
         "name": "MooncakeBackend",
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
