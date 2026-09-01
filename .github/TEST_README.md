@@ -16,33 +16,39 @@ This document describes the CI workflows for `vllm-ascend`, how to add tests, an
 
 ## Selective Testing System
 
-When a PR changes source files, `select_tests.py` maps changed files to affected modules in `test_config.yaml`, collects their tests, routes tests to runners, and emits a GitHub Actions matrix.
+When a PR changes source files, the precision-testing pipeline
+(`test_selector.py`) recommends tests from historical coverage data and the
+PR diff, then `select_tests.py` routes the recommended tests to runners and
+emits a GitHub Actions matrix.
 
 ```text
 PR changed files
     │
     ▼
-test_config.yaml ──► resolve base inheritance ──► match modules ──► collect test paths
-                                                                         │
-                                                                runner_mapping regex
-                                                                         │
-                                                               default partition
-                                                                         │
-                                                           pinned_routes (optional)
-                                                                         │
-                                                              partition runner_label
-                                                                         │
-                                                                runner_label.json
-                                                                         │
-                                                                    test_groups JSON
+test_selector.py (coverage + AST) ──► recommended pytest targets
+                                         │
+                              select_tests.py --test-list-file
+                                         │
+                            runner_mapping regex routing
+                                         │
+                              default partition
+                                         │
+                            pinned_routes (optional)
+                                         │
+                            partition runner_label
+                                         │
+                              runner_label.json
+                                         │
+                                  test_groups JSON
 ```
 
 ## Key Files
 
 | File | Role |
 |------|------|
-| `.github/workflows/scripts/select_tests.py` | Matches changed files, scans tests, routes to runners |
-| `.github/workflows/scripts/test_config.yaml` | Maps source paths to UT/E2E tests |
+| `.github/workflows/scripts/test_selector.py` | Recommends tests from coverage data and the PR diff (AST based) |
+| `.github/workflows/scripts/select_tests.py` | Routes test targets to runners and emits the matrix |
+| `.github/workflows/scripts/test_config.yaml` | Routing metadata: curated suites, skip list, runner mapping, partitions, estimated times |
 | `.github/workflows/scripts/runner_label.json` | Defines runner labels, chip types, NPU count, and image tags |
 
 `runner_mapping` maps test paths to default logical partitions such as
@@ -62,76 +68,25 @@ Workflows that temporarily reroute selected tests can use
 override is applied after pinned routes, has the highest priority, and creates
 a transient single-shard partition for that invocation.
 
-## `test_config.yaml` Tutorial
+## `select_tests.py` Modes
 
-Each module entry supports these fields:
+| Mode | Flag | Used by |
+|------|------|---------|
+| Recommended | `--test-list-file <file>` | PR precision testing (coverage/AST recommendation) |
+| Explicit | `--explicit-e2e-tests <path>...` | `/e2e` PR comment command |
+| Full suite | `--all-tests` | `ready-all` PRs, scheduled full scans |
+| Curated | `--curated <name>` | Curated suites (e.g. A5) |
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Unique module name |
-| `optional` | No | `true` by default. `false` means always matched when there are changed files |
-| `base` | No | Module name or list of module names to inherit from |
-| `source_file_dependencies` | No | Source/test paths that trigger this module |
-| `exclude_source_file_dependencies` | No | Paths excluded from `source_file_dependencies` matching |
-| `tests` | No | Test directories or files to run when matched |
-| `skip_tests` | No | Test files to remove after directory scanning |
+`test_config.yaml` holds the routing metadata consumed by all modes:
 
-### Path Matching
-
-`source_file_dependencies` and `exclude_source_file_dependencies` use the same rule:
-
-- File path: exact match only, e.g. `vllm_ascend/attention/__init__.py`
-- Directory path: matches all files below it, e.g. `vllm_ascend/attention`
-- Trailing slash is ignored
-
-Example: include all attention files except `__init__.py`:
-
-```yaml
-- name: attention_other
-  optional: true
-  source_file_dependencies:
-    - vllm_ascend/attention
-  exclude_source_file_dependencies:
-    - vllm_ascend/attention/__init__.py
-  tests:
-    - tests/ut/attention
-```
-
-### Base Inheritance
-
-Use `base` when a module should append another module's dependencies and tests. Inherited list fields are merged before the child fields, with duplicates removed while preserving order.
-
-Example: `attention_gqa` inherits common attention dependencies/tests and adds GQA-specific ones:
-
-```yaml
-- name: attention_common
-  optional: true
-  source_file_dependencies:
-    - vllm_ascend/attention/__init__.py
-    - vllm_ascend/attention/attention_mask.py
-    - vllm_ascend/attention/utils.py
-  tests:
-    - tests/ut/attention/test_attention_mask.py
-    - tests/ut/attention/a2/test_common_cp.py
-
-- name: attention_gqa
-  optional: true
-  base: attention_common
-  source_file_dependencies:
-    - vllm_ascend/attention/attention_v1.py
-  tests:
-    - tests/ut/attention/a2/test_attention_v1.py
-```
-
-After inheritance, `attention_gqa` behaves as if it had both `attention_common` and GQA-specific `source_file_dependencies` and `tests`.
-
-`base` can also be a list:
-
-```yaml
-base:
-  - attention_common
-  - quantization
-```
+| Field | Description |
+|-------|-------------|
+| `curated_tests` | Named test lists selected via `--curated <name>` |
+| `skip_tests` | Test files removed from any selection after scanning |
+| `runner_mapping` | Regex patterns mapping test paths to logical partitions |
+| `estimated_times` | Per-test estimated seconds for load-balanced partitioning |
+| `pinned_routes` | Files moved to dedicated partitions after selection |
+| `partition` | Logical partition → runner label + load-balanced group count |
 
 ## Runner Routing
 
@@ -174,18 +129,9 @@ All E2E tests run on NPU. E2E routing is determined by directory or `_310p` file
    - A3 x4: `tests/ut/<module>/a3_4/test_foo.py`
    - 310P x1: `tests/ut/<module>/310p/test_foo.py`
 
-2. Add or update the matching module in `test_config.yaml`:
-
-```yaml
-- name: my_module
-  optional: true
-  source_file_dependencies:
-    - vllm_ascend/my_module
-  tests:
-    - tests/ut/my_module
-```
-
-If `tests` points to a directory, `select_tests.py` scans `test_*.py` files and routes them to the correct runner automatically.
+The directory determines the runner. No configuration change is needed: the
+precision-testing recommendation and `--all-tests` mode pick the file up
+automatically from the test tree.
 
 ## Adding a New E2E Test
 
@@ -196,28 +142,27 @@ If `tests` points to a directory, `select_tests.py` scans `test_*.py` files and 
    - 4-card: `tests/e2e/pull_request/four_card/test_new_feature.py`
    - 8-card: `tests/e2e/pull_request/eight_card/test_new_feature.py`
 
-2. Register it in `.github/workflows/scripts/test_config.yaml` for PR selective testing.
+The directory determines the runner. No configuration change is needed.
 
-Example:
+## Adding a Curated Suite
+
+Add a named list to `curated_tests` in `.github/workflows/scripts/test_config.yaml`:
 
 ```yaml
-- name: e2e_my_feature
-  optional: true
-  source_file_dependencies:
-    - vllm_ascend/my_feature
-  tests:
-    - tests/e2e/pull_request/one_card/test_my_feature.py
-    - tests/e2e/pull_request/two_card/test_my_feature_distributed.py
+curated_tests:
+  a5:
+    - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
 ```
+
+Then run it with `select_tests.py --curated a5` (optionally combined with
+`--runner-label-override`).
 
 ## Running Selective Tests Locally
 
 ```bash
-# Route based on git diff
-python3 .github/workflows/scripts/select_tests.py --diff-base origin/main
-
-# Route based on explicit changed files
-python3 .github/workflows/scripts/select_tests.py --changed-files vllm_ascend/ops/foo.py
+# Route based on a recommended test list (mirrors the PR precision flow)
+printf 'tests/ut/test_envs.py\ntests/e2e/pull_request/one_card/test_foo.py\n' > /tmp/recommended.txt
+python3 .github/workflows/scripts/select_tests.py --test-list-file /tmp/recommended.txt
 
 # Run a specific subset of e2e tests (mirrors the /e2e slash command)
 python3 .github/workflows/scripts/select_tests.py \
@@ -228,6 +173,12 @@ python3 .github/workflows/scripts/select_tests.py \
 python3 .github/workflows/scripts/select_tests.py \
   --explicit-e2e-tests \
     tests/e2e/pull_request/one_card/test_foo.py::TestClass::test_method
+
+# Run the full suite (mirrors ready-all PRs and scheduled scans)
+python3 .github/workflows/scripts/select_tests.py --all-tests
+
+# Run a curated suite
+python3 .github/workflows/scripts/select_tests.py --curated a5
 ```
 
 ## Testing Changes to `select_tests.py`
