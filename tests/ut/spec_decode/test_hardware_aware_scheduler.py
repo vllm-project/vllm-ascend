@@ -27,7 +27,7 @@ class _FakeDSparkModel:
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return token_ids.float().unsqueeze(-1)
 
-    def confidence_logits(
+    def compute_confidence(
         self,
         hidden_states: torch.Tensor,
         markov_embs: torch.Tensor,
