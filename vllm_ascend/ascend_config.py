@@ -739,6 +739,8 @@ class AscendConfig:
 
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
         if moe_intermediate_size is None:
+            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
+        if moe_intermediate_size is None:
             return False
         if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
             return False
