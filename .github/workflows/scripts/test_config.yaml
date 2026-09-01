@@ -768,8 +768,8 @@ estimated_times:
   tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
   tests/ut/ops/a2/test_token_dispatcher.py: 30
   tests/ut/ops/a2/test_weight_prefetch.py: 30
-  tests/ut/ops/a3_2/test_activation.py: 30
-  tests/ut/ops/a3_2/test_select_experts.py: 30
+  tests/ut/ops/a3_2/test_activation.py: 20
+  tests/ut/ops/a3_2/test_select_experts.py: 20
   tests/ut/quantization/methods/a2/test_w4a16.py: 30
   tests/ut/quantization/methods/a2/test_w4a4_flatquant.py: 40
   tests/ut/quantization/methods/a2/test_w4a4_laos_dynamic.py: 40
@@ -817,7 +817,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
 
 
