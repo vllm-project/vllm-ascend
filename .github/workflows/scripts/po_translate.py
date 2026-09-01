@@ -98,9 +98,12 @@ CRITICAL RULES — violations will cause the translation to be rejected:
     Example: msgid "!!! note" → msgstr "!!! note"
     Example: msgid "!!! note \"Important\"" → msgstr "!!! note \"重要\""
 
-14. COLLAPSIBLE BLOCKS (???): Keep "???" and quote syntax. Translate only
+14. COLLAPSIBLE BLOCKS (??? type / ???+ type): Keep the exact "???" or
+    "???+" marker, the type keyword, and quote syntax unchanged. The "+"
+    means expanded by default and MUST NOT be added or removed. Translate only
     the title text inside quotes.
-    Example: msgid "??? \"Click here...\"" → msgstr "??? \"点击这里...\""
+    Example: msgid "??? note \\"Click here...\\"" → msgstr "??? note \\"点击这里...\\""
+    Example: msgid "???+ warning \\"Important\\"" → msgstr "???+ warning \\"重要\\""
 
 15. CONTENT TABS (===): Keep "===" and quote syntax. Translate only the label.
     Example: msgid "=== \"Before using pip\"" → msgstr "=== \"使用pip之前\""

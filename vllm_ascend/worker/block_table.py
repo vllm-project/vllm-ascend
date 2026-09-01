@@ -3,7 +3,11 @@ import torch
 from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    KVCacheSpecKind,
+    get_kv_cache_spec_kind,
+)
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
@@ -30,23 +34,19 @@ class BlockTable:
         self.max_num_reqs = max_num_reqs
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
-        if (
+        is_mamba_group = (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
-            and self.dcp_world_size > 1
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        ):
-            max_num_blocks_per_req = max_num_blocks_per_req * self.dcp_world_size
+            and get_kv_cache_spec_kind(kv_cache_group.kv_cache_spec) == KVCacheSpecKind.MAMBA
+        )
+        # The KV cache spec already provides the per-rank table capacity.
+        # Mamba state is replicated across DCP ranks, not sharded then expanded.
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
-        self.is_mamba_group = (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        )
+        self.is_mamba_group = is_mamba_group
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:

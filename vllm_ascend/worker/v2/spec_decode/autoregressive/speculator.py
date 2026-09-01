@@ -256,7 +256,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             cudagraph_runtime_mode,
             mm_inputs,
         )
-        self._ascend_update_seq_lens(attn_metadata)
         return last_hidden_states, hidden_states
 
     def _generate_draft(
@@ -303,6 +302,33 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
         super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
+
+    def _prefill(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+    ) -> None:
+        # Draft prefill reuses target metadata, but the target metadata may
+        # also contain target-only attention layers (e.g. GDN layers).
+        if attn_metadata is not None and self.draft_attn_layer_names is not None:
+            attn_metadata = {
+                name: metadata for name, metadata in attn_metadata.items() if name in self.draft_attn_layer_names
+            }
+
+        super()._prefill(
+            num_reqs,
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            cudagraph_runtime_mode,
+            mm_inputs,
+        )
 
     def _build_draft_attn_metadata(  # type: ignore[misc]
         self,
@@ -355,14 +381,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             self._update_decode_attn_metadata(per_step_attn_metadata, step, self.input_batch.num_reqs)
 
         return draft_attn_metadatas
-
-    def _ascend_update_seq_lens(self, attn_metadata: dict[str, Any] | None) -> None:
-        if self.attn_architecture in ("DSA", "SFA"):
-            return
-        if attn_metadata is not None:
-            for attn_meta in attn_metadata.values():
-                attn_meta.seq_lens = attn_meta.seq_lens + 1
-                attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
 
     def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
         """Initialize per-step decode attention metadata for graph mode."""
@@ -420,7 +438,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         attn_meta = next(iter(attn_metadata.values()))
         num_reqs_padded = attn_meta.seq_lens_cpu.shape[0]
-        seq_lens_cpu = self._get_seq_lens_cpu()[:num_reqs_padded]
+        seq_lens_cpu = self._get_seq_lens_cpu(num_reqs_padded)
         if num_reqs is None:
             num_reqs = num_reqs_padded
         next_seq_lens_cpu = self._calc_next_seq_lens_cpu(seq_lens_cpu, num_reqs, num_reqs_padded, step)
@@ -445,11 +463,18 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         next_seqs_cpu[num_reqs:].fill_(0)
         return next_seqs_cpu
 
-    def _get_seq_lens_cpu(self) -> torch.Tensor:
-        """Get seq_lens_cpu from input_batch."""
-        assert self.input_batch is not None
-        seq_lens_cpu = torch.from_numpy(self.input_batch.seq_lens_np)
-        return seq_lens_cpu
+    def _get_seq_lens_cpu(self, num_reqs_padded: int) -> torch.Tensor:
+        """Return the target sequence lengths for the padded graph batch.
+
+        ``input_batch.seq_lens_np`` can contain only the active requests.
+        During full-graph capture the draft batch can be padded to a larger
+        graph batch, so using that compact view produces a tensor that is too
+        short for ``num_reqs_padded``. The target input buffer owns the same
+        sequence lengths and retains the storage required by the padded graph
+        batch.
+        """
+        assert isinstance(self.target_input_buffers, AscendInputBuffers)
+        return self.target_input_buffers.seq_lens_cpu[:num_reqs_padded]
 
 
 # TODO Remove this patch when cann fix the gather bug.

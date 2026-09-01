@@ -192,7 +192,10 @@ def _index_block_score_kernel(
     bt_row = block_table_ptr + pid_b * stride_bt_b
     hi = tl.minimum(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
 
-    middle = (q_start - BLOCK_SIZE_K) // BLOCK_SIZE_K * BLOCK_SIZE_K
+    middle = tl.maximum(
+        0,
+        (q_start - BLOCK_SIZE_K) // BLOCK_SIZE_K * BLOCK_SIZE_K,
+    )
 
     for key_start in tl.range(0, middle, BLOCK_SIZE_K):
         block_id = key_start // BLOCK_SIZE_K

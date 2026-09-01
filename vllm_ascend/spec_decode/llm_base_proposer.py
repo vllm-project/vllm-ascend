@@ -26,6 +26,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -65,6 +66,16 @@ from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
+
+_HIDDEN_STATE_DRAFTER_TYPES = (
+    Eagle3LlamaForCausalLM,
+    DFlashQwen3ForCausalLM,
+    Qwen3DSparkForCausalLM,
+    K3DSparkForCausalLM,
+    Eagle3VwnLlamaForCausalLM,
+    Eagle3DeepseekV2ForCausalLM,
+    DSparkDeepseekV4ForCausalLM,
+)
 
 
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
@@ -115,7 +126,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return config.image_token_id
         if model_name == "PixtralForConditionalGeneration":
             return config.vision_config.image_token_id
-        if model_name == "KimiK25ForConditionalGeneration":
+        if model_name in {
+            "KimiK25ForConditionalGeneration",
+            "KimiK3ForConditionalGeneration",
+            "AscendKimiK3ForConditionalGeneration",
+        }:
             return config.media_placeholder_token_id
         return config.image_token_index
 
@@ -311,6 +326,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         with self.maybe_eager_context:
             self.model = self._get_model()
 
+        if self.supports_mm_inputs:
+            # Match upstream: a multimodal target can use a text-only drafter.
+            try:
+                dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
+                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
+            except (NotImplementedError, AttributeError, TypeError):
+                logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
+                self.supports_mm_inputs: bool = False
+
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
@@ -338,11 +362,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.draft_window_size = get_ascend_config().draft_window_size
         if self.draft_window_size is not None:
+            # Compatibility validation before enabling sliding-window draft
+            # attention. model_config may be absent in unit-test harnesses,
+            # so look it up defensively.
+            _target_hf_config = getattr(getattr(self.vllm_config, "model_config", None), "hf_config", None)
+            _target_model_type = getattr(_target_hf_config, "model_type", "") or ""
+            _target_is_deepseek_v4 = _target_model_type.startswith("deepseek_v4")
+            if self.method == "mtp":
+                # MTP reuses the target's own layers; capping its attention
+                # to a window would also window the target model.
+                logger.warning(
+                    "[sliding-window] draft method is MTP, which is not "
+                    "compatible with draft_window_size; the window is ignored."
+                )
+            elif self.method == "dspark" and _target_is_deepseek_v4:
+                logger.warning(
+                    "[sliding-window] DSpark drafts trained natively with a "
+                    "DeepSeek-V4 target are long-context stable; enabling the "
+                    "sliding window degrades acceptance length."
+                )
+
+        if self.draft_window_size is not None and self.method != "mtp":
             # EAGLE3: seq_lens is context-only, K draft positions lie beyond it
             #   -> future_offset = K.
-            # DFlash: set_inputs_first_pass bakes the query stretch into seq_lens
-            #   -> future_offset = 0.
-            future_offset = 0 if self.method == "dflash" else self.num_speculative_tokens
+            # DFlash / DSpark: set_inputs_first_pass bakes the query stretch into
+            #   seq_lens (dspark_proposer adds num_query_per_req at cad.seq_lens),
+            #   so the window end must not add K again -> future_offset = 0.
+            # MTP is excluded: it reuses the target's own layers, so windowing
+            # it would also window the target model.
+            future_offset = 0 if self.method in ("dflash", "dspark") else self.num_speculative_tokens
             self.sliding_window = SlidingWindowAdapter(
                 self.draft_window_size,
                 self.kernel_block_size,
@@ -362,7 +410,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # share embed_tokens with the target model if needed
         self._maybe_share_embeddings(target_language_model)
         self._maybe_share_topk_indices(target_language_model)
-        self._maybe_share_lm_head(model)
+        self._maybe_share_lm_head(target_language_model)
 
         if (
             self.parallel_drafting
@@ -484,21 +532,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             else:
                 logger.info("[spec_decode/base] Loading EAGLE/DFLASH LM head weights from the target model.")
+                target_lm_head = None
                 if hasattr(model, "lm_head"):
-                    self.model.lm_head = model.lm_head
+                    target_lm_head = model.lm_head
                 elif hasattr(model, "get_language_model") and hasattr(model.get_language_model(), "lm_head"):
-                    self.model.lm_head = model.get_language_model().lm_head
-                else:
+                    target_lm_head = model.get_language_model().lm_head
+                if target_lm_head is None:
                     logger.warning(
                         "[spec_decode/base] Target model has no accessible lm_head"
                         " for sharing. Draft model will use its own lm_head."
                         " This may cause incorrect logits if the draft lm_head"
                         " is not trained."
                     )
+                else:
+                    self.model.lm_head = target_lm_head
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
+            # Comparing weights only tells the two heads apart when the draft
+            # actually loaded one. A checkpoint that ships no MTP head leaves
+            # shared_head.head at its allocation-time contents, which compare
+            # unequal and would leave the draft predicting from garbage, so ask
+            # the model whether it owns a head before falling back to the
+            # comparison.
+            draft_owns_head = getattr(self.model, "has_own_lm_head", None)
             for _, layer_module in self.model.model.layers.items():
-                if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
+                if draft_owns_head is False or torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
@@ -793,18 +851,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model = self.model
             if isinstance(model, BreakableACLGraphWrapper):
                 model = model.unwrap()
-            assert isinstance(
-                model,
-                (
-                    Eagle3LlamaForCausalLM,
-                    DFlashQwen3ForCausalLM,
-                    Qwen3DSparkForCausalLM,
-                    Eagle3VwnLlamaForCausalLM,
-                    Eagle3DeepseekV2ForCausalLM,
-                    DSparkDeepseekV4ForCausalLM,
-                ),
-            )
-            target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
+            assert isinstance(model, _HIDDEN_STATE_DRAFTER_TYPES)
+            target_hidden_states = model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
@@ -878,6 +926,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             if self.method == "dflash":
                 common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+            elif self.method == "dspark":
+                # DSpark already rewrote both device and host sequence lengths
+                # in set_inputs_first_pass. Preserve those values while
+                # extending only the padded tail for full-graph replay.
+                common_attn_metadata.seq_lens = self._adjust_tensor(common_attn_metadata.seq_lens, num_reqs_padded)
+                if common_attn_metadata.seq_lens_cpu is not None:
+                    common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
+                        common_attn_metadata.seq_lens_cpu, num_reqs_padded
+                    )
+                if common_attn_metadata._seq_lens_cpu is not None:
+                    common_attn_metadata._seq_lens_cpu = self._adjust_tensor(
+                        common_attn_metadata._seq_lens_cpu, num_reqs_padded
+                    )
             else:
                 common_attn_metadata.seq_lens = self._adjust_tensor(self.runner.seq_lens, num_reqs_padded)
                 common_attn_metadata.seq_lens_cpu = self._adjust_tensor(
@@ -905,7 +966,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
-        if self.draft_window_size is not None:
+        if self.draft_window_size is not None and self.method not in ("dspark", "mtp"):
+            # DSpark's draft attention reads the per-group block_table assembled
+            # in build_draft_attn_metadata (which overwrites this table), so the
+            # window is applied there instead. Applying here would window a table
+            # that gets discarded and leave seq_lens windowed against an unwindowed
+            # table -> FIA reads the oldest blocks. See sw-dspark-flow-analysis.md.
+            # MTP is excluded: it reuses the target's own layers, so windowing
+            # it would also window the target model.
             self.sliding_window.apply(common_attn_metadata)
 
         if self.supports_mm_inputs:
@@ -1807,8 +1875,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Compute the slot mapping.
             # When sliding window is enabled, block_table_tensor may be cropped
             # for attention, but slot mapping needs the full block table to
-            # address the absolute KV cache positions.
-            if self.draft_window_size is not None:
+            # address the absolute KV cache positions. (self.sliding_window is
+            # None for MTP - the adapter is not constructed for it.)
+            if self.sliding_window is not None:
                 block_table_for_slot = self.sliding_window.full_block_table
             else:
                 block_table_for_slot = old_common_metadata.block_table_tensor
@@ -2293,6 +2362,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
                     common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                # Apply the sliding window to the per-group block_table + seq_lens
+                # that DSpark's draft FIA actually reads. This branch overwrites
+                # common_attn_metadata.block_table_tensor with the full per-group
+                # table, so the window applied earlier (line 922) is bypassed; we
+                # skipped it there for dspark and re-apply here on the per-group
+                # table so FIA reads the recent-blocks clone instead of block 0.
+                # (dspark only - self.sliding_window is None for MTP.)
+                if self.sliding_window is not None:
+                    self.sliding_window.apply(common_attn_metadata)
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )

@@ -19,10 +19,9 @@ import dataclasses
 import importlib.util
 import json
 import os
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ConfigDict, TypeAdapter, model_validator
-from pydantic_core import ArgsKwargs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -31,7 +30,21 @@ from vllm_ascend.config_utils import config
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+_MEGA_MOE_SUPPORTED = None
+
+
+def is_mega_moe_supported() -> bool:
+    """Whether the megamoe op is available at runtime.
+
+    Always read _MEGA_MOE_SUPPORTED through this accessor instead of
+    ``from ascend_config import _MEGA_MOE_SUPPORTED``: the global is rebound
+    during config init (AscendConfig._validate_user_input_ranges rolls back
+    megamoe), and a direct import binds a stale snapshot for the bool.
+    """
+    global _MEGA_MOE_SUPPORTED
+    if _MEGA_MOE_SUPPORTED is None:
+        _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+    return _MEGA_MOE_SUPPORTED
 
 
 def validate_additional_config_bool(value: Any, path: str) -> bool:
@@ -46,9 +59,10 @@ def validate_additional_config_bool(value: Any, path: str) -> bool:
 class AscendCompilationConfig:
     """Configuration for controlling the behavior of Ascend graph optimization.
 
-    Migrated to ``@config`` (pydantic dataclass). The 310P runtime downgrade
-    (disable npugraph_ex / static_kernel) and the static_kernel→npugraph_ex
-    dependency check are applied in an ``after`` model_validator.
+    Migrated to ``@config`` (pydantic dataclass). Hardware-profile runtime
+    downgrades (disable npugraph_ex / static_kernel) and the
+    static_kernel→npugraph_ex dependency check are applied in an ``after``
+    model_validator.
     """
 
     enable_npugraph_ex: bool = True
@@ -58,15 +72,16 @@ class AscendCompilationConfig:
     fuse_muls_add: bool = True
 
     @model_validator(mode="after")
-    def _apply_310p_downgrade_and_static_kernel_check(self):
-        from vllm_ascend.utils import is_310p
+    def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-        if is_310p():
+        if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
             if self.enable_npugraph_ex:
-                logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
+                logger.warning("npugraph_ex is not supported by the current hardware profile. Disabling it.")
             if self.enable_static_kernel:
                 logger.warning(
-                    "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
+                    "static kernel requires npugraph_ex, which is not supported by the current hardware profile. "
+                    "Disabling it."
                 )
             self.enable_npugraph_ex = False
             self.enable_static_kernel = False
@@ -196,7 +211,6 @@ class RlConfig:
                 ascend_config.weight_nz_mode,
             )
         ascend_config.weight_nz_mode = 0
-        os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
         from vllm_ascend.platform import _disable_expandable_segments
 
@@ -215,9 +229,8 @@ class AscendConfig:
     Migrated to ``@config`` (pydantic dataclass). User-input switches are now
     typed fields with lax bool/int coercion (``"false"``→False, ``"2"``→2),
     fixing the ``bool("false")``/``"2"==2`` pitfalls. Unknown keys are
-    forbidden (``extra="forbid"``). A-family env-var fallbacks (additional_config
-    → envs → default) run in a ``before`` model_validator. Cross-config
-    derivations, downgrades and mutex checks that need ``vllm_config`` run in
+    forbidden (``extra="forbid"``). Cross-config derivations, downgrades and
+    mutex checks that need ``vllm_config`` run in
     ``derive_and_validate()``, a plain method invoked explicitly by
     ``init_ascend_config`` (not a pydantic validator) — preserving original
     ordering and error messages.
@@ -229,6 +242,142 @@ class AscendConfig:
     Ascend-configuration container, free of the heavy upstream VllmConfig
     graph (and drops ``arbitrary_types_allowed``, which existed only for the
     former ``vllm_config`` field).
+
+    Example: pass this dict via ``--additional-config '<json>'``. All keys
+    are optional; the values below show every supported key with its default
+    value (see the mutex/validation notes below before copying).
+
+        {
+            "refresh": false,
+            "enable_cpu_binding": true,
+            "multistream_dsv4_dsa_overlap": true,
+            "enable_prefill_mc2": false,
+            "multistream_overlap_shared_expert": false,
+            "enable_kv_nz": false,
+            "enable_mc2_hierarchy_comm": false,
+            "enable_reduce_sample": false,
+            "enable_dsa_cp": false,
+            "draft_window_size": null,
+            "mix_placement": false,
+            "pa_shape_list": [],
+            "mega_moe_max_tokens": 131072,
+            "ascend_log_path": "~/ascend/log/vllm_ascend",
+            "c8_enable_reshape_optim": false,
+            "enable_fused_mc2": 0,
+            "enable_mlapo": true,
+            "mlapo_keep_prefill_weights": false,
+            "msmonitor_use_daemon": false,
+            "enable_transpose_kv_cache_by_block": true,
+            "weight_nz_mode": 1,
+            "enable_shared_expert_dp": false,
+            "enable_sparse_sfa_c8": false,
+            "enable_sparse_li_c8": false,
+            "ascend_compilation_config": {
+                "enable_npugraph_ex": true,
+                "enable_static_kernel": false,
+                "fuse_norm_quant": true,
+                "fuse_qknorm_rope": true,
+                "fuse_muls_add": true
+            },
+            "ascend_fusion_config": {
+                "fusion_ops_gmmswigluquant": true
+            },
+            "eplb_config": {
+                "dynamic_eplb": false,
+                "expert_map_path": null,
+                "expert_heat_collection_interval": 600,
+                "algorithm_execution_interval": 50,
+                "expert_map_record_path": null,
+                "num_redundant_experts": 0,
+                "eplb_policy_type": 2,
+                "eplb_heat_collection_stage": "all",
+                "load_collection_phase": "all"
+            },
+            "rejection_sampler_config": {
+                "enable_block_verify": false,
+                "enable_entropy_verify": false,
+                "posterior_threshold": 0.95,
+                "posterior_alpha": 0.4
+            },
+            "rl_config": {
+                "enabled": false,
+                "sleep_mode_extra_cleanup": false,
+                "enable_training_consistency": false,
+                "enable_batch_invariant": false
+            },
+            "xlite_graph_config": {
+                "enabled": false,
+                "full_mode": false
+            },
+            "finegrained_tp_config": {
+                "oproj_tensor_parallel_size": 0,
+                "lmhead_tensor_parallel_size": 0,
+                "embedding_tensor_parallel_size": 0,
+                "mlp_tensor_parallel_size": 0,
+                "olora_tensor_parallel_size": 0
+            },
+            "scheduler_config": {
+                "enable_balance_scheduling": false,
+                "recompute_scheduler_enable": false,
+                "short_request_first_config": {
+                    "enabled": false,
+                    "threshold": 256,
+                    "long_max_wait_ms": 0.0
+                },
+                "profiling_chunk_config": {
+                    "enabled": false,
+                    "smooth_factor": 1.0,
+                    "min_chunk": 4096,
+                    "need_timing": null,
+                    "max_fit_chunk": 30
+                },
+                "batch_job_sched_config": {
+                    "enabled": false,
+                    "max_jobs": 20,
+                    "reserve_margin_blocks": 2,
+                    "reserve_max_blocks": 8,
+                    "low_available_tokens_threshold": 4096,
+                    "short_decode_token_threshold": 32
+                },
+                "dyntra_lb_config": {
+                    "enabled": false,
+                    "enable_diagnostics": false,
+                    "mode": "dynamic",
+                    "start_step": 250,
+                    "end_step": -1,
+                    "bubble_threshold": 5.0,
+                    "long_req_block_threshold": 700,
+                    "dynamic_max_step": 256
+                }
+            },
+            "dynamic_spec_config": {
+                "method": null,
+                "method_params": {}
+            },
+            "sparse_kv_offload_config": {
+                "enabled": false,
+                "topk_buffer_size": 4096,
+                "dram_size_per_dp_GB": 128,
+                "keep_device_kv_cache": false
+            }
+        }
+
+    Additional notes:
+
+    - Unknown keys are rejected (``extra="forbid"``); a typo fails fast.
+    - ``dump_config_path`` (str path) / ``dump_config`` (inline dict, mutually
+      exclusive with ``dump_config_path``; materialized by the factory to
+      ``.vllm_ascend/msprobe/msprobe_dump_config.json``) are msprobe dump
+      options consumed by the factory before schema validation.
+    - ``refresh`` forces reconstruction of the cached singleton config.
+    - Pure-derived fields computed automatically and not user-settable:
+      ``enable_sp_by_pass``, ``pd_tp_ratio``, ``pd_head_ratio``,
+      ``num_head_replica``.
+    - Deprecated top-level scheduler keys (``enable_balance_scheduling``,
+      ``recompute_scheduler_enable``, ``short_request_first_config``,
+      ``profiling_chunk_config``, ``batch_job_sched_config``) still resolve,
+      but emit deprecation warnings; prefer nesting under
+      ``scheduler_config`` as shown above.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -239,7 +388,7 @@ class AscendConfig:
     enable_prefill_mc2: bool = False
     multistream_overlap_shared_expert: bool = False
     enable_kv_nz: bool = False
-    enable_mc2_hierarchy_comm: bool = False
+    enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     draft_window_size: int | None = None
@@ -251,10 +400,17 @@ class AscendConfig:
     )
     dump_config_path: str | None = None
     c8_enable_reshape_optim: bool = False
+    mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
     enable_mlapo: bool = True
+    # When True, keep MLAPO prefill weights on NPU instead of freeing them
+    # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
+    # normal local-prefill paths (recompute / fallback / preempt) that crash
+    # when the weights are freed (issue #11882). Default False (preserve
+    # existing memory-saving behavior).
+    mlapo_keep_prefill_weights: bool = False
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
@@ -289,39 +445,24 @@ class AscendConfig:
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
-    # ---- A-family envs fallback (before, handles ArgsKwargs) ----
-    @model_validator(mode="before")
-    @classmethod
-    def _env_fallback(cls, data: Any) -> Any:
-        if not isinstance(data, ArgsKwargs):
-            return data
-        kw = dict(data.kwargs)
-        from vllm_ascend import envs as ascend_envs
-
-        _A_FAMILY = {
-            "enable_fused_mc2": "VLLM_ASCEND_ENABLE_FUSED_MC2",
-            "enable_mlapo": "VLLM_ASCEND_ENABLE_MLAPO",
-            "msmonitor_use_daemon": "MSMONITOR_USE_DAEMON",
-            "enable_transpose_kv_cache_by_block": "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
-            "weight_nz_mode": "VLLM_ASCEND_ENABLE_NZ",
-        }
-        for key, env_name in _A_FAMILY.items():
-            if key in kw:
-                logger.info_once(f"AscendConfig.{key} is set from additional_config with value {kw[key]}.")
-            elif env_name in os.environ:
-                env_value = getattr(ascend_envs, env_name)
-                logger.info_once(
-                    f"AscendConfig.{key} falls back to environment variable {env_name} with value {env_value}. "
-                    f"Please use additional_config.{key} instead, because {env_name} will be removed in the "
-                    "next release."
-                )
-                kw[key] = env_value
-        return ArgsKwargs(data.args, kw)
-
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
+        # TODO(zzzzwwjj): remove it after deprecating `enable_mc2_hierarchy_comm`.
+        if self.enable_mc2_hierarchy_comm:
+            self.mc2_comm_alg = "hierarchy"
+        # TODO(zzzzwwjj): Currently, there are many problems with the megamoe op.
+        # We will first roll back the megamoe internally and keep `enable_fused_mc2=2`
+        # to enable the megamoe for testing capabilities.
+        # These codes will be removed after megamoe is ready.
+        global _MEGA_MOE_SUPPORTED
+        if self.enable_fused_mc2 in (0, 1):
+            # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
+            _MEGA_MOE_SUPPORTED = False
+        elif self.enable_fused_mc2 == 2:
+            _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+            self.enable_fused_mc2 = 1
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
@@ -410,21 +551,35 @@ class AscendConfig:
         assert not (
             self.enable_fused_mc2 == 1
             and any(architecture.startswith("MiniMaxM3") for architecture in model_architectures)
-        ), (
-            "MiniMax M3 does not support enable_fused_mc2=1. Please set "
-            "additional_config.enable_fused_mc2 to 0 or unset VLLM_ASCEND_ENABLE_FUSED_MC2."
-        )
+        ), "MiniMax M3 does not support enable_fused_mc2=1. Please set additional_config.enable_fused_mc2 to 0."
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(
-                "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
+                "enable_fused_mc2 and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
         if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vc):
             self.enable_fused_mc2 = 0
             logger.warning_once(
-                "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."
+                "MegaMoe is not supported for this model config; additional_config.enable_fused_mc2 will be set to 0."
             )
+
+        # mlapo_keep_prefill_weights preconditions: the prefill weights are only
+        # freed by MLAPO in the MLA attention path, so the keep switch is only
+        # meaningful under those same conditions. Fail fast on a no-op / mistaken
+        # config instead of silently leaving the switch ineffective (issue #11882).
+        if self.mlapo_keep_prefill_weights:
+            if not self.enable_mlapo:
+                raise ValueError(
+                    "mlapo_keep_prefill_weights=True requires enable_mlapo=True. "
+                    "The prefill weights are only freed when MLAPO is enabled."
+                )
+            if vc.model_config is None or not vc.model_config.is_deepseek_mla:
+                raise ValueError(
+                    "mlapo_keep_prefill_weights=True is only supported for MLA models "
+                    "(e.g., DeepSeek). The prefill weights are only freed by MLAPO "
+                    "in the MLA attention path."
+                )
 
         # PD tp_ratio / head_ratio / num_head_replica derivation
         if vc.kv_transfer_config is not None and vc.model_config is not None and not vc.model_config.is_deepseek_mla:
@@ -482,7 +637,7 @@ class AscendConfig:
             and vc.compilation_config.pass_config.enable_sp
         )
 
-        self._validate_mc2_hierarchy_comm(vc)
+        self._validate_mc2_comm_alg(vc)
 
         # mega_moe_max_tokens range
         if self.mega_moe_max_tokens <= 0:
@@ -513,26 +668,36 @@ class AscendConfig:
         self._validate_sparse_c8_kv_offload_compatibility()
         return self
 
-    def _validate_mc2_hierarchy_comm(self, vllm_config: VllmConfig) -> None:
-        if not self.enable_mc2_hierarchy_comm:
+    def _validate_mc2_comm_alg(self, vllm_config: VllmConfig) -> None:
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+        hardware_profile = get_current_hardware_profile()
+        if self.mc2_comm_alg == "fullmesh_v2" and not hardware_profile.supports(
+            HardwareCapability.MC2_FULLMESH_V2_COMM
+        ):
+            raise NotImplementedError("mc2_comm_alg == 'fullmesh_v2' is not supported by the current hardware profile.")
+
+        if self.mc2_comm_alg != "hierarchy":
             return
 
-        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-        device_type = get_ascend_device_type()
-        if device_type not in (AscendDeviceType.A2, AscendDeviceType.A3):
-            raise NotImplementedError(
-                f"enable_mc2_hierarchy_comm is only supported on A2 and A3, but got {device_type.name}."
-            )
+        if not hardware_profile.supports(HardwareCapability.MC2_HIERARCHY_COMM):
+            raise NotImplementedError("mc2_comm_alg == 'hierarchy' is not supported by the current hardware profile.")
 
         num_logical_experts = vllm_config.model_config.get_num_experts()
         num_redundant_experts = self.eplb_config.num_redundant_experts if self.eplb_config.dynamic_eplb else 0
         num_experts = num_logical_experts + num_redundant_experts
         if num_experts > 512:
             raise ValueError(
-                "enable_mc2_hierarchy_comm supports at most 512 experts, "
+                "mc2_comm_alg == 'hierarchy' supports at most 512 experts, "
                 f"but got {num_experts} experts "
                 f"({num_logical_experts} logical experts + {num_redundant_experts} EPLB redundant experts)."
+            )
+
+        # Fused MC2 and hierarchy communication are mutually exclusive.
+        if self.enable_fused_mc2:
+            raise ValueError(
+                "fused mc2 op cannot be used with hierarchy communication. "
+                "Please set additional_config.enable_fused_mc2 to 0."
             )
 
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
@@ -697,6 +862,17 @@ class AscendConfig:
 
     def update_compile_ranges_split_points(self):
         return
+
+    def get_mc2_comm_alg(self) -> str:
+        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
+        # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
+        # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
+        if self.mc2_comm_alg == "fullmesh" and get_current_hardware_profile().supports(
+            HardwareCapability.MC2_FULLMESH_V2_COMM
+        ):
+            return "fullmesh_v1"
+        return self.mc2_comm_alg
 
 
 @config
@@ -1046,8 +1222,8 @@ class SchedulerConfig:
             return default
 
         resolved = {
-            # VLLM_ASCEND_BALANCE_SCHEDULING is being sunset; do not carry its
-            # environment fallback into the new construction path.
+            # Balance scheduling is configured only through additional_config;
+            # the legacy environment fallback has been removed.
             "enable_balance_scheduling": _resolve("enable_balance_scheduling", False),
             "recompute_scheduler_enable": _resolve("recompute_scheduler_enable", False),
             # Let pydantic coerce the resolved dicts into typed sub-configs.

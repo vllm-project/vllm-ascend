@@ -4,9 +4,7 @@ import pytest
 import torch
 
 from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_fn as causal_conv1d_fn_ref
-from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_update as causal_conv1d_update_ref
 from vllm_ascend.ops.triton.mamba.causal_conv1d import PAD_SLOT_ID, causal_conv1d_fn
-from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_update_npu as causal_conv1d_update
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -177,139 +175,6 @@ def test_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias, silu_acti
 
     validate_cmp(out, out_ref, itype)
     validate_cmp(conv_states, conv_states_ref, itype)
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
-
-
-@pytest.mark.skip(
-    reason="In this scenario, using tirton ops:causal_conv1d_update will cause an overflow. \
-        Later, Zeng Tian was responsible for fixing this issue."
-)
-@pytest.mark.parametrize("itype", [torch.bfloat16])
-@pytest.mark.parametrize("silu_activation", [True])
-@pytest.mark.parametrize("has_bias", [False, True])
-@pytest.mark.parametrize("seqlen", [1, 3])
-@pytest.mark.parametrize("width", [3, 4])
-@pytest.mark.parametrize("dim", [2048 + 16, 4096])
-# tests correctness in case subset of the sequences are padded
-@pytest.mark.parametrize("with_padding", [True, False])
-@pytest.mark.parametrize("batch_size", [3, 64])
-def test_causal_conv1d_update_with_batch_gather(
-    batch_size, with_padding, dim, width, seqlen, has_bias, silu_activation, itype
-):
-    device = "npu"
-    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
-    if itype == torch.bfloat16:
-        rtol, atol = 1e-2, 5e-2
-
-    padding = 5 if with_padding else 0
-    padded_batch_size = batch_size + padding
-    # total_entries = number of cache line
-    total_entries = 10 * batch_size
-
-    # x will be (batch, dim, seqlen) with contiguous along dim-axis
-    x = torch.randn(padded_batch_size, seqlen, dim, device=device, dtype=itype).transpose(1, 2)
-
-    x_ref = x.clone()
-
-    conv_state_indices = torch.randperm(total_entries)[:batch_size].to(dtype=torch.int32, device=device)
-    unused_states_bool = torch.ones(total_entries, dtype=torch.bool, device=device)
-    unused_states_bool[conv_state_indices] = False
-    padded_state_indices = torch.concat(
-        [
-            conv_state_indices,
-            torch.as_tensor([PAD_SLOT_ID] * padding, dtype=torch.int32, device=device),
-        ],
-        dim=0,
-    )
-
-    # conv_state will be (cache_lines, dim, state_len)
-    # with contiguous along dim-axis
-    conv_state = torch.randn(total_entries, width - 1, dim, device=device, dtype=itype).transpose(1, 2)
-
-    conv_state_for_padding_test = conv_state.clone()
-
-    weight = torch.randn(dim, width, device=device, dtype=itype)
-    bias = torch.randn(dim, device=device, dtype=itype) if has_bias else None
-    conv_state_ref = conv_state[conv_state_indices, :].detach().clone()
-    activation = None if not silu_activation else "silu"
-
-    out = causal_conv1d_update(
-        x,
-        conv_state,
-        weight,
-        bias,
-        activation=activation,
-        conv_state_indices=padded_state_indices,
-        pad_slot_id=PAD_SLOT_ID,
-    )
-    out_ref = causal_conv1d_update_ref(
-        x_ref[:batch_size].transpose(1, 2), conv_state_ref, weight, bias, activation=activation
-    ).transpose(1, 2)
-
-    assert torch.equal(conv_state[conv_state_indices, :], conv_state_ref)
-    assert torch.equal(conv_state[unused_states_bool], conv_state_for_padding_test[unused_states_bool])
-    assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
-    gc.collect()
-    torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
-
-
-@pytest.mark.skip("Probabilistic failure, need zengtian after fix")
-def test_causal_conv1d_update_qwen3_next_shape():
-    device = "npu"
-    itype = torch.bfloat16
-    rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
-    if itype == torch.bfloat16:
-        rtol, atol = 1e-2, 5e-2
-
-    total_tokens = 192
-    dim = 4096
-    kernel_size = 4
-    batch_size = 96
-    num_states = 929
-
-    x = torch.randn(total_tokens, dim, dtype=itype, device=device)
-    conv_state = torch.randn(num_states, dim, kernel_size, dtype=itype, device=device)
-    weight = torch.randn(dim, kernel_size, dtype=itype, device=device)
-    bias = None
-    conv_state_indices = torch.randint(0, num_states, (batch_size,), dtype=torch.int32, device=device)
-    num_accepted_tokens = torch.ones(total_tokens, dtype=torch.int32, device=device)
-    query_start_loc = torch.arange(0, total_tokens + 1, dtype=torch.int32, device=device)
-
-    activation = "silu"
-    max_query_len = 2
-    pad_slot_id = -1
-    validate_data = False
-
-    block_idx_last_scheduled_token = None
-    initial_state_idx = None
-
-    out = causal_conv1d_update(
-        x,
-        conv_state,
-        weight,
-        bias,
-        activation,
-        conv_state_indices,
-        num_accepted_tokens,
-        query_start_loc,
-        max_query_len,
-        pad_slot_id,
-        block_idx_last_scheduled_token,
-        initial_state_idx,
-        validate_data,
-    )
-
-    x_ref = x.clone()
-    conv_state_ref = conv_state[conv_state_indices, :].detach().clone()
-    out_ref = causal_conv1d_update_ref(
-        x_ref[:batch_size].transpose(1, 2), conv_state_ref, weight, bias, activation=activation
-    ).transpose(1, 2)
-
-    assert torch.allclose(out[:batch_size], out_ref, rtol=rtol, atol=atol)
-
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()

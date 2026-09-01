@@ -31,8 +31,9 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.27.1"):
     import vllm.model_executor.models.qwen3_next as qwen3_next_module
@@ -56,10 +57,15 @@ if vllm_version_is("0.27.1"):
 _GDN_PATCH_TARGET = _GDNBaseCls
 
 
+def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
+    """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
+    return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
+
+
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
-        if "qwen3_5" in self.config.model_type:
+        if _uses_multimodal_rope(self):
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
@@ -226,7 +232,7 @@ _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
 
-if is_310p():
+if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core

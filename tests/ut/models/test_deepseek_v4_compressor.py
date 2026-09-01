@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.attention import dsa_attn_kv_plan
 from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorMetadata,
     AscendCompressorStateCache,
@@ -20,6 +20,7 @@ class TestCompressorMetadata:
         compressor = Compressor.__new__(Compressor)
         torch.nn.Module.__init__(compressor)
         compressor.compress_ratio = 4
+        compressor.vllm_config = SimpleNamespace()
         full_cos = torch.arange(8).view(2, 1, 1, 4)
         full_sin = -full_cos
         query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32)
@@ -33,18 +34,19 @@ class TestCompressorMetadata:
             block_table=block_table,
             storage_block_size=128,
             num_compressed_tokens=3,
-            num_reqs_actual=2,
+            num_actual_reqs=2,
         )
         result_cos = torch.ones((3, 4))
         result_sin = torch.zeros((3, 4))
         slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
+        plan = SimpleNamespace(get_dsa_compressor_slot_mapping_format=MagicMock(return_value=7))
 
         with (
             patch.object(
-                DeviceOperator,
-                "get_dsa_compressor_slot_mapping_format",
-                return_value=7,
-            ) as get_slot_format,
+                dsa_attn_kv_plan,
+                "get_dsa_attn_kv_plan",
+                return_value=plan,
+            ),
             patch.object(
                 torch.ops._C_ascend,
                 "compressor_metadata",
@@ -57,7 +59,7 @@ class TestCompressorMetadata:
         assert actual[0] is result_cos
         assert actual[1] is result_sin
         assert actual[2] is slot_mapping
-        get_slot_format.assert_called_once_with()
+        plan.get_dsa_compressor_slot_mapping_format.assert_called_once_with()
         args = metadata_op.call_args.args
         assert torch.equal(args[0], full_cos.view(2, 4))
         assert torch.equal(args[1], full_sin.view(2, 4))
@@ -150,7 +152,9 @@ class TestCompressorStateCache:
         cache.block_size = 8
         cache.dtype = torch.float32
         cache.sliding_window = 64
-        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
+        vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+        )
 
         spec = cache.get_kv_cache_spec(vllm_config)
 
