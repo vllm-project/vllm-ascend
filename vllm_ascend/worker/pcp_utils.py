@@ -36,7 +36,6 @@ from vllm.v1.utils import CpuGpuBuffer
 from vllm_ascend.spec_decode.utils import correct_optimistic_seq_lens_cpu
 from vllm_ascend.utils import is_pd_decode_recompute_scheduler_enabled
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -1684,7 +1683,7 @@ class PCPManager:
             out=self.input_ids_pcp_full.cpu[:total_num_scheduled_tokens_pcp_full],
         )
         self.input_ids_pcp_full.copy_to_gpu(total_num_scheduled_tokens_pcp_full)
-        copy_snapshot_to_gpu(self.query_start_loc_pcp_full)
+        self.query_start_loc_pcp_full.copy_to_gpu()
         if self.use_async_scheduling:
             self._update_input_ids_pcp_full_ids(
                 input_batch,
