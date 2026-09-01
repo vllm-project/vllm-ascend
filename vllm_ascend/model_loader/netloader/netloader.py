@@ -214,6 +214,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
         local_world_size = getattr(vllm_config.parallel_config, "local_world_size", world_size)
         if not isinstance(local_world_size, int) or local_world_size <= 0 or world_size % local_world_size != 0:
             local_world_size = world_size
+        if local_world_size == 1:
+            return
 
         # Same-node ranks only; skip cross-node wait for disk/HBM/NIC contention.
         group = None
@@ -296,13 +298,13 @@ class ModelNetLoaderElastic(BaseModelLoader):
         failed_model: nn.Module | None = None,
     ) -> None:
         """Remove new keys and any registrations owned by the failed model."""
-        stale_modules = set(failed_model.modules()) if failed_model is not None else set()
+        stale_module_ids = {id(module) for module in failed_model.modules()} if failed_model is not None else set()
         for _, static_forward_context in ModelNetLoaderElastic._iter_static_forward_contexts(vllm_config):
             keep_keys = snapshots.get(id(static_forward_context), set())
             new_keys = [
                 key
                 for key, module in list(static_forward_context.items())
-                if key not in keep_keys or module in stale_modules
+                if key not in keep_keys or id(module) in stale_module_ids
             ]
             for key in new_keys:
                 del static_forward_context[key]
