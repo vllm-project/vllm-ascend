@@ -29,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
     SharedBlockData,
+    get_partial_block_index,
 )
 
 
@@ -180,12 +181,10 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(result, [48])
 
     def test_partial_prefill_block_index_boundaries(self):
-        cls = self._make_worker_class()
-
-        self.assertEqual(cls._get_partial_block_index(20, 16, 1, True), 1)
-        self.assertEqual(cls._get_partial_block_index(32, 16, 1, True), 1)
-        self.assertIsNone(cls._get_partial_block_index(32, 16, 2, True))
-        self.assertIsNone(cls._get_partial_block_index(20, 16, 1, False))
+        self.assertEqual(get_partial_block_index(20, 16, 1, True), 1)
+        self.assertEqual(get_partial_block_index(32, 16, 1, True), 1)
+        self.assertIsNone(get_partial_block_index(32, 16, 2, True))
+        self.assertIsNone(get_partial_block_index(20, 16, 1, False))
 
     def test_find_all_discontinuous_hit_positions_all_tp_hits_with_limits(self):
         cls = self._make_worker_class()
@@ -994,6 +993,18 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             block_ids_np=np.asarray(block_ids_by_group[0], dtype=np.int64),
             block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64) for block_ids in block_ids_by_group],
         )
+
+    def test_set_external_slot_release_waiter_gated_on_gva(self):
+        waiter = MagicMock()
+
+        worker = self._make_worker()
+        worker.use_gva_layerwise = False
+        self.assertFalse(worker.set_external_slot_release_waiter(waiter))
+        self.assertIsNone(worker.external_slot_release_waiter)
+
+        worker.use_gva_layerwise = True
+        self.assertTrue(worker.set_external_slot_release_waiter(waiter))
+        self.assertIs(worker.external_slot_release_waiter, waiter)
 
     def test_process_layer_data_empty_requests(self):
         worker = self._make_worker()

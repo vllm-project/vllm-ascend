@@ -31,6 +31,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
+    backend_supports_layerwise,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol import (
+    GVAKeyFactory,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -70,6 +74,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_partial_block_index,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -154,7 +159,7 @@ class KVPoolWorker:
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
-        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        self.use_gva_layerwise = use_layerwise and backend_supports_layerwise(self.backend_name)
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
@@ -457,8 +462,17 @@ class KVPoolWorker:
             )
         return builders
 
-    def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> None:
+    def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
+        """Accept the MultiConnector composite slot-release waiter.
+
+        The GVA layerwise mode is the only mode whose receive threads wait on
+        an externally supplied slot-release callback, so the gate lives here
+        (at the data-plane consumer) instead of at the connector proxy.
+        """
+        if not self.use_gva_layerwise:
+            return False
         self.external_slot_release_waiter = waiter
+        return True
 
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
@@ -991,7 +1005,7 @@ class KVPoolWorker:
                 block_size,
                 self.hash_block_size,
             )
-            partial_block_index = self._get_partial_block_index(
+            partial_block_index = get_partial_block_index(
                 request.target_token_len,
                 block_size,
                 len(group_block_hashes),
@@ -1057,7 +1071,7 @@ class KVPoolWorker:
             )
             cached_full_blocks = cached_tokens // block_size
             full_blocks = min(cached_full_blocks, len(group_block_hashes))
-            partial_block_index = self._get_partial_block_index(
+            partial_block_index = get_partial_block_index(
                 cached_tokens,
                 block_size,
                 len(group_block_hashes),
@@ -1094,22 +1108,6 @@ class KVPoolWorker:
                 )
             )
 
-    @staticmethod
-    def _get_partial_block_index(
-        token_count: int,
-        block_size: int,
-        hash_count: int,
-        enabled: bool,
-    ) -> int | None:
-        if not enabled or token_count <= 0:
-            return None
-        full_blocks, remainder = divmod(token_count, block_size)
-        if remainder:
-            return full_blocks
-        if full_blocks > hash_count:
-            return full_blocks - 1
-        return None
-
     def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
         """Generate GVA key for layerwise transfer.
 
@@ -1117,10 +1115,13 @@ class KVPoolWorker:
         backward compatibility. Multi-group models include group_id
         (model@group_id@hash@rank) to distinguish groups.
         """
-        if self.num_kv_cache_groups > 1:
-            return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
-        else:
-            return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
+        return GVAKeyFactory.full_key(
+            self.model_name,
+            group_id,
+            block_hash_hex,
+            self.head_or_tp_rank,
+            self.num_kv_cache_groups,
+        )
 
     def _make_layerwise_partial_key(
         self,
@@ -1129,7 +1130,14 @@ class KVPoolWorker:
         block_index: int,
         end_token: int,
     ) -> str:
-        return f"{self.model_name}@partial@{request.req_id}@{group_id}@{block_index}@{end_token}@{self.head_or_tp_rank}"
+        return GVAKeyFactory.partial_key(
+            self.model_name,
+            request.req_id,
+            group_id,
+            block_index,
+            end_token,
+            self.head_or_tp_rank,
+        )
 
     def _refresh_allocated_gvas(self, keys: list[str]) -> None:
         """Drop local GVA entries whose MemCache blobs were evicted."""
@@ -1248,7 +1256,7 @@ class KVPoolWorker:
                             self._allocated_gvas[key] = gva
                             all_group_save_keys.append(key)
 
-                partial_block_index = self._get_partial_block_index(
+                partial_block_index = get_partial_block_index(
                     request.target_token_len,
                     effective_block_size,
                     len(group_block_hashes),
@@ -1356,7 +1364,7 @@ class KVPoolWorker:
                     continue
                 full_len = len(block_ids_by_group)
 
-                partial_block_index = self._get_partial_block_index(
+                partial_block_index = get_partial_block_index(
                     cached_tokens,
                     effective_block_size,
                     len(group_block_hashes),

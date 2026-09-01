@@ -25,12 +25,16 @@ from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
+    backend_supports_layerwise,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol import (
+    GVAKeyFactory,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_gva_layerwise_config,
     get_layerwise_kv_cache_specs,
+    get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -160,9 +164,9 @@ class KVPoolScheduler:
         )
         self.tp_mismatch = tp_mismatch_info.enabled
 
-        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
+        backend_name = str(vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake"))
         self.backend_name = backend_name.lower()
-        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        self.use_gva_layerwise = self.use_layerwise and backend_supports_layerwise(self.backend_name)
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -191,7 +195,7 @@ class KVPoolScheduler:
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.layerwise_offload = False
         if self.use_gva_layerwise:
-            extra_config = get_gva_layerwise_config(vllm_config.kv_transfer_config)
+            extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
             if kv_cache_config is not None and extra_config is not None:
                 reuse_layout = build_layerwise_reuse_layout(
                     get_layerwise_kv_cache_specs(kv_cache_config),
@@ -313,10 +317,13 @@ class KVPoolScheduler:
         group share one key for MLA).
         """
         head_or_tp_ranks = self.tp_size // self.put_step
-        if len(self.kv_cache_group_ids) > 1:
-            return [f"{self.model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(head_or_tp_ranks)]
-        else:
-            return [f"{self.model_name}@{block_hash_hex}@{h}" for h in range(head_or_tp_ranks)]
+        return GVAKeyFactory.hit_check_keys(
+            self.model_name,
+            group_id,
+            block_hash_hex,
+            head_or_tp_ranks,
+            len(self.kv_cache_group_ids),
+        )
 
     def _get_layerwise_gva_hit_tokens(
         self,
