@@ -17,7 +17,7 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -31,7 +31,7 @@ import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
 
-if not is_310p():
+if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa

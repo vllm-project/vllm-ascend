@@ -12,7 +12,7 @@ The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Us
 
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, speculative decoding, asynchronous scheduling, tensor parallelism, expert parallelism, data parallelism, PD disaggregation, and ACLGraph support.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
 :::{note}
 The support matrix records the maximum verified capability for this model. The startup examples in this document use practical validation settings for online serving and performance testing. Adjust `--max-model-len`, `--max-num-seqs`, and `--max-num-batched-tokens` based on your service workload and available KV cache.
@@ -32,13 +32,13 @@ It is recommended to download the model weight to a shared directory across mult
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Use `v0.17.0rc1` or later for this model.For Ascend95DT, the model is supported from `vllm-ascend:v0.23.0rc1`.
 
@@ -163,7 +163,7 @@ If you want to deploy a multi-node service, set up the same environment on each 
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
+You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
@@ -264,7 +264,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
     For W8A8 deployment, 2 Atlas 800 A2 (64G x 8) nodes are required. Refer to [Section 5.2](#52-multi-node-deployment-with-mp-recommended) for multi-node MP deployment.
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 **Key parameters:**
 
@@ -332,7 +332,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
 
-Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
 
 Run the following script on node 1.
 
@@ -785,11 +785,11 @@ Run a proxy server on the same node as the prefiller service instance. You can g
     unset https_proxy
     unset http_proxy
     python3 load_balance_proxy_server_example.py \
-      --prefiller-hosts 141.xx.xx.1 \
+      --prefiller-hosts 192.xx.xx.1 \
       --prefiller-ports 30060 \
-      --decoder-hosts 141.xx.xx.2 \
+      --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --port 8010
     ```
 
@@ -809,11 +809,11 @@ Run a proxy server on the same node as the prefiller service instance. You can g
     unset https_proxy
     unset http_proxy
     python3 load_balance_proxy_layerwise_server_example.py \
-      --prefiller-hosts 141.xx.xx.1 \
+      --prefiller-hosts 192.xx.xx.1 \
       --prefiller-ports 30060 \
-      --decoder-hosts 141.xx.xx.2 \
+      --decoder-hosts 192.xx.xx.2 \
       --decoder-ports 30050 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --port 8010
     ```
 
@@ -918,7 +918,7 @@ The following configurations are validated in specific test environments and are
 
 ### 9.2 Tuning Guidelines
 
-Refer to [public performance tuning documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
+Refer to [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
 
 Recommended tuning order:
 
@@ -946,7 +946,7 @@ Recommended tuning order:
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to [FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.5-397B-A17B.
+For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.5-397B-A17B.
 
 ### Q1: Why does the service report OOM during startup or soon after accepting requests?
 

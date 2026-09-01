@@ -328,6 +328,23 @@ at::Tensor npu_sparse_attention_score_meta(
                             query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
+at::Tensor npu_msa_index_score_meta(
+    const at::Tensor &query, const at::Tensor &,
+    const at::Tensor &block_table, const at::Tensor &,
+    const c10::optional<at::Tensor> &,
+    const c10::optional<at::Tensor> &,
+    const c10::optional<at::Tensor> &,
+    const c10::optional<at::Tensor> &,
+    c10::string_view, int64_t, int64_t, int64_t)
+{
+    const c10::SymInt score_stride =
+        ceil_div(block_table.sym_size(1), 16) * c10::SymInt(16);
+    const std::vector<c10::SymInt> output_size = {
+        query.sym_size(1), query.sym_size(0), score_stride};
+    return at::empty_symint(
+        output_size, query.options().dtype(at::kFloat).device(c10::kMeta));
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(
     const at::Tensor &query,
     const at::Tensor &key,
@@ -621,6 +638,46 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     auto options = value.options().dtype(at::ScalarType::BFloat16);
     at::Tensor output = at::empty_symint(value.sym_sizes(), options);
     return output;
+}
+
+at::Tensor recurrent_kda_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& gate,
+    const at::Tensor& beta,
+    at::Tensor& initial_state,
+    const at::Tensor& actual_seq_lengths,
+    const at::Tensor& ssm_state_indices,
+    const at::Tensor& a_log,
+    const at::Tensor& dt_bias,
+    const c10::optional<at::Tensor>& num_accepted_tokens,
+    double scale,
+    bool use_qk_l2norm_in_kernel,
+    bool use_gate_in_kernel,
+    bool use_beta_sigmoid_in_kernel,
+    bool allow_neg_eigval,
+    bool safe_gate,
+    double lower_bound)
+{
+    (void)query;
+    (void)key;
+    (void)gate;
+    (void)beta;
+    (void)actual_seq_lengths;
+    (void)ssm_state_indices;
+    (void)a_log;
+    (void)dt_bias;
+    (void)num_accepted_tokens;
+    (void)scale;
+    (void)use_qk_l2norm_in_kernel;
+    (void)use_gate_in_kernel;
+    (void)use_beta_sigmoid_in_kernel;
+    (void)allow_neg_eigval;
+    (void)safe_gate;
+    (void)lower_bound;
+    (void)initial_state;
+    return at::empty_symint(value.sym_sizes(), value.options());
 }
 
 std::vector<at::Tensor> moe_grouped_matmul_meta(
@@ -1367,6 +1424,150 @@ void npu_scatter_nd_update_v2_meta(
 }
 
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> npu_mla_prolog_v3_meta(
+    const at::Tensor &token_x,
+    const at::Tensor &weight_dq,
+    const at::Tensor &weight_uq_qr,
+    const at::Tensor &weight_uk,
+    const at::Tensor &weight_dkv_kr,
+    const at::Tensor &rmsnorm_gamma_cq,
+    const at::Tensor &rmsnorm_gamma_ckv,
+    const at::Tensor &rope_sin,
+    const at::Tensor &rope_cos,
+    at::Tensor &kv_cache,
+    at::Tensor &kr_cache,
+    const c10::optional<at::Tensor> &cache_index,
+    const c10::optional<at::Tensor> &dequant_scale_x,
+    const c10::optional<at::Tensor> &dequant_scale_w_dq,
+    const c10::optional<at::Tensor> &dequant_scale_w_uq_qr,
+    const c10::optional<at::Tensor> &dequant_scale_w_dkv_kr,
+    const c10::optional<at::Tensor> &quant_scale_ckv,
+    const c10::optional<at::Tensor> &quant_scale_ckr,
+    const c10::optional<at::Tensor> &smooth_scales_cq,
+    const c10::optional<at::Tensor> &actual_seq_len,
+    const c10::optional<at::Tensor> &k_nope_clip_alpha,
+    double rmsnorm_epsilon_cq,
+    double rmsnorm_epsilon_ckv,
+    c10::string_view cache_mode,
+    bool query_norm_flag,
+    int64_t weight_quant_mode,
+    int64_t kv_cache_quant_mode,
+    int64_t query_quant_mode,
+    int64_t ckvkr_repo_mode,
+    int64_t quant_scale_repo_mode,
+    int64_t tile_size,
+    double qc_qr_scale,
+    double kc_scale)
+{
+    constexpr int64_t FP8_E4M3_BLOCK_SIZE = 32;
+    const bool need_dequant_scale_q_nope =
+        (weight_quant_mode == 2 || weight_quant_mode == 3 || weight_quant_mode == 4 ||
+         weight_quant_mode == 5) &&
+        kv_cache_quant_mode == 1;
+
+    // rope_sin/rope_cos are required args; empty tensors mean RoPE off (Dr defaults to 64).
+    // symbolic-meta-ok: empty rope_sin (numel==0) is the concrete RoPE-off runtime sentinel.
+    const bool rope_enabled = rope_sin.defined() && rope_sin.numel() > 0;
+    at::ScalarType query_dtype = rope_enabled ? rope_sin.scalar_type() : at::kBFloat16;
+    if (weight_quant_mode == 3 && kv_cache_quant_mode == 1) {
+        query_dtype = at::kFloat8_e4m3fn;
+    } else if (weight_quant_mode == 2 && kv_cache_quant_mode == 1) {
+        query_dtype = at::kChar;
+    }
+
+    at::ScalarType query_norm_dtype = at::kBFloat16;
+    if (weight_quant_mode == 3 || weight_quant_mode == 4) {
+        query_norm_dtype = at::kFloat8_e4m3fn;
+    } else if (weight_quant_mode != 0) {
+        query_norm_dtype = weight_uq_qr.scalar_type();
+    }
+
+    at::ScalarType dequant_scale_q_norm_dtype =
+        weight_quant_mode == 3 ? at::kFloat8_e8m0fnu : at::kFloat;
+
+    c10::SymDimVector query_shape;
+    c10::SymDimVector query_rope_shape;
+    c10::SymDimVector dequant_scale_q_nope_shape;
+    c10::SymDimVector query_norm_shape;
+    c10::SymDimVector dequant_scale_q_norm_shape;
+
+    if (token_x.dim() == 3) {
+        c10::SymInt rope_dim = rope_enabled ? rope_sin.sym_size(2) : c10::SymInt(64);
+        query_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_uk.sym_size(0),
+                       weight_uk.sym_size(2)};
+        query_rope_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_uk.sym_size(0),
+                            rope_dim};
+        dequant_scale_q_nope_shape = {token_x.sym_size(0) * token_x.sym_size(1),
+                                      weight_uk.sym_size(0), c10::SymInt(1)};
+        query_norm_shape = {token_x.sym_size(0), token_x.sym_size(1), weight_dq.sym_size(1)};
+        dequant_scale_q_norm_shape = {token_x.sym_size(0) * token_x.sym_size(1)};
+        if (weight_quant_mode == 3) {
+            dequant_scale_q_norm_shape.push_back(weight_dq.sym_size(1) / c10::SymInt(FP8_E4M3_BLOCK_SIZE));
+        } else {
+            dequant_scale_q_norm_shape.push_back(c10::SymInt(1));
+        }
+    } else {
+        c10::SymInt rope_dim = rope_enabled ? rope_sin.sym_size(1) : c10::SymInt(64);
+        query_shape = {token_x.sym_size(0), weight_uk.sym_size(0), weight_uk.sym_size(2)};
+        query_rope_shape = {token_x.sym_size(0), weight_uk.sym_size(0), rope_dim};
+        dequant_scale_q_nope_shape = {token_x.sym_size(0), weight_uk.sym_size(0), c10::SymInt(1)};
+        query_norm_shape = {token_x.sym_size(0), weight_dq.sym_size(1)};
+        dequant_scale_q_norm_shape = {token_x.sym_size(0)};
+        if (weight_quant_mode == 3) {
+            dequant_scale_q_norm_shape.push_back(weight_dq.sym_size(1) / c10::SymInt(FP8_E4M3_BLOCK_SIZE));
+        } else {
+            dequant_scale_q_norm_shape.push_back(c10::SymInt(1));
+        }
+    }
+
+    at::Tensor query = at::empty_symint(query_shape, token_x.options().dtype(query_dtype));
+    at::Tensor query_rope = at::empty_symint(query_rope_shape, token_x.options().dtype(at::kBFloat16));
+    at::Tensor dequant_scale_q_nope =
+        need_dequant_scale_q_nope
+            ? at::empty_symint(dequant_scale_q_nope_shape, token_x.options().dtype(at::kFloat))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(at::kFloat));
+    at::Tensor query_norm =
+        query_norm_flag
+            ? at::empty_symint(query_norm_shape, token_x.options().dtype(query_norm_dtype))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(query_norm_dtype));
+    at::Tensor dequant_scale_q_norm =
+        (query_norm_flag && weight_quant_mode != 0)
+            ? at::empty_symint(dequant_scale_q_norm_shape,
+                               token_x.options().dtype(dequant_scale_q_norm_dtype))
+            : at::empty_symint(c10::SymDimVector{c10::SymInt(0)},
+                               token_x.options().dtype(dequant_scale_q_norm_dtype));
+
+    (void)weight_dkv_kr;
+    (void)rmsnorm_gamma_cq;
+    (void)rmsnorm_gamma_ckv;
+    (void)rope_cos;
+    (void)kv_cache;
+    (void)kr_cache;
+    (void)cache_index;
+    (void)dequant_scale_x;
+    (void)dequant_scale_w_dq;
+    (void)dequant_scale_w_uq_qr;
+    (void)dequant_scale_w_dkv_kr;
+    (void)quant_scale_ckv;
+    (void)quant_scale_ckr;
+    (void)smooth_scales_cq;
+    (void)actual_seq_len;
+    (void)k_nope_clip_alpha;
+    (void)rmsnorm_epsilon_cq;
+    (void)rmsnorm_epsilon_ckv;
+    (void)cache_mode;
+    (void)query_quant_mode;
+    (void)ckvkr_repo_mode;
+    (void)quant_scale_repo_mode;
+    (void)tile_size;
+    (void)qc_qr_scale;
+    (void)kc_scale;
+
+    return {query, query_rope, dequant_scale_q_nope, query_norm, dequant_scale_q_norm};
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_fwd_h_meta(
     const at::Tensor & k,
     const at::Tensor & w,
@@ -1447,6 +1648,160 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
+std::tuple<at::Tensor, c10::optional<at::Tensor>, c10::optional<at::Tensor>, at::Tensor, at::Tensor,
+           c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
+           c10::optional<at::Tensor>, c10::optional<at::Tensor>, c10::optional<at::Tensor>,
+           c10::optional<at::Tensor>>
+chunk_kda_fwd_meta(
+    const at::Tensor &q,
+    const at::Tensor &k,
+    const at::Tensor &v,
+    const at::Tensor &g,
+    const at::Tensor &beta,
+    double scale,
+    int64_t chunk_size,
+    c10::string_view layout,
+    const c10::optional<at::Tensor> &initial_state,
+    c10::optional<bool> output_final_state,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<at::IntArrayRef> chunk_indices,
+    c10::optional<bool> safe_gate,
+    c10::optional<double> lower_bound,
+    c10::optional<bool> use_gate_in_kernel,
+    const c10::optional<at::Tensor> &A_log,
+    const c10::optional<at::Tensor> &dt_bias,
+    c10::optional<bool> disable_recompute,
+    c10::optional<bool> return_intermediate_states,
+    c10::optional<bool> state_v_first)
+{
+    std::string layout_str = std::string(layout);
+    bool is_tnd = layout_str == "TND";
+    bool is_ntd = layout_str == "NTD";
+    bool is_bnsd = layout_str == "BNSD";
+    bool is_rank3 = is_tnd || is_ntd;
+    bool output_final_state_ = output_final_state.value_or(false);
+    bool use_gate_in_kernel_ = use_gate_in_kernel.value_or(false);
+    bool disable_recompute_ = disable_recompute.value_or(false);
+    bool return_intermediate_states_ = return_intermediate_states.value_or(false);
+    bool state_v_first_ = state_v_first.value_or(false);
+
+    c10::SymInt B = is_rank3 ? c10::SymInt(1) : q.sym_size(0);
+    c10::SymInt T = is_tnd ? q.sym_size(0) :
+        (is_ntd ? q.sym_size(1) : (is_bnsd ? q.sym_size(2) : q.sym_size(1)));
+    c10::SymInt K = is_rank3 ? q.sym_size(2) : q.sym_size(3);
+    c10::SymInt HV = is_tnd ? v.sym_size(1) :
+        (is_ntd ? v.sym_size(0) : (is_bnsd ? v.sym_size(1) : v.sym_size(2)));
+    c10::SymInt V = is_rank3 ? v.sym_size(2) : v.sym_size(3);
+    // symbolic-meta-ok: cu_seqlens is an IntArrayRef schema argument, not a Tensor shape.
+    c10::SymInt seq_num = cu_seqlens.has_value() ?
+        c10::SymInt(static_cast<int64_t>(cu_seqlens->size()) - 1) : B;
+    c10::SymInt total_chunks(0);
+    if (chunk_indices.has_value()) {
+        // symbolic-meta-ok: chunk_indices is an IntArrayRef schema argument, not a Tensor shape.
+        total_chunks = c10::SymInt(static_cast<int64_t>(chunk_indices->size()) / 2);
+    } else if (cu_seqlens.has_value()) {
+        int64_t concrete_total_chunks = 0;
+        // symbolic-meta-ok: cu_seqlens is an IntArrayRef schema argument, not a Tensor shape.
+        for (size_t i = 0; i + 1 < cu_seqlens->size(); ++i) {
+            concrete_total_chunks += ((*cu_seqlens)[i + 1] - (*cu_seqlens)[i] + chunk_size - 1) / chunk_size;
+        }
+        total_chunks = c10::SymInt(concrete_total_chunks);
+    } else {
+        total_chunks = (T + c10::SymInt(chunk_size - 1)) / c10::SymInt(chunk_size);
+    }
+
+    c10::SymDimVector attn_shape = is_rank3 ? c10::SymDimVector{T, HV, V}
+                                                   : c10::SymDimVector{B, T, HV, V};
+    c10::SymDimVector state_shape = state_v_first_ ? c10::SymDimVector{seq_num, HV, V, K}
+                                                   : c10::SymDimVector{seq_num, HV, K, V};
+    c10::SymDimVector matrix_shape = is_rank3 ? c10::SymDimVector{HV, T, c10::SymInt(chunk_size)}
+                                               : c10::SymDimVector{B, HV, T, c10::SymInt(chunk_size)};
+    c10::SymDimVector k_shape = is_rank3 ? c10::SymDimVector{HV, T, K}
+                                         : c10::SymDimVector{B, HV, T, K};
+    c10::SymDimVector v_shape = is_rank3 ? c10::SymDimVector{HV, T, V}
+                                         : c10::SymDimVector{B, HV, T, V};
+    c10::SymDimVector h_shape =
+        is_rank3 ? (state_v_first_ ? c10::SymDimVector{total_chunks, HV, V, K}
+                                   : c10::SymDimVector{total_chunks, HV, K, V})
+                 : (state_v_first_ ? c10::SymDimVector{B, total_chunks, HV, V, K}
+                                   : c10::SymDimVector{B, total_chunks, HV, K, V});
+
+    at::Tensor o = at::empty_symint(attn_shape, v.options());
+    c10::optional<at::Tensor> final_state;
+    if (output_final_state_) {
+        final_state = at::empty_symint(state_shape, q.options().dtype(at::kFloat));
+    }
+    c10::optional<at::Tensor> gk;
+    if (!use_gate_in_kernel_ || disable_recompute_) {
+        gk = at::empty_symint(k_shape, q.options().dtype(at::kFloat));
+    }
+    at::Tensor aqk = at::empty_symint(matrix_shape, q.options());
+    at::Tensor akk = at::empty_like(aqk);
+    c10::optional<at::Tensor> w;
+    c10::optional<at::Tensor> u;
+    c10::optional<at::Tensor> qg;
+    c10::optional<at::Tensor> kg;
+    c10::optional<at::Tensor> v_new;
+    if (disable_recompute_) {
+        w = at::empty_symint(k_shape, q.options());
+        u = at::empty_symint(v_shape, q.options());
+        qg = at::empty_symint(k_shape, q.options());
+        kg = at::empty_symint(k_shape, q.options());
+        v_new = at::empty_symint(v_shape, q.options());
+    }
+    c10::optional<at::Tensor> h;
+    if (disable_recompute_ || return_intermediate_states_) {
+        h = at::empty_symint(h_shape, q.options());
+    }
+    c10::optional<at::Tensor> initial_state_out =
+        initial_state.has_value() && initial_state->defined() ? initial_state : c10::nullopt;
+    (void)k;
+    (void)g;
+    (void)beta;
+    (void)scale;
+    (void)safe_gate;
+    (void)lower_bound;
+    (void)A_log;
+    (void)dt_bias;
+    return std::make_tuple(o, final_state, gk, aqk, akk, w, u, qg, kg, v_new, h, initial_state_out);
+}
+
+at::Tensor kda_gate_cumsum_meta(
+    const at::Tensor &g,
+    int64_t chunk_size,
+    const c10::optional<at::Tensor> &A_log,
+    const c10::optional<at::Tensor> &dt_bias,
+    c10::optional<at::IntArrayRef> cu_seqlens,
+    c10::optional<bool> use_gate_in_kernel,
+    c10::optional<bool> safe_gate,
+    c10::optional<double> lower_bound,
+    c10::string_view layout)
+{
+    (void)chunk_size;
+    (void)A_log;
+    (void)dt_bias;
+    (void)cu_seqlens;
+    (void)use_gate_in_kernel;
+    (void)safe_gate;
+    (void)lower_bound;
+    (void)layout;
+    return at::empty_symint(g.sym_sizes(), g.options().dtype(at::kFloat));
+}
+
+at::Tensor kda_layout_swap12_meta(
+    const at::Tensor &x,
+    const c10::optional<at::Tensor> &dependency)
+{
+    c10::SymDimVector y_sizes(x.sym_sizes().begin(), x.sym_sizes().end());
+    if (x.dim() == 3) {
+        std::swap(y_sizes[0], y_sizes[1]);
+    } else {
+        std::swap(y_sizes[1], y_sizes[2]);
+    }
+    (void)dependency;
+    return at::empty_symint(y_sizes, x.options());
+}
+
 void store_kv_block_metadata(
     const at::Tensor &slot_mapping_npu,
     const at::Tensor &group_len,
@@ -1468,6 +1823,85 @@ void store_kv_block(
     return;
 
 }
+std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
+    const at::Tensor& x,
+    const c10::optional<at::Tensor>& weight_scale,
+    const c10::optional<at::Tensor>& activation_scale,
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<at::Tensor>& quant_scale,
+    const c10::optional<at::Tensor>& quant_offset,
+    const c10::optional<at::Tensor>& group_index,
+    double beta,
+    double linear_beta,
+    bool activate_left,
+    c10::string_view quant_mode)
+{
+    (void)weight_scale;
+    (void)activation_scale;
+    (void)bias;
+    (void)quant_scale;
+    (void)quant_offset;
+    (void)group_index;
+    (void)beta;
+    (void)linear_beta;
+    (void)activate_left;
+    (void)quant_mode;
+
+    TORCH_CHECK(x.dim() == 2,
+                "dequant_situ_quant: x must be 2-dimensional [rows, width], but got rank ",
+                x.dim());
+    TORCH_CHECK(x.scalar_type() == at::kInt || x.scalar_type() == at::kBFloat16,
+                "dequant_situ_quant: x must be int32 or bfloat16, but got ", x.scalar_type());
+    const c10::SymInt input_width = x.sym_size(1);
+    TORCH_CHECK(input_width % 2 == 0,
+                "dequant_situ_quant: x last dimension must be even");
+
+    c10::SymDimVector y_shape(x.sym_sizes().begin(), x.sym_sizes().end());
+    y_shape.back() = input_width / 2;
+    c10::SymDimVector scale_shape;
+    scale_shape.push_back(x.sym_size(0));
+    at::Tensor y = at::empty_symint(y_shape, x.options().dtype(at::kChar));
+    at::Tensor scale = at::empty_symint(scale_shape, x.options().dtype(at::kFloat));
+    return {y, scale};
+}
+
+std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
+    const at::Tensor& x,
+    double beta,
+    double linear_beta,
+    bool activate_left,
+    int64_t dst_type)
+{
+    constexpr int64_t DST_TYPE_E5M2 = 35;
+    constexpr int64_t DST_TYPE_E4M3FN = 36;
+    constexpr int64_t MX_BLOCK_SPAN = 64;
+    constexpr int64_t MX_SCALE_ALIGN = 2;
+
+    TORCH_CHECK(x.dim() >= 1,
+                "situ_mx_quant: x must be at least 1-dimensional, but got ",
+                x.dim());
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16,
+                "situ_mx_quant: x must be bfloat16, but got ", x.scalar_type());
+    TORCH_CHECK(beta > 0.0,
+                "situ_mx_quant: beta must be greater than 0, but got ", beta);
+    TORCH_CHECK(dst_type == DST_TYPE_E4M3FN || dst_type == DST_TYPE_E5M2,
+                "situ_mx_quant: dst_type must be 36 (E4M3FN) or 35 (E5M2), but got ",
+                dst_type);
+
+    (void)linear_beta;
+    (void)activate_left;
+
+    c10::SymDimVector y_shape(x.sym_sizes().begin(), x.sym_sizes().end());
+    y_shape.back() = y_shape.back() / 2;
+    c10::SymDimVector mxscale_shape(y_shape.begin(), y_shape.end());
+    mxscale_shape.back() = (mxscale_shape.back() + MX_BLOCK_SPAN - 1) / MX_BLOCK_SPAN;
+    mxscale_shape.emplace_back(MX_SCALE_ALIGN);
+
+    auto y_dtype = dst_type == DST_TYPE_E5M2 ? at::kFloat8_e5m2 : at::kFloat8_e4m3fn;
+    at::Tensor y = at::empty_symint(y_shape, x.options().dtype(y_dtype));
+    at::Tensor mxscale = at::empty_symint(mxscale_shape, x.options().dtype(at::kFloat8_e8m0fnu));
+    return {y, mxscale};
+}
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -1486,6 +1920,12 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_kda_fwd
+    ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
+    // kda_gate_cumsum
+    ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
+    // kda_layout_swap12
+    ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
 }
 }
 #else
@@ -1496,6 +1936,9 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // recurrent_gated_delta_rule meta implementation
     ops.impl("npu_recurrent_gated_delta_rule", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_meta);
+    ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
+    ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
+    ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
@@ -1527,6 +1970,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_k2q_csr", &vllm_ascend::meta::npu_k2q_csr_meta);
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
+    ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
@@ -1566,10 +2010,18 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
+    // MLA prolog (MlaPrologV3), Ascend950-only; name aligned with torch_npu
+    ops.impl("npu_mla_prolog_v3", &vllm_ascend::meta::npu_mla_prolog_v3_meta);
     // chunk_gated_delta_rule_fwd_h
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_kda_fwd
+    ops.impl("chunk_kda_fwd", &vllm_ascend::meta::chunk_kda_fwd_meta);
+    // kda_gate_cumsum
+    ops.impl("kda_gate_cumsum", &vllm_ascend::meta::kda_gate_cumsum_meta);
+    // kda_layout_swap12
+    ops.impl("kda_layout_swap12", &vllm_ascend::meta::kda_layout_swap12_meta);
      // store_kv_block
     ops.impl("store_kv_block_pre", &vllm_ascend::meta::store_kv_block_metadata);
     ops.impl("store_kv_block", &vllm_ascend::meta::store_kv_block);

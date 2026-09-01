@@ -1,6 +1,10 @@
 import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
 
+from vllm_ascend.utils import is_310p
+
+_original_validate_v2_model_runner = VllmConfig._validate_v2_model_runner
+
 
 def _patched_use_v2_model_runner(self) -> bool:
     """Return VLLM_USE_V2_MODEL_RUNNER env directly.
@@ -18,3 +22,12 @@ def _patched_use_v2_model_runner(self) -> bool:
 
 
 VllmConfig.use_v2_model_runner = property(_patched_use_v2_model_runner)
+
+
+def _patched_validate_v2_model_runner(self) -> None:
+    if is_310p():
+        return
+    _original_validate_v2_model_runner(self)
+
+
+VllmConfig._validate_v2_model_runner = _patched_validate_v2_model_runner

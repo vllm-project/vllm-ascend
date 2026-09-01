@@ -10,9 +10,9 @@ This document will show the main verification steps of the model, including supp
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -110,7 +110,7 @@ You can use our official docker image to run `GLM-4.x` directly.
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -119,7 +119,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 ### 5.1 Single-node Deployment
 
 - In low-latency scenarios, we recommend a single-machine deployment.
-- Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
+- Quantized model `glm4.7_w8a8_with_float_mtp` can be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8).
 
 Run the following script to execute online inference.
 
@@ -130,7 +130,6 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -147,7 +146,7 @@ vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --gpu-memory-utilization 0.9 \
   --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
   --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+  --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
 ```
 
 **Notice:**
@@ -157,7 +156,7 @@ The parameters are explained as follows:
 
 ### 5.2 Multi-node Deployment
 
-While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64G × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
+While the previous documentation advises against multi-node deployment on the Atlas 800 A2 (64GB × 8) platform, this configuration can still be implemented for the GLM-4.x model if required. To proceed with a dual-node setup, execute the following scripts on each respective node.
 
 === "Node 0"
 
@@ -179,7 +178,6 @@ While the previous documentation advises against multi-node deployment on the At
     export OMP_NUM_THREADS=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
     vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -205,7 +203,7 @@ While the previous documentation advises against multi-node deployment on the At
     --served-model-name glm47 \
     --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
     --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+    --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
     ```
 
 === "Node 1"
@@ -229,7 +227,6 @@ While the previous documentation advises against multi-node deployment on the At
     export OMP_NUM_THREADS=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
     vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -256,7 +253,7 @@ While the previous documentation advises against multi-node deployment on the At
     --served-model-name glm47 \
     --speculative-config '{"num_speculative_tokens": 3, "method":"mtp", "enforce_eager":true}' \
     --compilation-config '{"cudagraph_capture_sizes": [1,2,4,8,16,32,64,128,256,512], "cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}'
+    --additional-config '{"enable_shared_expert_dp":true,"ascend_fusion_config":{"fusion_ops_gmmswigluquant":false},"scheduler_config":{"enable_balance_scheduling":true}}'
     ```
 
 ### 5.3 Prefill-Decode Disaggregation
@@ -520,7 +517,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -546,7 +542,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
-            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
+            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "enable_fused_mc2": 1, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
@@ -589,7 +585,6 @@ Before you start, please
         export TASK_QUEUE_ENABLE=1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
@@ -615,7 +610,7 @@ Before you start, please
             "torch_profiler_dir": "./vllm_profile",
             "torch_profiler_with_stack": false}' \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY",  "cudagraph_capture_sizes":[1,2,4,6,8,10,12,14,16,18,20,24,26,28,30,32,64,128,256,512]}' \
-            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
+            --additional-config '{"recompute_scheduler_enable": true, "enable_shared_expert_dp": true, "enable_fused_mc2": 1, "ascend_fusion_config": {"fusion_ops_gmmswigluquant": false}}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
@@ -731,8 +726,8 @@ Here are two accuracy evaluation methods.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 |----- | ----- | ----- | ----- | -----| ----- |
-| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64G × 16) |
-| MATH500 | - | accuracy | gen | 98.8 | 1 Atlas 800 A3 (64G × 16) |
+| GPQA | - | accuracy | gen | 84.85 | 1 Atlas 800 A3 (64GB × 16) |
+| MATH500 | - | accuracy | gen | 98.8 | 1 Atlas 800 A3 (64GB × 16) |
 
 ### Using Language Model Evaluation Harness
 

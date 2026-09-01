@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from vllm.config import CUDAGraphMode
 
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
@@ -76,16 +77,22 @@ class TestMultimodalImageTokenIndex:
 
         assert image_token_index == 789
 
-    def test_kimi_uses_media_placeholder_token_id(self):
+    @pytest.mark.parametrize(
+        "model_name",
+        [
+            "KimiK25ForConditionalGeneration",
+            "KimiK3ForConditionalGeneration",
+            "AscendKimiK3ForConditionalGeneration",
+        ],
+    )
+    def test_kimi_uses_media_placeholder_token_id(self, model_name: str):
         config = SimpleNamespace(
             image_token_id=123,
             image_token_index=456,
             media_placeholder_token_id=789,
         )
 
-        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
-            "KimiK25ForConditionalGeneration", config
-        )
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(model_name, config)
 
         assert image_token_index == 789
 
@@ -99,16 +106,68 @@ class TestMultimodalImageTokenIndex:
         assert image_token_index == 456
 
 
+class TestMtpSharesTheTargetLmHead:
+    """``_maybe_share_lm_head`` for the MTP branch.
+
+    Weight equality only distinguishes the two heads when the draft loaded one.
+    GLM-5.3 and friends ship no ``shared_head.head``, so its buffer holds
+    whatever the allocation left behind; comparing that against the target head
+    says "different" and would leave the draft predicting from garbage.
+    """
+
+    @staticmethod
+    def _build(draft_head_weight, has_own_lm_head=None):
+        target = SimpleNamespace(lm_head=SimpleNamespace(weight=torch.ones(4, 2)))
+        mtp_layer = SimpleNamespace(shared_head=SimpleNamespace(head=SimpleNamespace(weight=draft_head_weight)))
+
+        draft = MagicMock()
+        draft.model.layers = {"78": mtp_layer}
+        if has_own_lm_head is None:
+            del draft.has_own_lm_head
+        else:
+            draft.has_own_lm_head = has_own_lm_head
+
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "mtp"
+        proposer.model = draft
+        proposer.use_cuda_graph = False
+        proposer.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(is_deepseek_mla=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        )
+        return proposer, target, mtp_layer
+
+    def test_shares_when_the_checkpoint_has_no_mtp_head(self):
+        proposer, target, mtp_layer = self._build(torch.randn(4, 2), has_own_lm_head=False)
+        proposer._maybe_share_lm_head(target)
+        assert mtp_layer.shared_head.head is target.lm_head
+
+    def test_keeps_a_head_the_draft_owns(self):
+        proposer, target, mtp_layer = self._build(torch.randn(4, 2), has_own_lm_head=True)
+        own_head = mtp_layer.shared_head.head
+        proposer._maybe_share_lm_head(target)
+        assert mtp_layer.shared_head.head is own_head
+
+    def test_still_deduplicates_an_identical_head(self):
+        # DeepSeek ships shared_head.head equal to lm_head; sharing it saves a
+        # copy of the vocabulary projection.
+        proposer, target, mtp_layer = self._build(torch.ones(4, 2), has_own_lm_head=True)
+        proposer._maybe_share_lm_head(target)
+        assert mtp_layer.shared_head.head is target.lm_head
+
+
 def test_load_model_reads_validated_draft_window_size():
     proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
     proposer.vllm_config = SimpleNamespace(additional_config={"draft_window_size": 64})
     proposer.maybe_eager_context = nullcontext()
-    proposer._get_model = MagicMock(return_value=MagicMock())
+    draft_model = MagicMock()
+    proposer._get_model = MagicMock(return_value=draft_model)
     proposer.method = "eagle3"
     proposer.num_speculative_tokens = 4
     proposer.runner = SimpleNamespace(max_num_reqs=8)
     proposer.device = "cpu"
     proposer.parallel_drafting = False
+    proposer.supports_mm_inputs = False
     proposer._maybe_share_embeddings = MagicMock()
     proposer._maybe_share_topk_indices = MagicMock()
     proposer._maybe_share_lm_head = MagicMock()

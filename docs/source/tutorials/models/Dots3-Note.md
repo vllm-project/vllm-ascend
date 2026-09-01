@@ -214,7 +214,7 @@ echo "$ASCEND_RT_VISIBLE_DEVICES"
 
 If the jemalloc path does not exist in the selected image, install it first or change it to the actual path in the image; do not start the service with an invalid `LD_PRELOAD`.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 This chapter starts one service form at a time. For the first deployment, it is recommended to start text-only first to complete the basic pipeline validation, then switch to image or audio according to the test objective.
 

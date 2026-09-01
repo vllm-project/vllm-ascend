@@ -214,7 +214,7 @@
 #       On 310P, override verify_and_update_config to align mamba_block_size and
 #       attention block size to the 128-token kernel alignment, ensuring the
 #       attention page size is >= mamba page size. This is the 310P counterpart
-#       of patch_mamba_config.py (loaded only when `is_310p()` is True).
+#       of patch_mamba_config.py (selected by the active hardware profile).
 #    Related PR (if no, explain why):
 #       No, 310P-specific kernel alignment requirement.
 #    Future Plan:
@@ -683,11 +683,22 @@
 #       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
 #       GDN attention backend. RC devices also route upstream GDNAttentionBackend
 #       to the 310P metadata builder.
+#
+#   4. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.rot_pos_emb`
+#      (RC only)
+#    Why:
+#       310P images do not install Triton, so upstream ``HAS_TRITON=False``
+#       already selects ``pos_embed_interpolate_native``; no pos-embed rewrite.
+#       RC still needs blocking H2D in `rot_pos_emb` to avoid indexing races.
+#    How:
+#       On RC only, bind `rot_pos_emb_310` from
+#       `vllm_ascend/_310p/ops/qwen3vl_310.py`.
 #    Related PR (if no, explain why):
 #       No, 310P custom operator and backend behavior are vllm-ascend specific.
 #    Future Plan:
 #       Remove this patch when upstream exposes stable hooks for 310P GDN
-#       chunk metadata, spec-decode input layout, and backend selection.
+#       chunk metadata, spec-decode input layout, backend selection, and
+#       vision rot_pos_emb that does not race on 310P RC.
 #
 # ** 8. File: worker/patch_kimi_k25.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1048,6 +1059,22 @@
 #       Define AscendModelState and initialize it in init_model_state.
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
+#
+# ** 27a. File: worker/patch_v2/patch_spec_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. PPHandler sampled-token broadcast methods
+#    Why:
+#       Target-driven speculative decoding generates next-step draft tokens
+#       after target sampling. Non-last PP ranks need both results for the same
+#       delayed request-state update.
+#    How:
+#       Defer the target-token broadcast until drafting finishes, then carry
+#       accepted target tokens and next-step draft tokens in the same V2 PP
+#       queue slot.
+#    Related PR (if no, explain why):
+#       No, this enables the Ascend MRV2 implementation.
+#    Future Plan:
+#       Remove when vLLM natively transports draft tokens through PP.
 #
 # ** 28. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

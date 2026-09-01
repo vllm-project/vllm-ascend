@@ -39,7 +39,7 @@ _server_cmd: &server_cmd
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--additional-config"
-  - '{"enable_cpu_binding": true, "enable_npugraph_ex": true, "enable_static_kernel": true,"enable_fused_mc2":true,"weight_nz_mode":true,"enable_flashcomm1":true}'
+  - '{"enable_cpu_binding": true, "ascend_compilation_config": {"enable_npugraph_ex": true, "enable_static_kernel": false}, "enable_fused_mc2": true, "weight_nz_mode": 1, "enable_flashcomm1": true}'
 
 _benchmarks_3500: &benchmarks_3500
   perf_50:

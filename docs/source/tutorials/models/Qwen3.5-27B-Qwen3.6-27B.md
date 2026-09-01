@@ -33,13 +33,13 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 It is **recommended to use the latest release candidate (rc) version or the latest official version** of the `vllm-ascend` image to ensure the best compatibility and access to the latest features. As a minimum-version requirement, use `vllm-ascend:v0.17.0rc1` (or a later version) for `Qwen3.5-27B`, and `vllm-ascend:v0.18.0rc1` (or a later version) for `Qwen3.6-27B`. For `Qwen3.6-27B` on Atlas 800 A3, please use the matching `v0.18.0rc1-a3` (or a later `-a3`) image. For Atlas 300I DUO, use `vllm-ascend:v0.23.0rc1-310p` (or a later `-310p`) image.
 
@@ -194,7 +194,7 @@ If you don't want to use the docker image as above, you can also build all from 
     pip install -e .
     ```
 
-    For the complete installation steps, refer to [installation](../../installation.md).
+    For the complete installation steps, refer to [installation](../../getting_started/installation.md).
 
     !!! note
 
@@ -318,7 +318,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
         - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B / Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.5-27B / Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQs](../../faqs.md).
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
@@ -454,14 +454,14 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         - (2) Decode requests are prioritized for scheduling, and prefill requests are scheduled only if there is available capacity.
         - Generally, if `--max-num-batched-tokens` is set to a larger value, the overall latency will be lower, but the pressure on HBM memory (activation value usage) will be greater.
     - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Its essential function is to calculate the available kv_cache size. During the warm-up phase (referred to as profile run in vLLM), vLLM records the peak HBM memory usage during an inference process with an input size of `--max-num-batched-tokens`. The available kv_cache size is then calculated as: `--gpu-memory-utilization` * HBM size - peak HBM memory usage. Therefore, the larger the value of `--gpu-memory-utilization`, the more kv_cache can be used. However, since the HBM memory usage during the warm-up phase may differ from that during actual inference (e.g., due to uneven EP load), setting `--gpu-memory-utilization` too high may lead to OOM (Out of Memory) issues during actual inference. The default value is `0.9`.
-    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+    - `--no-enable-prefix-caching` indicates that prefix caching is disabled. The current implementation of hybrid kv cache for Qwen3.6-27B may result in a very large effective `block_size` when prefix caching is enabled (e.g., 2048), which means any prefix shorter than `block_size` will never be cached. If your workload has many short repeated prefixes, consider keeping prefix caching disabled. For related issues, see the [Public FAQs](../../faqs.md).
     - `--quantization ascend` indicates that quantization is used. To disable quantization, remove this option.
     - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.6-27B` because it shares the same MTP head design as `Qwen3.5-27B`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -524,7 +524,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     ```shell
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.1"
+    local_ip="192.xx.xx.1"
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -588,7 +588,7 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     ```shell
     # nic_name is the network interface name corresponding to local_ip of the current node
     nic_name="xxx"
-    local_ip="141.xx.xx.2"
+    local_ip="192.xx.xx.2"
 
     export HCCL_IF_IP=$local_ip
     export GLOO_SOCKET_IFNAME=$nic_name
@@ -656,9 +656,9 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
 
     ```shell
     # p0 (Prefill node 0)
-    python launch_online_dp.py --dp-size 8 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address 192.xx.xx.1 --dp-rpc-port 12321 --vllm-start-port 7100
     # d0 (Decode node 0)
-    python launch_online_dp.py --dp-size 8 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address 141.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
+    python launch_online_dp.py --dp-size 8 --tp-size 2 --dp-size-local 8 --dp-rank-start 0 --dp-address 192.xx.xx.2 --dp-rpc-port 12321 --vllm-start-port 7100
     ```
 
 5. Run the proxy server on the prefill master node.
@@ -670,27 +670,27 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     ```shell
     python load_balance_proxy_server_example.py \
       --port 1999 \
-      --host 141.xx.xx.1 \
+      --host 192.xx.xx.1 \
       --prefiller-hosts \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
-        141.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
+        192.xx.xx.1 \
       --prefiller-ports \
         7100 7101 7102 7103 7104 7105 7106 7107 \
       --decoder-hosts \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
-        141.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
+        192.xx.xx.2 \
       --decoder-ports \
         7100 7101 7102 7103 7104 7105 7106 7107
     ```
@@ -717,7 +717,7 @@ curl http://<proxy_node0_ip>:1999/v1/chat/completions \
 
 Expected Result: The proxy returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, confirming that Prefill nodes have successfully processed the prompt and Decode nodes have generated the response.
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -932,8 +932,8 @@ After about several minutes, you can get the performance evaluation result.
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

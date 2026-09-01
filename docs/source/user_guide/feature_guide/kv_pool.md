@@ -54,6 +54,7 @@ export PYTHONHASHSEED=0
         ```bash
         cat /etc/hccn.conf
         ```
+
         For Ascend 950 Products, additionally mount:
         * devices: `/dev/ummu`, `/dev/uburma`
         * commands: `/usr/bin/urma_admin`
@@ -74,12 +75,15 @@ export PYTHONHASHSEED=0
         python3 -m pip install mooncake-transfer-engine-npu==0.3.11.post1 --extra-index-url https://mirrors.aliyun.com/pypi/web/simple
         ```
 
+        Mooncake `0.3.11.post1` remains supported when `tenant_id` is omitted or resolves to `default`. A non-default tenant requires a Mooncake version whose `MooncakeDistributedStore.setup()` accepts `tenant_id`; use Mooncake `0.3.12` or later for multi-tenant deployments.
+
 ### Step 2.2: Run Mooncake Master
 
 **Note:** Before proceeding, review the following Mooncake guides:
 
 * [Mooncake Store Deployment Guide](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/mooncake-store-deployment-guide.md)
 * [SSD Offload](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/ssd/ssd-offload.md)
+* [Tenant Quota Management](https://github.com/kvcache-ai/Mooncake/blob/main/docs/source/deployment/mooncake-store-deployment-guide.md#tenant-quota-management)
 
 #### Step 2.2.1: Configure mooncake.json
 
@@ -95,7 +99,8 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "preferred_segment": false,
     "prefer_alloc_in_same_node": true,
     "enable_ssd_offload": false, # only required when the SSD offload feature is enabled
-    "ssd_offload_path": "/nvme/mooncake_offload" # only required when the SSD offload feature is enabled)
+    "ssd_offload_path": "/nvme/mooncake_offload", # only required when the SSD offload feature is enabled)
+    "tenant_id": "default"
 }
 ```
 
@@ -110,6 +115,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
 | `prefer_alloc_in_same_node` | Whether to prefer allocating KV on the same node. Defaults to **true**. |
 | `enable_ssd_offload` | Set to `true` to enable SSD offload. Environment variables are not supported. |
 | `ssd_offload_path` | **Required when `enable_ssd_offload` is `true`.** Absolute path to a local directory where Mooncake stores offloaded KV data (for example, `/nvme/mooncake_offload`). The directory must exist and be writable by the vLLM process; create it before startup (`mkdir -p <path>`). Relative paths, symbolic links, and paths containing `..` are rejected by Mooncake. |
+| `tenant_id` | Optional Mooncake tenant namespace. Missing, `null`, empty, or whitespace-only values use `default`; surrounding whitespace is removed. All Prefill, Decode, scheduler, and replica instances that share KV entries must use the same tenant ID. Non-default tenants require Mooncake `0.3.12` or later. |
 
 #### Step 2.2.2: Start mooncake_master
 
@@ -129,6 +135,43 @@ mooncake_master --port 50088 --eviction_high_watermark_ratio 0.9 --eviction_rati
 | `enable_offload` | Set to `true` to enable SSD offload in Mooncake master. Keep the master port aligned with `master_server_address` in `mooncake.json`. Only required when SSD offload is enabled. |
 | `client_ttl` | Seconds a client stays alive after the last Ping. CLI default is `10`; see [SEGMENT_NOT_FOUND with SSD offload](#5321-segment_not_found-with-ssd-offload). Only required when SSD offload is enabled. |
 
+#### Step 2.2.3: Enable Strict Multi-Tenant Mode
+
+Tenant IDs are ignored for object placement while strict multi-tenant mode is disabled, and objects remain in the `default` namespace. To enable isolated namespaces and per-tenant memory quota admission, start Mooncake master with strict multi-tenant mode and a policy connector:
+
+```shell
+mooncake_master \
+    --port 50088 \
+    --enable_multi_tenants=true \
+    --tenant_quota_connector_type=file \
+    --tenant_quota_connector_uri=/etc/mooncake/tenant_quotas.yaml
+```
+
+For example, `/etc/mooncake/tenant_quotas.yaml` can contain:
+
+```yaml
+version: 1
+
+tenants:
+  - name: tenant-a
+    quota: 200GB
+  - name: tenant-b
+    quota: 200GB
+  - name: default
+    quota: 100GB
+```
+
+The file connector can be replaced with `etcd` when Mooncake is built with `STORE_USE_ETCD=ON`; in that case, set `tenant_quota_connector_uri` to the etcd endpoints. Strict mode rejects writes for unregistered tenants, including `default`, so every tenant used by vLLM-Ascend must appear in the policy.
+
+Mooncake exposes tenant quota snapshots through the master metrics HTTP port (default `9003`):
+
+```shell
+curl -s http://<master_host>:9003/api/v1/tenant_quotas
+curl -s "http://<master_host>:9003/api/v1/tenant_quotas?tenant_id=tenant-a"
+```
+
+`tenant_id` is an instance-level namespace and quota identity, not an authentication mechanism. A client that can access Mooncake can still declare a tenant ID. Keep incompatible models, model versions, quantization formats, and KV layouts in separate model or release namespaces even when tenant isolation is enabled.
+
 ### Step 2.3: PD Disaggregation Scenario
 
 #### Step 2.3.1: Run `prefill` Node and `decode` Node
@@ -141,9 +184,9 @@ Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and 
 #!/bin/bash
 
 # prefill / decode
-ROLE="prefill"  
-# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)            
-HARDWARE_SERIES="A2"        
+ROLE="prefill"
+# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
+HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
 LOCAL_IP="xx.xx.xx.xx"
@@ -311,7 +354,7 @@ Content of pd_mix.sh:
 
 ```shell
 # A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
-HARDWARE_SERIES="A2"        
+HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
 LOCAL_IP="xx.xx.xx.xx"
@@ -424,7 +467,7 @@ The following environment variables control disk space usage for SSD offload (bu
 
 | Environment Variable | Default | Description |
 | :--- | :--- | :--- |
-| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | `1342177280` (1280 MB) | Per-rank SSD read/write buffer size in bytes. **Not** configurable in `mooncake.json`. If you hit `BUFFER_OVERFLOW`, increase this value — see [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#5323-sizing-mooncake_offload_local_buffer_size_bytes). **On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, must be aligned to 1GB and counts toward per-rank fabric mem quota (see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3-ascend_enable_use_fabric_mem=1))**. |
+| `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` | `1342177280` (1280 MB) | Per-rank SSD read/write buffer size in bytes. **Not** configurable in `mooncake.json`. If you hit `BUFFER_OVERFLOW`, increase this value — see [Sizing MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES](#5323-sizing-mooncake_offload_local_buffer_size_bytes). **On A3 with `ASCEND_ENABLE_USE_FABRIC_MEM=1`, must be aligned to 1GB and counts toward per-rank fabric mem quota (see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1))**. |
 | `MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE` | `0` | Eviction threshold in bytes. When set to `0`, the backend uses **90% of the physical disk capacity** as the quota. Set an explicit value to control disk usage precisely. |
 | `MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY` | `none` | Eviction policy: `none` (writes fail when full), `fifo`, or `lru`. |
 | `MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES` | `2199023255552` (2 TB) | **Per-rank** maximum disk usage reported to Mooncake master. Master aggregates this across clients (roughly **2 TB × rank count** in the `SSD Storage` total). **Always override** to match real disk capacity — the default often exceeds available space. |
@@ -476,7 +519,7 @@ ock.mmc.meta_service.config_store_url = tcp://xx.xx.xx.xx:6000
 ock.mmc.meta_service.metrics_url = http://xx.xx.xx.xx:8000
 ock.mmc.log_level = info
 # If SSD is enabled, modify the following parameters to improve SSD cache hit rate
-ock.mmc.evict_threshold_high = 70  
+ock.mmc.evict_threshold_high = 70
 ock.mmc.evict_threshold_low = 60
 ock.mmc.rewarm.dram_watermark = 95
 ```
@@ -541,9 +584,9 @@ Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and 
 #!/bin/bash
 
 # prefill / decode
-ROLE="prefill"  
-# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)           
-HARDWARE_SERIES="A2"        
+ROLE="prefill"
+# A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
+HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
 LOCAL_IP="xx.xx.xx.xx"
@@ -673,7 +716,7 @@ Refer to [Run Inference](#step-233-run-inference) in the MooncakeStore deploymen
 #!/bin/bash
 
 # A2 (800I/800T A2) or A3 (800I/800T A3) or A5 (950PR/950DT)
-HARDWARE_SERIES="A2"        
+HARDWARE_SERIES="A2"
 # Link type: ROCE or HCCS in A3 series.
 LINK_TYPE="ROCE"
 LOCAL_IP="xx.xx.xx.xx"
@@ -819,7 +862,7 @@ ock.mmc.local_service.protocol = device_sdma
 ock.mmc.local_service.dram.size = 600GB
 ock.mmc.local_service.max.dram.size = 1024GB
 # SSD feature related parameters below
-ock.mmc.local_service.storage.enabled = true 
+ock.mmc.local_service.storage.enabled = true
 ubsio.disk.path = /dev/nvmexn1:/dev/nvmexn2p1:/dev/loopX
 ubsio.mem.size_in_gb = 50
 ubsio.standalone.device_count = 1
@@ -1100,7 +1143,7 @@ This section describes hardware-specific environment variables required by both 
 | Hardware | Dependencies | Export Command | Description |
 | :--- | :--- | :--- | :--- |
 | 950PR/DT Ascend 950 Products series | HDK >=25.6 with mooncake >= v0.3.11 <br>CANN >= 9.1.0 | # UBOE<br> `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["uboe:device"]}'` <br> # UB<br>`export ASCEND_LOCAL_COMM_RES='{"version":"1.3"}'` | Configure the required environment variables based on the communication protocol to use. |
-| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3-ascend_enable_use_fabric_mem=1) — memory sizes must be aligned to 1GB. |
+| 800 I/T A3 series | HDK >= 26.0<br>or HDK >= 25.5 with mooncake >= v0.3.11<br>CANN >= 9.0.0<br>LingQu Computing Network >= 1.5 | `export ASCEND_ENABLE_USE_FABRIC_MEM=1` | **Recommended**. Enables unified memory address direct transmission scheme. With SSD offload, see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1) — memory sizes must be aligned to 1GB. |
 | 800 I/T A2 series | HDK >= 25.5 is recommended | `export HCCL_INTRA_ROCE_ENABLE=1` | Required by direct transmission scheme on 800 I/T A2 series|
 
 ### 5.2. Memcache Prerequisites
@@ -1227,7 +1270,7 @@ If client logs show `OffloadObjectHeartbeat failed, error code is SEGMENT_NOT_FO
 
 Also restart Master together with vLLM to avoid stale `segment_already_exists` state when debugging restarts.
 
-##### 5.3.2.2. Fabric memory size alignment (A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1`)
+##### 5.3.2.2. Fabric memory size alignment (A3 + `ASCEND_ENABLE_USE_FABRIC_MEM=1`) {: #5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1}
 
 On A3 with fabric memory enabled, **each** fabric mem allocation must be an integer multiple of **1 GB** (1073741824 bytes). Mooncake does not round sizes up automatically.
 

@@ -8,7 +8,7 @@
 !!! note
 
     To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
-    For installation instructions, see [Set Up Using Python](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python)
+    For installation instructions, see [installing in an existing CANN environment](../../getting_started/installation.md#installation-existing-cann-install).
 
 This document shows how to enable batch invariance in vLLM-Ascend. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
 

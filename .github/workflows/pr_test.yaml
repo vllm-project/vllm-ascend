@@ -47,7 +47,6 @@ jobs:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -85,19 +84,11 @@ jobs:
         id: vllm
         run: |
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
             echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
             exit 1
           }
-          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
-            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
-            exit 1
-          }
-          {
-            echo "main_commit=${main_commit}"
-            echo "release_tag=${release_tag}"
-          } >> "$GITHUB_OUTPUT"
+          echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
       - name: cp problem matchers
         run: |
@@ -425,16 +416,13 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file "$LIST_FILE"
 
-      - name: Select tests based on changed files
+      - name: Select all tests
         id: scope-all
         if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
-          python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}' \
-            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
+          python3 .github/workflows/scripts/select_tests.py --all-tests
 
       - name: Set no-tests output when no tests selected
         id: noop
@@ -454,13 +442,10 @@ jobs:
         if: steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }} \
-            --modules a5 \
-            --runner-override a5_x4 \
-            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
+            --curated a5 \
+            --runner-label-override linux-aarch64-a5-4
 
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
@@ -532,7 +517,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -560,7 +544,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests_upstream.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -571,12 +554,20 @@ jobs:
 
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
-    if: ${{ needs.select-tests.outputs.has_tests_a5 == 'true' && contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
+    # (skipped under ready-all) through select-tests, without running after workflow cancel.
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        needs.select-tests.result == 'success' &&
+        needs.select-tests.outputs.has_tests_a5 == 'true' &&
+        contains(github.event.pull_request.labels.*.name, 'ready-a5')
+      }}
     strategy:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -658,18 +649,3 @@ jobs:
 
           echo "=== CI Gate: PASSED ==="
 
-  # this job collects failure from uploaded logs
-  # failure analyze & upload reports
-
-  analyze-failure-report:
-    name: Analyze failure report
-    needs: [run-selected-tests, recommend-tests-from-coverage]
-    if: ${{ !cancelled() }}
-    uses: ./.github/workflows/_analyze_failure.yaml
-    with:
-      log_artifact_pattern: selected-test-logs-*
-      recommendations_file: .github/workflows/scripts/recommended_pytest_paths.txt
-      recommendations_content: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths || '' }}
-    secrets:
-      OBS_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-      OBS_SECRET_ACCESS_KEY_FAILURE_ANALYSIS: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}

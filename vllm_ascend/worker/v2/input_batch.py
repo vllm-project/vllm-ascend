@@ -16,7 +16,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 import torch
@@ -101,8 +101,9 @@ class AscendInputBatch(InputBatch):
             input_buffers.seq_lens_np[num_reqs:] = 0
             seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
             update_cos_sin(input_batch.positions)
+            base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
             return cls(
-                **asdict(input_batch),
+                **base_fields,
                 seq_lens_np=seq_lens_np,
                 attn_state=AscendAttentionState.DecodeOnly,
                 is_dummy=True,
@@ -132,8 +133,9 @@ class AscendInputBatch(InputBatch):
             input_buffers.seq_lens_np[num_reqs:] = 0
             seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
             update_cos_sin(input_batch.positions)
+            base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
             return cls(
-                **asdict(input_batch),
+                **base_fields,
                 seq_lens_np=seq_lens_np,
                 attn_state=AscendAttentionState.DecodeOnly,
                 is_dummy=True,

@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.layer import MoERunner
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
     AscendSharedExperts,
@@ -87,6 +87,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             )
 
         setup_moe_comm_method(self.moe_config)
+        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
+        if alltoall_comm is not None:
+            expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
+            if expert_ids_per_ep_rank is not None:
+                self.routed_experts.register_buffer(
+                    "expert_ids_per_ep_rank",
+                    expert_ids_per_ep_rank,
+                    persistent=False,
+                )
 
     @property
     def is_internal_router(self) -> bool:
@@ -214,12 +223,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             input_ids: torch.Tensor | None = None,
         ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
             with self._sequence_parallel_context():
+                shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
                 if self.ascend_shared_experts is None:
                     return self.routed_experts.forward_impl(
                         hidden_states=hidden_states,
                         router_logits=router_logits,
                         input_ids=input_ids,
                     )
+                shared_expert_input, shared_input_all_gather_done = (
+                    self.ascend_shared_experts.prepare_input_before_routed_experts(shared_hidden_states)
+                )
                 if self.is_internal_router:
                     gate = self.gate
                     assert gate is not None
@@ -227,7 +240,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     # increase with extra hidden states. We also assume that all gate
                     # linear is unquantized so that we the weight is pre-casted in
                     # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                    hidden_states_fp32 = hidden_states.float()
+                    hidden_states_fp32 = shared_hidden_states.float()
                     before_routed_experts = torch.npu.current_stream().record_event()
                     # v0.27.1: weight_fp32 is guaranteed by is_internal_router.
                     router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
@@ -236,6 +249,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     before_routed_experts = torch.npu.current_stream().record_event()
                     after_routed_experts = None
 
+                if shared_input_all_gather_done is not None:
+                    torch.npu.current_stream().wait_event(shared_input_all_gather_done)
                 routed_out, fused_moe_events = self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -243,10 +258,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 )
                 fused_moe_events.before_routed_experts = before_routed_experts
                 fused_moe_events.after_routed_experts = after_routed_experts
+                if shared_input_all_gather_done is not None:
+                    fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
 
                 shared_out = self.ascend_shared_experts.forward(
-                    hidden_states,
+                    shared_expert_input,
                     fused_moe_events,
+                    input_is_gathered=shared_input_all_gather_done is not None,
                 )
                 return shared_out, routed_out
 
@@ -260,6 +278,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             input_ids: torch.Tensor | None = None,
         ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
             with self._sequence_parallel_context():
+                shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
                 if self.ascend_shared_experts is None:
                     if self.is_internal_router:
                         gate = self.gate
@@ -274,6 +293,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         router_logits=router_logits,
                         input_ids=input_ids,
                     )
+                shared_expert_input, shared_input_all_gather_done = (
+                    self.ascend_shared_experts.prepare_input_before_routed_experts(shared_hidden_states)
+                )
                 if self.is_internal_router:
                     gate = self.gate
                     assert gate is not None
@@ -281,7 +303,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     # increase with extra hidden states. We also assume that all gate
                     # linear is unquantized so that we the weight is pre-casted in
                     # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                    hidden_states_fp32 = hidden_states.float()
+                    hidden_states_fp32 = shared_hidden_states.float()
                     before_routed_experts = torch.npu.current_stream().record_event()
                     # main (cdc4824a21): is_internal_router only checks self.gate,
                     # weight_fp32 may be absent, fall back to gate.weight.
@@ -294,6 +316,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     before_routed_experts = torch.npu.current_stream().record_event()
                     after_routed_experts = None
 
+                if shared_input_all_gather_done is not None:
+                    torch.npu.current_stream().wait_event(shared_input_all_gather_done)
                 routed_out, fused_moe_events = self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
@@ -301,9 +325,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 )
                 fused_moe_events.before_routed_experts = before_routed_experts
                 fused_moe_events.after_routed_experts = after_routed_experts
+                if shared_input_all_gather_done is not None:
+                    fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
 
                 shared_out = self.ascend_shared_experts.forward(
-                    hidden_states,
+                    shared_expert_input,
                     fused_moe_events,
+                    input_is_gathered=shared_input_all_gather_done is not None,
                 )
                 return shared_out, routed_out
