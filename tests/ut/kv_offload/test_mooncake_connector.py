@@ -1169,12 +1169,12 @@ class TestCoreFunctionality(unittest.TestCase):
     def test_transfer_sfa_metadata_plane_uses_cache_spec_type(self, mock_get_meta):
         metadata_layer_idx = self.thread.index_cache_plane_base + 3
         metadata_size = metadata_layer_idx + 1
-        local_base_addrs = [[] for _ in range(metadata_size)]
-        remote_base_addrs = [[] for _ in range(metadata_size)]
-        block_lens = [[] for _ in range(metadata_size)]
-        block_strides = [[] for _ in range(metadata_size)]
-        remote_block_strides = [[] for _ in range(metadata_size)]
-        block_size_scale = [[] for _ in range(metadata_size)]
+        local_base_addrs: list[list[int]] = [[] for _ in range(metadata_size)]
+        remote_base_addrs: list[list[int]] = [[] for _ in range(metadata_size)]
+        block_lens: list[list[int]] = [[] for _ in range(metadata_size)]
+        block_strides: list[list[int]] = [[] for _ in range(metadata_size)]
+        remote_block_strides: list[list[int]] = [[] for _ in range(metadata_size)]
+        block_size_scale: list[list[int]] = [[] for _ in range(metadata_size)]
         local_base_addrs[metadata_layer_idx] = [0x2000]
         remote_base_addrs[metadata_layer_idx] = [0x4000]
         block_lens[metadata_layer_idx] = [2048]
