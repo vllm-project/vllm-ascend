@@ -28,6 +28,37 @@ TARGET_LM_HEAD_WEIGHT_NAMES = (
 logger = logging.getLogger(__name__)
 
 
+def _configure_dspark_draft_window(vllm_config: VllmConfig) -> None:
+    """Make ``draft_window_size`` a physical Qwen3 DSpark KV window.
+
+    ``SlidingWindowAdapter`` limits the block table consumed by attention, but
+    the scheduler can recycle old KV blocks only when the attention layers
+    expose a ``SlidingWindowSpec``. Qwen3 DSpark is built on the DFlash model,
+    whose ``dflash_config.use_swa`` switch selects that cache spec. Configure
+    it before the parent constructor creates the attention layers so only the
+    draft KV groups use ``SlidingWindowManager``; target-model groups are not
+    modified.
+    """
+    additional_config = vllm_config.additional_config or {}
+    window_size = additional_config.get("draft_window_size")
+    if window_size is None:
+        return
+    if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size <= 0:
+        raise ValueError("draft_window_size must be a positive integer")
+
+    draft_config = vllm_config.speculative_config.draft_model_config.hf_config
+    dflash_config = dict(getattr(draft_config, "dflash_config", None) or {})
+    dflash_config.update(
+        use_swa=True,
+        swa_window_size=window_size,
+    )
+    draft_config.dflash_config = dflash_config
+    logger.info(
+        "Configuring Qwen3 DSpark draft KV cache as a %d-token physical sliding window.",
+        window_size,
+    )
+
+
 def get_dspark_rotation_path(vllm_config: VllmConfig) -> Path | None:
     """Resolve the target QuaRot matrix used to align DSpark FC weights.
 
@@ -109,6 +140,7 @@ class DSparkConfidenceHead(nn.Module):
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        _configure_dspark_draft_window(vllm_config)
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = self.config
