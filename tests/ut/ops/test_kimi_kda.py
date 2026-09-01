@@ -8,13 +8,6 @@ import pytest
 import torch
 from torch import nn
 
-from vllm_ascend.quantization.methods.w4a8_mxfp4 import (
-    AscendW4A8MXFPDynamicLinearMethod,
-)
-from vllm_ascend.quantization.methods.w8a8_mxfp8 import (
-    AscendW8A8MXFP8DynamicLinearMethod,
-)
-
 from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
@@ -22,6 +15,12 @@ from vllm_ascend.ops.kimi_kda import (
     _prepare_beta,
     _zero_padded_output,
     _zero_padded_recurrent_output,
+)
+from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
+    AscendW4A8MXFPDynamicLinearMethod,
+)
+from vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8 import (
+    AscendW8A8MXFP8DynamicLinearMethod,
 )
 
 
