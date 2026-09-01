@@ -77,6 +77,9 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
+
+work_debug_stat = get_worker_debug_stat()
 
 torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],
@@ -612,16 +615,22 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        work_debug_stat.execute += 1
+        work_debug_stat.set_call_step(0, 11)
         self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
 
+        work_debug_stat.set_call_step(0, 12)
         if self._pp_send_work:
             for handle in self._pp_send_work:
+                work_debug_stat.set_call_step(0, 14)
                 handle.wait()
+                work_debug_stat.set_call_step(0, 15)
             self._pp_send_work = []
 
+        work_debug_stat.set_call_step(0, 16)
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -631,9 +640,11 @@ class NPUWorker(WorkerBase):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
+            work_debug_stat.set_call_step(0, 20)
             tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
                 all_gather_group=all_gather_group
             )
+            work_debug_stat.set_call_step(0, 21)
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -641,12 +652,16 @@ class NPUWorker(WorkerBase):
                 comm_postprocess=comm_postprocess,
             )
 
+        work_debug_stat.set_call_step(0, 24)
         if self.profiler is not None:
             self.profiler.step()
 
+        work_debug_stat.set_call_step(0, 25)
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+            work_debug_stat.set_call_step(0, 26)
             return output
+        work_debug_stat.set_call_step(0, 27)
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
@@ -657,26 +672,35 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
+        work_debug_stat.set_call_step(0, 30)
         self._pp_send_work = get_pp_group().isend_tensor_dict(
             output.tensors,
             all_gather_group=all_gather_group,
         )
+        work_debug_stat.set_call_step(0, 31)
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
+            work_debug_stat.set_call_step(0, 33)
             return None
 
         # In case of PP with kv transfer, we need to pass through the
         # kv_connector_output
         if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
+            work_debug_stat.set_call_step(0, 35)
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        work_debug_stat.set_call_step(0, 39)
         return output
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        work_debug_stat.sample += 1
+        work_debug_stat.set_call_step(0, 50)
+        rt = self.model_runner.sample_tokens(grammar_output)
+        work_debug_stat.set_call_step(0, 51)
+        return rt
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -983,8 +1007,13 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        work_debug_stat.dummy += 1
+        work_debug_stat.set_call_step(0, 60)
         self.log_memory_stats()
+        work_debug_stat.set_call_step(1, 60)
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
+        work_debug_stat.set_call_step(1, 61)
+        work_debug_stat.set_call_step(0, 61)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
@@ -1008,6 +1037,7 @@ class NPUWorker(WorkerBase):
         return self.model_runner.get_supported_tasks()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
+        work_debug_stat.take_draft += 1
         return self.model_runner.take_draft_token_ids()
 
     def check_health(self) -> None:

@@ -5,6 +5,9 @@ import time
 from contextlib import contextmanager
 
 from vllm.distributed.device_communicators import shm_broadcast
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
+
+worker_debug_stat = get_worker_debug_stat()
 
 MessageQueue = shm_broadcast.MessageQueue
 
@@ -38,6 +41,7 @@ def acquire_read(
     timeout: float | None = None,
     indefinite: bool = False,
 ):
+    worker_debug_stat.set_call_step(1, 3)
     assert self._is_local_reader, "Only readers can acquire read"
     read_timeout = self.ReadTimeoutWithWarnings(timeout=timeout, should_warn=not indefinite)
     with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
@@ -49,13 +53,16 @@ def acquire_read(
                 written_flag = metadata_buffer[0]
                 return not (not written_flag or read_flag)
 
+            worker_debug_stat.set_call_step(1, 4)
             if shm_broadcast.SPINLOOP_EXT_ENABLED and not check():
+                worker_debug_stat.set_call_step(1, 5)
                 shm_broadcast.spinloop(
                     metadata_buffer[0 : self.local_reader_rank + 1],
                     check,
                     timeout=shm_broadcast.SPINLOOP_TIMEOUT_SECONDS,
                 )
 
+            worker_debug_stat.set_call_step(1, 6)
             if not check():
                 # this block is either
                 # (1) not written
@@ -64,7 +71,9 @@ def acquire_read(
                 # for readers, `self.current_idx` is the next block to read
                 # if this block is not ready,
                 # we need to wait until it is written
+                worker_debug_stat.set_call_step(1, 7)
                 self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
+                worker_debug_stat.set_call_step(1, 8)
 
                 if self.shutting_down:
                     raise RuntimeError("cancelled")
@@ -78,10 +87,12 @@ def acquire_read(
 
                 continue
 
+            worker_debug_stat.set_call_step(1, 9)
             # found a block that is not read by this reader
             # let caller read from the buffer
             with self.buffer.get_data(self.current_idx) as buf:
                 try:
+                    worker_debug_stat.set_call_step(1, 10)
                     yield buf
                 finally:
                     # caller has read from the buffer; set the read flag.
@@ -93,7 +104,9 @@ def acquire_read(
                     next_idx = self.current_idx + 1
                     self.current_idx = next_idx % self.buffer.max_chunks
                     self._spin_condition.record_read()
+            worker_debug_stat.set_call_step(1, 11)
             break
+    worker_debug_stat.set_call_step(1, 12)
 
 
 MessageQueue.ReadTimeoutWithWarnings.timeout_ms = timeout_ms

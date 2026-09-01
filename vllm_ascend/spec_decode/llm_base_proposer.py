@@ -54,7 +54,9 @@ from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kerne
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
 from vllm_ascend.worker.utils import copy_snapshot_to_gpu
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
 
+worker_debug_stat = get_worker_debug_stat()
 
 @contextmanager
 def patch_tensor_parallel_group(tp_group):
@@ -555,11 +557,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         dummy_compute_logits=lambda hidden_states: None,
         is_profile=False,
     ):
+        worker_debug_stat.set_call_step(3, 30001)
         (
             num_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
+        worker_debug_stat.set_call_step(3, 30002)
         pcp_manager = getattr(self.runner, "pcp_manager", None)
 
         multi_steps_attn_metadata = []
@@ -619,6 +623,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # update long_seq related params and flatten block_table
                 common_attn_metadata.prefill_context_parallel_metadata = pcp_manager.long_seq_metadata
 
+            worker_debug_stat.set_call_step(3, 30030)
             assert len(self.draft_attn_groups) > 0
             builder = self.draft_attn_groups[0].get_metadata_builder()
             kv_cache_spec = self.draft_attn_groups[0].kv_cache_spec
@@ -666,6 +671,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     per_layer_attn_metadata[layer_name] = attn_metadata_eagle
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
+        worker_debug_stat.set_call_step(3, 30050)
         model_positions = self._get_positions(num_tokens)
 
         batch_size = max(num_tokens // (self.num_speculative_tokens + 1), 1)
@@ -702,6 +708,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if forward_context is not None:
                 forward_context.moe_layer_index = 0
 
+            worker_debug_stat.set_call_step(3, 30060)
             self._runnable(
                 num_input_tokens=num_tokens,
                 batch_size=batch_size,
@@ -715,6 +722,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
                 self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
+        worker_debug_stat.set_call_step(3, 30090)
 
     def _update_full_graph_params_if_needed(
         self,
@@ -748,6 +756,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        worker_debug_stat.set_call_step(3, 50001)
         batch_size = common_attn_metadata.batch_size()
 
         if token_indices_to_sample is None:
@@ -766,6 +775,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
+        worker_debug_stat.set_call_step(3, 50005)
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
@@ -789,6 +799,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         uniform_decode = target_model_batch_desc.uniform
 
         if self.use_cuda_graph:
+            worker_debug_stat.set_call_step(3, 50011)
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
@@ -796,13 +807,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             num_input_tokens = num_tokens
 
+        worker_debug_stat.set_call_step(3, 50012)
         (
             num_input_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
+        worker_debug_stat.set_call_step(3, 50013)
 
         if self.use_cuda_graph:
+            worker_debug_stat.set_call_step(3, 50014)
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
                 num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
@@ -810,6 +824,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
             batch_descriptor = None
+        worker_debug_stat.set_call_step(3, 50015)
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
@@ -820,6 +835,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
+            worker_debug_stat.set_call_step(3, 50017)
             num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
                 self.query_start_loc,
                 num_input_tokens,
@@ -869,7 +885,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_attn_metadata.block_table_tensor = self._adjust_tensor(
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
-
+        worker_debug_stat.set_call_step(3, 50030)
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
             inputs_embeds = self.model.embed_input_ids(
@@ -910,6 +926,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 common_ratio_to_sas_metadata=dict(),
                 block_size=self.draft_attn_groups[0].kv_cache_spec.block_size,
             )
+        worker_debug_stat.set_call_step(3, 50050)
         attn_metadata = builder.build(0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args)
 
         if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
@@ -952,6 +969,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "mtp_slot_mapping": None,
         }
         if pcp_manager is not None:
+            worker_debug_stat.set_call_step(3, 50061)
             pcp_mtp_inputs = pcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,
@@ -972,6 +990,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         should_update_next_steps = not self.parallel_drafting and (
             self.pcp_size * self.dcp_size == 1 or pcp_mtp_inputs is not None
         )
+        worker_debug_stat.set_call_step(3, 50070)
         if should_update_next_steps:
             # Copy the old attn_metadata and update
             for draft_index in range(1, self.num_speculative_tokens):
@@ -995,7 +1014,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
-
+        worker_debug_stat.set_call_step(3, 50080)
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -1029,11 +1048,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
             if self.enable_enpu:
+                worker_debug_stat.set_call_step(3, 50090)
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+                worker_debug_stat.set_call_step(3, 50091)
                 draft_token_ids = run_draft()
             else:
+                worker_debug_stat.set_call_step(3, 50092)
                 draft_token_ids = run_draft()
+                worker_debug_stat.set_call_step(3, 50093)
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        worker_debug_stat.set_call_step(3, 50099)
         return draft_token_ids
 
     def compute_draft_token_ids(self, hidden_states: torch.Tensor):

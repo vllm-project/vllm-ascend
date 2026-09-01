@@ -10,7 +10,9 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+from vllm.utils.debug.debug_stat import get_worker_debug_stat
 
+worker_debug_stat = get_worker_debug_stat()
 
 class AscendDflashProposer(AscendEagleProposer):
     def __init__(
@@ -162,12 +164,13 @@ class AscendDflashProposer(AscendEagleProposer):
         **kwargs,
     ) -> None:
         num_query_tokens = min(num_tokens, self.max_query_tokens)
-
+        worker_debug_stat.set_call_step(3, 31002)
         (
             num_input_tokens,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
+        worker_debug_stat.set_call_step(3, 31003)
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
@@ -199,11 +202,12 @@ class AscendDflashProposer(AscendEagleProposer):
                 ],
             )
 
+            worker_debug_stat.set_call_step(3, 31020)
             attn_metadata_dflash = builder.build_for_graph_capture(
                 common_attn_metadata,
                 AscendAttentionState.ChunkedPrefill,
             )
-
+            worker_debug_stat.set_call_step(3, 31021)
             attn_metadata_dflash.attn_mask = None
             attn_metadata_dflash.attn_state = AscendAttentionState.ChunkedPrefill
 
@@ -227,7 +231,9 @@ class AscendDflashProposer(AscendEagleProposer):
             draft_attn_metadatas=multi_steps_attn_metadata,
         ):
             if is_profile:
+                worker_debug_stat.set_call_step(3, 31030)
                 self.model.precompute_and_store_context_kv(context_states, context_positions)
+                worker_debug_stat.set_call_step(3, 31031)
                 self.model(
                     input_ids=self.input_ids[:num_query_total],
                     positions=self._get_positions(num_query_total),
@@ -236,6 +242,7 @@ class AscendDflashProposer(AscendEagleProposer):
 
             else:
                 self._dflash_num_context = num_input_tokens
+                worker_debug_stat.set_call_step(3, 31040)
                 self._runnable(
                     num_input_tokens=num_input_tokens,
                     batch_size=num_reqs,
@@ -245,10 +252,11 @@ class AscendDflashProposer(AscendEagleProposer):
                     multi_steps_attn_metadata=multi_steps_attn_metadata,
                     num_tokens=num_input_tokens,
                 )
-
+            worker_debug_stat.set_call_step(3, 31041)
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
                 self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
+        worker_debug_stat.set_call_step(3, 31090)
 
     def build_model_inputs_first_pass(
         self,
