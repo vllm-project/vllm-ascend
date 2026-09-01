@@ -107,7 +107,7 @@ class AscendECCPUWorker(ECCPUWorker):
             self._save_stream = None
             self._save_count = 0
             self._save_bytes = 0
-            self._save_mm_hashes = []
+            self._save_mm_hashes: list[str] = []
             raise
 
     def _shutdown_transfer_backend(self) -> None:
