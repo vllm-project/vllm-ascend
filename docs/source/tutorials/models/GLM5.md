@@ -633,6 +633,10 @@ In addition to all single-node parameters described in [Single-Node Online Deplo
 
 We'd like to show the deployment guide of `GLM-5` on multi-node environment with Prefill-Decode (PD) disaggregation for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
+In the PD disaggregation scenario, Mooncake is used as the KV cache transfer connector between the prefill and decode nodes. Please refer to [KV Cache Pool (Ascend Store) Deployment Guide](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/user_guide/feature_guide/kv_pool.md) for the Mooncake configuration.
+
+#### 5.3.1 Prefill-Decode Disaggregation (Ascend950DT series)
+
 Before you start, please
 
 prepare the script `launch_online_dp.py` on each node:
@@ -730,10 +734,6 @@ if __name__ == "__main__":
     for process in processes:
         process.join()
 ```
-
-#### 5.3.1 Prefill-Decode Disaggregation (Ascend950DT series)
-
-We'd like to show the deployment guide of `GLM-5` on multi-node environment with 2P1D for better performance. *Prefill-Decode Disaggregation* refers to the separation of the prefill stage and the decode stage across different nodes to improve throughput and latency.
 
 1. prepare the script `run_dp_template.sh` on each node.
 
@@ -1055,11 +1055,87 @@ Once the preparation is done, you can start the server with the following comman
 
 The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128GB × 8): 2 prefill nodes (`PP2 TP16`, 78 layers partitioned as `41/37`, one PP rank per node) and 2 decode nodes (`DP8 TP4`, 4 DP ranks per node). The same scripts serve both the high-throughput and low-latency cases.
 
+Before you start, please
+
+prepare the script `launch_online_dp.py` on each node:
+
+```python
+import argparse
+import multiprocessing
+import os
+import subprocess
+import sys
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dp-size", type=int, required=True, help="Data parallel size.")
+    parser.add_argument("--tp-size", type=int, default=1, help="Tensor parallel size.")
+    parser.add_argument("--pp-size", type=int, default=1, help="Pipeline parallel size.")
+    parser.add_argument("--dp-size-local", type=int, default=-1, help="Local data parallel size.")
+    parser.add_argument("--dp-rank-start", type=int, default=0, help="Starting rank for data parallel.")
+    parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
+    parser.add_argument("--dp-rpc-port", type=str, default="12321", help="Port for data parallel master node.")
+    parser.add_argument("--vllm-start-port", type=int, default=8000, help="Starting port for the engine.")
+    return parser.parse_args()
+
+args = parse_args()
+dp_size = args.dp_size
+tp_size = args.tp_size
+pp_size = args.pp_size
+dp_size_local = args.dp_size_local
+if dp_size_local == -1:
+    dp_size_local = dp_size
+dp_rank_start = args.dp_rank_start
+dp_address = args.dp_address
+dp_rpc_port = args.dp_rpc_port
+vllm_start_port = args.vllm_start_port
+# 一个 DP 副本占 tp×pp 张连续卡（pp=1 时退化为现状的 tp）
+gpus_per_dp_rank = tp_size * pp_size
+
+def run_command(visible_devices, dp_rank, vllm_engine_port):
+    command = [
+        "bash",
+        "./run_dp_template.sh",
+        visible_devices,
+        str(vllm_engine_port),
+        str(dp_size),
+        str(dp_rank),
+        dp_address,
+        dp_rpc_port,
+        str(tp_size),
+        str(pp_size),
+    ]
+    subprocess.run(command, check=True)
+
+if __name__ == "__main__":
+    template_path = "./run_dp_template.sh"
+    if not os.path.exists(template_path):
+        print(f"Template file {template_path} does not exist.")
+        sys.exit(1)
+
+    processes = []
+    num_cards = dp_size_local * gpus_per_dp_rank
+
+    for i in range(dp_size_local):
+        dp_rank = dp_rank_start + i
+        vllm_engine_port = vllm_start_port + i
+        visible_devices = ",".join(str(x) for x in range(i * gpus_per_dp_rank, (i + 1) * gpus_per_dp_rank))
+        process = multiprocessing.Process(
+            target=run_command,
+            args=(visible_devices, dp_rank, vllm_engine_port)
+        )
+        processes.append(process)
+        process.start()
+
+    for process in processes:
+        process.join()
+```
+
 1. prepare the script `run_dp_template.sh` on each node.
 
     1. Prefill node 0
 
-        The prefill script selects the node via `node_rank`: set `node_rank=0` on prefill node 0 and `node_rank=1` on prefill node 1. `$2` is the engine port.
+        The prefill script selects the node via `node_rank`: set `node_rank=0` on prefill node 0 (PP master node, engine port `9081`) and `node_rank=1` on prefill node 1 (non-master node, `--headless`, no API server).
 
         ```shell
         nic_name="xxxx" # change to your own nic name
@@ -1093,10 +1169,10 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128G
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
             --host 0.0.0.0 \
-            --port $2 \
+            --port 9081 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
-            --master-addr $node_p0_ip \
+            --master-addr $local_ip \
             --master-port 7060 \
             --nnodes 2 \
             --node-rank $node_rank \
@@ -1167,13 +1243,13 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128G
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.1-W8A8C8-MTP \
             --host 0.0.0.0 \
-            --port $2 \
             --pipeline-parallel-size 2 \
             --distributed-executor-backend mp \
-            --master-addr $local_ip \
+            --master-addr $node_p0_ip \
             --master-port 7060 \
             --nnodes 2 \
             --node-rank $node_rank \
+            --headless \
             --tensor-parallel-size 16 \
             --enable-expert-parallel \
             --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp","enforce_eager":true}' \
@@ -1213,6 +1289,10 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128G
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
+        # 每个 DP rank 使用独立的 engine_id,避免 KV 路由混淆
+        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → engine_id 100-103
+        ENGINE_ID=$((100 + $4))
+
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_TRANSFER_TIMEOUT=600
         export HCCL_EXEC_TIMEOUT=3600
@@ -1268,7 +1348,7 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128G
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "2",
+            "engine_id": "'"$ENGINE_ID"'",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -1285,6 +1365,10 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128G
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
+        # 每个 DP rank 使用独立的 engine_id,避免 KV 路由混淆
+        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → engine_id 100-103
+        ENGINE_ID=$((100 + $4))
+
         export HCCL_OP_EXPANSION_MODE="AIV"
         export HCCL_TRANSFER_TIMEOUT=600
         export HCCL_EXEC_TIMEOUT=3600
@@ -1340,7 +1424,7 @@ The high-throughput (198K context) scenario is validated on 4 Atlas 800 A3 (128G
             '{"kv_connector": "MooncakeConnectorV1",
             "kv_role": "kv_consumer",
             "kv_port": "30200",
-            "engine_id": "2",
+            "engine_id": "'"$ENGINE_ID"'",
             "kv_connector_extra_config": {
                 "use_ascend_direct": true,
                 "prefill": {"dp_size": 1, "pp_size": 2, "tp_size": 16, "pp_layer_partition": "41,37"},
@@ -1367,14 +1451,14 @@ Once the preparation is done, you can start the server with the following comman
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --pp-size 1 --dp-size-local 4 --dp-rank-start 0 --dp-address $node_d0_ip --dp-rpc-port 12321 --vllm-start-port 8000
     ```
 
 4. Decode node 1
 
     ```shell
     # change ip to your own
-    python launch_online_dp.py --dp-size 8 --tp-size 4 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 16600 --vllm-start-port 9900
+    python launch_online_dp.py --dp-size 8 --tp-size 4 --pp-size 1 --dp-size-local 4 --dp-rank-start 4 --dp-address $node_d0_ip --dp-rpc-port 12321 --vllm-start-port 8000
     ```
 
 **Notice:**
@@ -1430,14 +1514,12 @@ unset http_proxy
 unset https_proxy
 
 python load_balance_proxy_server_example.py \
-    --port 8000 \
+    --port 9000 \
     --host 0.0.0.0 \
     --prefiller-hosts \
     $node_p0_ip \
-    $node_p1_ip \
     --prefiller-ports \
     9081 \
-    9082 \
     --decoder-hosts \
     $node_d0_ip \
     $node_d0_ip \
@@ -1448,8 +1530,8 @@ python load_balance_proxy_server_example.py \
     $node_d1_ip \
     $node_d1_ip \
     --decoder-ports \
-    9900 9901 9902 9903 \
-    9900 9901 9902 9903
+    8000 8001 8002 8003 \
+    8000 8001 8002 8003
 ```
 
 Key Parameter Descriptions for PD separation deployment:
