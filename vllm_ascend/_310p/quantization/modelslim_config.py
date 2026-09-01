@@ -22,7 +22,6 @@ from typing import Any
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -33,17 +32,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm_ascend._310p.quantization.methods.registry import (
     get_scheme_class,
 )
-from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod, AscendLinearMethod
-from vllm_ascend.quantization.modelslim_config import (
+from vllm_ascend.quantization.configs.modelslim_config import (
     AscendModelSlimConfig,
     get_quant_type_for_layer,
     packed_modules_model_mapping,
 )
+from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod, AscendLinearMethod
+from vllm_ascend.quantization.utils import is_fused_moe_layer
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
-
-
-def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    return isinstance(layer, (MoERunner, RoutedExperts))
 
 
 def create_scheme_for_layer(
@@ -122,7 +118,7 @@ class AscendModelSlimConfig310(AscendModelSlimConfig):
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
             return AscendLinearMethod(scheme)
 
-        elif _is_fused_moe_layer(layer):
+        elif is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 from vllm_ascend._310p.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod310
 

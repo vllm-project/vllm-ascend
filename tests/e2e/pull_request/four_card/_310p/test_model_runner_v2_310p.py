@@ -42,3 +42,21 @@ def test_qwen3_moe_mrv2_tp2_aclgraph_w8a8():
         },
     ) as vllm_model:
         vllm_model.generate_greedy(["Hello, my name is"], max_tokens=5)
+
+
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_qwen35_hybrid_mrv2_tp2_aclgraph_fp16():
+    with VllmRunner(
+        "Qwen/Qwen3.5-4B",
+        tensor_parallel_size=2,
+        enforce_eager=False,
+        enable_prefix_caching=False,
+        dtype="float16",
+        max_model_len=8192,
+        mamba_ssm_cache_dtype="float16",
+        compilation_config={
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [1],
+        },
+    ) as vllm_model:
+        vllm_model.generate_greedy(["Hello, my name is"], max_tokens=5)

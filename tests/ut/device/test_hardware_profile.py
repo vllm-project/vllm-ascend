@@ -5,67 +5,189 @@
 from typing import cast
 
 import pytest
+import torch
 
-from vllm_ascend.device.device_config import DeviceConfig
+from vllm_ascend.device.device_config import get_device_config
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import (
+    AttentionBackendFamily,
+    CPUBindingMode,
+    DeviceAdaptorFamily,
+    DeviceAddressingMode,
     HardwareCapability,
+    QuantizationBackendFamily,
     WeightLayoutPolicy,
     get_current_hardware_profile,
     get_hardware_profile,
 )
 
+_STANDARD_CAPABILITIES = frozenset(
+    {
+        HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+        HardwareCapability.ATB_EXTENSIONS,
+        HardwareCapability.ATB_WARMUP,
+        HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.IRQ_CPU_RESERVATION,
+        HardwareCapability.LORA_CUSTOM_OPS,
+        HardwareCapability.MC2_HIERARCHY_COMM,
+        HardwareCapability.NPUGRAPH_EX,
+        HardwareCapability.PAGED_ATTENTION,
+        HardwareCapability.RUNTIME_CUSTOM_OPS,
+        HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
+        HardwareCapability.STANDARD_MAMBA_PATCH,
+        HardwareCapability.STANDARD_WORKER_PATCHES,
+        HardwareCapability.TRITON_BATCH_MEMCPY,
+    }
+)
+
+_EXPECTED_CAPABILITIES = {
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES,
+    AscendDeviceType.A3: _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM},
+    AscendDeviceType._310P: frozenset(
+        {
+            HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
+            HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
+            HardwareCapability.GDN_COMPATIBILITY,
+            HardwareCapability.IRQ_CPU_RESERVATION,
+            HardwareCapability.RC_DEVICE_DISCOVERY,
+            HardwareCapability.RUNTIME_CUSTOM_OPS,
+        }
+    ),
+    AscendDeviceType.A5: frozenset(
+        {
+            HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+            HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+            HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
+            HardwareCapability.CLUSTER_CPU_TOPOLOGY,
+            HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
+            HardwareCapability.DSA_O_PROJ_TP,
+            HardwareCapability.DSV4_COMPRESSED_CACHE,
+            HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+            HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
+            HardwareCapability.FP8_ATTENTION,
+            HardwareCapability.LOCAL_KV_COMM_RESOURCE,
+            HardwareCapability.LORA_CUSTOM_OPS,
+            HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
+            HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+            HardwareCapability.NPUGRAPH_EX,
+            HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+            HardwareCapability.STANDARD_MAMBA_PATCH,
+            HardwareCapability.STANDARD_WORKER_PATCHES,
+            HardwareCapability.TRITON_BATCH_MEMCPY,
+            HardwareCapability.UNRESTRICTED_MLAPO,
+        }
+    ),
+}
+
 
 @pytest.mark.parametrize(
-    ("device_type", "weight_layout_policy", "capabilities"),
+    (
+        "device_type",
+        "attention_backend_family",
+        "cpu_binding_mode",
+        "default_worker_cls",
+        "device_adaptor_family",
+        "device_addressing_mode",
+        "weight_layout_policy",
+        "quantization_backend_family",
+    ),
     [
         (
             AscendDeviceType.A2,
+            AttentionBackendFamily.STANDARD,
+            CPUBindingMode.TOPO_AFFINITY,
+            "vllm_ascend.worker.worker.NPUWorker",
+            DeviceAdaptorFamily.STANDARD,
+            DeviceAddressingMode.DIRECT,
             WeightLayoutPolicy.CONFIGURABLE,
-            frozenset({HardwareCapability.AUTO_ENABLE_CUSTOM_OPS}),
+            QuantizationBackendFamily.STANDARD,
         ),
         (
             AscendDeviceType.A3,
+            AttentionBackendFamily.STANDARD,
+            CPUBindingMode.GLOBAL_SLICE,
+            "vllm_ascend.worker.worker.NPUWorker",
+            DeviceAdaptorFamily.STANDARD,
+            DeviceAddressingMode.DUAL_CHIP_CARD,
             WeightLayoutPolicy.CONFIGURABLE,
-            frozenset({HardwareCapability.AUTO_ENABLE_CUSTOM_OPS}),
+            QuantizationBackendFamily.STANDARD,
         ),
-        (AscendDeviceType._310P, WeightLayoutPolicy.FORCE_NZ, frozenset()),
+        (
+            AscendDeviceType._310P,
+            AttentionBackendFamily.COMPATIBILITY,
+            CPUBindingMode.TOPO_AFFINITY,
+            "vllm_ascend._310p.worker_310p.NPUWorker310",
+            DeviceAdaptorFamily.COMPATIBILITY,
+            DeviceAddressingMode.DIRECT,
+            WeightLayoutPolicy.FORCE_NZ,
+            QuantizationBackendFamily.COMPATIBILITY,
+        ),
         (
             AscendDeviceType.A5,
+            AttentionBackendFamily.STANDARD,
+            CPUBindingMode.TOPO_AFFINITY,
+            "vllm_ascend.worker.worker.NPUWorker",
+            DeviceAdaptorFamily.FP8_OPTIMIZED,
+            DeviceAddressingMode.DIRECT,
             WeightLayoutPolicy.CONFIGURABLE,
-            frozenset(
-                {
-                    HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
-                    HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
-                }
-            ),
+            QuantizationBackendFamily.STANDARD,
         ),
     ],
 )
-def test_hardware_profile_matrix(
+def test_hardware_profile_implementation_matrix(
     device_type: AscendDeviceType,
+    attention_backend_family: AttentionBackendFamily,
+    cpu_binding_mode: CPUBindingMode,
+    default_worker_cls: str,
+    device_adaptor_family: DeviceAdaptorFamily,
+    device_addressing_mode: DeviceAddressingMode,
     weight_layout_policy: WeightLayoutPolicy,
-    capabilities: frozenset[HardwareCapability],
+    quantization_backend_family: QuantizationBackendFamily,
 ) -> None:
     profile = get_hardware_profile(device_type)
 
     assert profile._device_type is device_type
+    assert profile.attention_backend_family is attention_backend_family
+    assert profile.cpu_binding_mode is cpu_binding_mode
+    assert profile.default_worker_cls == default_worker_cls
+    assert profile.device_adaptor_family is device_adaptor_family
+    assert profile.device_addressing_mode is device_addressing_mode
     assert profile.weight_layout_policy is weight_layout_policy
-    assert profile.capabilities == capabilities
+    assert profile.quantization_backend_family is quantization_backend_family
+
+
+@pytest.mark.parametrize("device_type", list(AscendDeviceType))
+def test_hardware_profile_capability_matrix(device_type: AscendDeviceType) -> None:
+    profile = get_hardware_profile(device_type)
+    expected_capabilities = _EXPECTED_CAPABILITIES[device_type]
+
+    assert profile.capabilities == expected_capabilities
     for capability in HardwareCapability:
-        assert profile.supports(capability) is (capability in capabilities)
+        assert profile.supports(capability) is (capability in expected_capabilities)
 
 
-def test_current_hardware_profile_uses_device_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    import vllm_ascend.device.hardware_profile as profile_module
+def test_current_hardware_profile_uses_device_config() -> None:
+    expected_profile = get_hardware_profile(get_device_config()._device_type)
 
-    monkeypatch.setattr(
-        profile_module,
-        "get_device_config",
-        lambda: DeviceConfig(_device_type=AscendDeviceType.A5),
-    )
+    assert get_current_hardware_profile() is expected_profile
 
-    assert get_current_hardware_profile() is get_hardware_profile(AscendDeviceType.A5)
+
+def test_current_hardware_profile_is_dynamo_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CPU UTs expose a mocked NPU backend that is not importable as
+    # ``torch.npu``. Keep accelerator stream discovery out of this test so it
+    # only exercises hardware-profile tracing.
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+
+    def use_profile_capability(value: torch.Tensor) -> torch.Tensor:
+        if get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
+            return value + 1
+        return value
+
+    value = torch.ones(1)
+    expected = use_profile_capability(value)
+    compiled = torch.compile(use_profile_capability, backend="eager", fullgraph=True)
+
+    assert torch.equal(compiled(value), expected)
 
 
 def test_unknown_device_type_is_rejected() -> None:
