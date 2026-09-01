@@ -135,15 +135,23 @@ WeightType = torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]
 def _restore_mxfp_semantic_dtype(tensors: WeightType, semantic_dtype: torch.dtype) -> WeightType:
     """View byte-backed MX tensors with the dtype required by ACLNN.
 
-    The model loader can retain packed MXFP4 weights and E8M0 scales as
-    uint8 tensors after an NPU format conversion. The bytes and storage
-    format are already correct, but ACLNN needs the logical MX dtype in the
-    tensor descriptor. view(dtype) only changes that descriptor and does
-    not copy the device storage.
+    Only plain ND-format uint8 tensors can be re-viewed in place. Weights
+    that already went through npu_format_cast carry their semantic dtype in
+    the cast metadata, and their padded fractal storage no longer matches
+    the logical shape, so view(dtype) would raise — pass those through.
     """
 
     def restore_dtype(tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.view(semantic_dtype) if tensor.dtype == torch.uint8 else tensor
+        if tensor.dtype != torch.uint8:
+            return tensor
+        # Only real ND-format NPU tensors can be checked/re-viewed in place;
+        # weights already npu_format_cast-ed (fractal storage) pass through.
+        if isinstance(tensor, torch.Tensor):
+            import torch_npu
+
+            if int(torch_npu.get_npu_format(tensor)) != int(torch_npu.Format.ND):
+                return tensor
+        return tensor.view(semantic_dtype)
 
     if isinstance(tensors, list):
         return [restore_dtype(tensor) for tensor in tensors]
@@ -195,10 +203,12 @@ def grouped_matmul_situ_quant(
     # npu_format_cast can leave production packed MX tensors exposed as
     # uint8. Restore their logical dtype at this custom-op boundary, so
     # OpDef and ACLNN see MXFP4/E8M0 rather than ordinary byte tensors.
-    import torch_npu
-
-    weight = _restore_mxfp_semantic_dtype(weight, torch_npu.float4_e2m1fn_x2)
-    weight_scale = _restore_mxfp_semantic_dtype(weight_scale, torch_npu.float8_e8m0fnu)
+    # NOTE: must use the NATIVE torch dtypes here — torch_npu's registered
+    # float4_e2m1fn_x2/float8_e8m0fnu carry broken itemsize metadata on this
+    # torch_npu build, and view() against them always fails with
+    # "shape '[296]' is invalid for input of size <N>".
+    weight = _restore_mxfp_semantic_dtype(weight, torch.float4_e2m1fn_x2)
+    weight_scale = _restore_mxfp_semantic_dtype(weight_scale, torch.float8_e8m0fnu)
 
     is_list = isinstance(weight, (list, tuple))
     op = (
