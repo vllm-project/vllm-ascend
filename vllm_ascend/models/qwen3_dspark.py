@@ -44,17 +44,25 @@ def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     return processed_weight.to(ori_dtype)
 
 
+# TODO: Temporary compatibility implementation for vLLM 0.27.1.
+# Remove this class and its version-gated handling once vLLM-Ascend
+# main no longer supports vLLM 0.27.1.
 class DSparkConfidenceHead(nn.Module):
-    def __init__(self, config, prefix: str) -> None:
+    def __init__(
+        self,
+        input_dim: int,
+        prefix: str,
+        bias: bool = False,
+        with_markov: bool = True,
+    ) -> None:
         super().__init__()
-
-        rank = int(getattr(config, "markov_rank", getattr(config, "dspark_markov_rank", 256)))
+        self.with_markov = with_markov
         self.proj = ReplicatedLinear(
-            config.hidden_size + rank,
+            input_dim,
             1,
-            bias=True,  # released dspark_qwen3_*_block7 ckpt has confidence_head.proj.bias
+            bias=bias,
+            return_bias=False,
             params_dtype=torch.float32,
-            quant_config=None,
             prefix=maybe_prefix(prefix, "proj"),
         )
 
@@ -63,9 +71,8 @@ class DSparkConfidenceHead(nn.Module):
         hidden_states: torch.Tensor,
         markov_embeds: torch.Tensor,
     ) -> torch.Tensor:
-        x = torch.cat([hidden_states, markov_embeds], dim=-1)
-        confidence, _ = self.proj(x.float())  # ReplicatedLinear returns (output, bias)
-        return confidence.squeeze(-1)
+        features = (torch.cat([hidden_states, markov_embeds], dim=-1) if self.with_markov else hidden_states).float()
+        return self.proj(features).squeeze(-1)
 
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
@@ -75,10 +82,13 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
         if vllm_version_is("0.27.1") and self.enable_confidence_head:
+            rank = int(getattr(config, "markov_rank", getattr(config, "dspark_markov_rank", 256)))
             model_prefix = maybe_prefix(prefix, "model")
             self.model.confidence_head = DSparkConfidenceHead(
-                config=config,
+                input_dim=config.hidden_size + rank,
                 prefix=maybe_prefix(model_prefix, "confidence_head"),
+                bias=True,
+                with_markov=True,
             )
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
         self.target_model_path = Path(vllm_config.model_config.model)

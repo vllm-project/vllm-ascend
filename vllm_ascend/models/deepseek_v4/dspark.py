@@ -24,7 +24,7 @@ from vllm.distributed import (
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -32,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsEagle3
+from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.utils import (
     PPMissingLayer,
     maybe_prefix,
@@ -44,7 +45,7 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp
+from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
 
 
 def _apply_dsv4_rope(
@@ -68,52 +69,6 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
     if num_layers is None:
         num_layers = getattr(config, "dspark_num_mtp_layers", 3)
     return int(num_layers or 3)
-
-
-class DSparkMarkovHead(nn.Module):
-    def __init__(self, config: PretrainedConfig, prefix: str) -> None:
-        super().__init__()
-
-        # Markov decoding runs serially for every draft position. Keep both
-        # low-rank weights replicated so each step remains communication-free.
-        self.markov_w1 = nn.Embedding(config.vocab_size, config.dspark_markov_rank)
-        self.markov_w2 = ReplicatedLinear(
-            config.dspark_markov_rank,
-            config.vocab_size,
-            bias=False,
-            return_bias=False,
-            prefix=f"{prefix}.markov_w2",
-            disable_tp=True,
-        )
-
-    def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
-        return self.markov_w1(token_ids)
-
-    def bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.markov_w2(markov_embed)
-
-
-class DSparkConfidenceHead(nn.Module):
-    def __init__(self, config: PretrainedConfig, prefix: str) -> None:
-        super().__init__()
-
-        input_dim = config.hidden_size + config.dspark_markov_rank
-
-        self.proj = ReplicatedLinear(
-            input_dim,
-            1,
-            bias=False,
-            return_bias=False,
-            prefix=maybe_prefix(prefix, "proj"),
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        markov_embed: torch.Tensor,
-    ) -> torch.Tensor:
-        features = torch.cat([hidden_states, markov_embed.to(dtype=hidden_states.dtype)], dim=-1)
-        return self.proj(features).squeeze(-1)
 
 
 class DeepseekV4DSparkModel(nn.Module):
@@ -170,11 +125,35 @@ class DeepseekV4DSparkModel(nn.Module):
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         last_layer_idx = self.mtp_start_layer_idx + self.num_dspark_layers - 1
+        draft_vocab_size = getattr(config, "draft_vocab_size", None) or config.vocab_size
         self.markov_head = DSparkMarkovHead(
-            config,
-            maybe_prefix(prefix, f"layers.{last_layer_idx}.markov_head"),
+            config.vocab_size,
+            draft_vocab_size,
+            config.dspark_markov_rank,
+            prefix=maybe_prefix(
+                prefix,
+                f"layers.{last_layer_idx}.markov_head",
+            ),
         )
-        self.confidence_head = DSparkConfidenceHead(config, maybe_prefix(prefix, "confidence_head"))
+        self.confidence_head: nn.Module
+        if vllm_version_is("0.27.1"):
+            from vllm_ascend.models.qwen3_dspark import DSparkConfidenceHead as CompatDSparkConfidenceHead
+
+            self.confidence_head = CompatDSparkConfidenceHead(
+                input_dim=config.hidden_size + config.dspark_markov_rank,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                bias=False,
+                with_markov=True,
+            )
+        else:
+            from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead
+
+            self.confidence_head = DSparkConfidenceHead(
+                input_dim=config.hidden_size + config.dspark_markov_rank,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                bias=False,
+                with_markov=True,
+            )
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
@@ -287,8 +266,8 @@ class DeepseekV4DSparkModel(nn.Module):
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.markov_head.embed(token_ids)
 
-    def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.markov_head.bias(markov_embed)
+    def markov_bias(self, markov_embed: torch.Tensor, logits_processor: LogitsProcessor) -> torch.Tensor:
+        return self.markov_head.bias(markov_embed, logits_processor)
 
     def compute_logits(
         self,
@@ -386,7 +365,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         return self.model.markov_embed(token_ids)
 
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.model.markov_bias(markov_embed)
+        return self.model.markov_bias(markov_embed, self.logits_processor)
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""
