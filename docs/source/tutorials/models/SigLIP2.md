@@ -77,7 +77,7 @@ vllm serve google/siglip2-base-patch16-224 \
     --chat-template template_basic.jinja \
     --limit-mm-per-prompt '{"image": 1}' \
     --compilation-config '{"cudagraph_capture_sizes": [64,32]}' \
-    --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}' \
+    --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}' \
     --dtype float16 \
     --port 8000 \
     --max-model-len 64
