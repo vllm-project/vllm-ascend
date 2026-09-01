@@ -80,10 +80,7 @@ def test_qwen3_eagle3_dsd() -> None:
             "enforce_eager": True,
             "async_scheduling": True,
             "generation_config": "vllm",
-            "additional_config": {
-                "enable_cpu_binding": True,
-                "
-            },
+            "additional_config": {"enable_cpu_binding": True},
             "compilation_config": {"cudagraph_mode": "NONE"},
         },
         acceptance_length_rtol=ACCEPTANCE_LENGTH_RTOL,
