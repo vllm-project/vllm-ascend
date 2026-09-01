@@ -137,9 +137,10 @@ class TestKVPoolScheduler(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_layerwise_mtp_hit_uses_safe_load_extent(self, mock_client_cls):
-        scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
-        scheduler.use_layerwise = True
-        scheduler.use_gva_layerwise = True
+        scheduler = KVPoolScheduler(
+            self._make_config(block_size=16, extra_config={"backend": "memcache"}),
+            use_layerwise=True,
+        )
         scheduler.use_eagle = True
         scheduler.cache_transfer_granularity = 16
         scheduler._get_layerwise_gva_hit_tokens = MagicMock(return_value=64)
@@ -795,7 +796,10 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
-        return KVPoolScheduler(make_config(), use_layerwise=False)
+        # memcache backend makes the constructor resolve the real key
+        # factory; use_layerwise stays False so the test keeps exercising
+        # the query_start_block offset math it was built around.
+        return KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=False)
 
     def test_layerwise_gva_hit_tokens(self):
         cases = [

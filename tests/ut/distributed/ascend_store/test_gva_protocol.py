@@ -27,6 +27,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol import (
     GVAKeyFactory,
+    extract_layout_config,
 )
 
 # isort: on
@@ -45,7 +46,10 @@ class TestGvaMemcacheExclusivity(unittest.TestCase):
 
     The five GVA store calls must be overridden by MemcacheBackend and
     inherited as NotImplementedError stubs by every other backend
-    (python's MRO: an override wins over the inherited stub).
+    (python's MRO: an override wins over the inherited stub). The
+    registry interlock is asserted along the way: the backend_map entry
+    carries ``layerwise_protocol`` exactly when the class owns the
+    overrides.
     """
 
     def _backend_classes(self):
@@ -62,6 +66,19 @@ class TestGvaMemcacheExclusivity(unittest.TestCase):
                     with self.subTest(method=method):
                         owns_override = any(method in vars(cls) for cls in backend_class.__mro__ if cls is not Backend)
                         self.assertEqual(owns_override, name == "memcache")
+                        self.assertEqual(owns_override, "layerwise_protocol" in backend_map[name])
+
+
+class TestExtractLayoutConfig(unittest.TestCase):
+    """The protocol owns the layerwise opt-in check of the layout layer."""
+
+    def test_returns_config_when_opted_in(self):
+        extra_config = {"use_layerwise": True, "layerwise_num_shared_buffers": 2}
+        self.assertIs(extract_layout_config(extra_config), extra_config)
+
+    def test_returns_none_when_not_opted_in(self):
+        self.assertIsNone(extract_layout_config({}))
+        self.assertIsNone(extract_layout_config({"use_layerwise": False}))
 
 
 class TestGVAKeyFactory(unittest.TestCase):

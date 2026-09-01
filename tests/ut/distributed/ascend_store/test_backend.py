@@ -24,8 +24,6 @@ from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
-    backend_map,
-    backend_supports_layerwise,
     get_layerwise_protocol,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
@@ -60,54 +58,24 @@ class TestBackendABC(unittest.TestCase):
 # Backend layerwise protocol registry
 # =========================================================================
 class TestLayerwiseProtocolRegistry(unittest.TestCase):
-    """The registry is the generic layers' only knowledge of layerwise
-    support: an entry carries ``layerwise_protocol`` iff its backend
-    class actually implements the layerwise GVA store calls."""
-
-    _GVA_STORE_METHODS = (
-        "batch_get_key_info",
-        "batch_alloc",
-        "batch_add_lease",
-        "batch_remove_lease",
-        "batch_write_finish",
-    )
-
-    def _backend_classes(self):
-        import importlib
-
-        for name, entry in backend_map.items():
-            module = importlib.import_module(entry["path"])
-            yield name, getattr(module, entry["name"])
-
-    def test_registry_matches_gva_store_methods(self):
-        for name, backend_class in self._backend_classes():
-            with self.subTest(backend=name):
-                for method in self._GVA_STORE_METHODS:
-                    with self.subTest(method=method):
-                        owns_override = any(method in vars(cls) for cls in backend_class.__mro__ if cls is not Backend)
-                        self.assertEqual(owns_override, "layerwise_protocol" in backend_map[name])
-
-    def test_backend_supports_layerwise_truth_table(self):
-        cases = [
-            ("memcache", True),
-            ("mooncake", False),
-            ("yuanrong", False),
-            # The name is normalized (strip + lower).
-            ("MEMCACHE", True),
-            (" Memcache ", True),
-            ("nonexistent", False),
-        ]
-        for backend_name, expected in cases:
-            with self.subTest(backend=backend_name):
-                self.assertEqual(backend_supports_layerwise(backend_name), expected)
+    """``get_layerwise_protocol`` is the generic layers' only knowledge of
+    layerwise support: it resolves the protocol module registered under the
+    backend name (normalized), or None when the entry carries none."""
 
     def test_get_layerwise_protocol_resolves_module(self):
         protocol = get_layerwise_protocol("memcache")
         self.assertIsNotNone(protocol)
         self.assertTrue(hasattr(protocol, "GVAKeyFactory"))
-        # Backends without a protocol resolve to None.
-        self.assertIsNone(get_layerwise_protocol("mooncake"))
-        self.assertIsNone(get_layerwise_protocol("nonexistent"))
+
+    def test_get_layerwise_protocol_normalizes_name(self):
+        for backend_name in ("MEMCACHE", " Memcache "):
+            with self.subTest(backend=backend_name):
+                self.assertIsNotNone(get_layerwise_protocol(backend_name))
+
+    def test_get_layerwise_protocol_returns_none_without_protocol(self):
+        for backend_name in ("mooncake", "yuanrong", "nonexistent"):
+            with self.subTest(backend=backend_name):
+                self.assertIsNone(get_layerwise_protocol(backend_name))
 
 
 def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:

@@ -30,6 +30,21 @@ snapshot assertions.
 
 from __future__ import annotations
 
+from typing import Any
+
+
+def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the connector's extra config when it opts into the layerwise
+    GVA transfer, None otherwise.
+
+    Called by the generic layout layer through the backend registry; the
+    protocol itself owns the opt-in check so the layout layer never spells
+    out the gate.
+    """
+    if extra_config.get("use_layerwise", False):
+        return extra_config
+    return None
+
 
 class GVAKeyFactory:
     """String formats for the layerwise GVA keys.

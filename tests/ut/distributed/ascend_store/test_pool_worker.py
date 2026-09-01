@@ -962,8 +962,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         return make_worker(self)
 
     def _make_gva_worker(self, num_groups=1):
-        worker = self._make_worker()
-        worker.use_gva_layerwise = True
+        worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
         worker.num_kv_cache_groups = num_groups
         worker.grouped_block_size = [16] * num_groups
@@ -1239,8 +1238,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
 
         self.assertIsNotNone(_pool_worker)
-        worker = self._make_worker()
-        worker.use_gva_layerwise = True
+        worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
         worker.independent_layers = [0]
         worker.num_kv_cache_groups = 1

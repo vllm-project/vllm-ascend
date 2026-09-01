@@ -25,10 +25,7 @@ from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
-    backend_supports_layerwise,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol import (
-    GVAKeyFactory,
+    get_layerwise_protocol,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
@@ -166,7 +163,13 @@ class KVPoolScheduler:
 
         backend_name = str(vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake"))
         self.backend_name = backend_name.lower()
-        self.use_gva_layerwise = self.use_layerwise and backend_supports_layerwise(self.backend_name)
+        # Resolve the backend's layerwise protocol (if any) once through the
+        # registry; generic code never imports the protocol module by name.
+        self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
+        self.use_gva_layerwise = self.use_layerwise and self.layerwise_protocol is not None
+        self._layerwise_key_factory = (
+            self.layerwise_protocol.GVAKeyFactory if self.layerwise_protocol is not None else None
+        )
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -317,7 +320,7 @@ class KVPoolScheduler:
         group share one key for MLA).
         """
         head_or_tp_ranks = self.tp_size // self.put_step
-        return GVAKeyFactory.hit_check_keys(
+        return self._layerwise_key_factory.hit_check_keys(
             self.model_name,
             group_id,
             block_hash_hex,

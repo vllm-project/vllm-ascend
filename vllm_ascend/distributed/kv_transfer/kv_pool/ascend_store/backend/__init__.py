@@ -24,8 +24,8 @@ backend_map = {
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
         # The memcache backend carries an exclusive layerwise transfer
         # protocol (module path). Generic layers resolve it through
-        # backend_supports_layerwise() / get_layerwise_protocol() and never
-        # import the protocol module by name.
+        # get_layerwise_protocol() and never import the protocol module
+        # by name.
         "layerwise_protocol": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol",
     },
     "yuanrong": {
@@ -33,17 +33,6 @@ backend_map = {
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend",
     },
 }
-
-
-def backend_supports_layerwise(backend_name: str) -> bool:
-    """Return True if the backend registered under ``backend_name``
-    carries a layerwise transfer protocol module.
-
-    The name is normalized (stripped, lowercased), so callers may pass
-    the raw config string.
-    """
-    normalized_name = backend_name.strip().lower()
-    return "layerwise_protocol" in backend_map.get(normalized_name, {})
 
 
 def get_layerwise_protocol(backend_name: str):
