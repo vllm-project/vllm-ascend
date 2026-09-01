@@ -278,7 +278,7 @@ jobs:
           pip install uc-manager
           uv pip install -r requirements-dev.txt
           uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
-          if find vllm_ascend -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
+          if find "${{ env.WORK_REPO_DIR }}/vllm_ascend" -maxdepth 1 -name '*.so' -type f 2>/dev/null | grep -q .; then
             echo "CSRC cache hit: .so files found, skip kernel compilation"
             COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
           else
