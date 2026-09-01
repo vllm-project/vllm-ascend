@@ -25,9 +25,11 @@ import os
 from unittest.mock import patch
 
 import pytest
+from vllm import SamplingParams
 from vllm.config import CompilationConfig
 
-from tests.e2e.pull_request.utils import _run_speculative_decoding
+from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.utils import SPEC_DECODE_PROMPTS, _run_speculative_decoding
 
 MAIN_MODEL = "Eco-Tech/GLM-5.2-w4a8"
 SPECULATOR_MODEL = "RedHatAI/GLM-5.2-speculator.dspark"
@@ -60,14 +62,15 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         "CLOSE_MATMUL_K_SHIFT": "1",
     },
 )
-def test_glm_5_2_dspark_acceptance_tp8() -> None:
+@wait_until_npu_memory_free()
+def test_glm_5_2_dspark_aclgraph_acceptance_tp8() -> None:
     _run_speculative_decoding(
         model_name=MAIN_MODEL,
         speculative_config={
             "method": "dspark",
             "model": SPECULATOR_MODEL,
             "num_speculative_tokens": DSPARK_NUM_SPECULATIVE_TOKENS,
-            "enforce_eager": True,
+            "enforce_eager": False,
         },
         expected_acceptance_length=DSPARK_EXPECTED_ACCEPTANCE_LENGTH,
         runner_kwargs={
@@ -77,6 +80,65 @@ def test_glm_5_2_dspark_acceptance_tp8() -> None:
             "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
         },
     )
+
+
+@pytest.mark.e2e_model(MAIN_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="spec_decode,aclgraph",
+    parallel="DP,TP,EP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W4A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "512",
+        "HCCL_OP_EXPANSION_MODE": "AIV",
+        "LCCL_DETERMINISTIC": "1",
+        "HCCL_DETERMINISTIC": "true",
+        "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
+        "CLOSE_MATMUL_K_SHIFT": "1",
+    },
+)
+@wait_until_npu_memory_free()
+def test_glm_5_2_dspark_aclgraph_dp2_tp4() -> None:
+    # Consecutive sharding sends the first two prompts to DP rank 0 and the
+    # last two to rank 1. Their deliberately different lengths exercise the
+    # token-max padding and request-count convergence used by DSpark graphs.
+    prompts = [
+        SPEC_DECODE_PROMPTS[0],
+        SPEC_DECODE_PROMPTS[1],
+        SPEC_DECODE_PROMPTS[2],
+        SPEC_DECODE_PROMPTS[3],
+    ]
+    sampling_params = SamplingParams(temperature=0, max_tokens=256)
+
+    with DPVllmRunner(
+        MAIN_MODEL,
+        quantization="ascend",
+        data_parallel_size=2,
+        tensor_parallel_size=4,
+        max_model_len=8192,
+        max_num_seqs=4,
+        enable_expert_parallel=True,
+        disable_log_stats=False,
+        distributed_executor_backend="mp",
+        async_scheduling=True,
+        speculative_config={
+            "method": "dspark",
+            "model": SPECULATOR_MODEL,
+            "num_speculative_tokens": DSPARK_NUM_SPECULATIVE_TOKENS,
+            "enforce_eager": False,
+        },
+        compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
+    ) as vllm_model:
+        outputs = vllm_model.generate(prompts, sampling_params=sampling_params)
+
+    assert len(outputs) == len(prompts)
+    assert all(output_ids[0] and output_text[0] for output_ids, output_text in outputs)
 
 
 @pytest.mark.e2e_model(MAIN_MODEL)
