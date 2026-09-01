@@ -172,9 +172,6 @@ def _split_host_device_kv_specs(
         raise ValueError("Sparse KV offload requires at least one host KV cache spec")
     if not device_specs:
         raise ValueError("Sparse KV offload requires at least one device KV cache spec")
-    block_sizes = {spec.block_size for spec in host_specs + device_specs}
-    if len(block_sizes) != 1:
-        raise ValueError(f"Sparse KV offload memory planning requires one shared block size, got {sorted(block_sizes)}")
     return host_specs, device_specs
 
 

@@ -224,6 +224,29 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
 )
 
+
+def _mark_dsv4_c4_main_cache_for_offload(
+    layer_name: str,
+    spec: KVCacheSpec,
+    enabled: bool,
+) -> KVCacheSpec:
+    """Mark only DeepSeek-V4 c4 attention data as host-resident.
+
+    DeepSeek-V4 exposes several MLA-shaped cache specs. The c4 attention
+    payload is the sparse-attention data plane; the indexer, compressor state,
+    c128 cache, and SWA cache must remain device-resident.
+    """
+    if (
+        enabled
+        and isinstance(spec, AscendMLAAttentionSpec)
+        and layer_name.endswith(".attn")
+        and spec.model_version == "deepseek_v4"
+        and spec.compress_ratio == 4
+    ):
+        return replace(spec, store_on_host=True)
+    return spec
+
+
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
 
@@ -4979,7 +5002,11 @@ class NPUModelRunner(GPUModelRunner):
             elif self.use_compress:
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    kv_cache_spec[layer_name] = spec
+                    kv_cache_spec[layer_name] = _mark_dsv4_c4_main_cache_for_offload(
+                        layer_name,
+                        spec,
+                        self.sparse_kv_offload_enabled,
+                    )
             elif isinstance(attn_module, Attention):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
