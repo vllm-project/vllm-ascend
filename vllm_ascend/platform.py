@@ -1111,11 +1111,15 @@ def _setup_compile_backend(
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
-    # Upstream MoE SP shards tokens before the MoE runner, independent shared-
-    # expert DP shards them inside AscendSharedExperts, and DSA-CP shards Q at
-    # its attention boundary. All three layouts require TP-aligned graph gears
-    # so every captured graph has a stable local token shape. Keep the layout
-    # constraint separate from the feature switches so none enables another.
+    additional_config = vllm_config.additional_config or {}
+    if (
+        not additional_config.get("enable_flashcomm1", False)
+        and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
+    ):
+        vllm_config.parallel_config.all2all_backend = (
+            "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
+        )
+        logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
     requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
