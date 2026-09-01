@@ -1162,6 +1162,7 @@ class TestEagleProposerPropose:
         self.proposer.draft_attn_groups = [mock_attn_group]
         self.proposer.attn_layer_names = ['model.layers.36.self_attn.attn']
         self.proposer.kernel_block_size = 128
+        self.proposer.block_size = 128
         self.proposer._runnable = MagicMock()
         self.proposer._runnable.return_value = [0, 0, 0]
         captured_common_attn_metadata = None
