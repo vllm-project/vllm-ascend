@@ -1187,11 +1187,6 @@ class TestNPUPlatform(TestBase):
                 "batch_job_sched_config",
             ),
             (
-                "profiling_chunk",
-                lambda config, ascend: setattr(ascend.scheduler_config.profiling_chunk_config, "enabled", True),
-                "profiling_chunk_config",
-            ),
-            (
                 "kv_consumer",
                 lambda config, ascend: setattr(
                     config, "kv_transfer_config", MagicMock(kv_role="kv_consumer", engine_id="engine0")
@@ -1214,6 +1209,79 @@ class TestNPUPlatform(TestBase):
                     patch.object(platform, "check_kv_extra_config"),
                 ):
                     self.platform.check_and_update_config(vllm_config)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_short_request_first_accepts_profiling_chunk(
+        self,
+        mock_init_ascend,
+        mock_soc_version,
+        mock_auto_detect,
+    ):
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.scheduler_config.short_request_first_config.enabled = True
+        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
+        mock_init_ascend.return_value = ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = None
+        vllm_config.scheduler_config.async_scheduling = False
+
+        with (
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(
+            vllm_config.scheduler_config.scheduler_cls,
+            "vllm_ascend.core.scheduler_profiling_chunk.ProfilingChunkScheduler",
+        )
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_short_request_first_rejects_async_profiling_chunk(
+        self,
+        mock_init_ascend,
+        mock_soc_version,
+        mock_auto_detect,
+    ):
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform = platform.NPUPlatform()
+
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.scheduler_config.short_request_first_config.enabled = True
+        ascend_config.scheduler_config.profiling_chunk_config.enabled = True
+        mock_init_ascend.return_value = ascend_config
+
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.kv_transfer_config = None
+        vllm_config.scheduler_config.async_scheduling = True
+
+        with (
+            pytest.raises(
+                ValueError,
+                match="requires synchronous scheduling",
+            ),
+            patch.object(platform, "_fix_incompatible_config"),
+            patch.object(platform, "check_kv_extra_config"),
+        ):
+            self.platform.check_and_update_config(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch(

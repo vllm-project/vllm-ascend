@@ -30,6 +30,9 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import ProfilingChunkConfig, clear_ascend_config, init_ascend_config
 from vllm_ascend.core.profiling_chunk_predictor import ChunkSizePredictor, ProfilingChunkManager
 from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
+from vllm_ascend.core.short_request_first_scheduler import (
+    ShortRequestFirstRequestQueue,
+)
 from vllm_ascend.utils import vllm_version_is
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -38,13 +41,13 @@ MAX_NUM_BATCHED_TOKENS = 8192
 MAX_NUM_SEQS = 16
 
 
-def create_requests(num_requests, num_tokens=10, max_tokens=16):
+def create_requests(num_requests, num_tokens=10, max_tokens=16, request_id_prefix=""):
     init_none_hash(sha256)
     sampling_params = SamplingParams(ignore_eos=False, max_tokens=max_tokens)
     requests = []
     for i in range(num_requests):
         request = Request(
-            request_id=f"{i}",
+            request_id=f"{request_id_prefix}{i}",
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
             pooling_params=None,
@@ -281,12 +284,18 @@ class TestProfilingChunkScheduler(TestBase):
         mock_get_ascend_config,
         _mock_profiling_init_ascend_config,
         mock_balance_init_ascend_config,
+        srf_enabled=False,
     ):
         profiling_cfg = MagicMock()
         profiling_cfg.enabled = True
         profiling_cfg.smooth_factor = 0.8
         profiling_cfg.min_chunk = 256
         mock_get_ascend_config.return_value.scheduler_config.profiling_chunk_config = profiling_cfg
+        short_request_first_cfg = MagicMock()
+        short_request_first_cfg.enabled = srf_enabled
+        short_request_first_cfg.threshold = 256
+        short_request_first_cfg.long_max_wait_ms = 2000.0
+        mock_get_ascend_config.return_value.scheduler_config.short_request_first_config = short_request_first_cfg
         mock_balance_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
 
         mock_hf_config = MagicMock()
@@ -372,6 +381,45 @@ class TestProfilingChunkScheduler(TestBase):
         scheduler = self.create_scheduler()
         self.assertIsNotNone(scheduler.profiling_chunk_manager)
         self.assertFalse(scheduler._profiling_initialized)
+        self.assertFalse(scheduler._short_request_first_enabled)
+        self.assertNotIsInstance(
+            scheduler.waiting,
+            ShortRequestFirstRequestQueue,
+        )
+
+    def test_scheduler_init_with_short_request_first(self):
+        scheduler = self.create_scheduler(srf_enabled=True)
+
+        self.assertIsInstance(
+            scheduler.waiting,
+            ShortRequestFirstRequestQueue,
+        )
+
+    def test_schedule_short_request_before_earlier_long_request(self):
+        scheduler = self.create_scheduler(srf_enabled=True)
+
+        long_request = create_requests(
+            num_requests=1,
+            num_tokens=512,
+            request_id_prefix="long-",
+        )[0]
+        short_request = create_requests(
+            num_requests=1,
+            num_tokens=64,
+            request_id_prefix="short-",
+        )[0]
+
+        # Simulate a long request arriving before a short request.
+        scheduler.add_request(long_request)
+        scheduler.add_request(short_request)
+
+        output = scheduler.schedule()
+
+        self.assertEqual(len(output.scheduled_new_reqs), 2)
+        self.assertEqual(
+            [request.request_id for request in scheduler.running],
+            ["short-0", "long-0"],
+        )
 
     def test_run_profiling_chunk_init_success(self):
         scheduler = self.create_scheduler()
@@ -382,6 +430,19 @@ class TestProfilingChunkScheduler(TestBase):
 
         self.assertTrue(scheduler._profiling_initialized)
         self.assertTrue(scheduler.profiling_chunk_manager.is_ready)
+        self.assertFalse(scheduler.profiling_chunk_manager._set_time_done)
+
+    def test_run_profiling_chunk_init_failure(self):
+        scheduler = self.create_scheduler()
+        mock_executor = MagicMock()
+        mock_executor.collective_rpc.return_value = []
+
+        scheduler.run_profiling_chunk_init(mock_executor)
+
+        self.assertTrue(scheduler._profiling_initialized)
+        self.assertFalse(scheduler.profiling_chunk_manager.is_ready)
+        self.assertIsNone(scheduler.profiling_chunk_manager.predictor.target_latency)
+        self.assertFalse(scheduler.profiling_chunk_manager._set_time_done)
 
     def test_run_profiling_chunk_init_skips_second_call(self):
         scheduler = self.create_scheduler()
