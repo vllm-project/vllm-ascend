@@ -128,8 +128,8 @@ from vllm_ascend.patch.worker.patch_draft_quarot import patch_load_weights
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
+from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
 from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
     AscendExtractHiddenStatesProposer,
@@ -140,7 +140,6 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
-from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.utils import (
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
@@ -200,6 +199,10 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+DP_METADATA_NUM_TOKENS = 0
+DP_METADATA_CUDAGRAPH_MODE = 1
+DP_METADATA_HAS_REAL_WORK = 2
+DP_METADATA_FIELD_COUNT = 3
 
 
 @dataclass
@@ -674,13 +677,14 @@ class NPUModelRunner(GPUModelRunner):
         is_draft_model: bool = False,
         cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         allow_dp_padding: bool = False,
+        is_dummy_run: bool = False,
     ) -> tuple[int, torch.Tensor | None, CUDAGraphMode]:
         # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
-        # our case, we still need to sync the other two flags as well. So we need to
-        # include them in the all_reduce operation, and more over, we CANNOT skip it
-        # even if we are running in eager mode, which harms performance.
+        # our case, we also need to sync the graph mode and whether the rank has real
+        # work. Therefore, we CANNOT skip this all_reduce even in eager mode, which
+        # harms performance.
         # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
-        # immediately once the other two flags are no longer needed.
+        # once the additional metadata is no longer needed.
         if self.dp_size == 1:
             return num_tokens, None, cudagraph_mode
 
@@ -696,17 +700,47 @@ class NPUModelRunner(GPUModelRunner):
             if self.ascend_config.dp_allreduce_on_npu
             else ("cpu", get_dp_group().cpu_group)
         )
-        packed_tensor = torch.zeros(2, self.dp_size, device=device_str, dtype=torch.int32)
-        packed_tensor[0][self.dp_rank] = num_tokens
-        packed_tensor[1][self.dp_rank] = cudagraph_mode.value
+        packed_tensor = torch.zeros(
+            DP_METADATA_FIELD_COUNT,
+            self.dp_size,
+            device=device_str,
+            dtype=torch.int32,
+        )
+        packed_tensor[DP_METADATA_NUM_TOKENS][self.dp_rank] = num_tokens
+        packed_tensor[DP_METADATA_CUDAGRAPH_MODE][self.dp_rank] = cudagraph_mode.value
+        packed_tensor[DP_METADATA_HAS_REAL_WORK][self.dp_rank] = not is_dummy_run
         dist.all_reduce(packed_tensor, group=group)
         if device_str == "npu":
             packed_tensor = packed_tensor.cpu()
 
         # Unpack the results
-        num_tokens_across_dp = packed_tensor[0, :]
-        max_tokens_across_dp = int(num_tokens_across_dp.max().item())
-        synced_cudagraph_mode = CUDAGraphMode(_post_process_cudagraph_mode(packed_tensor))
+        num_tokens_across_dp = packed_tensor[DP_METADATA_NUM_TOKENS, :]
+        active_dp_mask = packed_tensor[DP_METADATA_HAS_REAL_WORK, :].bool()
+        if not active_dp_mask.any():
+            active_dp_mask = torch.ones_like(active_dp_mask)
+
+        active_num_tokens = num_tokens_across_dp[active_dp_mask]
+        max_tokens_across_dp = int(active_num_tokens.max().item())
+        synced_cudagraph_mode = CUDAGraphMode(
+            _post_process_cudagraph_mode(packed_tensor, active_dp_mask)
+        )
+
+        # Runtime dummy ranks must follow the graph selected by ranks with real
+        # work. Otherwise their local graph padding can inflate the global token
+        # count and make every rank select a different MoE communication path.
+        num_tokens_across_dp[~active_dp_mask] = max_tokens_across_dp
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DP model execution metadata synchronized: rank=%d, role=%s, "
+                "local_tokens=%d, active_mask=%s, synced_tokens=%s, aclgraph_mode=%s",
+                self.dp_rank,
+                "dummy" if is_dummy_run else "active",
+                num_tokens,
+                active_dp_mask.tolist(),
+                num_tokens_across_dp.tolist(),
+                synced_cudagraph_mode.name,
+            )
 
         # Create a tensor for num_tokens_after_padding
         if allow_dp_padding or is_draft_model:
@@ -2989,6 +3023,7 @@ class NPUModelRunner(GPUModelRunner):
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        is_dummy_run: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
@@ -3042,6 +3077,7 @@ class NPUModelRunner(GPUModelRunner):
                                   or enable_sp(self.vllm_config)
                                   or oproj_tp_enable()
                                   or embedding_tp_enable()),
+                is_dummy_run=is_dummy_run,
             )
 
             # Extract DP padding if there is any
@@ -3491,6 +3527,7 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
+            is_dummy_run=True,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -5129,13 +5166,17 @@ class NPUModelRunner(GPUModelRunner):
         )
 
 
-def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
+def _post_process_cudagraph_mode(tensor: torch.Tensor, active_dp_mask: torch.Tensor | None = None) -> int:
     """
     Synchronize cudagraph_mode across DP ranks by taking the minimum.
-    If any rank has NONE (0), all ranks use NONE.
+    If any active rank has NONE (0), all ranks use NONE. Runtime dummy ranks
+    are excluded when an active mask is provided.
     This ensures all ranks send consistent values (all padded or all unpadded).
     """
-    return int(tensor[1, :].min().item())
+    cudagraph_modes = tensor[DP_METADATA_CUDAGRAPH_MODE, :]
+    if active_dp_mask is not None:
+        cudagraph_modes = cudagraph_modes[active_dp_mask]
+    return int(cudagraph_modes.min().item())
 
 
 def _get_gpu_model_runner_module_name(model_runner) -> str:

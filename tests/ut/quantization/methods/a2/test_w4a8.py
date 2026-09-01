@@ -311,6 +311,25 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
 
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz", side_effect=identity)
+    @patch("torch.Tensor.npu", new=lambda self: self)
+    def test_process_weights_after_loading_builds_a3_mega_moe_int8_lists(self, mock_maybe_trans_nz):
+        self.quant_method.use_a3_mega_moe = True
+        self.quant_method.new_quant_version = True
+        layer = self.build_layer(is_new_quant_version=True)
+
+        self.quant_method.process_weights_after_loading(layer)
+
+        self.assertEqual(len(layer.a3_mega_moe_w13_weight_list), self.experts)
+        self.assertEqual(len(layer.a3_mega_moe_w2_weight_list), self.experts)
+        self.assertEqual(layer.a3_mega_moe_w13_weight_list[0].dtype, torch.int8)
+        self.assertEqual(layer.a3_mega_moe_w2_weight_list[0].dtype, torch.int8)
+        self.assertEqual(len(layer.a3_mega_moe_w13_weight_scale_list), self.experts)
+        self.assertEqual(len(layer.a3_mega_moe_w2_weight_scale_list), self.experts)
+        self.assertFalse(hasattr(layer, "w13_weight"))
+        self.assertFalse(hasattr(layer, "w2_weight"))
+        self.assertEqual(mock_maybe_trans_nz.call_count, 2)
+
     def test_pack_to_int32_asserts_new_quant_packed_dim(self):
         self.quant_method.new_quant_version = True
         weight = torch.zeros((self.experts, self.output_size, 10), dtype=torch.int8)

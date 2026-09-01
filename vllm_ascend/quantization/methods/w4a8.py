@@ -25,8 +25,9 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.ops.fused_moe.a3_mega_moe import is_a3_mega_moe_enabled
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, maybe_trans_nz
@@ -363,6 +364,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
         )
         self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        self.use_a3_mega_moe = is_a3_mega_moe_enabled(vllm_config)
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError("The current weight does not support moe part tp>16.")
 
@@ -551,7 +553,18 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
 
         topk_weights = topk_weights.to(x.dtype)
 
-        if self.dynamic_eplb:
+        if self.use_a3_mega_moe and _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+            w1 = layer.a3_mega_moe_w13_weight_list
+            w1_scale = layer.a3_mega_moe_w13_weight_scale_list
+            w2 = layer.a3_mega_moe_w2_weight_list
+            w2_scale = layer.a3_mega_moe_w2_weight_scale_list
+
+            def cast_bias_to_fp32(bias_list):
+                return [bias if bias.dtype == torch.float32 else bias.to(torch.float32) for bias in bias_list]
+
+            w1_scale_bias = cast_bias_to_fp32(layer.a3_mega_moe_w13_scale_bias_list)
+            w2_scale_bias = cast_bias_to_fp32(layer.a3_mega_moe_w2_scale_bias_list)
+        elif self.dynamic_eplb:
             w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
             w1_scale = layer.w13_weight_scale_list
             w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
@@ -669,6 +682,30 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             self.process_weights_after_loading_compressed_tensors(layer)
         else:
             self.process_weights_after_loading_modelslim(layer)
+        if self.use_a3_mega_moe:
+            self._prepare_a3_mega_moe_weights(layer)
+
+    @staticmethod
+    def _prepare_a3_mega_moe_weights(layer):
+        layer.a3_mega_moe_w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+        layer.a3_mega_moe_w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+        layer.a3_mega_moe_w13_weight_scale_list = [
+            scale.reshape(-1) for scale in layer.w13_weight_scale.data.unbind(dim=0)
+        ]
+        layer.a3_mega_moe_w2_weight_scale_list = [
+            scale.reshape(-1) for scale in layer.w2_weight_scale.data.unbind(dim=0)
+        ]
+        layer.a3_mega_moe_w13_scale_bias_list = [bias.reshape(-1) for bias in layer.w13_scale_bias.data.unbind(dim=0)]
+        layer.a3_mega_moe_w2_scale_bias_list = [bias.reshape(-1) for bias in layer.w2_scale_bias.data.unbind(dim=0)]
+        for tensor_name in (
+            "w13_weight",
+            "w2_weight",
+            "w13_weight_scale",
+            "w2_weight_scale",
+            "w13_scale_bias",
+            "w2_scale_bias",
+        ):
+            delattr(layer, tensor_name)
 
     def process_weights_after_loading_compressed_tensors(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -721,8 +758,9 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = self.pack_int4_to_int8(layer.w2_weight.data)
         layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
         layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
-        layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
-        layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
+        if not self.use_a3_mega_moe:
+            layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
+            layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)
 
     def process_weights_after_loading_modelslim(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
@@ -773,6 +811,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w2_weight_scale
             del layer.w13_scale_bias
             del layer.w2_scale_bias
-        else:
+        elif not self.use_a3_mega_moe:
             layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
             layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)

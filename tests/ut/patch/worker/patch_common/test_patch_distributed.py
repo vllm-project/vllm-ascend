@@ -337,6 +337,16 @@ def test_mc2_stays_isolated_from_ep_even_when_pg_options_match(module_env):
     assert first.device_group is not second.device_group
 
 
+def test_mega_moe_stays_isolated_from_ep_even_when_pg_options_match(module_env):
+    first = _make_group(module_env, group_name="ep")
+    second = _make_group(module_env, group_name="mega_moe")
+
+    hccl_calls = _calls_with_backend(module_env, "hccl")
+
+    assert len(hccl_calls) == 2
+    assert first.device_group is not second.device_group
+
+
 def test_dynamic_eplb_stays_separate_from_ep_when_pg_options_differ(module_env):
     default_hccl_pg_options = module_env.utils_module.create_hccl_pg_options.return_value
 

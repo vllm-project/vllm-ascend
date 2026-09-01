@@ -203,3 +203,23 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.quant_method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "w13_weight_list"))
         self.assertFalse(hasattr(layer, "w13_weight_scale_fp32"))
+
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, _: weight)
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    def test_process_weights_after_loading_builds_a3_mega_moe_lists(self, mock_get_config, mock_format_cast):
+        mock_get_config.return_value = MagicMock(enable_fused_mc2=1)
+        self.quant_method.dynamic_eplb = False
+        self.quant_method.use_a3_mega_moe = True
+        layer = create_moe_layer(
+            num_experts=self.num_experts,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+        )
+
+        self.quant_method.process_weights_after_loading(layer)
+
+        self.assertEqual(len(layer.a3_mega_moe_w13_weight_list), self.num_experts)
+        self.assertEqual(len(layer.a3_mega_moe_w2_weight_list), self.num_experts)
+        self.assertEqual(len(layer.a3_mega_moe_fused_w1_scale_list), self.num_experts)
+        self.assertEqual(len(layer.a3_mega_moe_fused_w2_scale_list), self.num_experts)
+        self.assertEqual(mock_format_cast.call_count, 2)
