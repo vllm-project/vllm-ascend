@@ -259,10 +259,11 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
-        if is_mega_moe_supported():
+        self.enable_fused_mc2 = get_ascend_config().enable_fused_mc2
+        if self.enable_fused_mc2 == 1 and is_mega_moe_supported():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if self.enable_fused_mc2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -418,7 +419,7 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         expert_tokens = None
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if self.enable_fused_mc2 == 1:
             if is_mega_moe_supported():
                 out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input)
             else:
@@ -447,7 +448,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 )
                 expert_tokens = self.expert_token_nums
         else:
-            raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
+            raise ValueError(f"Wrong value of {self.enable_fused_mc2=}")
         return FusedExpertsResult(
             routed_out=out,
             expert_tokens=expert_tokens,
