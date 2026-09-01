@@ -563,6 +563,7 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401
+
         # Worker trace patches wrap NPUModelRunner, which is only fully
         # defined after vllm_ascend.worker.model_runner_v1 finishes
         # importing. That module imports from vllm_ascend.patch.worker
@@ -1218,6 +1219,7 @@ def _compute_potential_max_tokens(vllm_config) -> int:
 # both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
 # neither path recomputes it.
 _potential_max_tokens: int | None = None
+_MIN_NONEMPTY_MOE_BATCH_TOKENS = 1
 
 
 def set_potential_max_tokens(vllm_config) -> None:
@@ -1239,7 +1241,8 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
 
     Skipping is applicable for all dense models and for moe models only on ranks
     that act as KV consumers. We skip the DP all-reduce when either:
-    - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
+    - MegaMoE cannot be selected and both the prefill and decode communication
+      methods are regular MC2, or
     - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
@@ -1269,14 +1272,31 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
     from vllm_ascend.ascend_forward_context import select_moe_comm_method
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
-    def needs_mc2(n: int) -> bool:
-        return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+    def get_comm_method(n: int):
+        return select_moe_comm_method(n, vllm_config, is_draft_model=is_draft_model)
 
     scheduler_config = vllm_config.scheduler_config
+    # MegaMoE is selected for batches up to its per-rank buffer capacity. The
+    # decode and prefill maxima can both exceed that capacity even though a
+    # smaller runtime batch still selects MegaMoE. Probe the minimum non-empty
+    # batch first so all ranks retain metadata synchronization in that case.
+    minimum_batch_comm_method = get_comm_method(_MIN_NONEMPTY_MOE_BATCH_TOKENS)
+    if minimum_batch_comm_method == MoECommType.FUSED_MC2:
+        return False
+
     # potential_max_tokens is read from the set/get global (computed once in init).
-    decode_must_use_mc2 = needs_mc2(get_potential_max_tokens())
+    decode_comm_method = get_comm_method(get_potential_max_tokens())
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
-    prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
+    prefill_comm_method = get_comm_method(scheduler_config.max_num_batched_tokens)
+    # MegaMoE uses a symmetric collective across the complete EP-like group.
+    # Every rank must therefore make the same backend decision and enter the
+    # operator with the same token shape. Keep DP metadata synchronization
+    # enabled whenever either execution shape can select MegaMoE.
+    if MoECommType.FUSED_MC2 in {decode_comm_method, prefill_comm_method}:
+        return False
+
+    decode_must_use_mc2 = decode_comm_method == MoECommType.MC2
+    prefill_must_use_mc2 = prefill_comm_method == MoECommType.MC2
     # Skip all-reduce if decode requires MC2 and either prefill also
     # requires MC2 or recompute-based scheduler is enabled.
     return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)

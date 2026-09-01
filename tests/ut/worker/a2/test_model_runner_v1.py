@@ -4,9 +4,132 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+class TestNPUModelRunnerDPSync(unittest.TestCase):
+    def _build_runner(self, dp_rank: int, dp_size: int):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dp_rank = dp_rank
+        runner.dp_size = dp_size
+        runner.vllm_config = MagicMock()
+        runner.ascend_config = SimpleNamespace(dp_allreduce_on_npu=False)
+        return runner
+
+    def _sync_with_metadata(self, runner, metadata, **kwargs):
+        def all_reduce(packed_tensor, group):
+            self.assertIsNotNone(group)
+            packed_tensor.copy_(metadata)
+
+        dp_group = SimpleNamespace(cpu_group=object())
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1.should_skip_allreduce_across_dp_group",
+                return_value=False,
+            ),
+            patch("vllm_ascend.worker.model_runner_v1.get_dp_group", return_value=dp_group),
+            patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce", side_effect=all_reduce),
+        ):
+            return runner._sync_metadata_across_dp(**kwargs)
+
+    def test_idle_dummy_follows_active_graph_metadata(self):
+        runner = self._build_runner(dp_rank=1, dp_size=2)
+        metadata = torch.tensor(
+            [
+                [8, 128],
+                [CUDAGraphMode.PIECEWISE.value, CUDAGraphMode.NONE.value],
+                [1, 0],
+            ],
+            dtype=torch.int32,
+        )
+
+        with patch("vllm_ascend.worker.model_runner_v1.logger") as mock_logger:
+            mock_logger.isEnabledFor.return_value = True
+            max_tokens, tokens_across_dp, graph_mode = self._sync_with_metadata(
+                runner,
+                metadata,
+                num_tokens=128,
+                cudagraph_mode=CUDAGraphMode.NONE,
+                allow_dp_padding=True,
+                is_dummy_run=True,
+            )
+
+        self.assertEqual(max_tokens, 8)
+        self.assertEqual(tokens_across_dp.tolist(), [8, 8])
+        self.assertEqual(graph_mode, CUDAGraphMode.PIECEWISE)
+        mock_logger.debug.assert_called_once_with(
+            "DP model execution metadata synchronized: rank=%d, role=%s, "
+            "local_tokens=%d, active_mask=%s, synced_tokens=%s, aclgraph_mode=%s",
+            1,
+            "dummy",
+            128,
+            [True, False],
+            [8, 8],
+            CUDAGraphMode.PIECEWISE.name,
+        )
+
+    def test_active_rank_keeps_its_execution_metadata(self):
+        runner = self._build_runner(dp_rank=0, dp_size=2)
+        metadata = torch.tensor(
+            [
+                [8, 128],
+                [CUDAGraphMode.PIECEWISE.value, CUDAGraphMode.NONE.value],
+                [1, 0],
+            ],
+            dtype=torch.int32,
+        )
+
+        with patch("vllm_ascend.worker.model_runner_v1.logger") as mock_logger:
+            mock_logger.isEnabledFor.return_value = True
+            max_tokens, tokens_across_dp, graph_mode = self._sync_with_metadata(
+                runner,
+                metadata,
+                num_tokens=8,
+                cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                allow_dp_padding=True,
+                is_dummy_run=False,
+            )
+
+        self.assertEqual(max_tokens, 8)
+        self.assertEqual(tokens_across_dp.tolist(), [8, 8])
+        self.assertEqual(graph_mode, CUDAGraphMode.PIECEWISE)
+        mock_logger.debug.assert_called_once_with(
+            "DP model execution metadata synchronized: rank=%d, role=%s, "
+            "local_tokens=%d, active_mask=%s, synced_tokens=%s, aclgraph_mode=%s",
+            0,
+            "active",
+            8,
+            [True, False],
+            [8, 8],
+            CUDAGraphMode.PIECEWISE.name,
+        )
+
+    def test_all_dummy_ranks_keep_capture_metadata_behavior(self):
+        runner = self._build_runner(dp_rank=1, dp_size=2)
+        metadata = torch.tensor(
+            [
+                [8, 16],
+                [CUDAGraphMode.PIECEWISE.value, CUDAGraphMode.NONE.value],
+                [0, 0],
+            ],
+            dtype=torch.int32,
+        )
+
+        max_tokens, tokens_across_dp, graph_mode = self._sync_with_metadata(
+            runner,
+            metadata,
+            num_tokens=16,
+            cudagraph_mode=CUDAGraphMode.NONE,
+            allow_dp_padding=True,
+            is_dummy_run=True,
+        )
+
+        self.assertEqual(max_tokens, 16)
+        self.assertEqual(tokens_across_dp.tolist(), [16, 16])
+        self.assertEqual(graph_mode, CUDAGraphMode.NONE)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

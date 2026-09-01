@@ -112,10 +112,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_NZ": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
-    # Whether to enable fused MC2 (`dispatch_gmm_combine_decode` / `dispatch_ffn_combine`).
+    # Whether to enable fused MoE communication+compute backends.
     # 0, or not set: default ALLTOALL and MC2 will be used.
-    # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
-    # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
+    # 1: ALLTOALL and MC2 might be replaced by a fused MoE backend.
+    # On A3 this uses `dispatch_ffn_combine`; on A5 this uses MegaMoE for supported MXFP MoE paths.
     # 2: MC2 might be replaced by `dispatch_gmm_combine_decode` operator.
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.

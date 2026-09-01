@@ -26,7 +26,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.mxfp_compat import (
     FLOAT8_E8M0FNU_DTYPE,
     ensure_mxfp8_linear_available,
@@ -297,6 +297,16 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
 
         if topk_weights is None or topk_ids is None:
             raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
+        if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+            routing_pad_size = x.shape[0] - topk_ids.shape[0]
+            if routing_pad_size < 0:
+                raise ValueError(
+                    "MegaMoE routing token count exceeds its input token count: "
+                    f"routing_tokens={topk_ids.shape[0]}, input_tokens={x.shape[0]}."
+                )
+            if routing_pad_size > 0:
+                topk_weights = F.pad(topk_weights, (0, 0, 0, routing_pad_size))
+                topk_ids = F.pad(topk_ids, (0, 0, 0, routing_pad_size))
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -308,14 +318,26 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         if x.dtype not in [torch.float8_e4m3fn]:
             topk_weights = topk_weights.to(x.dtype)
 
+        if not self.dynamic_eplb and _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+            # MegaMoE requires one stacked tensor in checkpoint orientation.
+            w1 = layer.w13_weight.transpose(1, 2)
+            w2 = layer.w2_weight.transpose(1, 2)
+            w1_scale = layer.w13_weight_scale.transpose(1, 2)
+            w2_scale = layer.w2_weight_scale.transpose(1, 2)
+        else:
+            w1 = layer.w13_weight
+            w2 = layer.w2_weight
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=expert_map,
@@ -330,8 +352,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_per_token_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.float8_e4m3fn]),
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
                 swiglu_limit=layer.swiglu_limit,
             )
         )
