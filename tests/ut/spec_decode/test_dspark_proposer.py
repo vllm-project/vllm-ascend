@@ -19,12 +19,15 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
+from vllm.forward_context import BatchDescriptor
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MLAAttentionSpec,
@@ -34,6 +37,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
+from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
@@ -118,6 +122,10 @@ class _DSparkProposerTestBase:
             ),
         ):
             proposer = AscendDSparkProposer(vllm_config, device)
+        proposer._initial_query_buffer_shapes = (
+            proposer.positions.shape,
+            proposer._slot_mapping_buffer.shape,
+        )
         num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer.positions[:num_query_total] = torch.arange(num_query_total, dtype=torch.int32)
@@ -343,7 +351,456 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
+        assert proposer._initial_query_buffer_shapes == (
+            torch.Size([expected_max_query_tokens]),
+            torch.Size([expected_max_query_tokens]),
+        )
         assert proposer._dspark_draft_buffer.shape == (_MAX_BATCH_SIZE, 1 + _NUM_SPECULATIVE_TOKENS)
+
+
+class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
+    """The target descriptor supplies only the synchronized request bucket;
+    DSpark owns the draft token width used for its graph key."""
+
+    def test_base_mapper_declines_mapped_path(self):
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        target_desc = BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True)
+
+        assert proposer.build_draft_graph_descriptor(CUDAGraphMode.FULL, target_desc) == (None, None)
+
+    @pytest.mark.parametrize(
+        ("configured_mode", "structural", "rollout"),
+        [
+            (CUDAGraphMode.FULL_DECODE_ONLY, True, True),
+            (CUDAGraphMode.FULL_AND_PIECEWISE, True, False),
+            (CUDAGraphMode.FULL, False, False),
+            (CUDAGraphMode.NONE, False, False),
+        ],
+    )
+    def test_resolved_mode_is_evaluated_once(self, configured_mode, structural, rollout):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+
+        proposer.set_resolved_cudagraph_mode(configured_mode)
+
+        assert proposer._request_aligned_decode_graph is structural
+        assert proposer._dspark_graph_rollout_enabled is rollout
+
+    @pytest.mark.parametrize(
+        ("target_arch", "draft_arch", "supported"),
+        [
+            ("GlmMoeDsaForCausalLM", "Qwen3DSparkModel", True),
+            ("DeepseekV32ForCausalLM", "Qwen3DSparkModel", False),
+            ("GlmMoeDsaForCausalLM", "KimiK3DSparkForCausalLM", False),
+        ],
+    )
+    def test_phase1_model_capability_is_narrow(self, target_arch, draft_arch, supported):
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(architectures=[target_arch]),
+            speculative_config=SimpleNamespace(
+                draft_model_config=SimpleNamespace(
+                    architectures=[draft_arch],
+                    hf_config=SimpleNamespace(architectures=[draft_arch]),
+                ),
+            ),
+        )
+
+        assert AscendDSparkProposer._supports_phase1_aclgraph(config) is supported
+
+    def test_dynamic_verify_length_disables_rollout(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._dspark_phase1_model_supported = True
+        proposer.dynamic_spec = object()
+
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        assert proposer._request_aligned_decode_graph is True
+        assert proposer._dspark_graph_rollout_enabled is False
+        assert proposer.use_cuda_graph is False
+
+    def test_dcp_disables_phase1_rollout(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._dspark_phase1_model_supported = True
+        proposer.dynamic_spec = None
+        proposer.dcp_size = 2
+        proposer.num_query_per_req = 8
+
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        assert proposer._request_aligned_decode_graph is True
+        assert proposer._dspark_graph_rollout_enabled is False
+        assert proposer.use_cuda_graph is False
+        assert proposer._dspark_graph_fallback_reason == "DCP is outside phase-1 rollout"
+        assert (
+            proposer.get_draft_graph_capture_sizes(
+                [(CUDAGraphMode.FULL, [BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True)])],
+                [36],
+            )
+            == []
+        )
+
+    def test_probabilistic_draft_sampling_disables_rollout_and_capture(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._dspark_phase1_model_supported = True
+        proposer.dynamic_spec = None
+        proposer._enable_probabilistic_draft_probs = True
+        proposer.num_query_per_req = 8
+
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        assert proposer._dspark_graph_rollout_enabled is False
+        assert proposer.use_cuda_graph is False
+        assert (
+            proposer.get_draft_graph_capture_sizes(
+                [(CUDAGraphMode.FULL, [BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True)])],
+                [36],
+            )
+            == []
+        )
+
+    def test_explicit_draft_eager_disables_rollout_and_capture(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._dspark_phase1_model_supported = True
+        proposer.dynamic_spec = None
+        proposer.speculative_config = SimpleNamespace(
+            enforce_eager=True,
+            disable_padded_drafter_batch=False,
+        )
+        proposer.num_query_per_req = 8
+        proposer._runnable = proposer._run_merged_draft
+
+        with patch("vllm_ascend.spec_decode.llm_base_proposer.ACLGraphWrapper") as wrapper:
+            proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        assert proposer._dspark_graph_rollout_enabled is False
+        assert proposer.use_cuda_graph is False
+        assert (
+            proposer.get_draft_graph_capture_sizes(
+                [(CUDAGraphMode.FULL, [BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True)])],
+                [36],
+            )
+            == []
+        )
+        wrapper.assert_not_called()
+
+    def test_delayed_full_graph_rechecks_padded_batch_requirement(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._dspark_phase1_model_supported = True
+        proposer.dynamic_spec = None
+        proposer.speculative_config = SimpleNamespace(
+            enforce_eager=False,
+            disable_padded_drafter_batch=True,
+        )
+        proposer.compilation_config = SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+
+        with pytest.raises(NotImplementedError, match="padded drafter batch"):
+            proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+    def test_resolved_gate_wraps_loaded_draft_runnable(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._dspark_phase1_model_supported = True
+        proposer.dynamic_spec = None
+        proposer._runnable = proposer._run_merged_draft
+        runner_update_stream = object()
+        proposer.update_stream = runner_update_stream
+        proposer.vllm_config = SimpleNamespace()
+        proposer.use_eagle = False
+        proposer.enable_enpu = False
+
+        with patch("vllm_ascend.spec_decode.llm_base_proposer.ACLGraphWrapper") as wrapper:
+            proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+            proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        wrapper.assert_called_once_with(
+            proposer._run_merged_draft,
+            proposer.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            use_eagle=False,
+            enable_enpu=False,
+        )
+        assert proposer._runnable is wrapper.return_value
+        assert proposer.update_stream is runner_update_stream
+
+    def test_maps_target_request_bucket_to_draft_width(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+        target_desc = BatchDescriptor(
+            num_tokens=36,
+            num_reqs=4,
+            uniform=True,
+            has_lora=True,
+            num_active_loras=2,
+        )
+
+        mode, draft_desc = proposer.build_draft_graph_descriptor(CUDAGraphMode.FULL, target_desc)
+
+        assert mode == CUDAGraphMode.FULL
+        assert draft_desc == BatchDescriptor(
+            num_tokens=32,
+            num_reqs=4,
+            uniform=True,
+            has_lora=True,
+            num_active_loras=2,
+        )
+
+    def test_base_capture_sizes_keep_existing_behavior(self):
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        target_sizes = [1, 2, 4]
+
+        assert proposer.get_draft_graph_capture_sizes([], target_sizes) is target_sizes
+
+    def test_draft_capture_sizes_map_full_descriptors_and_deduplicate(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+        capture_descs = [
+            (
+                CUDAGraphMode.FULL,
+                [
+                    BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True),
+                    BatchDescriptor(
+                        num_tokens=36,
+                        num_reqs=4,
+                        uniform=True,
+                        has_lora=True,
+                        num_active_loras=1,
+                    ),
+                    BatchDescriptor(num_tokens=68, num_reqs=8, uniform=True),
+                ],
+            ),
+            (CUDAGraphMode.PIECEWISE, [BatchDescriptor(num_tokens=16)]),
+        ]
+
+        assert proposer.get_draft_graph_capture_sizes(capture_descs, [16, 36, 68]) == [32, 64]
+
+    def test_draft_capture_sizes_empty_when_phase_is_disabled(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_AND_PIECEWISE)
+        capture_descs = [
+            (CUDAGraphMode.FULL, [BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True)]),
+        ]
+
+        assert proposer.get_draft_graph_capture_sizes(capture_descs, [36]) == []
+
+    def test_mapped_full_uses_local_dp_vector_and_skips_collective(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.use_cuda_graph = True
+        proposer._draft_num_tokens_across_dp = torch.empty(2, dtype=torch.int32)
+        proposer.runner = SimpleNamespace(
+            _sync_metadata_across_dp=MagicMock(side_effect=AssertionError("draft DP sync must be skipped")),
+        )
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+        target_desc = BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True)
+
+        mode, draft_desc, num_input_tokens, num_tokens_across_dp = proposer._dispatch_draft_graph(
+            num_actual_tokens=24,
+            num_actual_reqs=3,
+            target_mode=CUDAGraphMode.FULL,
+            target_desc=target_desc,
+            uniform_decode=True,
+            has_lora=False,
+        )
+
+        assert mode == CUDAGraphMode.FULL
+        assert draft_desc == BatchDescriptor(num_tokens=32, num_reqs=4, uniform=True)
+        assert num_input_tokens == 32
+        assert num_tokens_across_dp.data_ptr() == proposer._draft_num_tokens_across_dp.data_ptr()
+        assert num_tokens_across_dp.tolist() == [32, 32]
+        proposer.runner._sync_metadata_across_dp.assert_not_called()
+
+    def test_mapped_full_dp1_preserves_none_dp_metadata_contract(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.use_cuda_graph = True
+        proposer._draft_num_tokens_across_dp = torch.empty(1, dtype=torch.int32)
+        proposer.runner = SimpleNamespace(
+            dp_size=1,
+            _sync_metadata_across_dp=MagicMock(side_effect=AssertionError("draft DP sync must be skipped")),
+        )
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        _, _, num_input_tokens, num_tokens_across_dp = proposer._dispatch_draft_graph(
+            num_actual_tokens=24,
+            num_actual_reqs=3,
+            target_mode=CUDAGraphMode.FULL,
+            target_desc=BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True),
+            uniform_decode=True,
+            has_lora=False,
+        )
+
+        assert num_input_tokens == 32
+        assert num_tokens_across_dp is None
+        proposer.runner._sync_metadata_across_dp.assert_not_called()
+
+    def test_mapped_eager_retains_collective(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.use_cuda_graph = True
+        proposer._draft_num_tokens_across_dp = torch.empty(2, dtype=torch.int32)
+        synced = torch.tensor([24, 24], dtype=torch.int32)
+        proposer.runner = SimpleNamespace(
+            _sync_metadata_across_dp=MagicMock(return_value=(24, synced, CUDAGraphMode.NONE)),
+        )
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        result = proposer._dispatch_draft_graph(
+            num_actual_tokens=24,
+            num_actual_reqs=3,
+            target_mode=CUDAGraphMode.NONE,
+            target_desc=BatchDescriptor(num_tokens=24),
+            uniform_decode=True,
+            has_lora=False,
+        )
+
+        assert result == (CUDAGraphMode.NONE, None, 24, synced)
+        proposer.runner._sync_metadata_across_dp.assert_called_once_with(24, is_draft_model=True)
+
+    def test_mapped_full_asserts_exact_query_width(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.use_cuda_graph = True
+        proposer._draft_num_tokens_across_dp = torch.empty(1, dtype=torch.int32)
+        proposer.runner = SimpleNamespace(_sync_metadata_across_dp=MagicMock())
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+
+        with pytest.raises(AssertionError, match=r"B \* Q"):
+            proposer._dispatch_draft_graph(
+                num_actual_tokens=23,
+                num_actual_reqs=3,
+                target_mode=CUDAGraphMode.FULL,
+                target_desc=BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True),
+                uniform_decode=True,
+                has_lora=False,
+            )
+
+    def test_mapped_full_metadata_has_exactly_r_equal_width_rows(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 8
+        proposer.max_batch_size = 4
+        proposer._draft_graph_query_start_loc = torch.arange(5, dtype=torch.int32) * 8
+        proposer._draft_graph_query_start_loc_cpu = torch.arange(5, dtype=torch.int32) * 8
+        cad = SimpleNamespace(
+            num_reqs=3,
+            query_start_loc=torch.tensor([0, 8, 16, 24], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 8, 16, 24], dtype=torch.int32),
+            actual_seq_lengths_q=[8, 8, 8],
+        )
+
+        proposer._prepare_mapped_full_graph_metadata(
+            cad,
+            BatchDescriptor(num_tokens=32, num_reqs=4, uniform=True),
+            num_input_tokens=32,
+        )
+
+        assert cad.num_reqs == 4
+        assert cad.query_start_loc.tolist() == [0, 8, 16, 24, 32]
+        assert cad.query_start_loc_cpu.tolist() == [0, 8, 16, 24, 32]
+        assert cad.actual_seq_lengths_q == [8, 16, 24, 32]
+
+    def test_mapped_full_trims_outputs_to_real_requests(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._last_draft_probs = torch.arange(4 * 2 * 5).reshape(4, 2, 5)
+        draft_token_ids = torch.arange(4 * 2).reshape(4, 2)
+        trimmed = proposer._finalize_draft_outputs(
+            draft_token_ids,
+            num_actual_reqs=3,
+            aclgraph_runtime_mode=CUDAGraphMode.FULL,
+        )
+
+        assert trimmed.shape == (3, 2)
+        assert proposer._last_draft_probs.shape == (3, 2, 5)
+
+    def test_dummy_capture_builds_exact_r_row_attention_metadata(self, monkeypatch):
+        proposer = self._make_proposer(
+            max_num_tokens=64,
+            num_reqs=4,
+            block_size=8,
+            draft_attn_causal=False,
+        )
+        proposer._draft_num_tokens_across_dp = torch.empty(2, dtype=torch.int32)
+        proposer.runner = SimpleNamespace(
+            _sync_metadata_across_dp=MagicMock(side_effect=AssertionError("capture DP sync must be skipped")),
+            optimistic_seq_lens_cpu=torch.arange(4, dtype=torch.int32),
+            seq_lens=torch.arange(4, dtype=torch.int32),
+        )
+        proposer._dspark_phase1_model_supported = True
+        proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
+        proposer.vllm_config = SimpleNamespace()
+        proposer.token_indices_to_sample = torch.zeros(32, dtype=torch.int32)
+        proposer._get_positions = lambda n: proposer.positions[:n]
+        proposer._runnable = MagicMock()
+        proposer.model.precompute_and_store_context_kv = MagicMock()
+        metadata = SimpleNamespace(attn_mask=object(), attn_state=None)
+        builder = MagicMock()
+        builder.build_for_graph_capture.return_value = metadata
+        proposer.draft_attn_groups[0].get_metadata_builder = lambda: builder
+        captured_context = {}
+
+        @contextmanager
+        def fake_forward_context(*args, **kwargs):
+            captured_context.update(kwargs)
+            yield
+
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.set_ascend_forward_context",
+            fake_forward_context,
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_forward_context",
+            lambda: SimpleNamespace(cudagraph_runtime_mode=CUDAGraphMode.FULL),
+        )
+        monkeypatch.setattr("vllm_ascend.spec_decode.dspark_proposer._EXTRA_CTX", SimpleNamespace(capturing=True))
+
+        proposer.dummy_run(
+            num_tokens=36,
+            num_reqs=4,
+            aclgraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True),
+        )
+
+        common_metadata = builder.build_for_graph_capture.call_args.args[0]
+        assert common_metadata.num_actual_tokens == 32
+        assert common_metadata.num_input_tokens == 32
+        assert common_metadata.num_reqs == 4
+        assert common_metadata.query_start_loc_cpu.tolist() == [0, 8, 16, 24, 32]
+        assert common_metadata.seq_lens.shape[0] == 4
+        assert common_metadata.block_table_tensor.shape[0] == 4
+        assert common_metadata.slot_mapping.shape[0] == 32
+        assert captured_context["num_tokens"] == 32
+        assert captured_context["num_actual_tokens"] == 32
+        assert captured_context["batch_descriptor"] == BatchDescriptor(
+            num_tokens=32,
+            num_reqs=4,
+            uniform=True,
+        )
+        assert captured_context["num_tokens_across_dp"].tolist() == [32, 32]
+        assert proposer._runnable.call_args.kwargs["num_input_tokens"] == 32
+        assert proposer._runnable.call_args.kwargs["batch_size"] == 4
+        assert proposer._runnable.call_args.kwargs["multi_steps_attn_metadata"] == [{"L0": metadata}]
+        proposer.runner._sync_metadata_across_dp.assert_not_called()
+        proposer.model.precompute_and_store_context_kv.assert_not_called()
+
+    def test_context_kv_runs_only_in_the_outside_hook(self):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer._dflash_num_context = 3
+        proposer._dflash_hidden_states = torch.zeros(8, 4)
+        proposer._context_positions_buffer = torch.zeros(8, dtype=torch.int32)
+        proposer._context_slot_mapping_buffers = [torch.zeros(8, dtype=torch.int32)]
+        proposer.model = MagicMock()
+
+        proposer._prepare_context_kv_inside_runnable(8, proposer._context_slot_mapping_buffers)
+        proposer.model.precompute_and_store_context_kv.assert_not_called()
+
+        proposer._prepare_inputs_outside_draft_runnable(8)
+        proposer.model.precompute_and_store_context_kv.assert_called_once()
+        args = proposer.model.precompute_and_store_context_kv.call_args.args
+        assert args[0].shape[0] == 3
+        assert args[1].shape[0] == 3
+        assert args[2][0].shape[0] == 3
 
 
 class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
@@ -435,6 +892,8 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert cad.slot_mapping.data_ptr() == proposer._per_group_query_slot_mapping_buffers[0].data_ptr()
         assert cad.slot_mapping.shape[0] == num_query_total
         # optional attrs the proposer rewrites when present.
+        # Eager behavior remains unchanged; mapped FULL rewrites this field to
+        # cumulative boundaries in _prepare_mapped_full_graph_metadata().
         assert cad.actual_seq_lengths_q == [block_size] * num_reqs
         assert cad.decode_token_per_req == block_size
 

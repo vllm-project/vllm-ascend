@@ -289,6 +289,7 @@ class ExecuteModelState(NamedTuple):
     positions: torch.Tensor
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
+    target_cudagraph_runtime_mode: CUDAGraphMode
     batch_desc: BatchDescriptor
 
 
@@ -1714,6 +1715,7 @@ class NPUModelRunner(GPUModelRunner):
         aux_hidden_states: torch.Tensor = None,
         sample_hidden_states: torch.Tensor = None,
         target_model_batch_desc: BatchDescriptor = None,
+        target_model_cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> list[list[int]] | None:
         self._log_propose_draft_token_ids_entry(spec_decode_metadata, num_scheduled_tokens)
 
@@ -1910,6 +1912,7 @@ class NPUModelRunner(GPUModelRunner):
                 token_indices_to_sample=token_indices_to_sample,
                 common_attn_metadata=common_attn_metadata,
                 target_model_batch_desc=target_model_batch_desc,
+                target_model_cudagraph_runtime_mode=target_model_cudagraph_runtime_mode,
                 sampling_metadata=sampling_metadata,
                 req_scheduled_tokens=req_scheduled_tokens,
                 long_seq_metadata=long_seq_metadata,
@@ -2439,6 +2442,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions,
                 ec_connector_output,
                 cudagraph_stats,
+                cudagraph_mode,
                 batch_desc,
             )
             self.kv_connector_output = kv_connector_output
@@ -2485,6 +2489,7 @@ class NPUModelRunner(GPUModelRunner):
             positions,
             ec_connector_output,
             cudagraph_stats,
+            target_cudagraph_runtime_mode,
             batch_desc,
         ) = self.execute_model_state
         # Clear ephemeral state.
@@ -2524,7 +2529,8 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states,
                 aux_hidden_states,
                 sample_hidden_states,
-                batch_desc,
+                target_model_batch_desc=batch_desc,
+                target_model_cudagraph_runtime_mode=target_cudagraph_runtime_mode,
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
@@ -5144,6 +5150,14 @@ class NPUModelRunner(GPUModelRunner):
                 cudagraph_mode, self.uniform_decode_query_len
             )
 
+        # Evaluate proposer graph capabilities only after the compilation
+        # config has resolved all mode fallbacks. Proposers that do not use
+        # target-descriptor mapping intentionally have no such hook.
+        if self.drafter is not None and (
+            set_resolved_mode := getattr(self.drafter, "set_resolved_cudagraph_mode", None)
+        ) is not None:
+            set_resolved_mode(cudagraph_mode)
+
         if (
             self.speculative_config
             and self.drafter is not None
@@ -5170,7 +5184,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                draft_capture_sizes = capture_sizes
+                if self.drafter is not None and (
+                    get_draft_capture_sizes := getattr(self.drafter, "get_draft_graph_capture_sizes", None)
+                ) is not None:
+                    draft_capture_sizes = get_draft_capture_sizes(capture_descs, capture_sizes)
+                if draft_capture_sizes:
+                    set_draft_graph_params(draft_capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""

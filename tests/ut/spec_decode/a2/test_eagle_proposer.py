@@ -1540,7 +1540,7 @@ class TestEagleProposerPropose:
                             'token_indices_to_sample', 'common_attn_metadata', 'target_model_batch_desc',
                             'sampling_metadata', 'mm_embed_inputs', 'req_scheduled_tokens', 'long_seq_metadata',
                             'num_prefill_reqs', 'num_decode_reqs', 'scheduler_output', 'num_scheduled_tokens',
-                            'num_rejected_tokens_gpu'
+                            'num_rejected_tokens_gpu', 'target_model_cudagraph_runtime_mode'
                         ]
 
 

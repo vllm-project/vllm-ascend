@@ -111,6 +111,145 @@ def _is_glm_model(model_config) -> bool:
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
+    def set_resolved_cudagraph_mode(self, mode: CUDAGraphMode) -> None:
+        """Record the runner's final graph-mode decision.
+
+        The runner calls this only after resolving graph-mode fallbacks. Draft
+        implementations may derive and cache capability gates here rather than
+        re-reading compilation config from a hot path.
+        """
+        self._resolved_cudagraph_mode = mode
+
+    def build_draft_graph_descriptor(
+        self,
+        target_mode: CUDAGraphMode,
+        target_desc: BatchDescriptor | None,
+    ) -> tuple[CUDAGraphMode | None, BatchDescriptor | None]:
+        """Optionally map a synchronized target graph key to a draft key.
+
+        ``(None, None)`` means that the proposer does not own this mapping and
+        the caller must retain the existing draft-side dispatcher behavior.
+        """
+        return None, None
+
+    def get_draft_graph_capture_sizes(
+        self,
+        target_capture_descs: list[tuple[CUDAGraphMode, list[BatchDescriptor]]],
+        target_capture_sizes: list[int],
+    ) -> list[int]:
+        """Return draft workspace sizes; preserve existing proposers by default."""
+        return target_capture_sizes
+
+    def _dispatch_draft_graph(
+        self,
+        *,
+        num_actual_tokens: int,
+        num_actual_reqs: int,
+        target_mode: CUDAGraphMode,
+        target_desc: BatchDescriptor | None,
+        uniform_decode: bool,
+        has_lora: bool,
+    ) -> tuple[CUDAGraphMode, BatchDescriptor | None, int, torch.Tensor | None]:
+        """Select the draft execution shape, preserving the legacy dispatcher."""
+        mapped_mode, mapped_desc = self.build_draft_graph_descriptor(target_mode, target_desc)
+        if mapped_mode is not None:
+            if mapped_mode == CUDAGraphMode.FULL:
+                # target_mode/target_desc are already DP-synchronized. Every
+                # rank must enter this branch and skip the draft collective;
+                # adding a rank-local fallback here can deadlock its peers.
+                assert mapped_desc is not None and mapped_desc.num_reqs is not None
+                return (
+                    mapped_mode,
+                    mapped_desc,
+                    mapped_desc.num_tokens,
+                    self._mapped_num_tokens_across_dp(mapped_desc.num_tokens),
+                )
+
+            num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
+                num_actual_tokens,
+                is_draft_model=True,
+            )
+            return CUDAGraphMode.NONE, None, num_input_tokens, num_tokens_across_dp
+
+        if self.use_cuda_graph:
+            _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_actual_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+        else:
+            num_input_tokens = num_actual_tokens
+
+        num_input_tokens, num_tokens_across_dp, _ = self.runner._sync_metadata_across_dp(
+            num_input_tokens,
+            is_draft_model=True,
+        )
+
+        if self.use_cuda_graph:
+            runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
+                num_tokens=num_input_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=has_lora,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
+        else:
+            runtime_mode = CUDAGraphMode.NONE
+            batch_descriptor = None
+        return runtime_mode, batch_descriptor, num_input_tokens, num_tokens_across_dp
+
+    def _mapped_num_tokens_across_dp(self, num_tokens: int) -> torch.Tensor | None:
+        raise NotImplementedError
+
+    def _prepare_mapped_full_graph_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        batch_descriptor: BatchDescriptor,
+        num_input_tokens: int,
+    ) -> None:
+        """Allow mapped proposers to establish their request-row layout."""
+
+    def _prepare_context_kv_inside_runnable(
+        self,
+        num_input_tokens: int,
+        context_slot_mapping_buffers: torch.Tensor | list[torch.Tensor] | None,
+    ) -> None:
+        self.build_model_inputs_first_pass(num_input_tokens, context_slot_mapping_buffers)
+
+    def _prepare_inputs_outside_draft_runnable(self, num_input_tokens: int) -> None:
+        """Prepare dynamic inputs that must remain outside a captured callable."""
+
+    def _finalize_draft_outputs(
+        self,
+        draft_token_ids: torch.Tensor,
+        num_actual_reqs: int,
+        aclgraph_runtime_mode: CUDAGraphMode,
+    ) -> torch.Tensor:
+        """Restore the public draft-output shape after graph execution."""
+        return draft_token_ids
+
+    def _wrap_draft_runnable_for_full_graph(self) -> None:
+        if getattr(self, "_draft_full_graph_wrapped", False):
+            return
+        logger.info(
+            "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
+            " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
+            self.use_eagle,
+            self.enable_enpu,
+        )
+        # The runner owns this stream and may already have injected it before
+        # DSpark enables graph wrapping after graph-mode resolution.
+        if not hasattr(self, "update_stream"):
+            self.update_stream = None
+        self._runnable = ACLGraphWrapper(
+            self._run_merged_draft,
+            self.vllm_config,
+            runtime_mode=CUDAGraphMode.FULL,
+            use_eagle=self.use_eagle,
+            enable_enpu=self.enable_enpu,
+        )
+        self._draft_full_graph_wrapped = True
+
     @staticmethod
     def _get_multimodal_image_token_index(model_name: str, config: Any) -> int:
         if model_name in [
@@ -560,20 +699,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     layer_module.shared_head.head = model.lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
-            logger.info(
-                "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
-                " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
-                self.use_eagle,
-                self.enable_enpu,
-            )
-            self.update_stream = None
-            self._runnable = ACLGraphWrapper(
-                self._run_merged_draft,
-                self.vllm_config,
-                runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
-                enable_enpu=self.enable_enpu,
-            )
+            self._wrap_draft_runnable_for_full_graph()
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
@@ -820,6 +946,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        target_model_cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -877,30 +1004,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         has_lora = len(self.runner.input_batch.lora_id_to_lora_request) > 0
         uniform_decode = target_model_batch_desc.uniform
 
-        if self.use_cuda_graph:
-            _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens, uniform_decode=uniform_decode, has_lora=has_lora
-            )
-            num_input_tokens = batch_descriptor.num_tokens
-        else:
-            num_input_tokens = num_tokens
-
         (
+            aclgraph_runtime_mode,
+            batch_descriptor,
             num_input_tokens,
             num_tokens_across_dp,
-            _,
-        ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
-
-        if self.use_cuda_graph:
-            aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=num_input_tokens, uniform_decode=uniform_decode, has_lora=has_lora
-            )
-            num_input_tokens = batch_descriptor.num_tokens
-        else:
-            aclgraph_runtime_mode = CUDAGraphMode.NONE
-            batch_descriptor = None
+        ) = self._dispatch_draft_graph(
+            num_actual_tokens=num_tokens,
+            num_actual_reqs=batch_size,
+            target_mode=target_model_cudagraph_runtime_mode,
+            target_desc=target_model_batch_desc,
+            uniform_decode=uniform_decode,
+            has_lora=has_lora,
+        )
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            assert batch_descriptor is not None
+            self._prepare_mapped_full_graph_metadata(
+                common_attn_metadata,
+                batch_descriptor,
+                num_input_tokens,
+            )
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
             # should have been done in model runner but not. For example, at prefill stage, target model
             # is run in eager mode currently, which means `_pad_query_start_loc_for_fia` is not called,
@@ -1114,13 +1238,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             runnable = cast(Callable[..., Any], self._runnable)
             run_draft: Callable[[], Any] = partial(runnable, **model_inputs)
 
+            self._prepare_inputs_outside_draft_runnable(num_input_tokens)
+
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
                 draft_token_ids = run_draft()
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
-        return draft_token_ids
+        return self._finalize_draft_outputs(
+            draft_token_ids,
+            batch_size,
+            aclgraph_runtime_mode,
+        )
 
     def _sample_draft_from_logits(
         self,
@@ -1203,7 +1333,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_kwargs = {"input_ids": model_input_ids, "positions": model_positions, "inputs_embeds": inputs_embeds}
 
         if self.method in ("dflash", "dspark"):
-            self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
+            self._prepare_context_kv_inside_runnable(num_input_tokens, self._context_slot_mapping_buffers)
         else:
             if self.pass_hidden_states_to_model:
                 model_hidden_states = self.hidden_states[:num_input_tokens]
