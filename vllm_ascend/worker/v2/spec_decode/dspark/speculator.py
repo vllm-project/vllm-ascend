@@ -58,7 +58,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         # feeds the drafter are in rotated space; fc must be rotated (W @ R) to
         # project them back to model space.
         rotation_path = get_rotation_path(self.vllm_config)
-        if rotation_path is not None:
+        if rotation_path is not None and hasattr(model.model, "fc"):
             rotation_weight = get_rotation_matrix(rotation_path)
             fc = model.model.fc
             with torch.no_grad():
