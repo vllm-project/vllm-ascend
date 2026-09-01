@@ -248,6 +248,10 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
 )
+from vllm_ascend.core.profiling_chunk_predictor import (
+    _finish_profiling_chunk_timing,
+    _start_profiling_chunk_timing,
+)
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -2132,17 +2136,12 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        self._cpp_execution_time_ms = None
         profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
-        if profiling_chunk_config.enabled and profiling_chunk_config.need_timing:
-            # Check if the scheduler signaled that calibration is complete.
-            # This flag is set cross-process via scheduler_output because
-            # modifying the config singleton in the scheduler process does
-            # not affect this worker process.
-            if getattr(scheduler_output, "disable_profiling_timing", False):
-                profiling_chunk_config.need_timing = False
-            else:
-                self._sync_device()
-                self._execution_start_time = time.perf_counter()
+        execution_start_time = _start_profiling_chunk_timing(
+            profiling_chunk_config,
+            scheduler_output,
+        )
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
 
@@ -2489,6 +2488,10 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
+                profiling_chunk_config,
+                execution_start_time,
+            )
             # Verify every scheduled layer executed its deferred copy.
             if self.cache_config.mamba_cache_mode == "align" and mamba_copy_connector is not None:
                 mamba_copy_connector.finish_mamba_state_copy()
@@ -2568,7 +2571,6 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
         pp = get_pp_group()
@@ -2732,14 +2734,6 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
-        if (
-            profiling_chunk_config.enabled
-            and profiling_chunk_config.need_timing
-            and hasattr(self, "_execution_start_time")
-        ):
-            self._sync_device()
-            model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
-
         if self.dynamic_eplb:
             self.eplb_updator.forward_end(self.eplb_heat_collection_status)
 
