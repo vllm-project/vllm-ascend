@@ -9,7 +9,7 @@
         <span id="quick-start-atlas-950dt-ubuntu"></span>
 
         ```bash
-        export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt
+        export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
         docker pull "$IMAGE"
         ```
 
@@ -18,7 +18,7 @@
         <span id="quick-start-atlas-950dt-openeuler"></span>
 
         ```bash
-        export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler
+        export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler
         docker pull "$IMAGE"
         ```
 
