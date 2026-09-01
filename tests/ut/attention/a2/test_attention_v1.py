@@ -437,6 +437,19 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_sharing_target_layer_name=None,
         )
 
+        self.impl_256_head = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=256,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None,
+        )
+
         self.impl_kv_share = AscendAttentionBackendImpl(
             num_heads=8,
             head_size=64,
@@ -464,7 +477,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         )
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
-    def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
+    def test_large_head_prefill_uses_npu_fusion_fallback(self, mock_get_forward_context):
         query = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
         key = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
         value = torch.randn(2, 8, FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
@@ -472,12 +485,32 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.PrefillNoCache
         metadata.actual_seq_lengths_q = [2]
-        metadata.causal = True
+        metadata.causal = False
         metadata.attn_mask = None
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
         with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward:
             result = self.impl_large_head.forward_impl(query, key, value, (), metadata, output)
+
+        mock_forward.assert_called_once()
+        self.assertIs(result, output)
+        self.assertTrue(torch.equal(result, torch.ones_like(query)))
+
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_256_head_prefill_uses_npu_fusion_fallback(self, mock_get_forward_context):
+        query = torch.randn(2, 8, 256)
+        key = torch.randn(2, 8, 256)
+        value = torch.randn(2, 8, 256)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.actual_seq_lengths_q = [2]
+        metadata.causal = False
+        metadata.attn_mask = None
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
+
+        with patch(LARGE_HEAD_PREFILL_PATH, return_value=(torch.ones_like(query), None)) as mock_forward:
+            result = self.impl_256_head.forward_impl(query, key, value, (), metadata, output)
 
         mock_forward.assert_called_once()
         self.assertIs(result, output)

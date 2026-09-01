@@ -60,6 +60,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
+from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -1366,6 +1367,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
+        passed_key = key
         passed_value = value
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(
             key, value, attn_metadata, kv_cache
@@ -1378,6 +1380,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+        if self.head_size in device_utils.FIA_TND_FALLBACK_HEAD_SIZES:
+            attn_output, _ = device_utils.npu_large_head_prefill_attention(
+                query,
+                passed_key,
+                passed_value,
+                attn_metadata,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                scale=self.scale,
+                is_prefill_no_cache=attn_metadata.attn_state == AscendAttentionState.PrefillNoCache,
+            )
+            output[:num_tokens] = attn_output[:num_tokens]
+            return output
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q

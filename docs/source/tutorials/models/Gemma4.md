@@ -8,6 +8,21 @@ This document describes the main validation steps for Gemma4 on Atlas A2, Atlas 
 
 This document is written based on the latest vLLM Ascend main branch. Gemma4 is supported on Atlas A2, Atlas A3, and Ascend 950 Products in this version.
 
+### Lightweight E2B and E4B Scope
+
+This tutorial also covers the lightweight multimodal dense checkpoints
+`google/gemma-4-E2B-it` and `google/gemma-4-E4B-it` on a single Atlas A2 NPU
+(Ascend 910B). Both checkpoints accept text, image, and audio inputs. They have
+a 512-dimensional global attention head and use the model configuration's
+`num_kv_shared_layers` setting to share KV cache layers. No user-side model
+rewrite or KV-cache flag is required: keep the original `config.json` with the
+downloaded weights so that vLLM can construct the shared-layer mapping.
+
+For the first functional run, use eager mode and a short context. After text,
+image, audio, and shared-KV configuration checks pass, enable ACLGraph for the
+serving workload. E2B and E4B are dense models, so expert parallelism is not
+applicable.
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model support matrix, including BF16, chunked prefill, automatic prefix caching, tensor parallelism, expert parallelism, and ACLGraph support.
@@ -24,6 +39,8 @@ Download the Gemma4 model weight to a local or shared directory, such as `/root/
 
 | Model type | Description | Recommended hardware |
 | ---------- | ----------- | -------------------- |
+| `google/gemma-4-E2B-it` | Lightweight dense multimodal checkpoint for text, image, and audio. | One Atlas A2/Ascend 910B (TP=1) for the baseline. |
+| `google/gemma-4-E4B-it` | Larger lightweight dense multimodal checkpoint for text, image, and audio. | One Atlas A2/Ascend 910B (TP=1) for the baseline; lower `--max-model-len` if HBM is insufficient. |
 | Gemma4 dense model | Dense Gemma4 weight. | A single Atlas A2, Atlas A3, or Ascend 950 node. Adjust the number of visible NPUs according to model size. |
 | Gemma4 MoE model | Mixture-of-Experts Gemma4 weight. | A single Atlas A2, Atlas A3, or Ascend 950 node. Use tensor parallelism or expert parallelism according to the model size and deployment plan. |
 
@@ -68,6 +85,47 @@ Expected result: the command prints the installed vLLM Ascend version without er
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
+
+#### Lightweight E2B/E4B on One Ascend 910B
+
+Keep the Hugging Face cache on a volume with enough capacity for model weights.
+The following E2B command is the recommended first-run baseline. Replace the
+model ID with `google/gemma-4-E4B-it` to validate E4B with the same settings.
+
+```shell
+export ASCEND_RT_VISIBLE_DEVICES=0
+export HF_HOME=/tmp/gemma4-hf
+export MODEL_ID=google/gemma-4-E2B-it
+
+vllm serve ${MODEL_ID} \
+  --served-model-name gemma4-e2b \
+  --tensor-parallel-size 1 \
+  --dtype bfloat16 \
+  --max-model-len 1024 \
+  --gpu-memory-utilization 0.7 \
+  --enforce-eager
+```
+
+Verify the two Gemma4-specific configuration invariants before sending a
+request. A nonzero `num_kv_shared_layers` confirms that the checkpoint requests
+shared KV layers; `global_head_dim=512` confirms that the large-head attention
+path is selected from the original checkpoint configuration.
+
+```shell
+python - <<'PY'
+from transformers import AutoConfig
+
+config = AutoConfig.from_pretrained("google/gemma-4-E2B-it").text_config
+print(f"global_head_dim={config.global_head_dim}")
+print(f"num_kv_shared_layers={config.num_kv_shared_layers}")
+assert config.global_head_dim == 512
+assert config.num_kv_shared_layers > 0
+PY
+```
+
+For a stable long-running service, increase `--max-model-len` only after this
+baseline passes. The shared KV layers reduce duplicate cache allocation, but the
+remaining KV cache still grows with context length and concurrent requests.
 
 Single-node deployment runs both Prefill and Decode on the same node, and is suitable for functional verification and single-node serving. The following examples show eager and ACLGraph startup commands. The commands use 4 visible NPUs as an example. Adjust `ASCEND_RT_VISIBLE_DEVICES` and `--tensor-parallel-size` when using a different device count.
 
@@ -171,7 +229,53 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 Expected result: the request returns HTTP 200, and the JSON response contains a `choices` field with generated text from the model.
 
-### 6.3 Offline Inference
+### 6.3 Image and Audio Requests for E2B/E4B
+
+Run the following requests after the text request succeeds. They use the
+OpenAI-compatible multimodal message schema. Replace the sample URLs and paths
+with inputs that are reachable from the service host.
+
+```shell
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma4-e2b",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe the image in one sentence."},
+        {"type": "image_url", "image_url": {"url": "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/stop_sign.jpg"}}
+      ]
+    }],
+    "max_tokens": 64,
+    "temperature": 0
+  }'
+```
+
+For an audio URL, send it as `audio_url`:
+
+```shell
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemma4-e2b",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What can you hear?"},
+        {"type": "audio_url", "audio_url": {"url": "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/mary_had_lamb.ogg"}}
+      ]
+    }],
+    "max_tokens": 64,
+    "temperature": 0
+  }'
+```
+
+Expected result: both requests return HTTP 200 with a nonempty `choices[0]`
+message. A successful text-only response is not sufficient for multimodal
+sign-off.
+
+### 6.4 Offline Inference
 
 ```python
 from vllm import LLM, SamplingParams

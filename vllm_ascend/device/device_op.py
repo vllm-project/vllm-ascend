@@ -69,10 +69,10 @@ class BaseDeviceAdaptor:
         **kwargs,
     ):
         # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
-        # 512-dim global attention heads. The FIA path slices/replaces
-        # query/key/value before this wrapper, so large-head prefill fallback
+        # 256-dim local and 512-dim global attention heads. The FIA path
+        # slices/replaces query/key/value before this wrapper, so the fallback
         # must use the original current-token K/V.
-        if head_size == device_utils.FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE:
+        if head_size in device_utils.FIA_TND_FALLBACK_HEAD_SIZES:
             return device_utils.npu_large_head_prefill_attention(
                 query,
                 current_key,
