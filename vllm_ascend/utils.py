@@ -1164,6 +1164,15 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
     return _HAS_LAYER_IDX
 
 
+# C8_MXFP (FP8 KV + E8M0 scales) on Ascend A5 uses 512-token pages for the QFA path
+# (the QFA D=256 requirement doc allows block sizes 512/1024).
+A5_C8_MXFP_KV_CACHE_BLOCK_SIZE = 512
+
+
+def is_c8_mxfp_kv_quant(vllm_config: VllmConfig) -> bool:
+    return vllm_config.quant_config is not None and vllm_config.quant_config.enable_mxfp_c8_quant
+
+
 def refresh_block_size(vllm_config):
     """
     Refresh the block size in cache config.
@@ -1177,6 +1186,20 @@ def refresh_block_size(vllm_config):
 
     if cache_config.block_size is None:
         cache_config.block_size = 128
+
+    # Must run before the hybrid early-return below: C8-MXFP hybrid models
+    # (e.g. Qwen3.5/3.6 linear-attention + full-attention mixes) still need
+    # the 512-token pages that the QFA PA path requires.
+    if is_c8_mxfp_kv_quant(vllm_config):
+        if cache_config.block_size != A5_C8_MXFP_KV_CACHE_BLOCK_SIZE:
+            logger.info(
+                "Ascend A5 with C8_MXFP KV cache requires block_size=%s; "
+                "overriding block_size from %s.",
+                A5_C8_MXFP_KV_CACHE_BLOCK_SIZE,
+                cache_config.block_size,
+            )
+            cache_config.block_size = A5_C8_MXFP_KV_CACHE_BLOCK_SIZE
+        return
 
     if not scheduler_config or not model_config:
         return
