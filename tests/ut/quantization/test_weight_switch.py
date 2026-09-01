@@ -10,8 +10,8 @@ from vllm_ascend.weight_switch import (
     WeightLoadPartition,
     WeightSwitchConfig,
     WeightSwitchGatherSpec,
-    WeightSwitchRepeatSpec,
     WeightSwitchMixin,
+    WeightSwitchRepeatSpec,
 )
 
 

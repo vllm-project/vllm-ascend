@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
 from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADCPImpl,
     AscendSFADCPMetadata,

@@ -38,9 +38,9 @@ from .base import (
     WeightSwitchConfig,
     WeightSwitchGatherPart,
     WeightSwitchGatherSpec,
+    WeightSwitchMixin,
     WeightSwitchRepeatPart,
     WeightSwitchRepeatSpec,
-    WeightSwitchMixin,
     WeightSwitchState,
 )
 from .kv_cache import AscendFAQuantAttentionMethod

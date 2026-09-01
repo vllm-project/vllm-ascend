@@ -27,12 +27,6 @@ from vllm_ascend.attention.sfa_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.weight_switch import (
-    WeightLoadPartition,
-    WeightSwitchConfig,
-    WeightSwitchMixin,
-)
-from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
@@ -41,6 +35,12 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     vllm_version_is,
 )
+from vllm_ascend.weight_switch import (
+    WeightLoadPartition,
+    WeightSwitchConfig,
+    WeightSwitchMixin,
+)
+from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 
 if vllm_version_is("0.27.1"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -65,9 +65,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
-        self._initialize_o_proj_weight_switch(
-            WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input")
-        )
+        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
         if not self.enable_pcp_o_proj_weight_sharding:
             return
         self.o_proj_weight_load_partition = WeightLoadPartition.from_nested_groups(
@@ -75,12 +73,10 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
             get_pcp_group(),
         )
         linear_method = self._get_o_proj_weight_switch_method()
-        self.o_proj_weight_load_state = (
-            linear_method.prepare_layer_for_parallel_weight_load(
-                self.o_proj,
-                self.o_proj_weight_switch_config,
-                self.o_proj_weight_load_partition,
-            )
+        self.o_proj_weight_load_state = linear_method.prepare_layer_for_parallel_weight_load(
+            self.o_proj,
+            self.o_proj_weight_switch_config,
+            self.o_proj_weight_load_partition,
         )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -147,11 +143,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
 
         if self.o_proj.reduce_results and get_tp_group().world_size > 1:
-            if (
-                not self.o_proj.skip_bias_add
-                and get_tp_group().rank_in_group == 0
-                and self.o_proj.bias is not None
-            ):
+            if not self.o_proj.skip_bias_add and get_tp_group().rank_in_group == 0 and self.o_proj.bias is not None:
                 partial_output = partial_output + self.o_proj.bias
             partial_output = get_tp_group().all_reduce(partial_output)
         elif not self.o_proj.skip_bias_add and self.o_proj.bias is not None:

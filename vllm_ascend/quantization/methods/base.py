@@ -27,9 +27,9 @@ from vllm_ascend.weight_switch import (
     WeightSwitchConfig,
     WeightSwitchGatherPart,
     WeightSwitchGatherSpec,
+    WeightSwitchMixin,
     WeightSwitchRepeatPart,
     WeightSwitchRepeatSpec,
-    WeightSwitchMixin,
     WeightSwitchState,
 )
 
