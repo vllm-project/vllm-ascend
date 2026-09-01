@@ -259,15 +259,23 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
             layer,
             "w2_weight_packed" if self.use_weight_packed else "w2_weight",
         )
-        w13_weight.data = torch_npu.npu_format_cast(
-            w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
-        )
-        w2_weight.data = torch_npu.npu_format_cast(
-            w2_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
-        )
-        w13_weight.data = w13_weight.data.transpose(1, 2)
-        w2_weight.data = w2_weight.data.transpose(1, 2)
-        g, n, k = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
-        g, n, k = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
+        layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+            )
+        layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+            )
+        if get_ascend_config().enable_fused_mc2 == 1:
+            g, n, k = layer.w13_weight_scale.shape
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).contiguous()
+            g, n, k = layer.w2_weight_scale.shape
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).contiguous()
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(torch.float8_e8m0fnu)
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(torch.float8_e8m0fnu)
+        else:
+            w13_weight.data = w13_weight.data.transpose(1, 2)
+            w2_weight.data = w2_weight.data.transpose(1, 2)
+            g, n, k = layer.w13_weight_scale.shape
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
+            g, n, k = layer.w2_weight_scale.shape
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
