@@ -25,6 +25,10 @@ from dataclasses import dataclass
 from types import MethodType
 from typing import Any
 
+from vllm.entrypoints.openai.chat_completion import protocol as chat_protocol
+from vllm.entrypoints.openai.chat_completion import serving as chat_serving
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.engine import protocol as engine_protocol
 from vllm.reasoning import minimax_m2_reasoning_parser as minimax_parser
 
 _MINIMAX_REASONING_PARSER_TYPES = (
