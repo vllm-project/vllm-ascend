@@ -29,7 +29,10 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    get_uniform_token_count,
+)
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
@@ -94,6 +97,61 @@ def _use_ascend_pcp_manager_for_vllm_0271():
         yield
     finally:
         pcp_module.PCPManager = original_pcp_manager_cls
+
+
+def validate_oproj_tp_graph_step(
+    num_tokens: int,
+    cudagraph_mode: CUDAGraphMode,
+    max_cudagraph_capture_size: int,
+    *,
+    dp_size: int = 1,
+    oproj_enabled: bool = False,
+    dummy_run: bool = False,
+    is_profile: bool = False,
+    uniform_decode_step: bool = True,
+) -> None:
+    """Reject o_proj TP steps that would run outside a captured graph.
+
+    The o_proj TP group spans DP ranks, and its collectives stay aligned only
+    while every rank forwards the same token count per step; model runner v2
+    guarantees that only under a graph mode, and an eager step would hang the
+    collectives. Single-member groups have no cross-rank exchange; dummy/profile
+    runs are rank-uniform, so all three are exempt. FULL_DECODE_ONLY dispatches
+    its non-decode steps to eager without DP padding, so only its uniform
+    decode steps pass.
+    """
+    if dp_size == 1 or not oproj_enabled or dummy_run or is_profile:
+        return
+    eager_step = (
+        cudagraph_mode == CUDAGraphMode.NONE
+        or num_tokens > max_cudagraph_capture_size
+        or (cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY and not uniform_decode_step)
+    )
+    if eager_step:
+        raise ValueError(
+            "oproj TP requires every DP rank to forward the same token count "
+            "per step, which only holds inside a cudagraph "
+            f"(cudagraph_mode={cudagraph_mode}, num_tokens={num_tokens}, "
+            f"max_cudagraph_capture_size={max_cudagraph_capture_size}); keep "
+            "cudagraphs enabled and stay within the captured sizes "
+            "(FULL_DECODE_ONLY only covers decode steps), or the cross-DP "
+            "o_proj collectives will hang"
+        )
+
+
+def _is_uniform_decode_step(scheduler_output: SchedulerOutput, decode_query_len: int) -> bool:
+    # Zero-token steps return before any forward, so there is nothing to align.
+    num_scheduled = getattr(scheduler_output, "num_scheduled_tokens", None)
+    if not num_scheduled:
+        return True
+    return (
+        get_uniform_token_count(
+            len(num_scheduled),
+            scheduler_output.total_num_scheduled_tokens,
+            max(num_scheduled.values()),
+        )
+        == decode_query_len
+    )
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -239,6 +297,22 @@ class NPUModelRunner(GPUModelRunner):
             profiling_config,
             scheduler_output,
         )
+
+        if self.ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0:
+            validate_oproj_tp_graph_step(
+                scheduler_output.total_num_scheduled_tokens,
+                self.compilation_config.cudagraph_mode,
+                self.compilation_config.max_cudagraph_capture_size,
+                dp_size=self.dp_size,
+                oproj_enabled=True,
+                dummy_run=dummy_run,
+                is_profile=is_profile,
+                uniform_decode_step=(
+                    _is_uniform_decode_step(scheduler_output, self.decode_query_len)
+                    if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+                    else True
+                ),
+            )
 
         if vllm_version_is("0.27.1"):
             output = super().execute_model(

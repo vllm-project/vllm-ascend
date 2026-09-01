@@ -12,7 +12,8 @@ from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 def _make_runner(need_timing: bool = True):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
+        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing)),
+        finegrained_tp_config=SimpleNamespace(oproj_tensor_parallel_size=0),
     )
     runner.vllm_config = SimpleNamespace()
     runner.execute_model_state = None
