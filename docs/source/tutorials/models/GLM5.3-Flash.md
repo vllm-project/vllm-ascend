@@ -30,7 +30,38 @@ It is recommended to download the model weight to the shared directory of multip
     Start the docker image on each node.
 
     ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-a5
+    export NAME=vllm-ascend
 
+    docker run --rm \
+    --name $NAME \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
+    --device /dev/davinci_manager \
+    --device /dev/hisi_hdc \
+    --device /dev/ummu \
+    --device /dev/uburma \
+    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+    -v /etc/hixlep/:/etc/hixlep/ \
+    -v /root/.cache:/root/.cache \
+    -v /usr/local/sbin:/usr/local/sbin \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+    -v /usr/bin/urma_admin:/usr/bin/urma_admin \
+    -v /lib/route.conf:/lib/route.conf \
+    -v /usr/lib64:/usr/lib64 \
+    -itd $IMAGE bash
     ```
 
 
@@ -79,7 +110,6 @@ It is recommended to download the model weight to the shared directory of multip
     ```
 
 
-
 ## 5 Online Service Deployment
 
 ### 5.1 Single-Node Online Deployment
@@ -97,22 +127,23 @@ export HCCL_BUFFSIZE=1024
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
-vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A5 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
   --host 0.0.0.0 \
   --port 8011 \
-  --data-parallel-size 8 \
-  --tensor-parallel-size 1 \
+  --data-parallel-size 1 \
+  --tensor-parallel-size 8 \
   --enable-expert-parallel \
   --seed 1024 \
   --quantization ascend \
-  --served-model-name glm \
+  --served-model-name glm-5 \
   --max-num-seqs 128 \
   --max-model-len 132096 \
   --async-scheduling \
   --enable-prefix-caching \
   --max-num-batched-tokens 8192 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.90 \
+  --gpu-memory-utilization 0.95 \
+  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
   --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
 ```
@@ -125,8 +156,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
-- `--data-parallel-size 2` / `--tensor-parallel-size 8`: DP2 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w8a8 weights. 
-- `--tool-call-parser glm47` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable function calling for GLM-5.3-Flash.
+- `--data-parallel-size 1` / `--tensor-parallel-size 8`: DP1 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w8a8 weights. 
 - `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 
@@ -150,29 +180,27 @@ echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-
-vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-V1   \
+vllm serve  /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-0829   \
   --host 0.0.0.0 \
   --port 8900 \
   --max-model-len 133120  \
-  --data-parallel-size 1 \
   --tensor-parallel-size 16 \
+  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
   --enable-expert-parallel \
   --seed 1024 \
   --served-model-name glm \
   --safetensors-load-strategy prefetch \
   --max-num-seqs 128 \
-  --max-num-batched-tokens 8192 \
+  --max-num-batched-tokens 8196 \
   --trust-remote-code \
   --quantization ascend \
-  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
   --gpu-memory-utilization 0.85 \
-  --speculative-config '{"num_speculative_tokens": 2, "method": "deepseek_mtp", "enforce_eager": true}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [8,16,24]}' \
   --profiler-config \
 '{"profiler": "torch",
-"torch_profiler_dir": "/home/w00896881/profiling/0829",
-"torch_profiler_with_stack": true}' \
+"torch_profiler_dir": "/home/d00945881/profiling/0828",
+"torch_profiler_with_stack": false}' \
   --enable-prefix-caching \
   --async-scheduling \
   --api-server-count 1
@@ -186,8 +214,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
 - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
-- `--data-parallel-size 2` / `--tensor-parallel-size 8`: DP2 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w8a8 weights. 
-- `--tool-call-parser glm47` / `--reasoning-parser glm45` / `--enable-auto-tool-choice`: Enable function calling for GLM-5.3-Flash.
+- `--data-parallel-size 1` / `--tensor-parallel-size 16`: DP2 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w8a8 weights. 
 - `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 
