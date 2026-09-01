@@ -55,7 +55,13 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    calc_split_factor,
+    enable_sfa,
+    enable_sfa_dcp_replicated_indexer,
+    get_ascend_device_type,
+)
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -70,6 +76,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    sfa_dcp_replicated_indexer_size = (
+        vllm_config.parallel_config.decode_context_parallel_size
+        if enable_sfa_dcp_replicated_indexer(vllm_config)
+        else 1
+    )
 
     if get_ascend_device_type() == AscendDeviceType.A5:
         c8_k_cache_dtype = torch.float8_e4m3fn
@@ -133,6 +144,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 scale_dim=1 if cache_sparse_li_c8 else 0,
                 scale_dtype=c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
                 cache_sparse_li_c8=cache_sparse_li_c8,
+                sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
             )
             continue
 
@@ -252,6 +264,7 @@ def build_attn_metadata(
             is_prefilling=common_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
+            dcp_local_seq_lens=dcp_local_seq_lens,
             **common_attn_metadata_extra_kwargs,
         )
 

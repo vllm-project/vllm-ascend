@@ -17,20 +17,36 @@ class HardwareCapability(Enum):
     """Independent SoC capabilities consumed by shared business logic."""
 
     AUTO_ENABLE_CUSTOM_OPS = auto()
+    ATB_EXTENSIONS = auto()
+    ATB_WARMUP = auto()
     BGMV_SGMV_META_REGISTRATION = auto()
+    CHUNKED_PREFILL_PHASE_SPLIT = auto()
     CLUSTER_CPU_TOPOLOGY = auto()
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
+    DISTRIBUTED_COMMUNICATION_ADAPTATION = auto()
+    DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
+    DSA_O_PROJ_TP = auto()
     DYNAMIC_MX_QUANT_FUSION = auto()
+    DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
+    FP8_ATTENTION = auto()
+    GDN_COMPATIBILITY = auto()
     IRQ_CPU_RESERVATION = auto()
+    LOCAL_KV_COMM_RESOURCE = auto()
     LORA_CUSTOM_OPS = auto()
+    MLA_DECODE_PROLOG_WITHOUT_ROPE = auto()
+    MLAPO_NATIVE_WEIGHTS = auto()
     MC2_FULLMESH_V2_COMM = auto()
     MC2_HIERARCHY_COMM = auto()
     NPUGRAPH_EX = auto()
+    PAGED_ATTENTION = auto()
     RC_DEVICE_DISCOVERY = auto()
     REDUCED_CUDAGRAPH_CAPTURE_SIZES = auto()
     RUNTIME_CUSTOM_OPS = auto()
     SFA_DCP_REPLICATED_INDEXER = auto()
     STANDARD_WORKER_PATCHES = auto()
+    STANDARD_MAMBA_PATCH = auto()
+    TRITON_BATCH_MEMCPY = auto()
+    UNRESTRICTED_MLAPO = auto()
 
 
 class AttentionBackendFamily(Enum):
@@ -99,14 +115,19 @@ class HardwareProfile:
 _STANDARD_CAPABILITIES = frozenset(
     {
         HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
+        HardwareCapability.ATB_EXTENSIONS,
+        HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
         HardwareCapability.NPUGRAPH_EX,
+        HardwareCapability.PAGED_ATTENTION,
         HardwareCapability.RUNTIME_CUSTOM_OPS,
         HardwareCapability.SFA_DCP_REPLICATED_INDEXER,
+        HardwareCapability.STANDARD_MAMBA_PATCH,
         HardwareCapability.STANDARD_WORKER_PATCHES,
+        HardwareCapability.TRITON_BATCH_MEMCPY,
     }
 )
 _A3_CAPABILITIES = _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM}
@@ -147,6 +168,8 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             capabilities=frozenset(
                 {
                     HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
+                    HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
+                    HardwareCapability.GDN_COMPATIBILITY,
                     HardwareCapability.IRQ_CPU_RESERVATION,
                     HardwareCapability.RC_DEVICE_DISCOVERY,
                     HardwareCapability.RUNTIME_CUSTOM_OPS,
@@ -166,12 +189,23 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                 {
                     HardwareCapability.AUTO_ENABLE_CUSTOM_OPS,
                     HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+                    HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
+                    HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
+                    HardwareCapability.DSA_O_PROJ_TP,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
+                    HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
+                    HardwareCapability.FP8_ATTENTION,
+                    HardwareCapability.LOCAL_KV_COMM_RESOURCE,
                     HardwareCapability.LORA_CUSTOM_OPS,
+                    HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
+                    HardwareCapability.MLAPO_NATIVE_WEIGHTS,
                     HardwareCapability.NPUGRAPH_EX,
                     HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
+                    HardwareCapability.STANDARD_MAMBA_PATCH,
                     HardwareCapability.STANDARD_WORKER_PATCHES,
+                    HardwareCapability.TRITON_BATCH_MEMCPY,
+                    HardwareCapability.UNRESTRICTED_MLAPO,
                 }
             ),
         ),

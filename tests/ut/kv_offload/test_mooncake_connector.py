@@ -1299,13 +1299,14 @@ class TestCoreFunctionality(unittest.TestCase):
 
         with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
             mock_config.return_value.enable_kv_nz = False
-            self.thread.enable_sfa_dcp_replicated_indexer = True
-            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000]]
-            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000]]}
-            self.thread.block_size_scale = [[1, 2]]
-            self.thread.block_len_per_addr = [[1024, 2048]]
-            self.thread.block_stride_per_addr = [[1024, 2048]]
-            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[4096, 8192]]
+            self.thread.enable_sfa_dcp_replicated_indexer = False
+            self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "AscendSFAIndexerCacheSpec"}, [0])}
+            self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x2000]]
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x4000]]}
+            self.thread.block_size_scale = [[1]]
+            self.thread.block_len_per_addr = [[2048]]
+            self.thread.block_stride_per_addr = [[2048]]
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[8192]]
 
             self.thread._transfer_kv_cache_all_groups(req)
 
@@ -1313,6 +1314,29 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertEqual(call_args[1], [0x2000 + 4 * 2048])
         self.assertEqual(call_args[2], [0x4000 + 7 * 8192])
         self.assertEqual(call_args[3], [2 * 2048])
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_regular_kv_does_not_use_replicated_indexer_blocks(self, mock_get_meta):
+        req = dict(self.test_req)
+        req["local_block_ids"] = [[1, 2]]
+        req["remote_block_ids"] = [[3, 4]]
+        req["local_block_ids_replicate_k"] = ([40, 41],)
+        req["remote_block_ids_replicate_k"] = ([70, 71],)
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
+            mock_config.return_value.enable_kv_nz = False
+            self.thread.enable_sfa_dcp_replicated_indexer = False
+            self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "MLAAttentionSpec"}, [0])}
+            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
+            self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[1024]]
+
+            self.thread._transfer_kv_cache_all_groups(req)
+
+        call_args, _ = self.engine.batch_transfer_sync_read.call_args
+        self.assertEqual(call_args[1], [0x1000 + 1 * 1024])
+        self.assertEqual(call_args[2], [0x3000 + 3 * 1024])
+        self.assertEqual(call_args[3], [2 * 1024])
         mock_get_meta.assert_not_called()
 
     def test_append_mamba_transfer_meta_uses_block_stride_for_block_offsets(self):
@@ -3631,6 +3655,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_uses_full_blocks_for_prefix(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.use_sfa_sparse = True
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16
@@ -3653,6 +3678,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
     def test_get_sfa_replicated_indexer_block_ids_ignores_empty_regular_kv_shard(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.use_sfa_sparse = True
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16
@@ -3672,9 +3698,33 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(local_ids, ([40],))
         self.assertEqual(remote_ids, ([20],))
 
+    def test_get_sfa_replicated_indexer_block_ids_when_only_remote_enables_dcp(self):
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.enable_sfa_dcp_replicated_indexer = False
+        worker.use_sfa_sparse = True
+        worker.pcp_size = 1
+        worker.dcp_size = 1
+        worker.block_size = 16
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=2,
+            remote_block_ids=([10],),
+            local_block_ids=([20, 21],),
+            local_full_block_ids=([20, 21],),
+            num_external_tokens=32,
+            num_prompt_blocks=2,
+            num_computed_tokens=0,
+        )
+
+        local_ids, remote_ids = worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
+
+        self.assertEqual(local_ids, ([20, 21],))
+        self.assertEqual(remote_ids, ([20, 21],))
+
     def test_get_sfa_replicated_indexer_block_ids_requires_full_blocks_for_prefix(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.enable_sfa_dcp_replicated_indexer = True
+        worker.use_sfa_sparse = True
         worker.pcp_size = 1
         worker.dcp_size = 2
         worker.block_size = 16
