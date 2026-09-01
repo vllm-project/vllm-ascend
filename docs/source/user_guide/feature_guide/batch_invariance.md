@@ -35,13 +35,19 @@ The `batch_invariant_ops` build and installation process consists of two stages 
 1. Install the operator run package. It provides the device-side batch-invariant operators implemented with AscendC.
 2. Build and install the `batch_invariant_ops` wheel. It provides the PyTorch extension interfaces that invoke the AscendC operators.
 
-### Install the batch-invariant operator packages
+!!! note
 
-#### Option 1: Install with vllm-ascend from source
+    A prebuilt vllm-ascend wheel does not include the `csrc` directory or `csrc/build_batch_invariant_ops.sh`, and setting `VLLM_BATCH_INVARIANT=1` while installing that wheel does not rebuild the operators. Manual operator installation requires a matching vllm-ascend source checkout. `<vllm-ascend-source-dir>` in the following commands refers to that checkout, not the wheel's `site-packages` directory.
+
+### Install from source
+
+#### Option 1: Install vllm-ascend and the operator packages together
 
 The environment variable is consumed by the source build. It works with both a regular source installation and an editable source installation when custom kernel compilation is enabled:
 
 ```bash
+cd <vllm-ascend-source-dir>
+
 # Regular source installation
 COMPILE_CUSTOM_KERNELS=1 VLLM_BATCH_INVARIANT=1 \
     pip install . --no-build-isolation
@@ -51,15 +57,9 @@ COMPILE_CUSTOM_KERNELS=1 VLLM_BATCH_INVARIANT=1 \
     pip install -e . --no-build-isolation
 ```
 
-Setting `VLLM_BATCH_INVARIANT=1` while installing a prebuilt vllm-ascend wheel does not rebuild these operators. Use a source installation as above, or install the operator packages separately as described below.
-
-#### Option 2: Install after vllm-ascend is already installed
+#### Option 2: Install the operator packages after vllm-ascend is already installed
 
 Obtain a vllm-ascend source tree that matches the installed package version, then build and install the operator packages from that source tree.
-
-!!! note
-
-    A prebuilt vllm-ascend wheel does not include the `csrc` directory or `csrc/build_batch_invariant_ops.sh`. Therefore, the following commands cannot be run from the wheel's `site-packages` installation directory. `<vllm-ascend-source-dir>` must point to a matching vllm-ascend source checkout.
 
 **A2:**
 
