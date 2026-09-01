@@ -10,6 +10,7 @@ import torch
 
 from vllm_ascend.attention.dsa_compressor import (
     CompressorExecutor,
+    CompressorSPGatherHandle,
     IndexerCompressorExecutor,
 )
 from vllm_ascend.device.device_op import DeviceOperator
@@ -232,7 +233,14 @@ def test_indexer_compressor_sp_reuses_input_and_runs_epilog_after_reorder() -> N
             "_run_kernel",
             return_value=(compressed_kv, torch.empty((2, 2), dtype=torch.int32)),
         ) as run_kernel,
-        patch.object(executor, "_gather_sp_output", return_value=compressed_kv),
+        patch.object(
+            executor,
+            "_launch_sp_output",
+            return_value=CompressorSPGatherHandle(
+                recv_buffer=compressed_kv,
+                send_buffer=compressed_kv,
+            ),
+        ),
         patch.object(executor, "_sync_sp_state"),
         patch(
             "vllm_ascend.attention.dsa_compressor.get_or_compute_compressor_metadata",

@@ -11,6 +11,7 @@ from vllm_ascend.attention.context_parallel import dsa_cp
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_compressor import (
     CompressorExecutor,
+    CompressorSPGatherHandle,
     CompressorSPMetadataBuilder,
 )
 from vllm_ascend.device.device_op import DeviceOperator
@@ -578,16 +579,16 @@ def test_c128_compressed_gather_uses_one_collective_and_preallocated_buffers() -
     with patch.object(
         torch.distributed, "all_gather_into_tensor", side_effect=fake_all_gather
     ):
-        gathered_kv = executor._gather_sp_output(
+        gathered_kv = executor._launch_sp_output(
             compressed_kv,
             sp_metadata,
-        )
+        ).wait()
         send_buffer = sp_metadata.compressed_kv_send_buffer
         gather_buffer = sp_metadata.gathered_compressed_kv_buffer
-        gathered_kv_again = executor._gather_sp_output(
+        gathered_kv_again = executor._launch_sp_output(
             compressed_kv,
             sp_metadata,
-        )
+        ).wait()
 
     assert calls == 2  # One compressed-KV collective per invocation; no slot collective.
     assert gathered_kv.shape == (8, 2)
@@ -972,10 +973,11 @@ def test_c4_sp_executor_gathers_raw_output_before_global_reorder() -> None:
     )
     state_cache = torch.empty((1, 1, 1, 2))
 
-    def fake_gather(compressed_kv, metadata_arg):
+    def fake_launch(compressed_kv, metadata_arg, comm_stream=None):
         assert metadata_arg is sp_metadata
+        assert comm_stream is None
         torch.testing.assert_close(compressed_kv, raw_compressed_kv)
-        return gathered_kv
+        return CompressorSPGatherHandle(recv_buffer=gathered_kv, send_buffer=compressed_kv)
 
     with (
         patch.object(
@@ -983,7 +985,7 @@ def test_c4_sp_executor_gathers_raw_output_before_global_reorder() -> None:
             "_run_kernel",
             return_value=(raw_compressed_kv, torch.empty((3, 2), dtype=torch.int32)),
         ),
-        patch.object(executor, "_gather_sp_output", side_effect=fake_gather),
+        patch.object(executor, "_launch_sp_output", side_effect=fake_launch),
         patch.object(executor, "_write_cache") as write_cache,
         patch.object(executor, "_sync_sp_state") as sync_state,
         patch(

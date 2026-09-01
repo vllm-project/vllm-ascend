@@ -19,6 +19,7 @@ from vllm_ascend.attention.dsa_compressor import (
     CompressorExecutor,
     CompressorSPMetadata,
     CompressorSPMetadataBuilder,
+    CompressorSPPending,
     IndexerCompressorExecutor,
     rotate_activation,
 )
@@ -1625,14 +1626,31 @@ class AscendDSACPImpl(DSAAttentionImpl):
         compressor_output_metadata: M,
         compressor_state_metadata: M,
         sp_metadata: CompressorSPMetadata | None,
-    ) -> None:
-        """Run the main Compressor with separately built output/state metadata."""
+        comm_stream: torch.npu.Stream | None = None,
+    ) -> CompressorSPPending | None:
+        """Run the main Compressor with separately built output/state metadata.
+
+        With ``comm_stream`` the SP row all-gather is only launched here and the
+        caller must finalize the returned tail before attention reads the cache;
+        otherwise the whole update completes inline as before.
+        """
         compress_kv_cache, _, state_cache, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(
             kv_cache, self.compress_ratio
         )
         assert self.compressor_executor is not None
         assert compressor_output_metadata.req_metadata is not None
         assert compressor_state_metadata.req_metadata is not None
+        if comm_stream is not None:
+            assert sp_metadata is not None
+            return self.compressor_executor.launch_sp(
+                compressor_input,
+                state_cache,
+                compress_kv_cache,
+                metadata=compressor_output_metadata.req_metadata,
+                state_block_table=compressor_state_metadata.req_metadata.block_table,
+                sp_metadata=sp_metadata,
+                comm_stream=comm_stream,
+            )
         self.compressor_executor.run(
             compressor_input,
             state_cache,
@@ -1642,6 +1660,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             sp_metadata=sp_metadata,
             delay_sync_sp_state=self.multistream_dsv4_dsa_overlap,
         )
+        return None
 
     def _forward(
         self,
@@ -1704,6 +1723,19 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 if (main_compressor_sp_metadata is None) != (indexer_compressor_sp_metadata is None):
                     raise ValueError("Main and indexer compressors must use the same SP execution mode")
 
+        # One FIFO stream carries every Compressor SP collective, so the
+        # all-gathers keep a single deterministic order across TP ranks and stay
+        # off the compute streams. Graph capture cannot host-wait on a handle, so
+        # it keeps the inline collectives; the results are byte-identical either
+        # way, only the join point moves.
+        compressor_sp_comm_stream = None
+        if (
+            main_compressor_sp_metadata is not None
+            and self.multistream_dsv4_dsa_overlap
+            and not torch.npu.is_current_stream_capturing()
+        ):
+            compressor_sp_comm_stream = dsv4_overlap_stream("compressor_sp_comm")
+
         hs_local_ready_evt = torch.npu.current_stream().record_event()
 
         query_aux_stream = dsv4_overlap_stream("query")
@@ -1737,19 +1769,39 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 )
             compressor_input_ready_evt = torch.npu.current_stream().record_event()
 
+            # Launch the main Compressor first so its all-gather is already in
+            # flight while the Indexer computes. Both ranks reach the collective
+            # on shape-balanced local work, so no rank waits at the rendezvous.
+            main_compressor_aux_stream = dsv4_overlap_stream("main_compressor_aux_stream")
+            with npu_stream_switch(main_compressor_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+                torch.npu.current_stream().wait_event(compressor_input_ready_evt)
+                main_compressor_pending = self._forward_compressor_kv(
+                    kv_cache,
+                    compressor_input,
+                    main_compressor_output_metadata,
+                    main_compressor_state_metadata,
+                    main_compressor_sp_metadata,
+                    comm_stream=compressor_sp_comm_stream,
+                )
+
             if self.compress_ratio == 4:
                 assert indexer_compressor_state_metadata is not None
                 assert indexer_compressor_output_metadata is not None
                 indexer_aux_stream = dsv4_overlap_stream("indexer")
                 with npu_stream_switch(indexer_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
                     torch.npu.current_stream().wait_event(compressor_input_ready_evt)
-                    self._update_indexer_cache(
+                    indexer_compressor_pending = self._update_indexer_cache(
                         compressor_input=compressor_input,
                         kv_cache=kv_cache,
                         indexer_state_metadata=indexer_compressor_state_metadata,
                         indexer_output_metadata=indexer_compressor_output_metadata,
                         sp_metadata=indexer_compressor_sp_metadata,
+                        comm_stream=compressor_sp_comm_stream,
                     )
+                    if indexer_compressor_pending is not None:
+                        # TopK below reads the Indexer caches, so the gathered
+                        # rows must be written before it runs.
+                        self.indexer_compressor_executor.finalize_sp(indexer_compressor_pending)
                     indexer_compressor_done_evt = torch.npu.current_stream().record_event()
 
                     torch.npu.current_stream().wait_event(qr_kv_ready_evt)
@@ -1766,16 +1818,12 @@ class AscendDSACPImpl(DSAAttentionImpl):
                         qr_pertoken_scale=qr_pertoken_scale_local,
                     )
 
-            main_compressor_aux_stream = dsv4_overlap_stream("main_compressor_aux_stream")
-            with npu_stream_switch(main_compressor_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
-                torch.npu.current_stream().wait_event(compressor_input_ready_evt)
-                self._forward_compressor_kv(
-                    kv_cache,
-                    compressor_input,
-                    main_compressor_output_metadata,
-                    main_compressor_state_metadata,
-                    main_compressor_sp_metadata,
-                )
+            if main_compressor_pending is not None:
+                # Only attention reads these rows, so the join comes last: the
+                # Indexer local Compressor, its finalize and TopK have already
+                # covered the main collective.
+                with npu_stream_switch(main_compressor_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+                    self.compressor_executor.finalize_sp(main_compressor_pending)
 
         # SWA does not depend on preprocessing communication, so it is scheduled later.
         # Launch SWA all-gather last to avoid blocking compressor communication.
@@ -1806,7 +1854,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             # State cache is not required by attention, so it can be written asynchronously on
             # a separate stream. To avoid impacting compressor execution, perform the state-cache
             # write only after the compressor completion event.
-            if self.compress_ratio > 1:
+            if self.compress_ratio > 1 and main_compressor_sp_metadata is not None:
                 state_stream = dsv4_overlap_stream("state")
                 with npu_stream_switch(state_stream, enabled=True):
                     torch.npu.current_stream().wait_stream(main_compressor_aux_stream)
@@ -1817,12 +1865,14 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     self.compressor_executor._sync_sp_state(
                         main_state_cache,
                         main_compressor_sp_metadata,
+                        compressor_sp_comm_stream,
                     )
                     if self.compress_ratio == 4:
                         indexer_state_cache = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)[0]
                         self.indexer_compressor_executor._sync_sp_state(
                             indexer_state_cache,
                             indexer_compressor_sp_metadata,
+                            compressor_sp_comm_stream,
                         )
 
         record_attention_compute_start()
@@ -1932,14 +1982,32 @@ class AscendDSACPImpl(DSAAttentionImpl):
         indexer_state_metadata: M,
         indexer_output_metadata: M,
         sp_metadata: CompressorSPMetadata | None,
-    ) -> None:
-        """Run LI Compressor and update its K, scale, and full-value caches."""
+        comm_stream: torch.npu.Stream | None = None,
+    ) -> CompressorSPPending | None:
+        """Run LI Compressor and update its K, scale, and full-value caches.
+
+        With ``comm_stream`` only the local Compressor and its row all-gather are
+        issued here; the caller must finalize the returned tail before TopK reads
+        the Indexer caches.
+        """
         indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache = (
             DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)
         )
         assert indexer_output_metadata.req_metadata is not None
         assert indexer_state_metadata.req_metadata is not None
         assert self.indexer_compressor_executor is not None
+        if comm_stream is not None:
+            assert sp_metadata is not None
+            return self.indexer_compressor_executor.launch_sp(
+                compressor_input,
+                indexer_state_cache,
+                (indexer_k_cache, indexer_scale_cache, indexer_full_cache),
+                metadata=indexer_output_metadata.req_metadata,
+                state_block_table=indexer_state_metadata.req_metadata.block_table,
+                sp_metadata=sp_metadata,
+                hadamard=indexer_output_metadata.hadamard,
+                comm_stream=comm_stream,
+            )
         self.indexer_compressor_executor.run(
             compressor_input,
             indexer_state_cache,
@@ -1948,7 +2016,11 @@ class AscendDSACPImpl(DSAAttentionImpl):
             state_block_table=indexer_state_metadata.req_metadata.block_table,
             sp_metadata=sp_metadata,
             hadamard=indexer_output_metadata.hadamard,
+            # The deferred state stream owns the replication when overlap is on,
+            # so it must not also run inline here.
+            delay_sync_sp_state=self.multistream_dsv4_dsa_overlap,
         )
+        return None
 
     def _indexer_select_topk(
         self,
