@@ -76,6 +76,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as Vllm
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
@@ -83,10 +84,8 @@ from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.utils import (
-    AscendDeviceType,
     enable_dsa_cp,
     extract_dsv4_layer_index,
-    get_ascend_device_type,
     get_dsv4_compress_ratio,
 )
 
@@ -108,10 +107,10 @@ class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
         self.block_size = DSV4_BLOCK_SIZES[cache_config.block_size][0][1]
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
-            self.dtype = torch.float8_e4m3fn
+        self.dtype = get_dsv4_attn_kv_dtype(vllm_config)
+        if self.dtype == torch.float8_e4m3fn:
             vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
-        cached_head_size = self.head_dim + 128 if get_ascend_device_type() in {AscendDeviceType.A5} else self.head_dim
+        cached_head_size = self.head_dim + 128 if self.dtype == torch.float8_e4m3fn else self.head_dim
         return AscendSlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -586,8 +585,7 @@ class DeepseekV4Attention(nn.Module):
                     topk_indices_buffer=topk_indices_buffer,
                 )
 
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.bfloat16
+        k_dtype = get_dsv4_attn_kv_dtype(vllm_config)
         swa_cache_layer = AscendDeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,

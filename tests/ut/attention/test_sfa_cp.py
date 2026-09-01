@@ -30,6 +30,8 @@ from vllm_ascend.attention.sfa_v1 import (
 
 def test_sfa_dcp_extends_v1_backend() -> None:
     assert issubclass(AscendSFADCPImpl, AscendSFAImpl)
+    assert AscendSFADCPImpl.supports_mtp_with_cp_non_trivial_interleave_size
+    assert AscendSFADCPImpl.can_return_lse_for_decode
     assert issubclass(
         AscendSFADCPMetadataBuilder,
         AscendSFAMetadataBuilder,

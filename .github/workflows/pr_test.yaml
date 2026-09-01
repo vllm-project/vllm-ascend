@@ -416,16 +416,13 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file "$LIST_FILE"
 
-      - name: Select tests based on changed files
+      - name: Select all tests
         id: scope-all
         if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
-          python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}' \
-            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
+          python3 .github/workflows/scripts/select_tests.py --all-tests
 
       - name: Set no-tests output when no tests selected
         id: noop
@@ -445,13 +442,10 @@ jobs:
         if: steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }} \
-            --modules a5 \
-            --runner-label-override linux-aarch64-a5-4 \
-            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
+            --curated a5 \
+            --runner-label-override linux-aarch64-a5-4
 
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5

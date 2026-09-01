@@ -40,6 +40,7 @@ from vllm_ascend.ascend_config import (
     clear_ascend_config,
     get_ascend_config,
     init_ascend_config,
+    is_mega_moe_supported,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -993,13 +994,23 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
-    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
+    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
+    def test_fused_mc2_rolls_back_even_when_config_supported(self, mock_fix, mock_megamoe_supported):
+        # After the megamoe op rollback (#15267), enable_fused_mc2=1 short-circuits
+        # _MEGA_MOE_SUPPORTED to False in _validate_user_input_ranges, regardless
+        # of whether the model config supports megamoe. So even when
+        # _is_megamoe_supported_by_config() is True, is_mega_moe_supported() ends
+        # up False and the fused path routes to dispatch_ffn_combine instead of
+        # mega_moe.
         vc = VllmConfig()
         vc.additional_config = {"enable_fused_mc2": 1}
 
-        self.assertEqual(init_ascend_config(vc).enable_fused_mc2, 0)
+        config = init_ascend_config(vc)
+        self.assertEqual(config.enable_fused_mc2, 1)
+        # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
+        # routes to dispatch_ffn_combine instead of mega_moe.
+        self.assertFalse(is_mega_moe_supported())
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -827,7 +828,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     self.assertEqual(indexer_cache[1].shape, (2, 16, 1, 1))
                     self.assertEqual(indexer_cache[1].dtype, torch.float16)
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_device_type", return_value=AscendDeviceType.A5)
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_a5_sparse_c8_specs_keep_main_and_indexer_layouts_separate(
