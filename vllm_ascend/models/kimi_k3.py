@@ -912,10 +912,39 @@ def _apply_attention_residual(
     block_residual: torch.Tensor,
     projection: nn.Module,
     norm: RMSNorm,
+    *,
+    addend: torch.Tensor | None = None,
+    sum_out: torch.Tensor | None = None,
+    out_norm: RMSNorm | None = None,
 ) -> torch.Tensor:
-    """Apply K3's learned normalized mixture over residual block starts."""
-    if apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0:
-        mixed = apply_attn_res(prefix_sum, block_residual, projection, norm)
+    """Apply K3's learned normalized mixture over residual block starts.
+
+    When ``addend`` is given the residual sum ``prefix_sum + addend`` is folded
+    into the fused kernel and written to ``sum_out`` (allocated here if not
+    supplied; materialized with a plain add on the fallback path).  When
+    ``out_norm`` is given it is applied to the mixture in-kernel, replacing the
+    following standalone layernorm launch.
+    """
+    fused = apply_attn_res is not None and prefix_sum.device.type == "npu" and prefix_sum.numel() > 0
+    if addend is not None:
+        if fused:
+            if sum_out is None:
+                sum_out = torch.empty_like(addend)
+        else:
+            if sum_out is None:
+                prefix_sum = prefix_sum + addend
+            else:
+                prefix_sum = torch.add(prefix_sum, addend, out=sum_out)
+    if fused:
+        mixed = apply_attn_res(
+            prefix_sum,
+            block_residual,
+            projection,
+            norm,
+            addend=addend,
+            sum_out=sum_out if addend is not None else None,
+            out_norm=out_norm,
+        )
     else:
         values = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
         values_fp32 = values.float()
@@ -927,6 +956,8 @@ def _apply_attention_residual(
         scores = torch.matmul(normalized, projection.weight.t().float()).squeeze(-1)
         probabilities = scores.softmax(-1).unsqueeze(1)
         mixed = torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+        if out_norm is not None:
+            mixed = out_norm(mixed)
     if _EXTRA_CTX.flash_comm_v1_enabled:
         # FlashComm changes the first decoder layer from the global token
         # layout to a TP-local layout.  The learned-residual arithmetic above
@@ -1028,14 +1059,16 @@ class KimiK3DecoderLayer(nn.Module):
                 block_residual,
                 self.self_attention_res_proj,
                 self.self_attention_res_norm,
+                out_norm=self.input_layernorm,
             )
+        else:
+            hidden_states = self.input_layernorm(hidden_states)
 
         if self.layer_idx % self.attn_res_block_size == 0:
             assert prefix_sum is not None
             block_residual = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
             prefix_sum = None
 
-        hidden_states = self.input_layernorm(hidden_states)
         if self.is_vl_first_layer and _EXTRA_CTX.flash_comm_v1_enabled:
             tp_size = get_tensor_model_parallel_world_size()
             num_local_tokens = hidden_states.shape[0] // tp_size
@@ -1057,15 +1090,30 @@ class KimiK3DecoderLayer(nn.Module):
                 attention_output.unsqueeze(1),
                 block_residual,
             )
-        prefix_sum = attention_output if prefix_sum is None else prefix_sum + attention_output
-
-        hidden_states = _apply_attention_residual(
-            prefix_sum,
-            block_residual,
-            self.mlp_res_proj,
-            self.mlp_res_norm,
-        )
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        if prefix_sum is None:
+            prefix_sum = attention_output
+            hidden_states = _apply_attention_residual(
+                prefix_sum,
+                block_residual,
+                self.mlp_res_proj,
+                self.mlp_res_norm,
+                out_norm=self.post_attention_layernorm,
+            )
+        else:
+            # Fold the residual add into the fused kernel; it writes the
+            # materialized sum (still needed for the final layer add below)
+            # into sum_out.
+            sum_out = torch.empty_like(attention_output)
+            hidden_states = _apply_attention_residual(
+                prefix_sum,
+                block_residual,
+                self.mlp_res_proj,
+                self.mlp_res_norm,
+                addend=attention_output,
+                sum_out=sum_out,
+                out_norm=self.post_attention_layernorm,
+            )
+            prefix_sum = sum_out
         if hasattr(self, "block_sparse_moe"):
             hidden_states = self.block_sparse_moe(hidden_states)
         else:
