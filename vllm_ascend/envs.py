@@ -71,6 +71,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Per-rank bounded symmetric staging capacity used by KVPP MTE.
+    "ASCEND_KVPP_MTE_STAGING_BYTES": lambda: int(os.getenv("ASCEND_KVPP_MTE_STAGING_BYTES", str(256 << 20))),
+    # MemFabric SHM object IDs are process-global and restricted to [0, 64).
+    "ASCEND_KVPP_MTE_SHM_ID": lambda: int(os.getenv("ASCEND_KVPP_MTE_SHM_ID", "31")),
+    "ASCEND_KVPP_MTE_TIMEOUT_SECONDS": lambda: int(os.getenv("ASCEND_KVPP_MTE_TIMEOUT_SECONDS", "120")),
 }
 
 # end-env-vars-definition

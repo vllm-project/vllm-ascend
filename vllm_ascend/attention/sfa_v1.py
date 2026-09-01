@@ -451,6 +451,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.skip_topk = kwargs.get("skip_topk", False)
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
+        # Optional platform service injected by the model runner. Attention
+        # stays independent of KVPP scheduling and the concrete transport.
+        self.layerwise_kv_cache_hook: Any = None
 
         ascend_config = get_ascend_config()
         self.vllm_config = get_current_vllm_config()
@@ -1551,6 +1554,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             else:
                 k_li, k_li_scale = None, None
             wait_for_kv_layer_from_connector(layer_name)
+            if self.layerwise_kv_cache_hook is not None:
+                # The fused preprocess is the first operation that may read or
+                # update the paged SFA and LI caches.
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
             if fused_type == PreprocessType.PROLOG_V3:
                 hidden_states, ql_nope, q_pe, q_c = self._sfa_preprocess_prolog_v3(
@@ -1591,6 +1598,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 k_li, k_li_scale = None, None
 
             wait_for_kv_layer_from_connector(layer_name)
+            if self.layerwise_kv_cache_hook is not None:
+                # Q/KV and lightning-indexer projections above overlap the
+                # active-page transfer. Wait only before the first cache write.
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
             kv_outputs = self.exec_kv(
                 kv_no_split,

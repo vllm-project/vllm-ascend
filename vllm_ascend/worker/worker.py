@@ -57,8 +57,12 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import KVPPConfig, get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.kv_cache_placement import (
+    KVPPPhysicalCachePlan,
+    create_kvpp_cache_allocation_plan,
+)
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
@@ -178,6 +182,7 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
+        self._kvpp_cache_allocation_plan: KVPPPhysicalCachePlan | None = None
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -987,6 +992,15 @@ class NPUWorker(WorkerBase):
                 kv_cache_spec,
                 extra_config,
             )
+        kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
+        if kvpp_config.size > 1:
+            kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
+            self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
+                self.vllm_config,
+                kv_cache_spec,
+                kvpp_rank,
+            )
+            kv_cache_spec = self._kvpp_cache_allocation_plan.physical_cache_spec
         if get_ascend_config().sparse_kv_offload_config.enabled:
             # reserve kv_cache_spec for sparse kv offload memory profile usage.
             self.kv_cache_spec = kv_cache_spec
@@ -1007,6 +1021,9 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        if self._kvpp_cache_allocation_plan is not None:
+            kv_cache_config = copy.deepcopy(kv_cache_config)
+            self._kvpp_cache_allocation_plan.restore_logical_cache_view(kv_cache_config)
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()

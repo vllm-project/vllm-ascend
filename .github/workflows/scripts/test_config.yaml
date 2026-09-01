@@ -132,6 +132,7 @@ estimated_times:
   tests/e2e/pull_request/two_card/test_qwen3_vl_30b_a3b_instruct.py: 290
   tests/e2e/pull_request/two_card/test_shared_expert_dp.py: 1060
   tests/e2e/pull_request/two_card/test_hccl_weight_transfer.py: 130
+  tests/e2e/pull_request/two_card/test_kvpp.py: 1100
   tests/e2e/pull_request/two_card/test_xlite.py: 740
   tests/e2e/pull_request/four_card/_310p/test_dense_model_310p.py: 500
   tests/e2e/pull_request/four_card/_310p/test_model_runner_v2_310p.py: 800

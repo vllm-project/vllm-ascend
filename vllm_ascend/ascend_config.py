@@ -47,12 +47,65 @@ def is_mega_moe_supported() -> bool:
     return _MEGA_MOE_SUPPORTED
 
 
+_KVPP_COMPATIBLE_CONNECTORS = frozenset(
+    {
+        "MooncakeConnectorV2",
+        "MooncakePullConnector",
+    }
+)
+
+
 def validate_additional_config_bool(value: Any, path: str) -> bool:
     """Apply the same pydantic bool rules to values read before config init."""
     try:
         return TypeAdapter(bool).validate_python(value)
     except ValueError as exc:
         raise ValueError(f"{path} must be a boolean, got {value!r}.") from exc
+
+
+@config(config=ConfigDict(frozen=True))
+class KVPPConfig:
+    """Configuration for KV layer parallelism on Ascend."""
+
+    size: int = 1
+
+    @classmethod
+    def from_vllm_config(cls, vllm_config: VllmConfig) -> KVPPConfig:
+        additional_config = vllm_config.additional_config or {}
+        enabled = additional_config.get("enable_kvpp", False)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"additional_config.enable_kvpp must be a boolean, got {enabled!r}.")
+
+        size = vllm_config.parallel_config.tensor_parallel_size if enabled else 1
+        return cls(size=size)
+
+    def validate(self, vllm_config: VllmConfig) -> None:
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size != 1:
+            raise ValueError("KVPP does not support PCP yet.")
+        if parallel_config.decode_context_parallel_size != 1:
+            raise ValueError("KVPP and DCP cannot be enabled at the same time.")
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            connector = kv_transfer_config.kv_connector
+            role = kv_transfer_config.kv_role
+            if connector not in _KVPP_COMPATIBLE_CONNECTORS or role != "kv_producer":
+                raise ValueError(
+                    "KVPP supports KV transfer only with MooncakeConnectorV2 "
+                    f"on a kv_producer, got connector={connector!r}, role={role!r}."
+                )
+
+        model_config = vllm_config.model_config
+        if not getattr(model_config, "enforce_eager", False):
+            raise ValueError("KVPP currently supports eager execution only; set --enforce-eager.")
+        if not model_config.use_mla or model_config.is_hybrid:
+            raise ValueError("KVPP currently supports only non-hybrid MLA models.")
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            if speculative_config.method != "mtp":
+                raise ValueError("KVPP currently supports speculative decoding only with method='mtp'.")
+            if getattr(speculative_config, "num_speculative_tokens_per_batch_size", None):
+                raise ValueError("KVPP currently supports only a fixed number of MTP speculative tokens.")
 
 
 @config
@@ -430,6 +483,7 @@ class AscendConfig:
     dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
+    kvpp_config: KVPPConfig = dataclasses.field(kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
@@ -1358,6 +1412,7 @@ def init_ascend_config(vllm_config):
     sparse_kv = SparseKVOffloadConfig.from_additional_config(
         vllm_config, additional_config.get("sparse_kv_offload_config", {})
     )
+    kvpp_config = KVPPConfig.from_vllm_config(vllm_config)
     # dump_config: keep the mutual-exclusion / materialize logic as a factory
     # pre-step; the resolved path is passed as the dump_config_path field.
     dump_config_path = AscendConfig._resolve_dump_config_path(additional_config)
@@ -1374,6 +1429,10 @@ def init_ascend_config(vllm_config):
         # injected fields (factory passes explicitly; a copy in additional_config would conflict)
         "scheduler_config",
         "sparse_kv_offload_config",
+        # Factory-injected: derived from additional_config.enable_kvpp + TP.
+        "enable_kvpp",
+        "kvpp_size",
+        "kvpp_config",
         # Factory-only input: materialized by _resolve_dump_config_path and
         # replaced with the validated dump_config_path field below.
         "dump_config",
@@ -1404,6 +1463,7 @@ def init_ascend_config(vllm_config):
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,
         sparse_kv_offload_config=sparse_kv,
+        kvpp_config=kvpp_config,
         dump_config_path=dump_config_path,
         **kwargs,
     )
