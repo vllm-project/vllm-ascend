@@ -79,6 +79,7 @@ def test_execute_model_disables_profiling_timer_and_clears_stale_time():
     mock_synchronize.assert_not_called()
     mock_perf_counter.assert_not_called()
 
+
 def test_uniform_full_graph_preserves_descriptor_request_shape():
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.decode_query_len = 4
@@ -97,6 +98,7 @@ def test_uniform_full_graph_preserves_descriptor_request_shape():
 
     assert num_reqs_padded == 4
     np.testing.assert_array_equal(padded_query_start_loc[:5], [0, 4, 8, 12, 16])
+
 
 def test_full_decode_only_keeps_graph_descriptor_request_count():
     runner = _make_runner()
