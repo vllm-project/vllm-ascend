@@ -55,19 +55,23 @@ Setting `VLLM_BATCH_INVARIANT=1` while installing a prebuilt vllm-ascend wheel d
 
 ### Option 2: vllm-ascend is already installed
 
-Enter the vllm-ascend installation directory and build and install the `batch_invariant_ops` wheel:
+Obtain a vllm-ascend source tree that matches the installed package version, then build and install the operator packages from that source tree.
+
+!!! note
+
+    A prebuilt vllm-ascend wheel does not include the `csrc` directory or `csrc/build_batch_invariant_ops.sh`. Therefore, the following commands cannot be run from the wheel's `site-packages` installation directory. `<vllm-ascend-source-dir>` must point to a matching vllm-ascend source checkout.
 
 **A2:**
 
 ```bash
-cd <vllm-ascend-install-dir>
+cd <vllm-ascend-source-dir>
 bash csrc/build_batch_invariant_ops.sh ascend910b
 ```
 
 **A3:**
 
 ```bash
-cd <vllm-ascend-install-dir>
+cd <vllm-ascend-source-dir>
 bash csrc/build_batch_invariant_ops.sh ascend910_93
 ```
 
