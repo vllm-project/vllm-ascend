@@ -7,9 +7,9 @@ op-by-op path.
 
 This mirrors the sglang_npu ``qwen3_moe.py`` integration:
 
-* weights are loaded once into the MegaKernel model
-  (``blockrt.models.glm_5_2.weight_loader.load_glm5_2_weights``; HF param
-  names match vLLM checkpoints verbatim);
+* weights are loaded once into the MegaKernel model from the tensors
+  vLLM-Ascend already loaded (``Glm52MegaKernel(vllm_ascend_weights=True)``
+  direct path, no ``load_glm5_2_weights`` re-read);
 * the MegaKernel reuses the paged KV / DSA indexer caches already allocated by
   vLLM-Ascend (fp8 packed SFA C8 layout), so prefill writes and decode reads
   the same physical cache; vLLM drives scheduling and provides metadata
@@ -40,6 +40,7 @@ import torch.nn as nn
 
 from vllm.forward_context import get_forward_context
 from vllm.config import VllmConfig
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 from vllm.sequence import IntermediateTensors
 
@@ -87,10 +88,24 @@ def _model_args_from_hf_config(config: Any):
         if val is not None:
             setattr(args, key, int(val) if isinstance(val, (int, float)) else val)
     args.quantized = True
-    # The reduced MXFP checkpoint carries no MTP head weights; build the
-    # blockrt model without the MTP module (MTP decode is unsupported here).
-    args.num_nextn_predict_layers = 0
+    # Keep the MTP module enabled when the checkpoint provides MTP layers so
+    # the MegaKernel-backed draft (DeepSeekMTPModel) can share this runtime.
+    # The target forward never calls the MTP module.
+    args.num_nextn_predict_layers = int(
+        getattr(config, "num_nextn_predict_layers", 0) or 0
+    )
+    configured_start = getattr(config, "mtp_start_layer_idx", None)
+    args.mtp_start_layer_idx = (
+        int(configured_start)
+        if configured_start is not None
+        else args.num_hidden_layers
+    )
     return args
+
+
+# Registry so the MegaKernel-backed MTP draft (a separate vLLM model instance)
+# can share the target model's weights/runtime instead of loading them twice.
+_MEGA_STATE_REGISTRY: Dict[str, "_MegaKernelGLM52State"] = {}
 
 
 def _extract_dsa_metadata(attn_metadata: Any) -> AscendDSAMetadata:
@@ -161,6 +176,31 @@ class _MegaKernelGLM52State:
         self.model_args = _model_args_from_hf_config(
             vllm_config.model_config.hf_config
         )
+        # Optional reduced-main-layer mode: vLLM may serve the FULL checkpoint
+        # while the MegaKernel selectively loads a reduced layer prefix from
+        # MEGA_WEIGHTS_DIR (e.g. the 10-layer + MTP index).  The MTP start
+        # index stays at the checkpoint's absolute layer index.
+        env_layers = os.environ.get("MEGA_MAIN_LAYERS")
+        if env_layers:
+            self.model_args.num_hidden_layers = max(int(env_layers), 1)
+            if (
+                self.model_args.mtp_start_layer_idx is not None
+                and self.model_args.mtp_start_layer_idx
+                <= self.model_args.num_hidden_layers
+            ):
+                self.model_args.mtp_start_layer_idx = int(
+                    getattr(
+                        vllm_config.model_config.hf_config,
+                        "num_hidden_layers",
+                        self.model_args.num_hidden_layers,
+                    )
+                )
+            print(
+                "[MegaKernel] reduced main layers: "
+                f"num_hidden_layers={self.model_args.num_hidden_layers}, "
+                f"mtp_start={self.model_args.mtp_start_layer_idx}",
+                flush=True,
+            )
 
         num_blocks = self._num_blocks()
         self.num_blocks = num_blocks
@@ -174,7 +214,14 @@ class _MegaKernelGLM52State:
             flush=True,
         )
         self.index_cos_sin_cache = torch.empty(
-            (self.max_tokens_default, self.index_head_dim),
+            (self.max_tokens_default, 64),
+            dtype=torch.bfloat16,
+            device="npu",
+        )
+        # Compact 64-wide DSA indexer RoPE cache used by the MTP steps
+        # (indexer_rope requires [*, 64] = [cos(32), sin(32)]).
+        self.mtp_index_cos_sin_cache = torch.empty(
+            (self.max_tokens_default, 64),
             dtype=torch.bfloat16,
             device="npu",
         )
@@ -191,42 +238,74 @@ class _MegaKernelGLM52State:
         # Per-batch-size persistent metadata buffers (stable addresses).
         self.meta_buffers: Dict[int, Dict[str, torch.Tensor]] = {}
 
-        # Tensor parallelism: derive rank/world from the vLLM parallel config
-        # so the blockrt weights/model match the serving TP degree.
-        pc = vllm_config.parallel_config
-        self.tp_size = int(getattr(pc, "tensor_parallel_size", 1) or 1)
-        if self.tp_size > 1:
-            from vllm.distributed import get_tensor_model_parallel_rank
-            self.tp_rank = int(get_tensor_model_parallel_rank())
-            from blockrt.dist.utils import init_shemm
-            _ms = int(os.environ.get("MEGA_SHMEM_SIZE", str(1 << 33)))
-            print(f"[MegaKernel] init_shemm rank={self.tp_rank} world={self.tp_size} mem_size={_ms}", flush=True)
-            init_shemm(
-                rank=self.tp_rank,
-                world_size=self.tp_size,
-                mem_size=_ms,
-                ip_port=os.environ.get("MEGA_SHMEM_IP_PORT", "tcp://127.0.0.1:8666"),
-            )
-        else:
-            self.tp_rank = 0
+        # TP rank/world are set once on the model in
+        # AscendGlm52MegaForCausalLM.__init__ (SHMEM is initialized there too,
+        # exactly once per process - never call init_shemm again here).
+        self.tp_size = int(getattr(vllm_model, "tp_size", 1) or 1)
+        self.tp_rank = int(getattr(vllm_model, "tp_rank", 0) or 0)
 
-        # Weights + MegaKernel model.
+        # Weights: reuse the vLLM-Ascend nn.Module state_dict (the tensors
+        # vLLM-Ascend already loaded and post-processed), same idea as
+        # sglang_npu ``glm4_moe.py`` ``_collect_megakernel_weights``, and hand
+        # them straight to the MegaKernel via the ``vllm_ascend_weights``
+        # direct path instead of re-reading the checkpoint with
+        # ``load_glm5_2_weights``.
         from blockrt.models.glm_5_2.glm5_2 import Glm52MegaKernel
-        from blockrt.models.glm_5_2.weight_loader import load_glm5_2_weights
 
-        weight_dict = load_glm5_2_weights(
-            self.model_dir,
-            model_args=self.model_args,
-            device="npu",
-            tp_size=self.tp_size,
-            tp_rank=self.tp_rank,
+        weight_dict = {
+            name: tensor.detach()
+            for name, tensor in vllm_model.state_dict().items()
+        }
+        print(
+            "[MegaKernel] vllm-ascend weight_dict: "
+            f"n={len(weight_dict)} keys={sorted(weight_dict.keys())}",
+            flush=True,
         )
         self.mega = Glm52MegaKernel(
             self.model_args, weight_dict,
             tp_size=self.tp_size, tp_rank=self.tp_rank,
+            vllm_ascend_weights=True,
         )
 
-    @staticmethod
+        # Dedicated KV/index caches for the MTP layer(s).  vLLM's slot mapping
+        # and block tables index the shared-pool layout; a pool with the same
+        # block_size / block count is address-compatible with those indices.
+        mtp_start = self.model_args.mtp_start_layer_idx
+        mtp_end = mtp_start + self.model_args.num_nextn_predict_layers
+        self.mtp_k_cache: List[Optional[torch.Tensor]] = [None] * max(mtp_end, 1)
+        self.mtp_index_k_buffer: List[Optional[torch.Tensor]] = [None] * max(
+            mtp_end, 1
+        )
+        self.mtp_index_k_scale_buffer: List[Optional[torch.Tensor]] = [None] * max(
+            mtp_end, 1
+        )
+        for layer_id in range(mtp_start, mtp_end):
+            self.mtp_k_cache[layer_id] = torch.zeros(
+                (num_blocks, self.block_size, 1, self.packed_kv_dim),
+                dtype=torch.float8_e4m3fn,
+                device="npu",
+            )
+            self.mtp_index_k_buffer[layer_id] = torch.zeros(
+                (num_blocks * self.block_size, self.index_head_dim),
+                dtype=torch.float8_e4m3fn,
+                device="npu",
+            )
+            self.mtp_index_k_scale_buffer[layer_id] = torch.zeros(
+                (num_blocks * self.block_size, 1),
+                dtype=torch.float32,
+                device="npu",
+            )
+        print(
+            "[MegaKernel] MTP cache pool ready: "
+            f"layers [{mtp_start}, {mtp_end}) "
+            f"blocks={num_blocks} block_size={self.block_size}",
+            flush=True,
+        )
+
+        # Share this runtime with the MegaKernel MTP draft (same checkpoint),
+        # so the draft does not reload weights or build a second runtime.
+        _MEGA_STATE_REGISTRY[str(vllm_config.model_config.model)] = self
+
     def _resolve_packed_kv_dim(self, hf_config: Any) -> int:
         """Resolve the packed MLA KV head dimension from vLLM-Ascend.
 
@@ -316,6 +395,7 @@ class _MegaKernelGLM52State:
                 raise RuntimeError(
                     f"MegaKernel: layer {layer_id} has no MLA attention wrapper"
                 )
+            mla_attn = getattr(mla_attn, "mla_attn", None) or mla_attn
 
             main = _cache_tensors(getattr(mla_attn, "kv_cache", None))
             if len(main) != 1:
@@ -350,7 +430,7 @@ class _MegaKernelGLM52State:
                     )
                 )
                 indexer_scale_caches.append(
-                    torch.empty((0,), dtype=torch.float32, device=packed.device)
+                    torch.zeros((0, 1), dtype=torch.float32, device=packed.device)
                 )
                 continue
 
@@ -362,7 +442,7 @@ class _MegaKernelGLM52State:
                 indexer_scale_caches.append(indexer_cache[1].reshape(-1, 1))
             else:
                 indexer_scale_caches.append(
-                    torch.empty((0,), dtype=torch.float32, device=packed.device)
+                    torch.zeros((packed.shape[0] * packed.shape[1], 1), dtype=torch.float32, device=packed.device)
                 )
 
         return main_caches, indexer_caches, indexer_scale_caches
@@ -435,20 +515,168 @@ class _MegaKernelGLM52State:
             mask=meta_bufs["mask"] if "mask" in meta_bufs else None,
             mask_type=1,
             index_cos_sin_cache=self.index_cos_sin_cache[:num_tokens],
+            index_rope_positions=meta_bufs["positions"][:num_tokens],
             index_k_buffer=self.index_k_buffer,
             index_k_scale_buffer=self.index_k_scale_buffer,
             mla_cos_cache=self.mla_cos_cache[:num_tokens],
             mla_sin_cache=self.mla_sin_cache[:num_tokens],
         )
 
+    def build_mtp_forward_batch_info(
+        self,
+        meta_bufs: Dict[str, torch.Tensor],
+        num_tokens: int,
+        batch_size: int,
+    ) -> Any:
+        """Build a ForwardBatchInfo for one MegaKernel MTP step.
+
+        Uses the dedicated MTP cache pool (same block layout as the vLLM
+        shared pool) and the persistent per-step metadata buffers.  The
+        per-token RoPE caches are filled by the draft's ``_fill_rope_caches``
+        before this call.
+        """
+        from blockrt.models.glm_5_2.model_args import ForwardBatchInfo
+
+        return ForwardBatchInfo(
+            sin_cos_cache=self.mla_cos_cache[:num_tokens],
+            k_cache=self.mtp_k_cache,
+            v_cache=self.mtp_k_cache,
+            num_blocks=self.num_blocks,
+            block_tables=meta_bufs["block_tables"],
+            slot_mapping=meta_bufs["slot_mapping"][:num_tokens].reshape(
+                num_tokens, 1
+            ),
+            kv_seq_len=meta_bufs["kv_seq_len"][:batch_size],
+            q_seq_len=meta_bufs["q_seq_len"][:batch_size],
+            num_tokens=num_tokens,
+            mask=meta_bufs["mask"] if "mask" in meta_bufs else None,
+            mask_type=1,
+            index_cos_sin_cache=self.mtp_index_cos_sin_cache[:num_tokens],
+            index_rope_positions=meta_bufs["positions"][:num_tokens],
+            index_k_buffer=self.mtp_index_k_buffer,
+            index_k_scale_buffer=self.mtp_index_k_scale_buffer,
+            mla_cos_cache=self.mla_cos_cache[:num_tokens],
+            mla_sin_cache=self.mla_sin_cache[:num_tokens],
+        )
+
+    def fill_rope_caches(
+        self,
+        positions: torch.Tensor,
+        num_tokens: int,
+        self_attn: Any,
+    ) -> None:
+        """Populate the persistent MLA/indexer RoPE caches for one step.
+
+        ``self_attn`` may come from the target model (``layers[0].self_attn``)
+        or the MTP draft layer; both expose ``rotary_emb`` and the optional
+        ``indexer_rope_emb`` with identical conventions.
+        """
+        if num_tokens <= 0:
+            return
+
+        def _cos_sin(rope, positions_cpu):
+            inv_freq = 1.0 / (
+                rope.base
+                ** (
+                    torch.arange(
+                        0, rope.rotary_dim, 2, dtype=torch.float32
+                    )
+                    / rope.rotary_dim
+                )
+            )
+            freqs = torch.einsum("i,j->ij", positions_cpu.float(), inv_freq)
+            return freqs.cos(), freqs.sin()
+
+        pos_cpu = positions[:num_tokens].cpu()
+        cos32, sin32 = _cos_sin(self_attn.rotary_emb, pos_cpu)
+        self.mla_cos_cache[:num_tokens].copy_(
+            cos32.repeat_interleave(2, dim=-1).to(torch.bfloat16).npu()
+        )
+        self.mla_sin_cache[:num_tokens].copy_(
+            sin32.repeat_interleave(2, dim=-1).to(torch.bfloat16).npu()
+        )
+
+        irope = getattr(self_attn, "indexer_rope_emb", None)
+        if irope is not None:
+            icos32, isin32 = _cos_sin(irope, pos_cpu)
+            # indexer_rope consumes a compact [*, 64] = [cos(32), sin(32)]
+            # cache; do NOT repeat-interleave here (that is the 128-wide
+            # layout the target prefill path uses and the MTP indexer would
+            # reject).
+            self.mtp_index_cos_sin_cache[:num_tokens].copy_(
+                torch.cat((icos32, isin32), dim=-1).to(torch.bfloat16).npu()
+            )
+
 
 class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
     """GLM-5.2 model that routes through MegaKernel when enabled."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # One-time SHMEM init BEFORE the base vLLM-Ascend model is built,
+        # while the device is still free (mirrors run_tp2/test_forward.py).
+        # aclshmem must be initialized exactly once per process; failure here
+        # is fatal (fail fast at startup).
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        
+        pc = vllm_config.parallel_config
+        self.tp_size = int(getattr(pc, "tensor_parallel_size", 1) or 1)
+        if _mega_enabled() and self.tp_size > 1:
+            from vllm.distributed import get_tensor_model_parallel_rank
+            self.tp_rank = int(get_tensor_model_parallel_rank())
+            import torch_npu  # noqa: F401
+
+            import os as _os
+            _dev = torch.npu.current_device()
+            _lmaps = [
+                l.split()[-1]
+                for l in open("/proc/self/maps")
+                if "libshmem.so" in l
+            ]
+            print(
+                f"[MegaKernel] pre-shemm: current_device={_dev} "
+                f"tp_rank={self.tp_rank} libshmem_maps={_lmaps} "
+                f"SHMEM_HOME={_os.environ.get('SHMEM_HOME_PATH')}",
+                flush=True,
+            )
+            if torch.npu.is_available():
+                torch.npu.set_device(torch.npu.current_device())
+            from blockrt.dist.utils import init_shemm
+            _ms = int(os.environ.get("MEGA_SHMEM_SIZE", str(1 << 33)))
+            print(
+                f"[MegaKernel] init_shemm rank={self.tp_rank} "
+                f"world={self.tp_size} mem_size={_ms}",
+                flush=True,
+            )
+            try:
+                init_shemm(
+                    rank=self.tp_rank,
+                    world_size=self.tp_size,
+                    mem_size=_ms,
+                    ip_port=os.environ.get(
+                        "MEGA_SHMEM_IP_PORT", "tcp://127.0.0.1:8666"
+                    ),
+                )
+            except Exception:
+                _lm = [
+                    l for l in open("/proc/self/maps") if "libshmem.so" in l
+                ]
+                print(
+                    "[MegaKernel] init_shemm FAILED; libshmem maps:\n"
+                    + "\n".join(_lm),
+                    flush=True,
+                )
+                raise
+        else:
+            self.tp_rank = 0
+
         self.vllm_config = vllm_config
         self._mega_state: Optional[_MegaKernelGLM52State] = None
+        self._mega_raw_weights: Optional[Dict[str, torch.Tensor]] = None
+        print(
+            "[MegaKernel] AscendGlm52MegaForCausalLM initialized, "
+            f"ENABLE_MEGAKERNEL={_mega_enabled()}",
+            flush=True,
+        )
 
     def _ensure_mega(self, vllm_config: VllmConfig) -> _MegaKernelGLM52State:
         if self._mega_state is None:
@@ -507,13 +735,24 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
                     attn_meta = _extract_dsa_metadata(fc.attn_metadata)
             except Exception:
                 attn_meta = None
-            if (
+            is_decode = (
                 attn_meta is not None
                 and self._is_decode_step(attn_meta)
                 and _has_usable_metadata(attn_meta)
-            ):
+            )
+            print(
+                "[MegaKernel] forward: "
+                f"mega_enabled={_mega_enabled()}, "
+                f"attn_meta="
+                f"{type(attn_meta).__name__ if attn_meta is not None else 'None'}, "
+                f"decode={is_decode}",
+                flush=True,
+            )
+            if is_decode:
                 print(
-                    "[MegaKernel] decode step -> megakernel forward",
+                    "[MegaKernel] >>> ROUTED TO MEGA KERNEL (decode), "
+                    f"num_tokens="
+                    f"{getattr(attn_meta, 'num_actual_tokens', '?')}",
                     flush=True,
                 )
                 try:
@@ -523,6 +762,12 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
 
                     traceback.print_exc()
                     raise
+        elif _mega_enabled():
+            print(
+                "[MegaKernel] >>> NATIVE vLLM-Ascend path "
+                f"(input_ids={'yes' if input_ids is not None else 'no'})",
+                flush=True,
+            )
         return super().forward(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -608,13 +853,7 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
         irope = getattr(attn0, "indexer_rope_emb", None)
         if irope is not None:
             icos32, isin32 = _cos_sin(irope, pos_cpu)
-            idx_cache = torch.cat(
-                (
-                    icos32.repeat_interleave(2, dim=-1),
-                    isin32.repeat_interleave(2, dim=-1),
-                ),
-                dim=-1,
-            )  # [B, 128]
+            idx_cache = torch.cat((icos32, isin32), dim=-1)  # [B, 64]
             state.index_cos_sin_cache[:num_tokens].copy_(
                 idx_cache.to(torch.bfloat16).npu()
             )
@@ -649,6 +888,11 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
                 f"query_start_loc={query_start_loc is not None}"
             )
         batch_size = int(seq_lens.shape[0])
+        print(
+            "[MegaKernel] _forward_mega: "
+            f"tokens={num_tokens} batch={batch_size}",
+            flush=True,
+        )
         bufs = state.get_meta_buffers(batch_size)
 
         # Fill the persistent MLA/indexer RoPE caches for this step.
@@ -701,6 +945,355 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
         return logits.to(torch.float32)
 
 
+class _MegaMTPStepGraph(nn.Module):
+    """Capture-safe graph of embed + one MTP decoder-layer step.
+
+    Returns the same tuple as the native DeepSeekMTP draft contract:
+    ``(pre_final_norm_hidden, post_final_norm_recycle_hidden)``.  The
+    vocabulary head is applied later by ``compute_logits``.
+    """
+
+    def __init__(self, mtp_model: Any, embed_weight: torch.Tensor):
+        super().__init__()
+        self.mtp_model = mtp_model
+        self.embed_weight = embed_weight
+
+    def forward(
+        self,
+        forward_batch_info: Any,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor,
+        prev_hidden: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, Any]:
+        token_hidden = torch.ops.mk_ascendc.gather_v2(
+            self.embed_weight, input_ids
+        )
+        # mtp_model.forward -> (pre_final_norm, recycle_post_norm, topk)
+        return self.mtp_model(
+            forward_batch_info,
+            positions,
+            token_hidden,
+            prev_hidden,
+            spec_step_idx=spec_step_idx,
+        )
+
+
+def _shape_hash(value: Any) -> int:
+    """Small shape-only hash for graph-cache keys (values live in buffers)."""
+    h = 0
+
+    def _mix(v: int, x: int) -> int:
+        return (v * 1000003) ^ (x & 0xFFFFFFFF)
+
+    def _visit(v: Any) -> None:
+        nonlocal h
+        if isinstance(v, torch.Tensor):
+            h = _mix(h, v.ndim)
+            for s in v.shape:
+                h = _mix(h, int(s))
+        elif isinstance(v, (list, tuple)):
+            for item in v:
+                _visit(item)
+        elif v is not None:
+            h = _mix(h, hash(v))
+
+    _visit(value)
+    return h
+
+
+class _MegaMTPStepRunner(nn.Module):
+    """Per-step graph capture/cache/run for the MegaKernel MTP draft.
+
+    One 1-token (or packed first-pass) graph per shape; persistent input
+    buffers keep tensor addresses stable so the captured graph is replayed
+    instead of re-captured on every decode step (SGLang per-step design).
+    """
+
+    def __init__(
+        self,
+        step_graph: _MegaMTPStepGraph,
+        *,
+        device_id: int | None = None,
+        num_experts: int = 256,
+        skip_steps: int = 2,
+        cache_capacity: int = 16,
+    ) -> None:
+        super().__init__()
+        self.step_graph = step_graph
+        self.device_id = (
+            torch.npu.current_device() if device_id is None else device_id
+        )
+        self.num_experts = num_experts
+        self.skip_steps = skip_steps if num_experts else 0
+        from blockrt.models.model_cache import ModelCache
+
+        self.graph_cache = ModelCache(capacity=cache_capacity)
+        self._outputs: Dict[Any, Any] = {}
+        self._address_signatures: Dict[Any, tuple[int, ...]] = {}
+
+    @staticmethod
+    def _collect_ptrs(
+        forward_batch_info: Any,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor,
+        prev_hidden: torch.Tensor,
+    ) -> tuple[int, ...]:
+        ptrs: list[int] = []
+
+        def _add(v: Any) -> None:
+            if isinstance(v, torch.Tensor):
+                ptrs.append(v.data_ptr())
+            elif isinstance(v, (list, tuple)):
+                for item in v:
+                    _add(item)
+            elif v is not None:
+                for field in (
+                    "k_cache",
+                    "v_cache",
+                    "block_tables",
+                    "slot_mapping",
+                    "kv_seq_len",
+                    "q_seq_len",
+                    "index_cos_sin_cache",
+                    "index_rope_positions",
+                    "index_k_buffer",
+                    "index_k_scale_buffer",
+                    "mla_cos_cache",
+                    "mla_sin_cache",
+                ):
+                    _add(getattr(v, field, None))
+
+        _add(forward_batch_info)
+        _add(positions)
+        _add(input_ids)
+        _add(prev_hidden)
+        return tuple(ptrs)
+
+    def _capture(
+        self,
+        forward_batch_info: Any,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor,
+        prev_hidden: torch.Tensor,
+        spec_step_idx: int,
+    ) -> tuple[Any, Any]:
+        from blockrt.runtime.tracer import DAGCapture
+
+        with DAGCapture() as capture:
+            output = self.step_graph(
+                forward_batch_info,
+                positions,
+                input_ids,
+                prev_hidden,
+                spec_step_idx,
+            )
+        graph = capture.build(
+            device_id=self.device_id,
+            callback="libskip_inactive_callback.so",
+            num_experts=self.num_experts,
+            skip_steps=self.skip_steps,
+        )
+        return graph, output
+
+    def forward(
+        self,
+        forward_batch_info: Any,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor,
+        prev_hidden: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, Any]:
+        key = (
+            int(input_ids.numel()),
+            int(forward_batch_info.num_tokens),
+            int(spec_step_idx),
+            _shape_hash(
+                (
+                    forward_batch_info.block_tables,
+                    forward_batch_info.slot_mapping,
+                    forward_batch_info.kv_seq_len,
+                    forward_batch_info.q_seq_len,
+                    forward_batch_info.index_cos_sin_cache,
+                    forward_batch_info.mla_cos_cache,
+                    forward_batch_info.mla_sin_cache,
+                )
+            ),
+        )
+        graph = self.graph_cache.get_graph(key)
+        signature = self._collect_ptrs(
+            forward_batch_info, positions, input_ids, prev_hidden
+        )
+        if graph is None or self._address_signatures.get(key) != signature:
+            graph, output = self._capture(
+                forward_batch_info,
+                positions,
+                input_ids,
+                prev_hidden,
+                spec_step_idx,
+            )
+            self.graph_cache.insert_graph(key, graph)
+            self._outputs[key] = output
+            self._address_signatures[key] = signature
+            torch.npu.synchronize()
+        graph.run()
+        return self._outputs[key]
+
+
+class AscendGlm52MegaMTP(DeepSeekMTP):
+    """MegaKernel-backed GLM-5.2 MTP draft (DeepSeekMTPModel registry entry).
+
+    Keeps the native DeepSeekMTP module tree so vLLM's model loader and the
+    speculative proposer machinery work unchanged, but routes every MTP step
+    through the MegaKernel MTP model as an SGLang-style per-step graph.
+    """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.vllm_config = vllm_config
+        self._mtp_state: Optional[_MegaKernelGLM52State] = None
+        self._step_runner: Optional[_MegaMTPStepRunner] = None
+
+    def _ensure_mtp_state(self) -> _MegaKernelGLM52State:
+        if self._mtp_state is None:
+            model_path = str(self.vllm_config.model_config.model)
+            state = _MEGA_STATE_REGISTRY.get(model_path)
+            if state is None:
+                raise RuntimeError(
+                    "MegaKernel MTP draft: no shared MegaKernel state for "
+                    f"{model_path}. The target model must run with "
+                    "ENABLE_MEGAKERNEL=1 first (it registers the runtime)."
+                )
+            mtp_model = getattr(state.mega.model, "mtp_model", None)
+            if mtp_model is None:
+                raise RuntimeError(
+                    "MegaKernel MTP draft: checkpoint has no MTP layers "
+                    "(num_nextn_predict_layers=0)."
+                )
+            embed_weight = state.mega.model.model.embed_tokens.weight
+            self._step_runner = _MegaMTPStepRunner(
+                _MegaMTPStepGraph(mtp_model, embed_weight),
+                device_id=torch.npu.current_device(),
+                num_experts=int(
+                    getattr(state.model_args, "n_routed_experts", 256)
+                ),
+            )
+            self._mtp_state = state
+            print("[MegaKernel] MTP draft ready (per-step mega graphs)", flush=True)
+        return self._mtp_state
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        if input_ids is None:
+            raise RuntimeError("MegaKernel MTP draft requires input_ids")
+        state = self._ensure_mtp_state()
+        runner = self._step_runner
+        assert runner is not None
+
+        fc = get_forward_context()
+        attn_meta = _extract_dsa_metadata(fc.attn_metadata) if fc is not None else None
+        if attn_meta is None or not _has_usable_metadata(attn_meta):
+            raise RuntimeError(
+                "MegaKernel MTP draft: no usable attention metadata in forward "
+                "context"
+            )
+        req = getattr(attn_meta, "req_metadata", None) or attn_meta
+        num_tokens = int(
+            getattr(attn_meta, "num_actual_tokens", None)
+            or getattr(attn_meta, "num_tokens", None)
+            or input_ids.shape[0]
+        )
+        seq_lens = getattr(req, "seq_lens", None)
+        block_table = getattr(req, "block_table", None)
+        slot_mapping = getattr(req, "slot_mapping", None)
+        query_start_loc = getattr(req, "query_start_loc", None)
+        if seq_lens is None or block_table is None or slot_mapping is None:
+            raise RuntimeError(
+                "MegaKernel MTP draft: metadata lacks "
+                f"seq_lens={seq_lens is not None}, "
+                f"block_table={block_table is not None}, "
+                f"slot_mapping={slot_mapping is not None}"
+            )
+        batch_size = int(seq_lens.shape[0])
+        bufs = state.get_meta_buffers(batch_size)
+        if "hidden_states" not in bufs:
+            bufs["hidden_states"] = torch.empty(
+                (self._max_buf_tokens(batch_size), state.model_args.hidden_size),
+                dtype=torch.bfloat16,
+                device="npu",
+            )
+
+        # Stable-address persistent buffers for graph replay.
+        ids = input_ids.to(torch.int32).contiguous()
+        pos = positions.to(torch.int64).contiguous()
+        bufs["input_ids"][:num_tokens].copy_(ids[:num_tokens])
+        bufs["positions"][:num_tokens].copy_(pos[:num_tokens])
+        slot = slot_mapping.to(torch.int32).reshape(-1).contiguous()
+        bufs["slot_mapping"][:num_tokens].copy_(slot[:num_tokens])
+        block_table = block_table.to(torch.int32).contiguous()
+        max_blocks = min(block_table.shape[1], state.num_blocks)
+        bufs["block_tables"][:, :max_blocks].copy_(
+            block_table[:, :max_blocks]
+        )
+        seq_lens_t = seq_lens.to(torch.int32).contiguous()
+        bufs["kv_seq_len"][:batch_size].copy_(seq_lens_t[:batch_size])
+        if query_start_loc is not None:
+            qsl = query_start_loc.to(torch.int64).contiguous()
+            if qsl.shape[0] >= batch_size + 1:
+                q_seq = qsl[1 : batch_size + 1] - qsl[:batch_size]
+            else:
+                q_seq = torch.ones(
+                    batch_size, dtype=torch.int64, device=qsl.device
+                )
+            bufs["q_seq_len"][:batch_size].copy_(q_seq.to(torch.int32))
+        else:
+            bufs["q_seq_len"][:batch_size].fill_(1)
+
+        # Draft layer attention module (rotary_emb / indexer_rope_emb).
+        mtp_start = state.model_args.mtp_start_layer_idx
+        draft_layer = self.model.layers[str(mtp_start)]
+        draft_self_attn = draft_layer.mtp_block.self_attn
+        state.fill_rope_caches(pos, num_tokens, draft_self_attn)
+
+        bufs["hidden_states"][:num_tokens].copy_(
+            hidden_states[:num_tokens].to(torch.bfloat16).contiguous()
+        )
+        fbi = state.build_mtp_forward_batch_info(bufs, num_tokens, batch_size)
+        pre_norm, recycle, _topk = runner(
+            fbi,
+            bufs["positions"][:num_tokens],
+            bufs["input_ids"][:num_tokens],
+            bufs["hidden_states"][:num_tokens],
+            spec_step_idx,
+        )
+        return pre_norm, recycle
+
+    def _max_buf_tokens(self, batch_size: int) -> int:
+        state = self._mtp_state
+        return max(
+            getattr(state, "max_tokens_default", 8192) if state is not None else 8192,
+            batch_size * 4,
+        )
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        state = self._ensure_mtp_state()
+        logits = state.mega.model.mtp_model.compute_logits(
+            hidden_states, spec_step_idx
+        )
+        return logits.to(torch.float32)
+
+
 def register_megakernel_model() -> None:
     """Point the GLM-5.2 registry entry at the MegaKernel wrapper."""
     from vllm import ModelRegistry
@@ -708,4 +1301,14 @@ def register_megakernel_model() -> None:
     ModelRegistry.register_model(
         "GlmMoeDsaForCausalLM",
         "vllm_ascend.models.glm_5_2_mega:AscendGlm52MegaForCausalLM",
+    )
+
+
+def register_megakernel_mtp_model() -> None:
+    """Point the DeepSeekMTPModel registry entry at the MegaKernel MTP draft."""
+    from vllm import ModelRegistry
+
+    ModelRegistry.register_model(
+        "DeepSeekMTPModel",
+        "vllm_ascend.models.glm_5_2_mega:AscendGlm52MegaMTP",
     )
