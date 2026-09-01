@@ -189,11 +189,22 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer):
+        # Restore the MX semantic dtype BEFORE the format-29 (NZ) cast, using
+        # the NATIVE torch dtype: torch_npu's own float4_e2m1fn_x2 has broken
+        # itemsize metadata on this build and view() against it always fails
+        # with "shape '[296]' is invalid". After the cast the dtype sticks, so
+        # downstream view() calls are no longer needed.
         layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+            layer.w13_weight.data.view(torch.float4_e2m1fn_x2),
+            29,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=torch.float4_e2m1fn_x2,
         )
         layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+            layer.w2_weight.data.view(torch.float4_e2m1fn_x2),
+            29,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=torch.float4_e2m1fn_x2,
         )
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
