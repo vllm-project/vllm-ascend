@@ -160,7 +160,11 @@ private:
     static constexpr T LN2 = 0.6931471805599453094172;
     static constexpr T RECIP_OF_LN2 = 1 / LN2;
     static constexpr T SOFTMAX_MIN_NUM = -2e38;
-    static constexpr int32_t TQ4_DEQUANT_CHUNK = 4;
+    // [TQ4] 反量化批大小：bf16 快路径 16（scratch：compact 4K + half 8K +
+    // idx 16K = 28K ≤ 32K inputBuff2；byte-LUT 每字节一次 Gather，half/idx 区按
+    // 字节而非 nibble 计）；非 bf16 慢路径保留原 4（float work 8K + half 4K +
+    // idx 8K = 20K）。
+    static constexpr int32_t TQ4_DEQUANT_CHUNK = IsSameType<K_ROPE_T, bfloat16_t>::value ? 16 : 4;
 
     const TurboQuantSparseFlashAttentionTilingDataMla *__restrict tilingData;
 
@@ -220,7 +224,11 @@ private:
     // [TQ4] persistent centSigned codebook (setup once in InitBuffers); int4b_t HW Cast unpack
     // needs no nibble masks / reorder idx.
     TBuf<> tq4CentBuf_; // 16 float (centSigned[k] = _CENT[(k+8)%16])
-    // [O9] scale 批量导出用的索引表：sTIdx[i] = i*32（字节偏移），一次性初始化
+    // [TQ4] 256 项 byte-LUT：byteLut[b] 一次携带一个字节的两个质心 bf16 位型
+    //（高 16 位 = 高 nibble、低 16 位 = 低 nibble；小端 + low-nibble-first 打包，
+    // 低半字恰好落偶数维）。bf16 反量化每字节一次 Gather（见 Tq4DequantRows）。
+    TBuf<> tq4ByteLutBuf_; // 256 uint32 = 1KB
+    // [TQ4] scale 批量导出用的索引表：sTIdx[i] = i*32（字节偏移），一次性初始化
     TBuf<> tq4STIdxBuf_; // 512B = 128 个 uint32
     // [TQ4] per-column scale 专用暂存。曾经挤在 v0ValidSizeUb_ 内（手工偏移 4096/5120），
     // 实测 M 分块数>1 时 Cast/Duplicate 必崩 507015，故改为独立 buffer。
@@ -261,7 +269,7 @@ __aicore__ inline void QSFAVectorService<QSFAT>::InitBuffers(TPipe *pipe)
     v0ValidSizeUb_ = v0ValidSizeBuff.Get<int32_t>();
 
     // [TQ4] one-time setup: centSigned codebook (gather index = int4b signed nibble + 8). Done ONCE.
-    // [O9] 索引表一次性初始化：每 32B 取头 2B
+    // [TQ4] 索引表一次性初始化：每 32B 取头 2B
     pipe->InitBuffer(tq4STIdxBuf_, ConstInfo::BUFFER_SIZE_BYTE_512B);
     {
         LocalTensor<uint32_t> qsfaSTIdxInit = tq4STIdxBuf_.Get<uint32_t>();
@@ -271,6 +279,7 @@ __aicore__ inline void QSFAVectorService<QSFAT>::InitBuffers(TPipe *pipe)
     }
     pipe->InitBuffer(tq4ScaleBuf_, ConstInfo::BUFFER_SIZE_BYTE_4K);
     pipe->InitBuffer(tq4CentBuf_, ConstInfo::BUFFER_SIZE_BYTE_256B);
+    pipe->InitBuffer(tq4ByteLutBuf_, ConstInfo::BUFFER_SIZE_BYTE_1K);
     tq4Cent_ = tq4CentBuf_.Get<float>();
     tq4Cent_.SetValue(0, 0.00547294f);
     tq4Cent_.SetValue(1, 0.01680406f); // centSigned[k]=_CENT[(k+8)%16]
@@ -288,6 +297,32 @@ __aicore__ inline void QSFAVectorService<QSFAT>::InitBuffers(TPipe *pipe)
     tq4Cent_.SetValue(13, -0.02874970f);
     tq4Cent_.SetValue(14, -0.01700489f);
     tq4Cent_.SetValue(15, -0.00568677f);
+    // [TQ4] bf16 反量化 byte-LUT（纯标量侧生成，无跨流水序问题）。标量域没有
+    // bf16 寄存器（SetValue<bfloat16_t> 后端不支持），按 RNE 手工舍出 bf16 位型，
+    // 与热路径 Cast(CAST_RINT) 的 f32->bf16 舍入一致，查表直取位型。
+    if constexpr (IsSameType<K_ROPE_T, bfloat16_t>::value) {
+        // byteLut[b] = (质心(b>>4) 的 bf16 位型 << 16) | 质心(b&0xf)。
+        // nibble n 的质心 = _CENT[n] = tq4Cent_[n^8]（^8 恰等于 (k+8)%16，即码本
+        // 注释里的旋转），RNE 舍出公式与 Cast(CAST_RINT) 一致。
+        LocalTensor<uint32_t> qsfaByteLut = tq4ByteLutBuf_.Get<uint32_t>();
+        for (uint32_t hi = 0; hi < 16U; ++hi) {
+            union {
+                float f;
+                uint32_t u;
+            } cvtHi;
+            cvtHi.f = tq4Cent_.GetValue(hi ^ 8U);
+            uint32_t qsfaHiBits = (cvtHi.u + 0x7FFFU + ((cvtHi.u >> 16) & 1U)) >> 16;
+            for (uint32_t lo = 0; lo < 16U; ++lo) {
+                union {
+                    float f;
+                    uint32_t u;
+                } cvtLo;
+                cvtLo.f = tq4Cent_.GetValue(lo ^ 8U);
+                uint32_t qsfaLoBits = (cvtLo.u + 0x7FFFU + ((cvtLo.u >> 16) & 1U)) >> 16;
+                qsfaByteLut.SetValue(hi * 16U + lo, (qsfaHiBits << 16) | qsfaLoBits);
+            }
+        }
+    }
     // [TQ4] fp32 scale 区一次性初始化为 1.0。目的是保证该区域永不含未初始化数据
     // （否则 NaN 会在掩码之前被乘进 score 并穿透 softmax）。有了它，热路径就不必
     // 再从 qsfaScaleF[validCol] 起补尾部 —— 那是个非 32B 对齐的向量写，会抛 507015。
@@ -822,8 +857,9 @@ __aicore__ inline int64_t QSFAVectorService<QSFAT>::GetKeyBNBOffset(int64_t real
 }
 
 // [TQ4] Phase B: codebook dequant of `dealRow` combined slots (int4 nope + rope + 2B scale)
-// -> dstB16 [dealRow,headDim] bf16 (Hadamard-space K=V). Read each aligned slot row
-// directly as int4b_t, then batch index/Gather/scale/output Cast for each 4-row chunk.
+// -> dstB16 [dealRow,headDim] bf16 (Hadamard-space K=V). bf16 path: 32B-burst compact
+// the packed bytes then one byte-LUT Gather per byte (uint32 carries 2 centroids);
+// other dtypes: per-nibble int4b_t Cast/index/Gather/output Cast in 4-row chunks.
 // The 2B slot scale is expected to be vecNorm/sqrt(Sum c^2) on the fused-SFA write path.
 template <typename QSFAT>
 __aicore__ inline void QSFAVectorService<QSFAT>::Tq4DequantRows(LocalTensor<KV_T> &srcTensor,
@@ -833,17 +869,21 @@ __aicore__ inline void QSFAVectorService<QSFAT>::Tq4DequantRows(LocalTensor<KV_T
     uint32_t ROW_BYTES =
         QSFAAlign(static_cast<uint32_t>(tilingData->baseParams.dSizeVInput), static_cast<uint32_t>(BYTE_BLOCK));
     constexpr int32_t CHUNK = TQ4_DEQUANT_CHUNK;
-    constexpr uint32_t CHUNK_ELEMS = CHUNK * 512;
-    constexpr uint32_t WORK_BYTE_OFF = 0;
-    constexpr uint32_t WORK_BYTES = CHUNK_ELEMS * sizeof(float);
-    constexpr uint32_t SHALF_BYTE_OFF = WORK_BYTE_OFF + WORK_BYTES;
-    constexpr uint32_t SHALF_BYTES = CHUNK_ELEMS * sizeof(half);
-    constexpr uint32_t IDX_BYTE_OFF = SHALF_BYTE_OFF + SHALF_BYTES;
-    constexpr uint32_t IDX_BYTES = CHUNK_ELEMS * sizeof(int32_t);
-    static_assert(IDX_BYTE_OFF + IDX_BYTES <= ConstInfo::BUFFER_SIZE_BYTE_32K,
+    constexpr uint32_t CHUNK_ELEMS = CHUNK * 512; // 慢路径按 nibble 计（HD=512）
+    // [TQ4] bf16 快路径 scratch：compact(CHUNK×256B) + half(CHUNK×256×2B) +
+    // idx(CHUNK×256×4B)，无 float work 区（byte-LUT Gather 直写 dst 的 uint32
+    // 视图，每字节一个表项）；慢路径保留原布局（float work + half + idx，按
+    // nibble 计），故 chunk 上限不同（见 TQ4_DEQUANT_CHUNK）。
+    constexpr bool TQ4_FAST_BF16 = IsSameType<K_ROPE_T, bfloat16_t>::value;
+    constexpr uint32_t CHUNK_BYTES = CHUNK * 256U; // 每行打包字节数（HD/2=256）
+    constexpr uint32_t HALF_ELEMS = TQ4_FAST_BF16 ? CHUNK_BYTES : CHUNK_ELEMS;
+    constexpr uint32_t IDX_ELEMS = TQ4_FAST_BF16 ? CHUNK_BYTES : CHUNK_ELEMS;
+    constexpr uint32_t COMPACT_BYTES = TQ4_FAST_BF16 ? CHUNK_BYTES : 0U;
+    constexpr uint32_t SHALF_BYTE_OFF = TQ4_FAST_BF16 ? COMPACT_BYTES : CHUNK_ELEMS * sizeof(float);
+    constexpr uint32_t IDX_BYTE_OFF = SHALF_BYTE_OFF + HALF_ELEMS * sizeof(half);
+    static_assert(IDX_BYTE_OFF + IDX_ELEMS * sizeof(int32_t) <= ConstInfo::BUFFER_SIZE_BYTE_32K,
                   "TQ4 dequant scratch exceeds inputBuff2");
 
-    LocalTensor<float> workBase = inputBuff2.Get<float>()[WORK_BYTE_OFF / sizeof(float)];
     LocalTensor<half> sHalfBase = inputBuff2.Get<half>()[SHALF_BYTE_OFF / sizeof(half)];
     LocalTensor<int32_t> idxI = inputBuff2.Get<int32_t>()[IDX_BYTE_OFF / sizeof(int32_t)];
     LocalTensor<uint32_t> idxU = inputBuff2.Get<uint32_t>()[IDX_BYTE_OFF / sizeof(uint32_t)];
@@ -855,34 +895,69 @@ __aicore__ inline void QSFAVectorService<QSFAT>::Tq4DequantRows(LocalTensor<KV_T
         return;
     }
 
-    for (int32_t base = 0; base < dealRow; base += CHUNK) {
-        int32_t cur = (base + CHUNK <= dealRow) ? CHUNK : (dealRow - base);
-        uint32_t cnt = static_cast<uint32_t>(cur) * HD;
-
-        for (int32_t rr = 0; rr < cur; ++rr) {
-            int32_t r = base + rr;
-            Cast(sHalfBase[rr * HD], srcI4[r * ROW_BYTES * 2], RoundMode::CAST_NONE, HD); // int4b -> half, -8..7
+    // per-row 的 s_t 不在此处施加：MLA 里 K=V，缩放 K 的行等价于缩放 score/P 的列，
+    // 故改到 attention 侧按列做一次（见 ElewiseCompute 与 DealBmm1ResBaseBlock）。
+    // 省掉的是 dealRow 条 512 宽的 Muls，单算子实测约 3%。
+    if constexpr (TQ4_FAST_BF16) {
+        // [TQ4] 每块四条向量指令（摊到每 16 行四条）：
+        //   1) V 侧 32B-burst 拷贝把 CHUNK 行的 256B nibble 区按 416B 行距抽紧成
+        //      连续字节（uint8 视图寻址）；
+        //   2) 两条 Cast：u8->half（值域 0..255 在 half 精确）再 ->int32 —— Gather
+        //      的偏移张量形参只认 uint32（dav_m200/kernel_operator_vec_gather_impl.h），
+        //      且无 u8->i32 直通组合（vconv 支持表），u8 必须经 half 中转；
+        //   3) ShiftLeft <<2：字节下标 -> uint32 表项字节地址 [0, 1020]（×4 不能
+        //      烙进标量 baseOffset，它是全体元素共用的常数）；
+        //   4) Gather 直查 256 项 byte-LUT，uint32 直写 dst —— 一次携带相邻两维
+        //      的 bf16 质心位型，每字节一次 Gather。
+        // 向量指令 0.25/行，barrier 5/16行。
+        LocalTensor<uint8_t> compactU8 = inputBuff2.Get<uint8_t>();
+        LocalTensor<uint32_t> byteLut = tq4ByteLutBuf_.Get<uint32_t>();
+        LocalTensor<uint32_t> dstU32 = dstB16.template ReinterpretCast<uint32_t>();
+        LocalTensor<uint8_t> srcU8 = srcTensor.template ReinterpretCast<uint8_t>();
+        // 行距 416B=13×32B、nibble 区 256B=8×32B 均为 32B 整数倍（QSFAAlign 保证）
+        uint16_t nibbleBlk = static_cast<uint16_t>((HD / 2) / BYTE_BLOCK);
+        uint16_t rowGapBlk = static_cast<uint16_t>(ROW_BYTES / BYTE_BLOCK - nibbleBlk);
+        for (int32_t base = 0; base < dealRow; base += CHUNK) {
+            int32_t cur = (base + CHUNK <= dealRow) ? CHUNK : (dealRow - base);
+            uint32_t cnt = static_cast<uint32_t>(cur) * (HD / 2U); // 每字节一个 uint32 输出
+            DataCopyParams compactParams;
+            compactParams.blockCount = static_cast<uint16_t>(cur);
+            compactParams.blockLen = nibbleBlk;
+            compactParams.srcStride = rowGapBlk;
+            compactParams.dstStride = 0;
+            DataCopy(compactU8, srcU8[base * ROW_BYTES], compactParams);
+            PipeBarrier<PIPE_V>();
+            Cast(sHalfBase, compactU8, RoundMode::CAST_NONE, cnt); // byte value -> half, 0..255
+            PipeBarrier<PIPE_V>();
+            Cast(idxI, sHalfBase, RoundMode::CAST_ROUND, cnt);
+            PipeBarrier<PIPE_V>();
+            ShiftLeft(idxI, idxI, static_cast<int32_t>(2), cnt); // -> uint32 表字节地址 [0, 1020]
+            PipeBarrier<PIPE_V>();
+            Gather(dstU32[base * (HD / 2U)], byteLut, idxU, 0, cnt); // non-negative offsets only (base 0)
+            PipeBarrier<PIPE_V>();
         }
-        PipeBarrier<PIPE_V>();
-        Adds(sHalfBase, sHalfBase, static_cast<half>(8.0f), cnt); // signed nibble +8 -> [0, 15]
-        PipeBarrier<PIPE_V>();
-        Muls(sHalfBase, sHalfBase, static_cast<half>(4.0f), cnt); // *4 -> byte offset [0, 60]
-        PipeBarrier<PIPE_V>();
-        Cast(idxI, sHalfBase, RoundMode::CAST_ROUND, cnt);
-        PipeBarrier<PIPE_V>();
-        Gather(workBase, centBuf, idxU, 0, cnt); // non-negative offsets only (base 0)
-        PipeBarrier<PIPE_V>();
+    } else {
+        LocalTensor<float> workBase = inputBuff2.Get<float>();
+        for (int32_t base = 0; base < dealRow; base += CHUNK) {
+            int32_t cur = (base + CHUNK <= dealRow) ? CHUNK : (dealRow - base);
+            uint32_t cnt = static_cast<uint32_t>(cur) * HD;
 
-        // per-row 的 s_t 不在此处施加：MLA 里 K=V，缩放 K 的行等价于缩放 score/P 的列，
-        // 故改到 attention 侧按列做一次（见 ElewiseCompute 与 DealBmm1ResBaseBlock）。
-        // 省掉的是 dealRow 条 512 宽的 Muls，单算子实测约 3%。
-        PipeBarrier<PIPE_V>();
-        if constexpr (IsSameType<K_ROPE_T, bfloat16_t>::value) {
-            Cast(dstB16[base * HD], workBase, RoundMode::CAST_RINT, cnt);
-        } else {
+            for (int32_t rr = 0; rr < cur; ++rr) {
+                int32_t r = base + rr;
+                Cast(sHalfBase[rr * HD], srcI4[r * ROW_BYTES * 2], RoundMode::CAST_NONE, HD); // int4b -> half, -8..7
+            }
+            PipeBarrier<PIPE_V>();
+            Adds(sHalfBase, sHalfBase, static_cast<half>(8.0f), cnt); // signed nibble +8 -> [0, 15]
+            PipeBarrier<PIPE_V>();
+            Muls(sHalfBase, sHalfBase, static_cast<half>(4.0f), cnt); // *4 -> byte offset [0, 60]
+            PipeBarrier<PIPE_V>();
+            Cast(idxI, sHalfBase, RoundMode::CAST_ROUND, cnt);
+            PipeBarrier<PIPE_V>();
+            Gather(workBase, centBuf, idxU, 0, cnt); // non-negative offsets only (base 0)
+            PipeBarrier<PIPE_V>();
             Cast(dstB16[base * HD], workBase, RoundMode::CAST_ROUND, cnt);
+            PipeBarrier<PIPE_V>();
         }
-        PipeBarrier<PIPE_V>();
     }
     PipeBarrier<PIPE_ALL>();
 }
@@ -1019,7 +1094,7 @@ __aicore__ inline void QSFAVectorService<QSFAT>::CopyOutMrgeResult(int64_t mte2S
             uint32_t qsfaSlotRowBlk = QSFAAlign(static_cast<uint32_t>(tilingData->baseParams.dSizeVInput),
                                                 static_cast<uint32_t>(BYTE_BLOCK)) /
                                       BYTE_BLOCK;
-            // [O9] 向量化导出：每 token 读 1 个 32B block、跳过 (rowBlk-1) 个 block，
+            // [TQ4] 向量化导出：每 token 读 1 个 32B block、跳过 (rowBlk-1) 个 block，
             // 得到 [dealRow, 32B]；再用预置索引 (i*32) Gather 出每行头 2B，凑成连续向量。
             // 两条向量指令替掉 dealRow 次标量读写。
             LocalTensor<half> qsfaSTUb = tmpBuff2.Get<half>();
