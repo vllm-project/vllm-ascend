@@ -78,6 +78,7 @@ def build_compressor_metadata_out(
     metadata: Any,
     compress_ratio: int,
     outputs: CompressorMetadataOutput,
+    vllm_config: VllmConfig,
 ) -> None:
     assert metadata.full_compress_cos is not None
     assert metadata.full_compress_sin is not None
@@ -98,7 +99,7 @@ def build_compressor_metadata_out(
         metadata.start_pos,
         metadata.block_table,
         metadata.storage_block_size,
-        DeviceOperator.get_dsa_compressor_slot_mapping_format(),
+        get_dsa_attn_kv_plan(vllm_config).get_dsa_compressor_slot_mapping_format(),
         compress_ratio,
         metadata.num_actual_reqs,
         *outputs,
@@ -958,7 +959,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self._device_metadata_tasks = (
                 DeviceMetadataTask(
                     DeviceMetadataStage.COMPRESSOR,
-                    lambda: build_compressor_metadata_out(req_metadata, self.compressor_ratio, outputs),
+                    lambda: build_compressor_metadata_out(
+                        req_metadata, self.compressor_ratio, outputs, self.vllm_config
+                    ),
                     group_id,
                 ),
                 *self._device_metadata_tasks,
@@ -1850,8 +1853,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
 
         notify_kv_cache_written(layer_name)
-        record_attention_compute_start()
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
+        record_attention_compute_start()
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         attn_op = kv_plan.get_dsa_sparse_attn_op()
         attn_kwargs = kv_plan.get_dsa_sparse_attn_base_kwargs()

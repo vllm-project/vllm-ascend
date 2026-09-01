@@ -89,6 +89,7 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         method="dspark",
         runner=SimpleNamespace(device_metadata_executor=executor),
         dcp_size=dcp_size,
+        sliding_window=None,
         _per_group_block_table_buffers={group_id: torch.ones((1, 1), dtype=torch.int32) for group_id in range(2)},
         _per_group_query_slot_mapping_buffers={group_id: torch.zeros(1, dtype=torch.int32) for group_id in range(2)},
     )

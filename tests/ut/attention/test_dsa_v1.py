@@ -179,6 +179,12 @@ def test_draft_swa_and_sas_share_attention_task():
         causal=False,
     )
     sas_result = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=sas_result)
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_kwargs={},
+        get_dsa_sparse_attn_metadata_op=metadata_op,
+    )
+    plan.layout_kv = "PA_BBND"
 
     with (
         patch.object(
@@ -187,12 +193,7 @@ def test_draft_swa_and_sas_share_attention_task():
             return_value=torch.tensor([0, 10, 24], dtype=torch.int32),
         ),
         patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv", return_value=None),
-        patch.object(DeviceOperator, "get_dsa_sparse_attn_metadata_kwargs", return_value={}),
-        patch.object(
-            DeviceOperator,
-            "get_dsa_sparse_attn_metadata_op",
-            return_value=MagicMock(return_value=sas_result),
-        ),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch(
             "vllm_ascend.attention.dsa_v1.build_dspark_swa_indices",
             wraps=build_dspark_swa_indices,
@@ -246,6 +247,7 @@ def test_draft_swa_and_sas_share_attention_task():
     assert builder.dspark_swa_indices_buffer.shape[0] == 16
     assert not torch.equal(next_metadata.dspark_swa_indices, first_indices[:3])
     assert torch.equal(metadata.sas_metadata, sas_result)
+    assert metadata_op.call_args.kwargs["layout_kv"] == "PA_BBND"
 
 
 def test_draft_swa_metadata_rejects_rows_above_buffer_capacity():
@@ -718,6 +720,7 @@ def test_dsa_cp_device_metadata_tasks(
     builder.req_qli_metadata = torch.zeros(1024, dtype=torch.int32)
     builder._device_metadata_enabled = device_metadata_enabled
     builder._device_metadata_tasks = ()
+    builder.vllm_config = MagicMock()
     builder.model_config = SimpleNamespace(
         hf_config=SimpleNamespace(num_attention_heads=64, index_topk=512),
         get_head_size=lambda: 512,
@@ -907,14 +910,17 @@ def test_build_compressor_metadata_out_uses_fixed_outputs():
         torch.empty((2, 1, 1, 4)),
         torch.empty((2, 2), dtype=torch.int32),
     )
+    vllm_config = MagicMock()
+    plan = _mock_dsa_kv_plan(get_dsa_compressor_slot_mapping_format=2)
 
     with (
-        patch.object(DeviceOperator, "get_dsa_compressor_slot_mapping_format", return_value=2),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch.object(torch.ops._C_ascend, "compressor_metadata_out", create=True) as metadata_out,
     ):
-        build_compressor_metadata_out(metadata, 4, outputs)
+        build_compressor_metadata_out(metadata, 4, outputs, vllm_config)
 
     assert metadata_out.call_args.args[-3:] == outputs
+    assert metadata_out.call_args.args[6] == 2
 
 
 def test_dsa_cp_compressor_waits_for_precomputed_metadata():
@@ -946,10 +952,12 @@ def test_dsa_cp_legacy_compressor_waits_for_device_local_metadata():
         storage_block_size=128,
     )
     impl.compress_ratio = 4
+    impl.vllm_config = MagicMock()
+    plan = _mock_dsa_kv_plan(get_dsa_compressor_slot_mapping_format=2)
 
     with (
         patch("vllm_ascend.attention.context_parallel.dsa_cp.wait_for_device_metadata") as wait,
-        patch.object(DeviceOperator, "get_dsa_compressor_slot_mapping_format", return_value=2),
+        patch("vllm_ascend.attention.context_parallel.dsa_cp.get_dsa_attn_kv_plan", return_value=plan),
         patch.object(torch.ops._C_ascend, "compressor_metadata", create=True, return_value=(1, 2, 3)),
     ):
         assert impl._compute_compressor_metadata(metadata) == (1, 2, 3)
@@ -1095,6 +1103,7 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int):
     impl.compressor_ape = torch.empty(0)
     impl.compressor_norm = SimpleNamespace(weight=torch.empty(0))
     impl.compressor_norm_eps = 1e-6
+    impl.vllm_config = MagicMock()
 
     swa_sas = torch.zeros(1024, dtype=torch.int32)
     compressor_sas = torch.ones(1024, dtype=torch.int32)
@@ -1108,19 +1117,25 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int):
         indexer_state=compressor_metadata if compress_ratio == 4 else None,
     )
     expected_sas = swa_sas if compress_ratio <= 1 else compressor_sas
-    waited = False
+    events: list[str] = []
 
     def record_wait(stage: DeviceMetadataStage, group_id: int) -> None:
-        nonlocal waited
         assert (stage, group_id) == (DeviceMetadataStage.ATTENTION, id(expected_sas))
-        waited = True
+        events.append("wait")
 
     def run_attention(*args, **kwargs):
-        assert waited
+        assert events == ["wait", "record"]
+        events.append("attention")
         return (torch.ones((1, 1, 2)),)
 
     def add_extra_kwargs(extra_kwargs: dict[str, Any], **kwargs) -> None:
         extra_kwargs.update(kwargs)
+
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_op=run_attention,
+        get_dsa_sparse_attn_base_kwargs={},
+    )
+    plan.add_dsa_sparse_attn_extra_kwargs.side_effect = add_extra_kwargs
 
     with (
         patch.object(
@@ -1129,10 +1144,8 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int):
             return_value=(torch.empty(0), torch.empty(0), torch.zeros((1, 1, 1)), None, None, None),
         ),
         patch.object(DeviceOperator, "apply_dsa_q_rms", side_effect=lambda value, *_: value),
-        patch.object(DeviceOperator, "dsa_kv_compress_scatter"),
-        patch.object(DeviceOperator, "get_dsa_sparse_attn_op", return_value=run_attention),
-        patch.object(DeviceOperator, "get_dsa_sparse_attn_base_kwargs", return_value={}),
-        patch.object(DeviceOperator, "add_dsa_sparse_attn_extra_kwargs", side_effect=add_extra_kwargs),
+        patch("vllm_ascend.attention.context_parallel.dsa_cp.get_dsa_attn_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch.object(torch.ops._C_ascend, "inplace_partial_rotary_mul", create=True),
         patch.object(torch.ops._C_ascend, "compressor", create=True, return_value=torch.empty(0)),
         patch.object(impl, "_split_full_hidden_states_for_cp", side_effect=lambda value, _: value),
@@ -1148,7 +1161,10 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int):
             ),
         ),
         patch("vllm_ascend.attention.context_parallel.dsa_cp.notify_kv_cache_written"),
-        patch("vllm_ascend.attention.context_parallel.dsa_cp.record_attention_compute_start"),
+        patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.record_attention_compute_start",
+            side_effect=lambda: events.append("record"),
+        ),
         patch(
             "vllm_ascend.attention.context_parallel.dsa_cp.wait_for_device_metadata",
             side_effect=record_wait,
@@ -1161,7 +1177,7 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int):
             layer_metadata,
         )
 
-    assert waited
+    assert events == ["wait", "record", "attention"]
 
 
 @pytest.mark.parametrize("for_drafting", [False, True])
@@ -1538,7 +1554,13 @@ def test_forward_attention_routes_unified_req_metadata(
         req_metadata=req_metadata,
     )
     swa_kv_cache = torch.empty(0)
-    sparse_attn_op = MagicMock(return_value=(attention_output,))
+    events: list[str] = []
+
+    def run_attention(*args, **kwargs):
+        events.append("attention")
+        return (attention_output,)
+
+    sparse_attn_op = MagicMock(side_effect=run_attention)
 
     def add_extra_kwargs(extra_kwargs: dict[str, Any], **kwargs) -> None:
         extra_kwargs.update(kwargs)
@@ -1569,7 +1591,14 @@ def test_forward_attention_routes_unified_req_metadata(
         ) as mla_prolog,
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
-        patch("vllm_ascend.attention.dsa_v1.record_attention_compute_start"),
+        patch(
+            "vllm_ascend.attention.dsa_v1.wait_for_device_metadata",
+            side_effect=lambda *_: events.append("wait"),
+        ),
+        patch(
+            "vllm_ascend.attention.dsa_v1.record_attention_compute_start",
+            side_effect=lambda: events.append("record"),
+        ),
     ):
         layer_metadata = impl._get_layer_metadata(
             "layer",
@@ -1583,6 +1612,7 @@ def test_forward_attention_routes_unified_req_metadata(
         )
 
     assert actual is attention_output
+    assert events == ["wait", "record", "attention"]
     mla_call = mla_prolog.call_args
     assert torch.equal(mla_call.args[0], hidden_states)
     assert torch.equal(mla_call.args[1], cos[:3])
