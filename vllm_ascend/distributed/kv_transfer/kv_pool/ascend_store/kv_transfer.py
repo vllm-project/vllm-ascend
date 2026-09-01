@@ -452,6 +452,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         chunk,
                         block_ids,
                         kv_cache_group_id=group_id,
+                        block_id=key_block_ids[index],
                     )
                     addrs.append(addr)
                     sizes.append(size)
