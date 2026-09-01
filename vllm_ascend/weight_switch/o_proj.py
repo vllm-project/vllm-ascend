@@ -3,6 +3,9 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
+
+import torch
 
 from .linear import WeightSwitchConfig, WeightSwitchMixin, WeightSwitchState
 
@@ -10,6 +13,8 @@ from .linear import WeightSwitchConfig, WeightSwitchMixin, WeightSwitchState
 class OProjWeightSwitchMixin:
     """Manage weight switching for the backend's single ``o_proj`` layer."""
 
+    o_proj: Any
+    o_proj_full_pools: dict[Any, torch.Tensor]
     o_proj_weight_switch_pool_key = "o_proj"
 
     def _initialize_o_proj_weight_switch(

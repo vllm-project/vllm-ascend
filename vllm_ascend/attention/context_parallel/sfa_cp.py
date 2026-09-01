@@ -121,7 +121,7 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         # TP-local result, then the normal row-parallel TP reduction completes
         # the output when TP is enabled.
         linear_method = self._get_o_proj_weight_switch_method()
-        weight_part = self.o_proj_weight_state.gather_parts.get("weight")
+        weight_part = self._get_o_proj_weight_switch_state().gather_parts.get("weight")
         if weight_part is None:
             raise RuntimeError("SFA PCP O-proj requires a gather spec for the weight attribute.")
         # This is the logical TP-local O-proj input width. It remains valid
