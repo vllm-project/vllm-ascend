@@ -30,14 +30,14 @@ We will support Ascend 950 Products and other NPUs in the future.
 
 Batch invariance requires custom operators for Atlas A2 and A3 inference products. Set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend from source to build and install the required operator packages.
 
-The A2 and A3 Dockerfiles set `VLLM_BATCH_INVARIANT=1` while installing vllm-ascend from source, so the resulting images include both the batch-invariant operator run package and the `batch_invariant_ops` wheel. This is a build-time setting only; set `VLLM_BATCH_INVARIANT=1` again when starting the server or running offline inference to enable batch invariance at runtime.
-
 The `batch_invariant_ops` build and installation process consists of two stages as in the [build_batch_invariant_ops.sh](https://github.com/vllm-project/vllm-ascend/blob/main/csrc/build_batch_invariant_ops.sh), which must run in order:
 
 1. Install the operator run package. It provides the device-side batch-invariant operators implemented with AscendC.
 2. Build and install the `batch_invariant_ops` wheel. It provides the PyTorch extension interfaces that invoke the AscendC operators.
 
-### Option 1: Install vllm-ascend from source
+### Install the batch-invariant operator packages
+
+#### Option 1: Install with vllm-ascend from source
 
 The environment variable is consumed by the source build. It works with both a regular source installation and an editable source installation when custom kernel compilation is enabled:
 
@@ -53,7 +53,7 @@ COMPILE_CUSTOM_KERNELS=1 VLLM_BATCH_INVARIANT=1 \
 
 Setting `VLLM_BATCH_INVARIANT=1` while installing a prebuilt vllm-ascend wheel does not rebuild these operators. Use a source installation as above, or install the operator packages separately as described below.
 
-### Option 2: vllm-ascend is already installed
+#### Option 2: Install after vllm-ascend is already installed
 
 Obtain a vllm-ascend source tree that matches the installed package version, then build and install the operator packages from that source tree.
 
@@ -74,6 +74,10 @@ bash csrc/build_batch_invariant_ops.sh ascend910b
 cd <vllm-ascend-source-dir>
 bash csrc/build_batch_invariant_ops.sh ascend910_93
 ```
+
+### Use Docker images
+
+The A2 and A3 Docker images build vllm-ascend from source with `VLLM_BATCH_INVARIANT=1`, so the image build installs both the AscendC operator run package and the `batch_invariant_ops` wheel. This build-time environment variable is not retained as a runtime setting. Set `VLLM_BATCH_INVARIANT=1` when starting the server or running offline inference to enable batch invariance.
 
 ### Quick Check
 
