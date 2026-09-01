@@ -161,8 +161,8 @@ The repository contains runnable examples for both backends:
 - [`rlhf_async_new_apis.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rl/rlhf_async_new_apis.py)
 
 FRACTAL_NZ must be disabled for weight updates. RL mode forces
-`weight_nz_mode=0` and synchronizes `VLLM_ASCEND_ENABLE_NZ=0`; the
-weight-transfer start path validates the effective Ascend configuration.
+`weight_nz_mode=0`; the weight-transfer start path validates the effective
+Ascend configuration.
 
 ### Pause and resume generation
 

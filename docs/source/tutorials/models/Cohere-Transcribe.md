@@ -84,7 +84,7 @@ Expected result: `docker ps` lists the container with status `Up`, and `pip show
 
 ### 4.2 Source Code Installation
 
-If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md#installation-existing-cann-install).
 
 To verify the source installation:
 
@@ -146,7 +146,7 @@ Single-node deployment runs both audio prefill and decoding on one NPU, making i
         - `--dtype bfloat16` matches the BF16 deployment validated on Atlas A2 products.
         - `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` are recommended when the model weights are downloaded to a local directory in advance.
 
-When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+When the service starts successfully, the log contains `Application startup complete`. If startup fails, see the [Public FAQs](../../faqs.md).
 
 ## 6 Functional Verification
 
@@ -242,7 +242,7 @@ For general parameter tuning, refer to the [Public Performance Tuning Documentat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, see the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section covers model- and hardware-specific guidance.
+For common environment, installation, and general parameter issues, see the [Public FAQs](../../faqs.md). This section covers model- and hardware-specific guidance.
 
 ### The server fails to start with an out-of-memory error
 

@@ -42,28 +42,35 @@ from .base import (
     TPWeightSwitchMixin,
     TPWeightSwitchState,
 )
-
-# Import all scheme classes for external access
-from .fp8 import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DSDynamicLinearMethod
-from .fp8_block import AscendFp8BlockFusedMoEMethod, AscendFp8BlockLinearMethod, resolve_block_scales
-from .kv_c8 import AscendFAQuantAttentionMethod
-
-# Import registry functions
+from .kv_cache import AscendFAQuantAttentionMethod
 from .registry import get_scheme_class, register_scheme
-from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
-from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
-from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
-from .w4a4_mxfp4_flatquant import AscendW4A4MXFP4FlatQuantDynamicLinearMethod
-from .w4a8 import AscendW4A8DynamicFusedMoEMethod
-from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod, AscendW4A8MXFPDynamicLinearMethod
-from .w4a16 import AscendW4A16FusedMoEMethod
-from .w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
-from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
-from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from .w8a8_pdmix import AscendW8A8PDMixLinearMethod
-from .w8a8_static import AscendW8A8LinearMethod
-from .w8a8fp8_dynamic import AscendW8A8FP8DynamicFusedMoEMethod, AscendW8A8FP8DynamicLinearMethod
-from .w8a16 import AscendW8A16LinearMethod
+from .w4a4 import (
+    AscendW4A4FlatQuantDynamicLinearMethod,
+    AscendW4A4LaosDynamicLinearMethod,
+    AscendW4A4MXFP4DynamicFusedMoEMethod,
+    AscendW4A4MXFP4DynamicLinearMethod,
+    AscendW4A4MXFP4FlatQuantDynamicLinearMethod,
+)
+from .w4a8 import (
+    AscendW4A8DynamicFusedMoEMethod,
+    AscendW4A8MXFPDSDynamicFusedMoEMethod,
+    AscendW4A8MXFPDynamicFusedMoEMethod,
+    AscendW4A8MXFPDynamicLinearMethod,
+)
+from .w8a8 import (
+    AscendFp8BlockFusedMoEMethod,
+    AscendFp8BlockLinearMethod,
+    AscendW8A8DynamicFusedMoEMethod,
+    AscendW8A8DynamicLinearMethod,
+    AscendW8A8FP8DynamicFusedMoEMethod,
+    AscendW8A8FP8DynamicLinearMethod,
+    AscendW8A8LinearMethod,
+    AscendW8A8MXFP8DSDynamicLinearMethod,
+    AscendW8A8MXFP8DynamicLinearMethod,
+    AscendW8A8PDMixLinearMethod,
+    resolve_block_scales,
+)
+from .wna16 import AscendW4A16FusedMoEMethod, AscendW4A16MXFP4FusedMoEMethod, AscendW8A16LinearMethod
 
 
 def is_mx_quant_type(instance: Any) -> bool:

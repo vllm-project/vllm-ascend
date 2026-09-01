@@ -35,6 +35,12 @@
         "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
         "csrc_cache_target": "a3-arm64-ubuntu"
     },
+    "linux-aarch64-a3-16": {
+        "chip": "a3",
+        "npu_num": 16,
+        "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
+        "csrc_cache_target": "a3-arm64-ubuntu"
+    },
     "linux-aarch64-a3-2-": {
         "chip": "a3",
         "npu_num": 2,

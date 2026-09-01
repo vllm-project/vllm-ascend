@@ -11,7 +11,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_moe_layer,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.quantization.methods.w8a8_dynamic import (
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
     AscendW8A8DynamicFusedMoEMethod,
     AscendW8A8DynamicLinearMethod,
 )
@@ -59,7 +59,7 @@ class TestAscendW8A8DynamicLinearMethod(TestBase):
         layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
         layer.weight_scale.data = torch.randn(256, 1, dtype=torch.bfloat16)
         layer.weight_offset.data = torch.randn(256, 1, dtype=torch.bfloat16)
-        with patch("vllm_ascend.quantization.methods.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x):
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.maybe_trans_nz", side_effect=lambda x: x):
             self.method.process_weights_after_loading(layer)
         self.assertEqual(layer.weight_scale_fp32.dtype, torch.float32)
         self.assertEqual(layer.weight_scale.data.shape, (256,))
@@ -147,10 +147,10 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
     intermediate_size = 128
 
     @patch("torch.distributed.get_rank")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_mc2_group")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_mc2_group")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
     def setUp(self, mock_ascend, mock_mc2, mock_rank):
-        with patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_current_vllm_config") as mock_vllm:
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config") as mock_vllm:
             mock_vllm.return_value = create_mock_vllm_config()
             mock_ascend.return_value = create_mock_ascend_config()
             mock_mc2.return_value = MagicMock(
@@ -179,7 +179,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertEqual(param_dict["w2_weight_scale"].dtype, torch.bfloat16)
         self.assertEqual(param_dict["w2_weight_offset"].shape, (self.num_experts, self.hidden_size, 1))
 
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX")
     def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_extra_ctx):
         tokens = 4
         hidden_size = self.hidden_size
@@ -281,7 +281,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.assertIs(output, expected_output)
 
     @patch("torch_npu.npu_format_cast")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
     def test_process_weights_after_loading(self, mock_get_config, mock_format_cast):
         mock_config = MagicMock()
         mock_config.enable_fused_mc2 = 1

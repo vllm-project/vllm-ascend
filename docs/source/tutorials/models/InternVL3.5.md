@@ -68,13 +68,13 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-To verify the successful installation of the environment, please refer to [installation](../../installation.md).
+To verify the successful installation of the environment, please refer to [installation](../../getting_started/installation.md).
 
 ### 4.2 Source Code Installation
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -86,7 +86,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```bash
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -127,7 +127,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```bash
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
@@ -243,4 +243,4 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 9 FAQ
 
-- Common Issues Tip: If you encounter issues, refer to [FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, refer to [Public FAQs](../../faqs.md).

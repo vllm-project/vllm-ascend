@@ -63,6 +63,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
 from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -72,16 +73,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_layerwise_physical_layer_index,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
-    get_host_device_memory_usage_ratio,
+    plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
-    AscendDeviceType,
     check_ascend_device_type,
     enable_sp,
-    get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
 )
@@ -135,7 +134,7 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
 
         ops.register_dummy_fusion_op()
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.ATB_EXTENSIONS):
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
@@ -435,7 +434,7 @@ class NPUWorker(WorkerBase):
         gc.collect()
         torch.npu.empty_cache()
 
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
             setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
@@ -497,6 +496,42 @@ class NPUWorker(WorkerBase):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
+    def _apply_kv_offload_decode_memory_constraints(
+        self,
+        available_device_memory_bytes: int,
+    ) -> int:
+        GiB = lambda b: b / GiB_bytes
+        sparse_kv_offload_config = get_ascend_config().sparse_kv_offload_config
+        if not sparse_kv_offload_config.enabled:
+            return int(available_device_memory_bytes)
+
+        kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
+        dram_limit_bytes = int(sparse_kv_offload_config.dram_size_per_dp_GB * GiB_bytes)
+        budget = plan_sparse_kv_offload_memory(
+            kv_cache_spec=kv_cache_spec,
+            vllm_config=self.vllm_config,
+            available_device_memory_bytes=available_device_memory_bytes,
+            dram_limit_bytes=dram_limit_bytes,
+            keep_device_kv_cache=sparse_kv_offload_config.keep_device_kv_cache,
+        )
+        logger.info_once(
+            "Sparse KV offload memory plan: npu_limit=%d blocks, "
+            "dram_limit=%d blocks, workload_limit=%d blocks, "
+            "final=%d blocks (%s limited), planner=%.2f GiB, "
+            "host=%.2f GiB, device=%.2f GiB, alignment_reserve=%.2f GiB.",
+            budget.npu_limit_blocks,
+            budget.dram_limit_blocks,
+            budget.workload_limit_blocks,
+            budget.final_num_blocks,
+            budget.limiting_factor,
+            GiB(budget.final_planner_bytes),
+            GiB(budget.planned_host_bytes),
+            GiB(budget.planned_device_bytes),
+            GiB(budget.host_alignment_reserve_bytes),
+            scope="local",
+        )
+        return int(budget.final_planner_bytes)
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -524,8 +559,7 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
-            kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(kv_cache_memory_bytes)
-            return kv_cache_memory_bytes
+            return self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -588,45 +622,11 @@ class NPUWorker(WorkerBase):
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
-        self.available_kv_cache_memory_bytes = self.update_available_memory_for_sparse_kv_offload(
-            self.available_kv_cache_memory_bytes,
+        self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
+            self.available_kv_cache_memory_bytes
         )
 
         return int(self.available_kv_cache_memory_bytes)
-
-    def update_available_memory_for_sparse_kv_offload(self, available_memory):
-        """
-        A simple patch for Sparse KV offload: add additional available_memory according to the
-        ratio of host memory (kv) and dev memory (indexer), so we can allocate blocks for indexer cache
-        using all original available device memory without modify original kv_spec or vllm code.
-        For further optimization, consider to merge this logic to vllm kv_cache_utils.py,
-        or reuse hisparse's host pool logic after it's merged to vllm.
-        """
-        GiB = lambda b: b / GiB_bytes
-        sparse_kv_offload_config = get_ascend_config().sparse_kv_offload_config
-        if not sparse_kv_offload_config.enabled:
-            return available_memory
-        keep_device_kv_cache = sparse_kv_offload_config.keep_device_kv_cache
-        if keep_device_kv_cache:
-            needed_dram_size_bytes = available_memory
-        else:
-            kv_cache_spec = getattr(self, "kv_cache_spec", None) or self.get_kv_cache_spec()
-            host_device_memory_usage_ratio = get_host_device_memory_usage_ratio(kv_cache_spec)
-            needed_dram_size_bytes = host_device_memory_usage_ratio * available_memory
-        if needed_dram_size_bytes > sparse_kv_offload_config.dram_size_per_dp_GB * (1 << 30):
-            raise ValueError(
-                f"Needed dram size ({GiB(needed_dram_size_bytes)} GB) is larger than "
-                f"user specified dram size ({sparse_kv_offload_config.dram_size_per_dp_GB} GB). "
-                "Please increase sparse_kv_offload_config.dram_size_per_dp_GB if available on your device."
-            )
-        if not keep_device_kv_cache:
-            available_memory += needed_dram_size_bytes
-            logger.info_once(
-                "Sparse KV offload is enabled, enlarge total available memory to %.2f GiB",
-                GiB(available_memory),
-                scope="local",
-            )
-        return int(available_memory)
 
     def log_memory_stats(self) -> None:
         """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
@@ -821,7 +821,7 @@ class NPUWorker(WorkerBase):
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
             self._warm_up_atb()
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.

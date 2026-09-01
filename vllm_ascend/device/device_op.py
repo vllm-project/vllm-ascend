@@ -24,15 +24,12 @@ import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES, get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
-DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -510,40 +507,6 @@ class BaseDeviceAdaptor:
 
         return context_layer
 
-    # ===== Sparse Attention Metadata & Op Selectors =====
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        """Returns the metadata-building operator for sparse attention."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
-        """Returns kwargs for sparse attention metadata builder."""
-        return {"device": str(device)}
-
-    @staticmethod
-    def get_dsa_sparse_attn_op():
-        """Returns the sparse attention operator."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv
-
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
-        """Returns base kwargs for sparse attention (extended by caller)."""
-        return {}
-
-    @staticmethod
-    def get_dsa_compressor_slot_mapping_format():
-        """Slot mapping side output format consumed by the DSA scatter op."""
-        return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
-
-    # ===== SWA / Compressor KV Scatter =====
-
-    @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
-
     # ===== Indexer Quant + Scatter =====
 
     @staticmethod
@@ -674,21 +637,10 @@ class BaseDeviceAdaptor:
         return slot_mapping
 
     @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
-        """Format slot_mapping for metadata storage.
-        Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
-        return torch.stack([slot_mapping // block_size, slot_mapping % block_size], axis=-1)
-
-    @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
         """Non-A5: return the cached cu_seqlens_cmp_kv tensor.
         A5 override always returns None."""
         return cmp_kv_tensor
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
-        """Non-A5: add extra kwargs for sparse attention. A5: no-op."""
-        extra_kwargs.update(kwargs_to_add)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
@@ -1247,46 +1199,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             value=value,
         )
 
-    # ===== Sparse Attention Metadata & Op Selectors =====
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
-        return {"kv_quant_mode": 1}
-
-    @staticmethod
-    def get_dsa_sparse_attn_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
-
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
-        return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
-
-    @staticmethod
-    def get_dsa_compressor_slot_mapping_format():
-        """A5 kv_compress_epilog consumes flat slot ids."""
-        return DSA_COMPRESSOR_SLOT_MAPPING_FLAT
-
-    # ===== SWA / Compressor KV Scatter =====
-
-    @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache with fused quantization+compression.
-        A5: kv_compress_epilog handles quant/compress/scatter internally.
-        Input x is unquantized bf16; cache shape is [..., head_dim]."""
-        torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
-            x=x.view(-1, x.shape[-1]),
-            slot_mapping=slot_mapping,
-            quant_group_size=64,
-            quant_mode=2,
-            round_scale_flag=True,
-            layout=1,
-        )
-
     # ===== Indexer Quant + Scatter =====
 
     @staticmethod
@@ -1421,19 +1333,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return slot_mapping
 
     @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
-        """A5: 1D pass-through."""
-        return slot_mapping
-
-    @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
         """A5: cu_seqlens_cmp_kv is always None."""
         return None
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
-        """A5: no-op — A5 ops do not need extra kwargs from this path."""
-        pass
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
@@ -1683,12 +1585,12 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
-    ascend_device_type = get_ascend_device_type()
-    if ascend_device_type == AscendDeviceType.A5:
-        return A5DeviceAdaptor
-    if ascend_device_type == AscendDeviceType._310P:
-        return Ascend310PDeviceAdaptor
-    return BaseDeviceAdaptor
+    adaptor_by_family = {
+        DeviceAdaptorFamily.STANDARD: BaseDeviceAdaptor,
+        DeviceAdaptorFamily.FP8_OPTIMIZED: A5DeviceAdaptor,
+        DeviceAdaptorFamily.COMPATIBILITY: Ascend310PDeviceAdaptor,
+    }
+    return adaptor_by_family[get_current_hardware_profile().device_adaptor_family]
 
 
 DeviceOperator: type["BaseDeviceAdaptor"] = get_device_adaptor()
