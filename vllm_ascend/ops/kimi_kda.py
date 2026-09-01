@@ -19,7 +19,11 @@
 The vLLM implementation provides the projections, cache specification, and
 opaque ``kda_attention`` custom op.  This OOT replacement keeps that public
 surface while routing prefill through the Kimi AscendC kernels and decode
-through the recurrent KDA AscendC kernel.
+through the recurrent KDA AscendC kernel.  The one deliberate deviation is
+the Ascend-local ``kda_attention_qkv`` op below: it takes the merged qkv
+projection so the fused QKV linear feeds the op boundary directly (no
+split/cat round trip) while the upstream ``(q, k, v)`` op and the reference
+path on other platforms stay untouched.
 """
 
 from collections.abc import Callable
@@ -30,6 +34,7 @@ from einops import rearrange
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group, get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
+from vllm.utils.torch_utils import direct_register_custom_op
 
 try:
     from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd  # type: ignore[import-not-found]
@@ -69,6 +74,7 @@ if HAS_TRITON:
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
 _FUSED_QKV_NAME = "fused_qkv"
+_KDA_ATTENTION_QKV_OP = "vllm::kda_attention_qkv"
 
 
 def _zero_padded_spec_output(
@@ -93,6 +99,46 @@ def _zero_padded_spec_output(
         output,
         0.0,
     )
+
+
+def _kda_attention_qkv_impl(
+    qkv: torch.Tensor,
+    g1: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Ascend-local counterpart of vLLM's ``kda_attention`` custom op.
+
+    Identical mechanics (opaque boundary that resolves the layer from
+    ``no_compile_layers`` and calls its ``_forward`` eagerly), but takes the
+    merged qkv projection so the fused QKV linear feeds the op boundary
+    directly — no ``split`` before / ``cat`` after. Keeping this op local
+    lets the upstream ``vllm::kda_attention`` and its ``(q, k, v)`` signature
+    stay untouched, so vllm-ascend works against stock vLLM.
+    """
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward(qkv=qkv, g1=g1, beta=beta, core_attn_out=core_attn_out)
+
+
+def _kda_attention_qkv_fake(
+    qkv: torch.Tensor,
+    g1: torch.Tensor,
+    beta: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="kda_attention_qkv",
+    op_func=_kda_attention_qkv_impl,
+    mutates_args=["core_attn_out"],
+    fake_impl=_kda_attention_qkv_fake,
+    dispatch_key="PrivateUse1",
+)
 
 
 def uses_kimi_k3_global_inputs_embeds(vllm_config: VllmConfig) -> bool:
@@ -166,6 +212,15 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
 
     def __init__(self, config, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(config, vllm_config, prefix)
+
+        # Piecewise cudagraphs split the compiled graph at attention ops by
+        # name; ``vllm::kda_attention_qkv`` is registered on our side and thus
+        # absent from vLLM's built-in list. Model construction runs before
+        # compilation, so appending here is in time. FULL cudagraph and eager
+        # modes never consult the list and are unaffected.
+        splitting_ops = vllm_config.compilation_config.splitting_ops
+        if splitting_ops is not None and _KDA_ATTENTION_QKV_OP not in splitting_ops:
+            splitting_ops.append(_KDA_ATTENTION_QKV_OP)
 
         kda_config = config.linear_attn_config
         assert kda_config is not None, "linear_attn_config must be set"
@@ -266,8 +321,6 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         )
         num_tokens = hidden_states.size(0)
         qkv = self.fused_qkv(hidden_states)[0]
-        projection_size = self.local_num_heads * self.head_dim
-        q, k, v = qkv.split([projection_size] * 3, dim=-1)
 
         beta = self.b_proj(hidden_states)[0].float().sigmoid().unsqueeze(0)
         raw_gate = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
@@ -284,10 +337,8 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        torch.ops.vllm.kda_attention(
-            q,
-            k,
-            v,
+        torch.ops.vllm.kda_attention_qkv(
+            qkv,
             raw_gate,
             beta,
             core_attn_out,
@@ -524,9 +575,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
 
     def _forward(
         self,
-        q_proj_states: torch.Tensor,
-        k_proj_states: torch.Tensor,
-        v_proj_states: torch.Tensor,
+        qkv: torch.Tensor,
         g1: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
@@ -541,14 +590,11 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        q_proj_states = q_proj_states[:num_actual_tokens]
-        k_proj_states = k_proj_states[:num_actual_tokens]
-        v_proj_states = v_proj_states[:num_actual_tokens]
+        mixed_qkv = qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
         conv_state, recurrent_state = self.kv_cache
-        mixed_qkv = torch.cat((q_proj_states, k_proj_states, v_proj_states), dim=-1)
         conv_weights_t = self._conv_weights_t()
 
         spec_masks = attn_metadata.spec_sequence_masks
