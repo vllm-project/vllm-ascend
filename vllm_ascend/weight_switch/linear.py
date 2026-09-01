@@ -181,6 +181,15 @@ class WeightSwitchMixin:
     weight_switch_output_repeat_specs: ClassVar[tuple[WeightSwitchRepeatSpec, ...]] = ()
     supports_weight_switch: ClassVar[bool] = False
 
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply the concrete linear method."""
+        raise NotImplementedError(f"{type(self).__name__} must implement apply().")
+
     def _get_weight_switch_specs(
         self,
         layer: torch.nn.Module,
