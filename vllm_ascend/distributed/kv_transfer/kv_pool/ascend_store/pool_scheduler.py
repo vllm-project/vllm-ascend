@@ -42,6 +42,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     infer_group_cache_families,
     normalize_block_ids_by_group,
 )
+from vllm_ascend.g0_telemetry import emit as emit_g0
 
 
 class KVPoolScheduler:
@@ -93,6 +94,17 @@ class KVPoolScheduler:
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get("load_async", False)
         self.save_decode_cache = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "save_decode_cache", False
+        )
+        self.minimum_retrieve_tokens = int(
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                "minimum_retrieve_tokens", 0
+            )
+        )
+        if self.minimum_retrieve_tokens < 0:
+            raise ValueError("minimum_retrieve_tokens must be non-negative")
+        logger.info(
+            "AscendStore static minimum retrieve threshold: %d tokens",
+            self.minimum_retrieve_tokens,
         )
         # request_id -> (vllm cached tokes, kvpool cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
@@ -521,10 +533,44 @@ class KVPoolScheduler:
                 )
 
         if num_external_hit_tokens == 0:
+            emit_g0(
+                "materialization_decision",
+                request_id=request.request_id,
+                prompt_tokens=len(request.prompt_token_ids),
+                external_hit_tokens=0,
+                minimum_retrieve_tokens=self.minimum_retrieve_tokens,
+                decision="cache_miss",
+            )
             return 0, False
 
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
+
+        if num_external_hit_tokens < self.minimum_retrieve_tokens:
+            emit_g0(
+                "materialization_decision",
+                request_id=request.request_id,
+                prompt_tokens=len(request.prompt_token_ids),
+                external_hit_tokens=num_external_hit_tokens,
+                minimum_retrieve_tokens=self.minimum_retrieve_tokens,
+                decision="recompute_threshold",
+            )
+            logger.info(
+                "AscendStore threshold recompute req=%s hit_tokens=%d threshold=%d",
+                request.request_id,
+                num_external_hit_tokens,
+                self.minimum_retrieve_tokens,
+            )
+            return 0, False
+
+        emit_g0(
+            "materialization_decision",
+            request_id=request.request_id,
+            prompt_tokens=len(request.prompt_token_ids),
+            external_hit_tokens=num_external_hit_tokens,
+            minimum_retrieve_tokens=self.minimum_retrieve_tokens,
+            decision="materialize",
+        )
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0

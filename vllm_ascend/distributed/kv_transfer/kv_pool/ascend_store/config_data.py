@@ -1041,6 +1041,8 @@ class LayerLoadTask:
     transfer_tasks: list[LayerTransferTask]
     layer_id: int
     attention_start_gate: AttentionComputeStartGate | None = None
+    g0_enqueue_ns: int = 0
+    g0_queue_depth: int = 0
 
 
 @dataclass(init=False)

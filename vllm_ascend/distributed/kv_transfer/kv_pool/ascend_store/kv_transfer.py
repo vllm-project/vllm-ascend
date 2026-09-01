@@ -14,6 +14,8 @@ from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.g0_telemetry import adjust_bytes_in_flight
+from vllm_ascend.g0_telemetry import emit as g0_emit
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
@@ -1451,6 +1453,8 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
         attention_start_gate = data.attention_start_gate
+        g0_enqueue_ns = data.g0_enqueue_ns
+        g0_queue_depth = data.g0_queue_depth
 
         if len(transfer_tasks) == 0:
             if wait_for_save is not None:
@@ -1500,6 +1504,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         all_gvas = []
         all_addrs = []
         all_sizes = []
+        request_materialization_bytes: dict[str, int] = defaultdict(int)
         for task, req_meta in task_metas:
             if req_meta.load_keys:
                 all_load_keys.extend(req_meta.load_keys)
@@ -1510,19 +1515,58 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             all_gvas.append(req_meta.gvas_array)
             all_addrs.append(req_meta.addr_array)
             all_sizes.append(req_meta.size_array)
+            block_counts = [
+                block_range.end_block - block_range.start_block
+                + (1 if block_range.partial_block_index is not None else 0)
+                for block_range in task.block_ranges
+            ]
+            total_blocks = sum(block_counts)
+            task_bytes = int(req_meta.size_array.sum())
+            if total_blocks > 0 and len(block_counts) == len(req_meta.req_ids):
+                allocated = 0
+                for position, (req_id, count) in enumerate(zip(req_meta.req_ids, block_counts)):
+                    if position == len(block_counts) - 1:
+                        value = task_bytes - allocated
+                    else:
+                        value = task_bytes * count // total_blocks
+                        allocated += value
+                    request_materialization_bytes[req_id] += value
 
         self._stagger_h2d_submit(layer_id)
         gvas_array = np.concatenate(all_gvas) if len(all_gvas) > 1 else all_gvas[0]
         addr_array = np.concatenate(all_addrs) if len(all_addrs) > 1 else all_addrs[0]
         size_array = np.concatenate(all_sizes) if len(all_sizes) > 1 else all_sizes[0]
-        res = self._batch_copy_with_limits(
-            gvas_array,
-            addr_array,
-            size_array,
-            1,
-            self.max_transfer_blocks,
-            self.max_transfer_bytes,
-        )
+        transfer_bytes = int(size_array.sum())
+        request_ids = sorted(all_req_ids)
+        queue_wait_ns = max(0, time.perf_counter_ns() - g0_enqueue_ns) if g0_enqueue_ns else 0
+        bytes_in_flight = adjust_bytes_in_flight(transfer_bytes)
+        g0_emit("transfer_started", layer=layer_id, request_ids=request_ids,
+                connector_queue_depth=g0_queue_depth, connector_queue_wait_ns=queue_wait_ns,
+                requested_materialization_bytes=transfer_bytes,
+                realized_materialization_bytes=transfer_bytes,
+                request_materialization_bytes=request_materialization_bytes,
+                bytes_in_flight=bytes_in_flight)
+        res = -1
+        try:
+            res = self._batch_copy_with_limits(
+                gvas_array,
+                addr_array,
+                size_array,
+                1,
+                self.max_transfer_blocks,
+                self.max_transfer_bytes,
+            )
+        finally:
+            # Never leave the process-level gauge inflated when a native copy
+            # raises. A failed finish record is required for fail-closed G0
+            # activation checks.
+            bytes_in_flight = adjust_bytes_in_flight(-transfer_bytes)
+            g0_emit("transfer_finished", layer=layer_id, request_ids=request_ids,
+                    connector_queue_depth=self.request_queue.qsize(), connector_queue_wait_ns=queue_wait_ns,
+                    requested_materialization_bytes=transfer_bytes,
+                    realized_materialization_bytes=transfer_bytes if res == 0 else 0,
+                    request_materialization_bytes=request_materialization_bytes,
+                    bytes_in_flight=bytes_in_flight, transfer_result=res)
         if layer_id <= 2 or res != 0:
             logger.info(
                 "load_thread: layer=%d groups=%d blocks=%d res=%d",

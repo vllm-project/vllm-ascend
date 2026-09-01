@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import threading
+import time
 from collections.abc import Generator
 from typing import Any
 
@@ -48,6 +49,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import
     AscendStoreCoordinator,
     ExternalCachedBlockPool,
 )
+from vllm_ascend.g0_telemetry import emit as g0_emit
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
@@ -317,6 +319,12 @@ class KVPoolWorker:
 
         self.next_layer_to_submit = 0
         self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
+        g0_emit(
+            "connector_config",
+            use_layerwise=self.use_layerwise,
+            layerwise_prefetch_layers=self.num_prefetch_layers,
+            backend=self.backend,
+        )
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
@@ -1292,18 +1300,26 @@ class KVPoolWorker:
         def submit_layer_load(layer_id: int) -> bool:
             if not self.layer_load_tasks[layer_id]:
                 return False
+            request_ids = sorted({
+                block_range.request.req_id
+                for transfer_task in self.layer_load_tasks[layer_id]
+                for block_range in transfer_task.block_ranges
+            })
             wait_for_save_layer = None
             attention_start_gate = None
             if layer_id != self.current_layer:
                 attention_start_gate = get_attention_compute_start_gate()
-            recv_thread.add_request(
-                LayerLoadTask(  # type: ignore[arg-type]
+            task = LayerLoadTask(  # type: ignore[arg-type]
                     wait_for_save_layer=wait_for_save_layer,
                     transfer_tasks=self.layer_load_tasks[layer_id],
                     layer_id=layer_id,
                     attention_start_gate=attention_start_gate,
+                    g0_enqueue_ns=time.perf_counter_ns(),
+                    g0_queue_depth=recv_thread.request_queue.qsize(),
                 )
-            )
+            g0_emit("layer_load_enqueued", layer=layer_id, request_ids=request_ids,
+                    connector_queue_depth=task.g0_queue_depth)
+            recv_thread.add_request(task)
             return True
 
         submit_count = self.num_prefetch_layers if self.current_layer == 0 else 1
@@ -1324,7 +1340,22 @@ class KVPoolWorker:
         if not should_wait:
             self.layer_load_finished_events[self.current_layer].clear()
             return
+        # Capture activation before the receiver thread can finish and clear
+        # the task list while waking this waiter.
+        request_ids = sorted({
+            block_range.request.req_id
+            for transfer_task in self.layer_load_tasks[self.current_layer]
+            for block_range in transfer_task.block_ranges
+        })
+        wait_started_ns = time.perf_counter_ns()
         is_finish = self.layer_load_finished_events[self.current_layer].wait(timeout=10)
+        g0_emit(
+            "layer_ready_wait_finished",
+            layer=self.current_layer,
+            request_ids=request_ids,
+            layer_ready_wait_ns=time.perf_counter_ns() - wait_started_ns,
+            wait_succeeded=is_finish,
+        )
         if not is_finish:
             logger.info("Layerwise %d load wait timed out", self.current_layer)
         logger.debug(">>>>>>>>>>>>>>>>>>>> clear load layer %d", self.current_layer)
