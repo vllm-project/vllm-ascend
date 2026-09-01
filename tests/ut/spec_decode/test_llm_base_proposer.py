@@ -195,10 +195,18 @@ def test_load_model_reads_validated_draft_window_size():
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
 
 
-def test_draft_vllm_config_uses_draft_model_config():
-    draft_model_config = SimpleNamespace(runner_type="draft")
-    base_vllm_config = SimpleNamespace(model_config=SimpleNamespace(runner_type="generate"))
-    expected_vllm_config = SimpleNamespace(model_config=draft_model_config)
+def test_draft_vllm_config_only_propagates_draft_runner_type():
+    draft_model_config = SimpleNamespace(
+        runner_type="draft",
+        architecture="draft-architecture",
+        num_experts=0,
+    )
+    base_model_config = SimpleNamespace(
+        runner_type="generate",
+        architecture="target-architecture",
+        num_experts=256,
+    )
+    base_vllm_config = SimpleNamespace(model_config=base_model_config)
     proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
     proposer.speculative_config = SimpleNamespace(
         draft_model_config=draft_model_config,
@@ -209,18 +217,16 @@ def test_draft_vllm_config_uses_draft_model_config():
             "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
             return_value=base_vllm_config,
         ),
-        patch(
-            "vllm_ascend.spec_decode.llm_base_proposer.replace",
-            return_value=expected_vllm_config,
-        ) as mock_replace,
     ):
         draft_vllm_config = proposer._create_draft_vllm_config()
 
-    assert draft_vllm_config is expected_vllm_config
-    mock_replace.assert_called_once_with(
-        base_vllm_config,
-        model_config=draft_model_config,
-    )
+    assert draft_vllm_config is not base_vllm_config
+    assert draft_vllm_config.model_config is not base_model_config
+    assert draft_vllm_config.model_config is not draft_model_config
+    assert draft_vllm_config.model_config.runner_type == "draft"
+    assert draft_vllm_config.model_config.architecture == "target-architecture"
+    assert draft_vllm_config.model_config.num_experts == 256
+    assert base_model_config.runner_type == "generate"
 
 
 class TestDisablePaddedDrafterBatchWithFullGraph:
