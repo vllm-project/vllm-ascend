@@ -269,9 +269,12 @@ def test_should_advance_uses_exact_speculative_window():
 
 def test_should_advance_preserves_legacy_delta_window():
     seen_deltas = []
-    reasoner = SimpleNamespace(
-        is_reasoning_end_streaming=lambda _all_ids, delta_ids: seen_deltas.append(list(delta_ids)) or False
-    )
+
+    def record_delta(_all_ids, delta_ids):
+        seen_deltas.append(list(delta_ids))
+        return False
+
+    reasoner = SimpleNamespace(is_reasoning_end_streaming=record_delta)
     manager = object.__new__(StructuredOutputManager)
     manager.enable_in_reasoning = False
     manager._get_reasoner = lambda _request: reasoner
