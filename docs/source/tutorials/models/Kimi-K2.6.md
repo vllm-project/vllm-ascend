@@ -620,7 +620,7 @@ vllm serve Eco-Tech/Kimi-K2.6-W4A8 \
 ::::
 :::::
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
 - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
 - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
