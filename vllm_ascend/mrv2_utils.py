@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
+from vllm_ascend.utils import is_310p
+
 # Architectures for which Model Runner V2 is enabled by default on Ascend.
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
@@ -75,7 +77,7 @@ def _v2_model_runner_environment_ready(vllm_config: VllmConfig) -> bool:
 
     from vllm.triton_utils import HAS_TRITON
 
-    if not HAS_TRITON:
+    if not is_310p() and not HAS_TRITON:
         logger.warning_once("Model Runner V2 requires Triton; using the V1 model runner instead.")
         return False
 
