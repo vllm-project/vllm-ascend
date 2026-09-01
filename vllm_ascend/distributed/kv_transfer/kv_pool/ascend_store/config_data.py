@@ -1004,6 +1004,13 @@ class RequestTracker:
 
     block_sizes: list[int] | None = None
 
+    mamba_group_ids: list[int] | None = None
+
+    # spec blocks for mamba cache group
+    num_speculative_blocks: int = 0
+
+    block_sizes: list[int] | None = None
+
     def __init__(
         self,
         req_id: str,
