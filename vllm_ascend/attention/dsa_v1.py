@@ -1423,13 +1423,20 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
         # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
+        share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
         q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
 
         e_q_quant_done = main_stream.record_event()
 
         with npu_stream_switch(aux_stream, enabled=True):
             torch.npu.current_stream().wait_event(e_q_quant_done)
-            kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
+            if share_hs_quant:
+                # Both W8A8 dynamic projections consume the same hidden_states.
+                # Reuse the exact first quantization result instead of launching
+                # a second, serialized DynamicQuant on the auxiliary stream.
+                kv_quant, kv_pertoken_scale = q_quant, q_pertoken_scale
+            else:
+                kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
 
         wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
         main_stream.wait_stream(aux_stream)
