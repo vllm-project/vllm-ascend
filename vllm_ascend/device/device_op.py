@@ -1025,7 +1025,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
                 hidden_states,
                 topk_weight=None,
-                # The `group_index` input for the `npu_swiglu_group_quant` operator currently only supports the `count` type; however, the internal computation uses `group_index` solely for summation, so the last value of the `cumsum` tensor is used here.
+                # The `group_index` input for the `npu_swiglu_group_quant` 
+                # operator currently only supports the `count` type; 
+                # however, the internal computation uses `group_index` 
+                # solely for summation, so the last value of the `cumsum` 
+                # tensor is used here.
                 group_index=group_list[-1:],
                 dst_type=torch.float8_e4m3fn,
                 quant_mode=2,
