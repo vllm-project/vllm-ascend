@@ -98,6 +98,7 @@ def test_prepare_inputs_propagates_padded_request_count():
     assert isinstance(padded_count, ast.Name)
     assert padded_count.id == "num_reqs_padded"
 
+
 @patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
 def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_metadata):
     expected_metadata = {"gdn": object()}
@@ -139,7 +140,8 @@ def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_m
     model_metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
     assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [3, 3, 3, 3]
     assert model_metadata.num_accepted_tokens.tolist() == [2, 3, 1, 1]
-    
+
+
 @patch(
     "vllm_ascend.worker.v2.attn_utils.get_current_vllm_config",
     return_value=SimpleNamespace(kv_transfer_config=None),
