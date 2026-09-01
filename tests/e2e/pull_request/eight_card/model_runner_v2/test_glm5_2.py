@@ -60,7 +60,6 @@ def test_glm5_2_mtp_full_decode_only() -> None:
         runner_kwargs={
             "quantization": "ascend",
             "tensor_parallel_size": 8,
-            "enable_expert_parallel": True,
             "max_model_len": 8192,
             "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
         },
