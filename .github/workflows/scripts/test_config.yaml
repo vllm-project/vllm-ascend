@@ -104,6 +104,7 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/indexer.py
+    - vllm_ascend/attention/indexer_sync.py
     - vllm_ascend/attention/sfa_v1.py
     - vllm_ascend/attention/sfa_kv_offload.py
   tests:
