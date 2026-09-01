@@ -70,11 +70,9 @@ def _qsa_mqa_paged_kernel(
     if tl.program_id(1) == 0:
         tl.store(visible_blocks_ptr + row, visible)
     tile_start = tl.program_id(1) * TILES_PER_PROG
-    # Top-k is bounded by visible_blocks, so columns beyond it need no value.
-    if tile_start * BLOCK_N >= visible:
-        return
-    tile_end = tl.minimum(tile_start + TILES_PER_PROG, tl.cdiv(visible, BLOCK_N))
-    tile_end = tl.minimum(tile_end, tl.cdiv(num_columns, BLOCK_N))
+    # Every logits column must be defined because torch.topk reads the full
+    # capacity.  Visible padding is written as -inf rather than left stale.
+    tile_end = tl.minimum(tile_start + TILES_PER_PROG, tl.cdiv(num_columns, BLOCK_N))
 
     # Pad the small head axis to a tensor-core-compatible N dimension.
     query = tl.load(
@@ -108,10 +106,12 @@ def _qsa_mqa_paged_kernel(
         scores = tl.dot(keys, query, out_dtype=tl.float32)
         scores = tl.where(heads[None, :] < NUM_HEADS, tl.maximum(scores, 0.0), 0.0)
         score = tl.sum(scores, axis=1) / score_divisor
+        # topk consumes the full capacity, so invalid columns must contain a
+        # deterministic sentinel instead of retaining uninitialized storage.
         tl.store(
             logits_ptr + row * stride_logits_row + columns,
             tl.where(page_valid, score, -float("inf")),
-            mask=live & (columns < num_columns),
+            mask=columns < num_columns,
         )
 
 
@@ -594,8 +594,10 @@ def qsa_mqa_paged(
     BLOCK_N = 64
     BLOCK_D = max(16, triton.next_power_of_2(q.shape[2]))
     MAX_N = max(16, triton.next_power_of_2(q.shape[1]))
-    # Tuned on GB300: larger row batches provide enough parallelism to reuse Q.
-    tiles_per_program = 1 if q.shape[0] <= 32 else 8
+    # A3 requires the per-program paged tile to retain its naturally aligned
+    # 64-row layout.  The GB300 eight-tile reuse profile can lower to an
+    # unaligned UB vector access once the row batch exceeds 32.
+    tiles_per_program = 1
     _qsa_mqa_paged_kernel[(q.shape[0], triton.cdiv(columns, BLOCK_N * tiles_per_program))](
         q,
         k_cache,
@@ -714,7 +716,14 @@ def qsa_select_paged_tokens(
 
     columns = page_table.shape[1] * k_cache.shape[1]
     block_topk = token_topk // compress_ratio
-    rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
+    # torch.topk needs substantial temporary storage in addition to logits.
+    # Bound the row batch so a 4096-token eager prefill does not create a
+    # multi-GiB transient while decode D4 x max_num_seqs=32 remains one chunk.
+    max_rows_per_chunk = 128
+    rows_per_chunk = min(
+        max_rows_per_chunk,
+        max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1)),
+    )
     chunk_rows = min(rows, rows_per_chunk)
     blocks_buffer = torch.empty((chunk_rows, block_topk), dtype=torch.int32, device=q.device)
     for row_start in range(0, rows, rows_per_chunk):

@@ -20,9 +20,12 @@ import torch
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import canonicalize_singleton_dim_strides
 
+from vllm_ascend import envs
+
 from vllm_ascend.ops.triton.qwen4_exp.qsa import (
     qsa_sparse_paged_attention,
     qsa_store_cache_rows,
+    qsa_select_paged_tokens as qsa_select_paged_tokens_triton,
 )
 
 from .common import qsa_cache
@@ -31,7 +34,7 @@ from .nvidia import indexer_qsa as upstream_indexer
 from .nvidia import qsa as upstream_qsa
 from .ops import (
     qsa_compress_groups_with_ratio,
-    qsa_select_paged_tokens,
+    qsa_select_paged_tokens as qsa_select_paged_tokens_reference,
     reshape_and_cache_qsa,
 )
 
@@ -254,7 +257,12 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAForwardMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        return qsa_select_paged_tokens(
+        selector = (
+            qsa_select_paged_tokens_reference
+            if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE
+            else qsa_select_paged_tokens_triton
+        )
+        return selector(
             query,
             self.compressed_key_cache.kv_cache,
             metadata.block_table,

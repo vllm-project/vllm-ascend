@@ -188,6 +188,36 @@ def test_qsa_triton_attention_loads_k_in_source_contiguous_order() -> None:
     assert "keys = tl.trans(key_rows)" in key_load
 
 
+def test_qsa_indexer_defaults_to_triton_selector() -> None:
+    source = ast.unparse(_method(QSA, "AscendQSAIndexer", "_select"))
+    assert "envs.VLLM_ASCEND_FORCE_QSA_REFERENCE" in source
+    assert "qsa_select_paged_tokens_reference" in source
+    assert "qsa_select_paged_tokens_triton" in source
+    assert source.index("qsa_select_paged_tokens_reference") < source.index(
+        "qsa_select_paged_tokens_triton"
+    )
+
+
+def test_qsa_triton_selector_defines_padding_logits() -> None:
+    source = ast.unparse(_function(TRITON_QSA, "_qsa_mqa_paged_kernel"))
+    assert "if tile_start * BLOCK_N >= visible" not in source
+    assert "tl.where(page_valid, score, -float('inf'))" in source
+    assert "mask=columns < num_columns" in source
+
+
+def test_qsa_triton_selector_uses_a3_safe_single_tile_programs() -> None:
+    source = ast.unparse(_function(TRITON_QSA, "qsa_mqa_paged"))
+    assert "tiles_per_program = 1" in source
+    assert "q.shape[0] <= 32" not in source
+
+
+def test_qsa_triton_selector_bounds_topk_row_workspace() -> None:
+    source = ast.unparse(_function(TRITON_QSA, "qsa_select_paged_tokens"))
+    assert "max_rows_per_chunk = 128" in source
+    assert "rows_per_chunk = min(max_rows_per_chunk" in source
+    assert "range(0, rows, rows_per_chunk)" in source
+
+
 def test_qsa_ascend_backend_uses_six_slab_kv_views() -> None:
     source = MODEL_RUNNER.read_text()
     assert "owner.role == QSA_MAIN" in source
