@@ -183,7 +183,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
-        self.dynamic_eplb = get_ascend_config().eplb_config.dynamic_eplb
+        self.dynamic_eplb = get_ascend_config().eplb_config.convert_weight_to_list
 
     def get_weight(
         self,

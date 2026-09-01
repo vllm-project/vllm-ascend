@@ -121,7 +121,7 @@ def _is_dynamic_eplb_enabled(vllm_config: VllmConfig) -> bool:
     eplb_config = additional_config.get("eplb_config", {})
     if not isinstance(eplb_config, dict):
         return False
-    return bool(eplb_config.get("dynamic_eplb") or eplb_config.get("expert_map_record_path"))
+    return bool(eplb_config.get("dynamic_eplb") or eplb_config.get("expert_map_record_path") or eplb_config.get("enable_omni_eplb"))
 
 
 @register_model_loader("rfork")
