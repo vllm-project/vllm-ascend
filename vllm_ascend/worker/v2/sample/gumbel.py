@@ -20,6 +20,14 @@
 import torch
 from vllm.triton_utils import tl, triton
 
+# Offset salt keeping the draft's Gumbel noise disjoint from the target's
+# (upstream #54282). Verification is a probability-ratio test, not a Gumbel
+# coupling, so a proposal and the residual it is resampled from must not share
+# a noise vector. Positions are well below 2**30, so the streams cannot
+# collide. NPU: pos is cast to int32 before salting, and the salt plus any
+# real position stays within int32 range.
+_DRAFT_NOISE_SALT = tl.constexpr(1 << 30)
+
 
 @triton.jit(do_not_specialize=["logits_stride", "vocab_size"])
 def _temperature_kernel(
@@ -106,6 +114,7 @@ def _gumbel_sample_kernel(
     vocab_size,
     num_blocks,
     BLOCK_SIZE: tl.constexpr,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
 ):
@@ -153,6 +162,14 @@ def _gumbel_sample_kernel(
             # NOTE(Ronald1995): change pos's dtype to tl.int32, because triton-ascend's
             # compiler doesn't support uint64 of pos arg.
             pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+            if IS_DRAFTING:
+                # Offset salt keeping the draft's Gumbel noise disjoint from
+                # the target's (upstream #54282). Verification is a
+                # probability-ratio test, not a Gumbel coupling, so a proposal
+                # and the residual it is resampled from must not share a
+                # noise vector. NPU: pos is int32 here, and the salt (2**30)
+                # plus any real position stays within int32 range.
+                pos = pos + _DRAFT_NOISE_SALT
             gumbel_seed = tl.randint(seed, pos)
 
             # NOTE(Ronald1995): r is tl.float64 in vllm, change it to tl.float32,
@@ -178,6 +195,7 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
+    is_drafting: bool,
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
@@ -226,6 +244,7 @@ def gumbel_sample(
         vocab_size,
         num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
+        IS_DRAFTING=is_drafting,
         APPLY_TEMPERATURE=apply_temperature,
         PER_TOKEN_COL=per_token_col,
     )

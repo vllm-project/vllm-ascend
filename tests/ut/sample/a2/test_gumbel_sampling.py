@@ -95,7 +95,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
@@ -113,8 +115,12 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        s_false = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
-        s_true = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
+        s_false = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
+        s_true = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True, is_drafting=False
+        )
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
@@ -138,9 +144,13 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        r1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        r1 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
-        r2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        r2 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         assert torch.equal(r1, r2), "gumbel_sample is non-deterministic with same seed"
@@ -159,8 +169,12 @@ class TestGumbelSampling:
         # Ensure seeds differ
         seed2[0] = seed1[0] + 1
 
-        r1 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed1, pos, apply_temperature=False)
-        r2 = gumbel_sample(logits, expanded_idx_mapping, temperature, seed2, pos, apply_temperature=False)
+        r1 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed1, pos, apply_temperature=False, is_drafting=False
+        )
+        r2 = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed2, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         # With 16 tokens and vocab 32000 at temp=1.0, identical results are astronomically unlikely
@@ -183,7 +197,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         assert sampled.shape == (num_tokens,)
@@ -215,10 +231,22 @@ class TestGumbelSampling:
             pos = torch.tensor([i], dtype=torch.int32, device=DEVICE)
 
             s_low = gumbel_sample(
-                logits_base.clone(), expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True
+                logits_base.clone(),
+                expanded_idx_mapping,
+                low_temp,
+                seed,
+                pos,
+                apply_temperature=True,
+                is_drafting=False,
             )
             s_high = gumbel_sample(
-                logits_base.clone(), expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True
+                logits_base.clone(),
+                expanded_idx_mapping,
+                high_temp,
+                seed,
+                pos,
+                apply_temperature=True,
+                is_drafting=False,
             )
             if s_low.item() == 0:
                 low_temp_winner_count += 1
@@ -255,7 +283,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         greedy = logits.argmax(dim=-1)
@@ -278,7 +308,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
@@ -303,7 +335,9 @@ class TestGumbelSampling:
         # Same pos -> same Gumbel noise
         pos = torch.tensor([5, 5], dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True, is_drafting=False
+        )
         torch.npu.synchronize()
 
         assert sampled[0].item() == sampled[1].item(), (
@@ -332,6 +366,7 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=True,
+            is_drafting=False,
             logits_cache=out_logits,
         )
         torch.npu.synchronize()
@@ -365,6 +400,7 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=False,
+            is_drafting=False,
             logits_cache=out_logits,
         )
         torch.npu.synchronize()
@@ -406,6 +442,7 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=True,
+            is_drafting=False,
             logits_cache=out_logits,
         )
         torch.npu.synchronize()
@@ -454,6 +491,7 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=True,
+            is_drafting=False,
             logits_cache=draft_logits,
             logits_cache_col=col_tensor,
         )
@@ -500,6 +538,7 @@ class TestGumbelSampling:
             seed,
             pos,
             apply_temperature=True,
+            is_drafting=False,
             logits_cache=out_logits,
         )
         torch.npu.synchronize()
@@ -522,7 +561,9 @@ class TestGumbelSampling:
         seed = torch.tensor([12345], dtype=torch.int64, device=DEVICE)
         pos = torch.tensor([0], dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=True, is_drafting=False
+        )
         torch.npu.synchronize()
 
         assert sampled.shape == (1,)
@@ -539,7 +580,9 @@ class TestGumbelSampling:
         seed = torch.randint(0, 2**31, (num_tokens,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
 
-        sampled = gumbel_sample(logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False)
+        sampled = gumbel_sample(
+            logits, expanded_idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=False
+        )
         torch.npu.synchronize()
 
         expected = logits.argmax(dim=-1)
@@ -556,13 +599,15 @@ class TestGumbelSampling:
 
         # Very low temperature (near-greedy)
         low_temp = torch.tensor([0.01, 0.01, 0.01, 0.01], dtype=torch.float32, device=DEVICE)
-        s1 = gumbel_sample(logits, expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True)
+        s1 = gumbel_sample(logits, expanded_idx_mapping, low_temp, seed, pos, apply_temperature=True, is_drafting=False)
         torch.npu.synchronize()
         assert (s1 >= 0).all() and (s1 < vocab_size).all()
 
         # Very high temperature (near-uniform)
         high_temp = torch.tensor([100.0, 100.0, 100.0, 100.0], dtype=torch.float32, device=DEVICE)
-        s2 = gumbel_sample(logits, expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True)
+        s2 = gumbel_sample(
+            logits, expanded_idx_mapping, high_temp, seed, pos, apply_temperature=True, is_drafting=False
+        )
         torch.npu.synchronize()
         assert (s2 >= 0).all() and (s2 < vocab_size).all()
 
@@ -615,6 +660,7 @@ class TestGumbelSampleLogitsCache:
             seed,
             pos,
             apply_temperature=True,
+            is_drafting=False,
             logits_cache=cache,
             logits_cache_col=cols,
         )
@@ -658,6 +704,7 @@ class TestGumbelSampleLogitsCache:
                 seed,
                 pos,
                 apply_temperature=True,
+                is_drafting=False,
                 logits_cache=cache,
                 logits_cache_col=cols[step],
             )
@@ -687,6 +734,7 @@ class TestGumbelSampleLogitsCache:
                 seed,
                 pos,
                 apply_temperature=True,
+                is_drafting=False,
                 logits_cache=cache,
                 logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
             )

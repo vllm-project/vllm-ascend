@@ -51,6 +51,7 @@ def _npu_gumbel_block_argmax(
     logits_cache_stride_1,
     logits_cache_col_ptr,
     vocab_size,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
@@ -103,6 +104,11 @@ def _npu_gumbel_block_argmax(
         # NPU: cast pos to int32 to avoid uint64 in philox (NPU umulhi only
         # supports int32/uint32). Position values fit in int32 in practice.
         pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+        # IS_DRAFTING is kept for signature compatibility with upstream
+        # gumbel_block_argmax (upstream #54282). The rejection sampler's
+        # resample is the target side, so callers must always pass False;
+        # salting the noise here would corrupt the target's stream.
+        assert not IS_DRAFTING
         gumbel_seed = tl.randint(seed, pos)
         # NPU: tldevice.log1p (CUDA libdevice extern) is not usable on
         # triton-ascend — the AST frontend infers a NoneType return for the
@@ -264,6 +270,7 @@ def _resample_kernel(
         0,  # logits_cache_stride_1
         None,  # logits_cache_col_ptr
         vocab_size,
+        IS_DRAFTING=False,
         APPLY_TEMPERATURE=False,
         USE_FP64=False,
     )
