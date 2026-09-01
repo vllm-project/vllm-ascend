@@ -25,7 +25,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_NUM_BUFFERS,
     packed_broadcast_consumer,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
