@@ -1,0 +1,74 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-01 04:58+0000\n"
+"PO-Revision-Date: 2026-09-01 04:58+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Score Encoder Cache Manager"
+msgstr "# Score 编码器缓存管理器"
+
+msgid ""
+"The Score encoder cache manager uses a CPU cache tier and a score-based policy\n"
+"to manage multimodal encoder outputs. Selecting the manager enables the feature;\n"
+"there is no separate `enabled` option."
+msgstr ""
+"Score 编码器缓存管理器使用 CPU 缓存层和基于分数的策略来管理多模态编码器输出。选择该管理器即可启用此功能；没有单独的 `enabled` "
+"选项。"
+
+msgid "## Online inference"
+msgstr "## 在线推理"
+
+msgid "## Offline inference"
+msgstr "## 离线推理"
+
+msgid "## Configuration options"
+msgstr "## 配置选项"
+
+msgid "| Name | Type | Default | Description |"
+msgstr "| 名称 | 类型 | 默认值 | 描述 |"
+
+msgid ""
+"| `cpu_cache_slots` | int | `100000` | Maximum CPU cache capacity in encoder"
+" embedding slots. |"
+msgstr "| `cpu_cache_slots` | int | `100000` | CPU 缓存的最大容量，以编码器嵌入槽位为单位。 |"
+
+msgid ""
+"| `max_clock` | int | `15` | Maximum clock value used by the aging policy. |"
+msgstr "| `max_clock` | int | `15` | 老化策略使用的最大时钟值。 |"
+
+msgid ""
+"| `clock_decay_every` | int | `64` | Number of requests between clock decay "
+"steps. |"
+msgstr "| `clock_decay_every` | int | `64` | 两次时钟衰减步骤之间的请求数。 |"
+
+msgid ""
+"| `watermark` | float | `0.2` | Target ratio of NPU cache slots to keep free"
+" after eviction. |"
+msgstr "| `watermark` | float | `0.2` | 驱逐后 NPU 缓存槽位应保持空闲的目标比例。 |"
+
+msgid ""
+"| `promote_percentile` | float | `0.2` | Score percentile threshold used to "
+"promote CPU entries to NPU. |"
+msgstr ""
+"| `promote_percentile` | float | `0.2` | 用于将 CPU 条目提升至 NPU 的分数百分位阈值。 |"
+
+msgid ""
+"Custom managers are selected by fully qualified class name. Each manager defines\n"
+"its own `manager_config` schema and consumes it through `create_manager`."
+msgstr ""
+"自定义管理器通过完全限定的类名进行选择。每个管理器定义自己的 `manager_config` 模式，并通过 `create_manager` "
+"使用该模式。"
