@@ -89,7 +89,7 @@
   source_file_dependencies:
     - vllm_ascend/attention/fa3_v1.py
   tests:
-    - tests/e2e/pull_request/one_card/test_attention_fa3.py
+    - tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py
 
 - name: attention_mla
   optional: false
@@ -118,8 +118,13 @@
   base: attention_common
   source_file_dependencies:
     - vllm_ascend/attention/dsa_v1.py
+    - vllm_ascend/attention/dsa_attn_kv_plan.py
+    - vllm_ascend/attention/sparse_flash_mla.py
   tests:
     - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+    - tests/ut/attention/test_dsa_attn_kv_plan.py
+    - tests/ut/attention/test_dsa_v1.py
+    - tests/ut/attention/test_sparse_flash_mla.py
 
 - name: attention_cp
   optional: false
@@ -837,7 +842,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/spec_decode/test_ngram.py: 170
   tests/e2e/pull_request/one_card/spec_decode/test_ngram_npu.py: 280
   tests/e2e/pull_request/one_card/spec_decode/test_suffix.py: 150
-  tests/e2e/pull_request/one_card/test_attention_fa3.py: 30
+  tests/e2e/pull_request/one_card/rlhf/consistency/test_attention_fa3.py: 30
   tests/e2e/pull_request/one_card/test_camem.py: 140
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 170
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
@@ -889,6 +894,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 800
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 880
+  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 380
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
