@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, call, patch
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
@@ -73,6 +74,59 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
         )
 
         self.assertFalse(runner._draft_uses_qwen3_gqa_dspark())
+
+    def test_target_runtime_mode_is_forwarded_to_drafter(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._log_propose_draft_token_ids_entry = MagicMock()
+        runner.drafter = MagicMock()
+        runner.drafter.prepare_next_token_ids_padded.return_value = (
+            torch.tensor([7]),
+            torch.tensor([1]),
+        )
+        runner.drafter._propose.return_value = torch.tensor([[8]])
+        runner.drafter.take_last_draft_probs.return_value = None
+        runner.speculative_config = SimpleNamespace(
+            method="dspark",
+            uses_extract_hidden_states=lambda: False,
+            use_eagle=lambda: False,
+            uses_draft_model=lambda: True,
+        )
+        runner.vllm_config = SimpleNamespace(
+            speculative_config=SimpleNamespace(disable_padded_drafter_batch=False),
+        )
+        runner.input_batch = SimpleNamespace()
+        runner.requests = {}
+        runner.discard_request_indices = SimpleNamespace(gpu=torch.tensor([], dtype=torch.int64))
+        runner.num_discarded_requests = 0
+        runner._copy_valid_sampled_token_count = MagicMock()
+        runner.dcp_size = 1
+        runner.get_model = MagicMock(return_value=SimpleNamespace(get_mtp_target_hidden_states=lambda: None))
+        runner.use_aux_hidden_state_outputs = False
+        runner.input_ids = SimpleNamespace(gpu=torch.tensor([1, 2], dtype=torch.int32))
+        runner._get_positions = MagicMock(return_value=torch.tensor([0, 1], dtype=torch.int64))
+
+        target_desc = BatchDescriptor(num_tokens=4, num_reqs=1, uniform=True)
+        runner.propose_draft_token_ids(
+            valid_sampled_token_ids=torch.tensor([[3]], dtype=torch.int64),
+            sampling_metadata=MagicMock(),
+            scheduler_output=SimpleNamespace(
+                num_spec_tokens_to_schedule=1,
+                num_scheduled_tokens={"request": 2},
+            ),
+            spec_decode_metadata=None,
+            spec_decode_common_attn_metadata=MagicMock(),
+            positions=torch.tensor([0, 1], dtype=torch.int64),
+            num_scheduled_tokens=2,
+            hidden_states=torch.zeros(2, 4),
+            target_model_cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            target_model_batch_desc=target_desc,
+        )
+
+        self.assertEqual(
+            runner.drafter._propose.call_args.kwargs["target_model_cudagraph_runtime_mode"],
+            CUDAGraphMode.FULL,
+        )
+        self.assertIs(runner.drafter._propose.call_args.kwargs["target_model_batch_desc"], target_desc)
 
 
 class TestAcceptedTokenSnapshot(unittest.TestCase):
@@ -373,6 +427,45 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     call_kwargs["tensor_parallel_size"],
                     expected_tp_size,
                 )
+
+    @patch("vllm_ascend.worker.model_runner_v1.set_draft_graph_params")
+    @patch("vllm_ascend.worker.model_runner_v1.set_graph_params")
+    def test_resolved_mode_and_capture_descriptors_are_delegated_to_drafter(
+        self,
+        mock_set_graph_params,
+        mock_set_draft_graph_params,
+    ):
+        runner = self._build_runner()
+        compilation_config = SimpleNamespace(
+            pass_config=SimpleNamespace(enable_sp=False),
+            cudagraph_capture_sizes=[36],
+            resolve_cudagraph_mode_and_sizes=MagicMock(return_value=CUDAGraphMode.FULL_DECODE_ONLY),
+        )
+        runner.compilation_config = compilation_config
+        runner.vllm_config.compilation_config = compilation_config
+        runner.parallel_config = SimpleNamespace(tensor_parallel_size=1)
+        runner.uniform_decode_query_len = 1
+        runner.kv_cache_config = SimpleNamespace()
+        runner.max_num_reqs = 16
+        capture_descs = [
+            (CUDAGraphMode.FULL, [BatchDescriptor(num_tokens=36, num_reqs=4, uniform=True)]),
+        ]
+        runner.cudagraph_dispatcher = MagicMock()
+        runner.cudagraph_dispatcher.get_capture_descs.return_value = capture_descs
+        runner.speculative_config = SimpleNamespace(
+            use_eagle=lambda: False,
+            uses_extract_hidden_states=lambda: False,
+        )
+        runner.drafter = MagicMock()
+        runner.drafter.get_draft_graph_capture_sizes.return_value = [32]
+        runner.use_aclgraph = True
+
+        runner._check_and_update_cudagraph_mode([], [])
+
+        runner.drafter.set_resolved_cudagraph_mode.assert_called_once_with(CUDAGraphMode.FULL_DECODE_ONLY)
+        runner.drafter.get_draft_graph_capture_sizes.assert_called_once_with(capture_descs, [36])
+        mock_set_graph_params.assert_called_once_with([36])
+        mock_set_draft_graph_params.assert_called_once_with([32])
 
     def test_sparse_c8_indexer_reuses_raw_cache_from_shared_descriptor(self):
         runner = self._build_runner()
