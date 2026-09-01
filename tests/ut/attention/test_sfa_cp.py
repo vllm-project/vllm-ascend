@@ -1634,7 +1634,7 @@ class TestAscendSFADCPImpl(TestBase):
     def test_record_dcp_kv_gather_context_c8_only_gathers_packed_kv(self):
         impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
         impl.dcp_group = MagicMock()
-        impl.use_sparse_c8_sfa = True
+        impl.enable_sparse_sfa_c8 = True
         gather_context = MagicMock()
         impl._start_dcp_gather = MagicMock(return_value=gather_context)
 
@@ -1668,7 +1668,7 @@ class TestAscendSFADCPImpl(TestBase):
         impl.dcp_group = MagicMock()
         impl.dcp_size = 2
         impl.enable_dsa_cp = False
-        impl.use_sparse_c8_sfa = True
+        impl.enable_sparse_sfa_c8 = True
         impl.qk_rope_head_dim = 4
         impl.sfa_qsfa_tile_size = 128
         impl._remap_sparse_indices = MagicMock(side_effect=lambda x: x)
@@ -1714,7 +1714,7 @@ class TestAscendSFADCPImpl(TestBase):
         self.assertIs(result, merged_output)
         call_args = mock_execute_sfa.call_args.args
         call_kwargs = mock_execute_sfa.call_args.kwargs
-        self.assertTrue(call_args[0].use_sparse_c8_sfa)
+        self.assertTrue(call_args[0].enable_sparse_sfa_c8)
         self.assertEqual(len(call_args[3]), 1)
         self.assertEqual(call_args[3][0].dtype, torch.int8)
         self.assertIs(call_args[7], dcp_seq_lens)

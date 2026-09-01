@@ -399,7 +399,8 @@ FULL_FEATURE_MODEL_CASES = [
             "additional_config": {
                 "enable_flashcomm1": True,
                 "enable_dsa_cp": True,
-                "enable_sparse_c8": True,
+                "enable_sparse_sfa_c8": True,
+                "enable_sparse_li_c8": True,
             },
             "speculative_config": {
                 "method": "mtp",

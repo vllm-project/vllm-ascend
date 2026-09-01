@@ -227,7 +227,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_execute_kv_quant_sparse_flash_attention(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.use_sparse_c8_sfa = True
+        impl.enable_sparse_sfa_c8 = True
         impl.scale = 0.125
         impl.sfa_qsfa_tile_size = 128
         impl.qk_rope_head_dim = 16
@@ -272,7 +272,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
 
     def test_prolog_v3_enables_packed_int8_kv_cache(self):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        impl.use_sparse_c8_sfa = True
+        impl.enable_sparse_sfa_c8 = True
         impl.has_indexer = True
         impl.sfa_qsfa_tile_size = 128
         impl.sfa_qsfa_k_nope_clip_alpha = torch.ones(1)
