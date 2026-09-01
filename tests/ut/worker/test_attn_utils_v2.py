@@ -68,7 +68,11 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
         "enable_sfa_dcp_replicated_indexer",
         lambda _config: replicated_indexer,
     )
-    monkeypatch.setattr(attn_utils, "get_ascend_device_type", lambda: AscendDeviceType.A2)
+    monkeypatch.setattr(
+        attn_utils,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A2),
+    )
     monkeypatch.setattr(
         attn_utils,
         "get_ascend_config",
