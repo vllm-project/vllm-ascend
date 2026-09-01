@@ -1166,6 +1166,56 @@ class TestCoreFunctionality(unittest.TestCase):
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_sfa_metadata_plane_uses_cache_spec_type(self, mock_get_meta):
+        metadata_layer_idx = self.thread.index_cache_plane_base + 3
+        metadata_size = metadata_layer_idx + 1
+        local_base_addrs = [[] for _ in range(metadata_size)]
+        remote_base_addrs = [[] for _ in range(metadata_size)]
+        block_lens = [[] for _ in range(metadata_size)]
+        block_strides = [[] for _ in range(metadata_size)]
+        remote_block_strides = [[] for _ in range(metadata_size)]
+        block_size_scale = [[] for _ in range(metadata_size)]
+        local_base_addrs[metadata_layer_idx] = [0x2000]
+        remote_base_addrs[metadata_layer_idx] = [0x4000]
+        block_lens[metadata_layer_idx] = [2048]
+        block_strides[metadata_layer_idx] = [2048]
+        remote_block_strides[metadata_layer_idx] = [2048]
+        block_size_scale[metadata_layer_idx] = [1]
+
+        self.thread.kv_caches_base_addr["local_engine"][5555] = local_base_addrs
+        self.thread.kv_caches_base_addr["remote_engine"] = {6666: remote_base_addrs}
+        self.thread.block_len_per_addr = block_lens
+        self.thread.block_stride_per_addr = block_strides
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = remote_block_strides
+        self.thread.block_size_scale = block_size_scale
+
+        for layer_name in (
+            "model.layers.3.attn.index_cache",
+            "model.layers.3.self_attn.indexer.k_cache",
+        ):
+            with self.subTest(layer_name=layer_name):
+                self.thread.kv_group2layeridx = {
+                    0: (
+                        {
+                            "kv_cache_spec_type": "AscendSFAIndexerCacheSpec",
+                            "layer_names": [layer_name],
+                        },
+                        [metadata_layer_idx],
+                    )
+                }
+                self.thread._transfer_kv_cache_all_groups(self.test_req)
+
+                self.engine.batch_transfer_sync_read.assert_called_once_with(
+                    "localhost:7777",
+                    [0x2000 + 2048],
+                    [0x4000 + 3 * 2048],
+                    [2 * 2048],
+                )
+                self.engine.batch_transfer_sync_read.reset_mock()
+
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_mamba_uses_normalized_prompt_state_block(self, mock_get_meta):
         # Pure metadata/address arithmetic: no NPU tensor or torch.npu call.
         self._configure_mock_mamba_transfer()
