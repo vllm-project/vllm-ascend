@@ -12,9 +12,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forwa
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
     has_layer_idx,
     is_moe_model,
 )
@@ -244,7 +243,7 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def _select_a2_moe_comm_method(
+def _select_capacity_and_expert_density_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
@@ -263,10 +262,10 @@ def _select_a2_moe_comm_method(
     return MoECommType.ALLGATHER
 
 
-def _select_a3_moe_comm_method(
+def _select_fused_or_capacity_moe_comm_method(
     num_tokens: int,
-    mc2_tokens_capacity: int,
     vllm_config: VllmConfig,
+    mc2_tokens_capacity: int,
 ) -> MoECommType:
     if use_cann_megamoe(vllm_config):
         return MoECommType.FUSED_MC2
@@ -279,7 +278,7 @@ def _select_a3_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def _select_a5_moe_comm_method(
+def _select_capacity_and_world_size_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
@@ -298,29 +297,12 @@ def _select_a5_moe_comm_method(
 
 
 def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
-    """Select the MoE communication method according to parallel settings,
-    device generation, and token count.
-
-    1. Non-MoE models return `None`.
-    2. Without expert parallel, fall back to all-gather.
-    3. On A2 with expert parallel, pick MC2 when tokens fit the MC2 capacity
-       and the DP size is large enough; otherwise use all-gather.
-    4. On A3 with expert parallel, prefer fused MC2 when enabled and the EP
-       group size is small enough; otherwise use MC2 within capacity or
-       all-to-all.
-    5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+    """Select the MoE communication method from the active hardware policy,
+    parallel settings, and token count.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_draft_model (bool): Whether the model runs in MTP mode.
-
-    Raises:
-        ValueError: If the soc version is unsupported.
-
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
@@ -328,7 +310,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         return None
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
-    soc_version = get_ascend_device_type()
+    moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
@@ -338,24 +320,22 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
-    elif soc_version == AscendDeviceType.A2:
-        moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
-    elif soc_version == AscendDeviceType.A3:
-        moe_comm_type = _select_a3_moe_comm_method(
-            num_tokens,
-            mc2_tokens_capacity,
-            vllm_config,
-        )
-    elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
-    elif soc_version == AscendDeviceType._310P:
+    elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
-
     else:
-        raise ValueError(f"Unsupported soc_version: {soc_version}")
+        selector_by_policy = {
+            MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY: _select_capacity_and_expert_density_moe_comm_method,
+            MoECommPolicy.FUSED_OR_CAPACITY: _select_fused_or_capacity_moe_comm_method,
+            MoECommPolicy.CAPACITY_AND_WORLD_SIZE: _select_capacity_and_world_size_moe_comm_method,
+        }
+        moe_comm_type = selector_by_policy[moe_comm_policy](
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+        )
     logger.debug(
-        "MoE comm method selected: soc=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
-        soc_version,
+        "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        moe_comm_policy,
         moe_comm_type,
         num_tokens,
         mc2_tokens_capacity,

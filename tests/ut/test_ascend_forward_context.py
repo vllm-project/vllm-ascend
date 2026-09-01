@@ -8,6 +8,8 @@ import torch
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 
 
 @pytest.fixture(autouse=True)
@@ -77,7 +79,7 @@ def _patch_select_moe_comm_method_deps(
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
-    monkeypatch.setattr(afc, "get_ascend_device_type", lambda: device_type)
+    monkeypatch.setattr(afc, "get_current_hardware_profile", lambda: get_hardware_profile(device_type))
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=ep_world_size))
     monkeypatch.setattr(
         afc,
@@ -171,7 +173,7 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A3,
+        device_type=AscendDeviceType.A3,
         is_moe=False,
     )
 
@@ -192,7 +194,7 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
 ):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A3,
+        device_type=AscendDeviceType.A3,
         ep_world_size=ep_world_size,
     )
     vllm_config = _make_vllm_config(enable_expert_parallel=enable_expert_parallel)
@@ -210,7 +212,7 @@ def test_select_moe_comm_method_uses_allgather_without_effective_expert_parallel
 def test_select_moe_comm_method_a2_uses_mc2_within_capacity(monkeypatch, num_tokens, expected):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A2,
+        device_type=AscendDeviceType.A2,
         capacity=128,
         ep_world_size=16,
     )
@@ -236,7 +238,7 @@ def test_select_moe_comm_method_a3_enable_fused_mc2_mode_1(
 ):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A3,
+        device_type=AscendDeviceType.A3,
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
@@ -261,7 +263,7 @@ def test_select_moe_comm_method_a3_without_fused_mc2(
 ):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A3,
+        device_type=AscendDeviceType.A3,
         capacity=128,
         enable_prefill_mc2=1,
     )
@@ -284,7 +286,7 @@ def test_select_moe_comm_method_a3_quant_w4a16(
 ):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A3,
+        device_type=AscendDeviceType.A3,
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
@@ -310,7 +312,7 @@ def test_select_moe_comm_method_a3_quant_w4a8(
 ):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A3,
+        device_type=AscendDeviceType.A3,
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
@@ -336,7 +338,7 @@ def test_select_moe_comm_method_a3_quant_w8a8(
 ):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A3,
+        device_type=AscendDeviceType.A3,
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
@@ -362,7 +364,7 @@ def test_select_moe_comm_method_a3_mc2_invalid_hidden_size(
 ):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A3,
+        device_type=AscendDeviceType.A3,
         capacity=128,
         ep_world_size=ep_world_size,
         enable_fused_mc2=1,
@@ -385,7 +387,7 @@ def test_select_moe_comm_method_a3_mc2_invalid_hidden_size(
 def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_experts, expected):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType.A5,
+        device_type=AscendDeviceType.A5,
         capacity=128,
     )
     vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts)
@@ -396,7 +398,7 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
-        device_type=afc.AscendDeviceType._310P,
+        device_type=AscendDeviceType._310P,
     )
 
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
