@@ -14,6 +14,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    backend_supports_layerwise,
+)
+
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
 _PREFETCH_LAYERS = "layerwise_prefetch_layers"
 _INDEPENDENT_LAYERS = "layerwise_independent_layers"
@@ -67,8 +71,13 @@ class LayerwiseReuseLayout:
     has_layer_reuse: bool
 
 
-def get_gva_layerwise_config(kv_transfer_config: Any) -> dict[str, Any] | None:
-    """Return extra config for the MemCache GVA layerwise path."""
+def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None:
+    """Return the extra config of the layerwise-reuse connector, if any.
+
+    A connector opts into layerwise reuse when it enables layerwise
+    transfer and its backend carries a layerwise protocol (resolved via
+    the backend registry — the generic layer stays protocol-agnostic).
+    """
     if kv_transfer_config is None:
         return None
 
@@ -95,9 +104,8 @@ def get_gva_layerwise_config(kv_transfer_config: Any) -> dict[str, Any] | None:
         ):
             continue
         extra_config = connector_config.get("kv_connector_extra_config") or {}
-        if str(extra_config.get("backend", "mooncake")).lower() == "memcache" and extra_config.get(
-            "use_layerwise", False
-        ):
+        backend_name = str(extra_config.get("backend", "mooncake")).strip().lower()
+        if extra_config.get("use_layerwise", False) and backend_supports_layerwise(backend_name):
             return extra_config
     return None
 
@@ -281,7 +289,7 @@ def apply_layerwise_kv_cache_plan(
     vllm_config: VllmConfig,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
-    extra_config = get_gva_layerwise_config(vllm_config.kv_transfer_config)
+    extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
     if extra_config is None:
         return
 
