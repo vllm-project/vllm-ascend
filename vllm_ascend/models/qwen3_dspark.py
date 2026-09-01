@@ -74,7 +74,15 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
-        if vllm_version_is("0.27.1") and self.enable_confidence_head:
+        # vLLM PR #47808 owns the confidence head on newer checkouts. Older
+        # development checkouts expose the DSpark model without that module,
+        # even when their version string is not exactly 0.27.1. Detect the
+        # capability instead of relying on a version equality so the Ascend
+        # implementation can remain usable with both layouts.
+        self._ascend_owns_confidence_head = (
+            self.enable_confidence_head and not hasattr(self.model, "confidence_head")
+        )
+        if self._ascend_owns_confidence_head:
             model_prefix = maybe_prefix(prefix, "model")
             self.model.confidence_head = DSparkConfidenceHead(
                 config=config,
@@ -116,7 +124,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 processed_weights.append((name, loaded_weight))
             all_weights = processed_weights
 
-        if not vllm_version_is("0.27.1"):
+        if not self._ascend_owns_confidence_head:
             # main (cdc4824a21): upstream load_weights already manages
             # confidence_head (vllm#47808).
             result = super().load_weights(all_weights)
