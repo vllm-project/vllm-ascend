@@ -10,7 +10,7 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-from tests.ut.attention.utils import (
+from tests.e2e.pull_request.one_card.attention_utils import (
     BatchSpec,
     create_and_prepopulate_kv_cache,
     create_common_attn_metadata,

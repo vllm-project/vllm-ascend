@@ -134,8 +134,13 @@ class TestUtils(TestBase):
             self.assertEqual(utils.find_hccl_library(), "libhccl.so")
 
     def test_current_stream(self):
-        with mock.patch("torch.npu.current_stream") as mock_current_stream:
-            self.assertEqual(utils.current_stream(), mock_current_stream())
+        utils._CURRENT_STREAM = None
+        mock_stream = mock.MagicMock(name="npu_stream")
+        with mock.patch("vllm_ascend.utils.torch.npu.current_stream", return_value=mock_stream) as mock_current_stream:
+            self.assertIs(utils.current_stream(), mock_stream)
+            # Second call must hit the cached stream, not torch.npu.current_stream again.
+            self.assertIs(utils.current_stream(), mock_stream)
+            mock_current_stream.assert_called_once()
 
     def test_enable_dsa_cp_with_o_proj_tp_accepts_missing_kv_transfer(self):
         mock_vllm_config = mock.MagicMock()
@@ -148,6 +153,8 @@ class TestUtils(TestBase):
             self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
 
     def test_enable_sp_uses_upstream_parallel_config(self):
+        # Stop any leaked patch("vllm_ascend.utils.enable_sp") from other TestCases.
+        mock.patch.stopall()
         sequence_parallel_config = SimpleNamespace(
             parallel_config=SimpleNamespace(
                 use_sequence_parallel_moe=True,

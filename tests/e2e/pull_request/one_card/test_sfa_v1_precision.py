@@ -53,7 +53,7 @@ if "torch_npu._inductor" not in sys.modules:
 
 from vllm.forward_context import set_forward_context  # noqa: E402
 
-from tests.ut.attention.utils import (  # noqa: E402
+from tests.e2e.pull_request.one_card.attention_utils import (  # noqa: E402
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,

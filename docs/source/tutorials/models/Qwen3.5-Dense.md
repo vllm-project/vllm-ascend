@@ -20,9 +20,9 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 | Model | Version | Hardware Requirement | Download |
 |-------|---------|----------------------|----------|
-| Qwen3.5-2B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B) |
-| Qwen3.5-4B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B) |
-| Qwen3.5-9B | FP16 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B) |
+| Qwen3.5-2B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-2B-W8A8-310P) |
+| Qwen3.5-4B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-4B-W8A8-310P) |
+| Qwen3.5-9B | INT8 | Atlas 300I DUO or Atlas 200I Pro | [Download](https://www.modelscope.cn/models/Qwen/Qwen3.5-9B-W8A8-310P) |
 
 It is recommended to download the model weight to a local directory such as `/root/.cache/` or `/home/data/`.
 
@@ -187,7 +187,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
 
     vllm serve $MODEL_PATH \
     --host 127.0.0.1 \
-    --port 1025 \
+    --port 8080 \
     --tensor-parallel-size 1 \
     --served-model-name qwen3.5 \
     --max-num-seqs 32 \
@@ -197,7 +197,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     --mamba-ssm-cache-dtype float16 \
     --dtype float16 \
     --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
     --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
     ```
 
@@ -215,7 +215,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
 
     vllm serve $MODEL_PATH \
     --host 127.0.0.1 \
-    --port 1025 \
+    --port 8080 \
     --tensor-parallel-size 1 \
     --served-model-name qwen3.5 \
     --max-num-seqs 32 \
@@ -225,7 +225,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     --mamba-ssm-cache-dtype float16 \
     --dtype float16 \
     --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
     --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
     ```
 
@@ -243,7 +243,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
 
     vllm serve $MODEL_PATH \
     --host 127.0.0.1 \
-    --port 1025 \
+    --port 8080 \
     --tensor-parallel-size 1 \
     --served-model-name qwen3.5 \
     --max-num-seqs 32 \
@@ -253,7 +253,7 @@ The following examples use FP16 weights from ModelScope. Replace `MODEL_PATH` wi
     --mamba-ssm-cache-dtype float16 \
     --dtype float16 \
     --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}' \
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
     --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
     ```
 
@@ -268,7 +268,7 @@ Key Parameter Descriptions:
 - `--speculative-config` uses `qwen3_5_mtp` for Qwen3.5 Dense models that include an MTP head. It is recommended to set `num_speculative_tokens` to `1`.
 - `--compilation-config` contains configurations related to the aclgraph graph mode:
     - `"cudagraph_mode"`: `"FULL_DECODE_ONLY"` is recommended.
-    - `"cudagraph_capture_sizes"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
+    - `"cudagraph_capture_sizes"`: when tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
 - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required because `enable_npugraph_ex` is not supported on these platforms.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
@@ -285,12 +285,12 @@ If the service starts successfully, the following startup log will be displayed:
 
 ## 6 Functional Verification
 
-After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat.completions`. Use the `--served-model-name` you configured (for example, `qwen3.5`). If you used `--port 1025` or `-p 8080:8080`, adjust the URL accordingly.
+After the service is started, the model can be invoked by sending a prompt. Two API interfaces are supported: `completions` and `chat.completions`. Use the `--served-model-name` you configured (for example, `qwen3.5`). If you used `--port 8080` or `-p 8080:8080`, adjust the URL accordingly.
 
 **Completions API:**
 
 ```bash
-curl http://127.0.0.1:1025/v1/completions \
+curl http://127.0.0.1:8080/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.5",
@@ -303,7 +303,7 @@ curl http://127.0.0.1:1025/v1/completions \
 **Chat Completions API:**
 
 ```bash
-curl http://127.0.0.1:1025/v1/chat/completions \
+curl http://127.0.0.1:8080/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3.5",
@@ -343,7 +343,7 @@ models = [
         request_rate=0,
         retry=2,
         host_ip="127.0.0.1",
-        host_port=1025,
+        host_port=8080,
         max_out_len=4096,
         batch_size=16,
         trust_remote_code=False,

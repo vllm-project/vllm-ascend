@@ -12,7 +12,6 @@ import torch
 from vllm.config import CacheConfig, CompilationMode, CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.platforms import current_platform
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 import vllm_ascend.spec_decode.llm_base_proposer as llm_base_proposer
@@ -755,7 +754,7 @@ class TestEagleProposerMaybePadAndGather:
     @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
         self.check_mock()
-        self.device = torch.device("npu")
+        self.device = torch.device("cpu")
         yield
 
     def _new_proposer(
@@ -2825,8 +2824,15 @@ class TestEagleProposerPrepareInputs:
     """
 
     @pytest.fixture(autouse=True)
+    def _no_pin_memory(self):
+        # prepare_inputs allocates pinned CPU tensors via is_pin_memory_available().
+        # Without physical NPU, t.pin_memory() raises PrivateUse1HooksInterface errors.
+        with patch("vllm_ascend.spec_decode.llm_base_proposer.is_pin_memory_available", return_value=False):
+            yield
+
+    @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
-        self.device = torch.device(current_platform.device_type)
+        self.device = torch.device("cpu")
         self.runner = MagicMock()
         self.runner.pin_memory = False
         self.runner.dcp_size = 1
@@ -2895,7 +2901,7 @@ class TestEagleProposerPrepareInputs:
 
     def _create_proposer(self, method: str, num_speculative_tokens: int, device: torch.device = None, runner=None):
         if device is None:
-            device = torch.device(current_platform.device_type)
+            device = torch.device("cpu")
         vllm_config = self._create_base_vllm_config()
         vllm_config.speculative_config = self._create_speculative_config(
             method=method,
@@ -3179,7 +3185,7 @@ class TestEagleProposerPrepareInputsPadded:
 
     @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
-        self.device = torch.device(current_platform.device_type)
+        self.device = torch.device("cpu")
         self.runner = MagicMock()
         self.runner.pin_memory = False
         self.runner.dcp_size = 1
@@ -3248,7 +3254,7 @@ class TestEagleProposerPrepareInputsPadded:
 
     def _create_proposer(self, method: str, num_speculative_tokens: int, device: torch.device = None, runner=None):
         if device is None:
-            device = torch.device(current_platform.device_type)
+            device = torch.device("cpu")
         vllm_config = self._create_base_vllm_config()
         vllm_config.speculative_config = self._create_speculative_config(
             method=method,
@@ -3273,7 +3279,6 @@ class TestEagleProposerPrepareInputsPadded:
     @pytest.mark.parametrize(
         "has_triton,num_aicore,num_vectorcore",
         [
-            (True, 24, 48),
             (False, -1, -1),
         ],
     )
@@ -3399,7 +3404,6 @@ class TestEagleProposerPrepareInputsPadded:
     @pytest.mark.parametrize(
         "has_triton,num_aicore,num_vectorcore",
         [
-            (True, 24, 48),
             (False, -1, -1),
         ],
     )
@@ -3536,7 +3540,7 @@ class TestEagleProposerSetInputsFirstPass:
 
     @pytest.fixture(autouse=True)
     def setUp_and_tearDown(self):
-        self.device = torch.device(current_platform.device_type)
+        self.device = torch.device("cpu")
         self.runner = MagicMock()
         self.runner.pin_memory = False
         self.runner.dcp_size = 1
@@ -3617,7 +3621,7 @@ class TestEagleProposerSetInputsFirstPass:
     ):
         """Create a proposer instance for testing."""
         if device is None:
-            device = torch.device(current_platform.device_type)
+            device = torch.device("cpu")
         vllm_config = self._create_base_vllm_config()
         vllm_config.speculative_config = self._create_speculative_config(
             method=method,

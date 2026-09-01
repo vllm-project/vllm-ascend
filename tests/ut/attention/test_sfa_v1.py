@@ -325,9 +325,9 @@ class TestAscendSFACacheComposition(TestBase):
 
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):
-    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_block_quant")
-    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_interleave_rope")
-    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_rms_norm")
+    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_block_quant", create=True)
+    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_interleave_rope", create=True)
+    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_rms_norm", create=True)
     def test_pack_prefill_kv_cache(self, mock_rms_norm, mock_rope, mock_block_quant):
         k_nope = torch.randn(2, 1, 1, 256, dtype=torch.bfloat16)
         k_pe = torch.randn(2, 1, 1, 16, dtype=torch.bfloat16)
@@ -344,11 +344,11 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
             torch.randn(2, 1, 1, 16),
             256,
             16,
-            dst_type=1,
+            dst_type=torch.int8,
             tile_size=128,
         )
 
-        self.assertEqual(mock_block_quant.call_args.kwargs["dst_type"], 1)
+        self.assertEqual(mock_block_quant.call_args.kwargs["dst_type"], torch.int8)
         self.assertEqual(mock_block_quant.call_args.kwargs["row_block_size"], 1)
         self.assertEqual(mock_block_quant.call_args.kwargs["col_block_size"], 128)
 
@@ -424,6 +424,7 @@ class TestAscendSFAKVQuantSparseAttention(TestBase):
         with (
             patch(
                 "vllm_ascend.attention.sfa_v1.torch_npu.npu_dynamic_quant",
+                create=True,
                 return_value=(torch.empty(2, 8, dtype=torch.int8), torch.ones(2, 1)),
             ),
             patch(
@@ -945,7 +946,7 @@ class TestAscendSFAImpl(TestBase):
     # ============ exec_kv: sparse C8 uses custom_kv_rmsnorm_rope ============
 
     @patch("vllm_ascend.attention.sfa_v1.custom_kv_rmsnorm_rope")
-    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    @patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
     def test_exec_kv_sparse_c8_uses_custom(
         self,
         mock_npu_kv_rmsnorm_rope_cache,
@@ -979,6 +980,7 @@ class TestAscendSFAImpl(TestBase):
 
         result = self.impl.exec_kv(kv_no_split, cos, sin, kv_cache, slots, MagicMock())
         self.assertIs(result, fake_result)
+        mock_custom_kv_rmsnorm_rope.assert_called_once()
         mock_npu_kv_rmsnorm_rope_cache.assert_not_called()
 
     # ============ _resolve_preprocess_type: routing logic ============

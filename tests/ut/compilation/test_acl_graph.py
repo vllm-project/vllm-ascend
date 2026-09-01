@@ -889,13 +889,18 @@ class TestDCPGraphParams(TestBase):
 
         acl_graph_mod._graph_params = self._prev_graph_params
 
+    @patch("vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.graph_task_update_begin", MagicMock())
     @patch(
-        "torch.npu.graph_task_update_end",
+        "vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score.out",
+        MagicMock(),
     )
-    @patch("torch.npu.graph_task_update_begin", MagicMock())
-    @patch("torch_npu.npu_fused_infer_attention_score.out", MagicMock())
-    def test_update_mla_dcp_params(self, _mock_graph_task_end, mock_context):
+    @patch("vllm_ascend.attention.context_parallel.mla_cp.torch.npu.stream")
+    def test_update_mla_dcp_params(self, mock_stream, _mock_graph_task_end, mock_context, mock_extra_ctx):
+        mock_extra_ctx.is_draft_model = False
+        mock_extra_ctx.is_draft_model_prefill = False
         input_positions = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8])
         block_table = torch.zeros(2, 5, dtype=torch.long)
         seq_lens = torch.tensor([4, 4])
@@ -915,6 +920,10 @@ class TestDCPGraphParams(TestBase):
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
         forward_context.is_draft_model = False
+        forward_context.additional_kwargs = {
+            "is_draft_model": False,
+            "is_draft_model_prefill": False,
+        }
         mock_context.return_value = forward_context
 
         num_heads = 256
@@ -960,13 +969,18 @@ class TestDCPGraphParams(TestBase):
 
         _mock_graph_task_end.assert_called_once()
 
+    @patch("vllm_ascend.attention.context_parallel.attention_cp._EXTRA_CTX")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.graph_task_update_end")
+    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.graph_task_update_begin", MagicMock())
     @patch(
-        "torch.npu.graph_task_update_end",
+        "vllm_ascend.attention.context_parallel.attention_cp.torch_npu.npu_fused_infer_attention_score.out",
+        MagicMock(),
     )
-    @patch("torch.npu.graph_task_update_begin", MagicMock())
-    @patch("torch_npu.npu_fused_infer_attention_score.out", MagicMock())
-    def test_update_attn_dcp_params(self, _mock_graph_task_end, mock_context):
+    @patch("vllm_ascend.attention.context_parallel.attention_cp.torch.npu.stream")
+    def test_update_attn_dcp_params(self, mock_stream, _mock_graph_task_end, mock_context, mock_extra_ctx):
+        mock_extra_ctx.is_draft_model = False
+        mock_extra_ctx.is_draft_model_prefill = False
         block_table = torch.zeros(2, 5, dtype=torch.long)
         num_heads = 256
         scale = 0.1
@@ -992,6 +1006,10 @@ class TestDCPGraphParams(TestBase):
         forward_context = MagicMock()
         forward_context.attn_metadata = {"attn_layer_0": metadata}
         forward_context.is_draft_model = False
+        forward_context.additional_kwargs = {
+            "is_draft_model": False,
+            "is_draft_model_prefill": False,
+        }
         mock_context.return_value = forward_context
 
         self.graph_params.attn_params[4] = []
