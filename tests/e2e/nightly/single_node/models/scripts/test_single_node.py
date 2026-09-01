@@ -460,6 +460,14 @@ def _task_passed(case_config: dict[str, Any], result: Any) -> bool:
             return throughput_val >= float(threshold) * float(baseline)
         except (ValueError, AttributeError):
             return False
+    if case_type == "spec_decode" and isinstance(result, list):
+        if not isinstance(baseline, list) or len(result) != len(baseline):
+            return False
+        tolerance = float(threshold)
+        return all(
+            float(actual) >= float(golden) * (1 - tolerance)
+            for actual, golden in zip(result, baseline)
+        )
     return True
 
 
@@ -492,6 +500,13 @@ def _build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) -
                 metrics[_PERF_METRIC_RENAME.get(metric_name, metric_name)] = round(value, 4)
             except (ValueError, AttributeError):
                 pass
+    elif case_type == "spec_decode" and isinstance(result, list):
+        metrics.update(
+            {
+                f"acceptance_rate_pos_{position}": round(float(rate), 4)
+                for position, rate in enumerate(result)
+            }
+        )
 
     test_input_keys = ("num_prompts", "max_out_len", "batch_size", "request_rate")
     test_input = {k: case_config[k] for k in test_input_keys if k in case_config}
