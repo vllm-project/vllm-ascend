@@ -9,6 +9,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_dispatch_v2_tokens_capacity", None)
     monkeypatch.setattr(afc, "_moe_quant_mismatch", None)
     monkeypatch.setattr(
         afc,
@@ -31,6 +32,9 @@ def _make_vllm_config(
     max_cudagraph_capture_size: int = 0,
     max_num_batched_tokens: int = 0,
     hidden_size: int = 2048,
+    kv_connector: str | None = None,
+    kv_role: str | None = None,
+    recompute_scheduler_enable: bool = False,
 ):
     hf_text_config_attrs: dict[str, object] = {
         "top_k_experts": top_k_experts,
@@ -56,12 +60,20 @@ def _make_vllm_config(
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
         max_cudagraph_capture_size=max_cudagraph_capture_size,
     )
-    scheduler_config = SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens)
+    kv_transfer_config = (
+        SimpleNamespace(kv_connector=kv_connector, kv_role=kv_role)
+        if kv_connector is not None or kv_role is not None
+        else None
+    )
     return SimpleNamespace(
         model_config=model_config,
         parallel_config=parallel_config,
         compilation_config=compilation_config,
-        scheduler_config=scheduler_config,
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=max_num_batched_tokens,
+            recompute_scheduler_enable=recompute_scheduler_enable,
+        ),
+        kv_transfer_config=kv_transfer_config,
     )
 
 
@@ -117,6 +129,80 @@ def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeyp
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
 
     assert afc.get_mc2_tokens_capacity() == 520
+
+
+def test_set_mc2_tokens_capacity_decode_only_uses_cudagraph_capture_size(monkeypatch):
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=0,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=8,
+        cudagraph_capture_sizes=[1, 2],
+        max_cudagraph_capture_size=257,
+        max_num_batched_tokens=8192,
+        kv_connector="DecodeBenchConnector",
+        kv_role="kv_both",
+    )
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == 264
+
+
+def test_set_mc2_tokens_capacity_decode_only_without_cudagraph_uses_decode_shape(monkeypatch):
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=0,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+        ),
+    )
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=4,
+        max_num_batched_tokens=8192,
+        kv_connector="DecodeBenchConnector",
+        kv_role="kv_both",
+    )
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=2)
+
+    assert afc.get_mc2_tokens_capacity() == 32
+
+
+def test_set_mc2_tokens_capacity_disable_recompute_decode_uses_max_num_batched_tokens(monkeypatch):
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: True)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
+            enable_fused_mc2=1,
+            scheduler_config=SimpleNamespace(recompute_scheduler_enable=False),
+        ),
+    )
+    vllm_config = _make_vllm_config(
+        tensor_parallel_size=8,
+        cudagraph_capture_sizes=[1, 2],
+        max_cudagraph_capture_size=257,
+        max_num_batched_tokens=8192,
+        kv_connector="DecodeBenchConnector",
+        kv_role="kv_both",
+        recompute_scheduler_enable=False,
+    )
+
+    afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=16, uniform_decode_query_len=1)
+
+    assert afc.get_mc2_tokens_capacity() == 8192
 
 
 def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):

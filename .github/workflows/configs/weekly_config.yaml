@@ -84,7 +84,7 @@ a3:
     test_config:
       # pytest-driven tests
       - name: engine-func-tests
-        os: linux-aarch64-a3-4
+        os: linux-aarch64-a3-800t-4
         tests: tests/e2e/weekly/single_node/engine_func_test_robot
       - name: deepseek-v3-2-w8a8
         os: linux-aarch64-a3-16
@@ -99,7 +99,7 @@ a3:
         os: linux-aarch64-a3-16
         config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3_weekly.yaml
       - name: Qwen3.5-27B-w8a8-A3
-        os: linux-aarch64-a3-2
+        os: linux-aarch64-a3-800t-2
         config_file_path: Qwen3.5-27B-w8a8-A3.yaml
       - name: Qwen3.5-122B-A10B-W8A8-A3
         os: linux-aarch64-a3-16
@@ -111,7 +111,7 @@ a3:
         os: linux-aarch64-a3-16
         config_file_path: GLM-5.yaml
       - name: qwen2-5-vl-7b-epd
-        os: linux-aarch64-a3-4
+        os: linux-aarch64-a3-800t-4
         config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
       - name: MiniMax-M2.5-w8a8
         os: linux-aarch64-a3-16

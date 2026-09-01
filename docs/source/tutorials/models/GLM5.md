@@ -6,7 +6,7 @@ This document applies to both `GLM-5` and `GLM-5.1`. Unless otherwise specified,
 
 [GLM-5](https://huggingface.co/zai-org/GLM-5) uses a Mixture-of-Experts (MoE) architecture and targets complex systems engineering and long-horizon agentic tasks.
 
-The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version. The version of transformers need to be upgraded to 5.2.0 or later versions.
+The `GLM-5` model is first supported in `vllm-ascend:v0.17.0rc1`, and all **v0.17.0rc1 and later versions** can run stably. To use the latest features (e.g., PD separation, MTP), it is recommended to use the latest release candidate or official version.
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
@@ -137,7 +137,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```shell
     # The version of transformers needs to be upgraded to 5.2.0.
@@ -213,7 +213,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
     Run the following script to execute online inference.
 
-    Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+    Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
     ```shell
     export HCCL_OP_EXPANSION_MODE="AIV"
@@ -254,7 +254,7 @@ The parameters are explained as follows:
 
 If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
 
-Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
 === "A3 series"
 
@@ -1359,7 +1359,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 ## 10 FAQ
 
-- Common Issues Tip: If you encounter issues, Refer to [FAQs](../../faqs.md).
+- Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
 - **Q: How to solve ValueError: Tokenizer class TokenizersBackend does not exist or is not currently imported?**
 

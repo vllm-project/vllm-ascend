@@ -75,15 +75,16 @@
 #    Why:
 #       DeepSeek-V4-Flash-0731 defines three reasoning effort levels: low has
 #       no prompt prefix, high uses the original "Absolute maximum" prefix,
-#       and max uses the new "Beyond maximum" prefix. The supported vLLM
-#       Python tokenizer predates this 0731 prompt mapping.
+#       and max uses the new "Beyond maximum" prefix. The earlier Flash
+#       checkpoint uses a different mapping where only max/xhigh selects the
+#       "Absolute maximum" prefix. The supported vLLM Python tokenizer
+#       predates the 0731 prompt mapping.
 #    How:
-#       Monkey-patch tokenizer normalization so omitted options select
-#       thinking with high effort and compatibility aliases map to canonical
-#       low, high, or max. Wrap render_message to prepend the official 0731
-#       prompt before the first message in thinking mode. Align the parser's
-#       default state with the tokenizer so implicit thinking is extracted as
-#       reasoning instead of content.
+#       Select the 0731 mapping when the model config contains a dspark_*
+#       field; otherwise preserve the earlier Flash mapping. Wrap
+#       render_message to prepend the selected prompt before the first message
+#       in thinking mode. Align the parser's default state with the tokenizer
+#       so implicit thinking is extracted as reasoning instead of content.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/50580
 #       https://github.com/vllm-project/vllm/pull/51296
@@ -477,6 +478,23 @@
 #       Remove or narrow this patch if upstream exposes stable hooks for backend
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
+#
+# ** 19a. File: platform/patch_shm_broadcast.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.device_communicators.shm_broadcast.MessageQueue`
+#    Why:
+#       vLLM 0.26.0 local readers can wait indefinitely after a best-effort ZMQ
+#       notification is lost. A caller exception can also leave a read slot
+#       unreleased and block the writer.
+#    How:
+#       Replace `timeout_ms` and `acquire_read` with the implementations from the
+#       upstream fix. Idle waits are capped at five seconds, and read-slot cleanup
+#       runs in a `finally` block.
+#    Related PR:
+#       https://github.com/vllm-project/vllm/pull/45224
+#       https://github.com/vllm-project/vllm-ascend/pull/14181
+#    Future Plan:
+#       Remove this patch when the supported vLLM release includes PR #45224.
 #
 # ** 20. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

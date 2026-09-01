@@ -26,6 +26,7 @@ from vllm_ascend.attention.dsa_compressor import (
 from vllm_ascend.attention.dsa_v1 import (
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
+    get_or_compute_compressor_metadata,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,

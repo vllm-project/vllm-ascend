@@ -189,7 +189,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -2606,8 +2606,22 @@ class NPUModelRunner(GPUModelRunner):
     # all-gather one hidden-states in sp scene
     @staticmethod
     def _all_gather_hidden_states(hidden_states):
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-        pad_size = get_forward_context().pad_size
+        forward_context = get_forward_context()
+        pad_size = forward_context.pad_size
+        num_tokens = forward_context.num_tokens
+        padded_num_tokens = getattr(
+            forward_context,
+            "padded_length",
+            num_tokens + pad_size,
+        )
+
+        # Multimodal inputs bypass the first sequence-parallel scatter. Eagle3
+        # auxiliary states captured before the first reduce-scatter therefore
+        # already contain the global token dimension. Gathering them again
+        # multiplies that dimension by TP (for example, 16K x TP16) and can
+        # allocate several GiB per auxiliary state.
+        if hidden_states.shape[0] != padded_num_tokens:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
         if pad_size > 0:
             hidden_states = hidden_states[:-pad_size, :]
 
@@ -3545,7 +3559,9 @@ class NPUModelRunner(GPUModelRunner):
         if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
             mc2_tokens_capacity, self.vllm_config
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
-            self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+            # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
+            with disable_compilation(self.get_model()):
+                self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         super().profile_run()
 
     def eplb_warmup(self):

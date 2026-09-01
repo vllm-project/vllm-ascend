@@ -22,6 +22,52 @@ from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
+class TestNPUModelRunnerHiddenStateGather(unittest.TestCase):
+    @patch("vllm_ascend.worker.model_runner_v1.tensor_model_parallel_all_gather")
+    @patch("vllm_ascend.worker.model_runner_v1.get_forward_context")
+    def test_global_aux_hidden_state_is_not_gathered(self, mock_get_forward_context, mock_all_gather):
+        mock_get_forward_context.return_value = SimpleNamespace(
+            num_tokens=16,
+            pad_size=0,
+        )
+        hidden_states = torch.zeros((16, 8))
+
+        result = NPUModelRunner._all_gather_hidden_states(hidden_states)
+
+        self.assertIs(result, hidden_states)
+        mock_all_gather.assert_not_called()
+
+    @patch("vllm_ascend.worker.model_runner_v1.tensor_model_parallel_all_gather")
+    @patch("vllm_ascend.worker.model_runner_v1.get_forward_context")
+    def test_local_hidden_state_is_gathered(self, mock_get_forward_context, mock_all_gather):
+        mock_get_forward_context.return_value = SimpleNamespace(
+            num_tokens=16,
+            pad_size=0,
+        )
+        hidden_states = torch.zeros((4, 8))
+        gathered_hidden_states = torch.zeros((16, 8))
+        mock_all_gather.return_value = gathered_hidden_states
+
+        result = NPUModelRunner._all_gather_hidden_states(hidden_states)
+
+        self.assertIs(result, gathered_hidden_states)
+        mock_all_gather.assert_called_once_with(hidden_states, 0)
+
+    @patch("vllm_ascend.worker.model_runner_v1.tensor_model_parallel_all_gather")
+    @patch("vllm_ascend.worker.model_runner_v1.get_forward_context")
+    def test_global_aux_hidden_state_removes_padding(self, mock_get_forward_context, mock_all_gather):
+        mock_get_forward_context.return_value = SimpleNamespace(
+            num_tokens=15,
+            pad_size=1,
+        )
+        hidden_states = torch.zeros((16, 8))
+
+        result = NPUModelRunner._all_gather_hidden_states(hidden_states)
+
+        self.assertEqual(result.shape, (15, 8))
+        mock_all_gather.assert_not_called()
+
+
 class TestDSparkAuxCaptureMode(unittest.TestCase):
     def _build_runner(
         self,

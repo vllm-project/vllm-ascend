@@ -6,9 +6,9 @@ self-hosted-runner:
     - linux-aarch64-310p-2
     - linux-aarch64-310p-4
     - linux-aarch64-a3-1
-    - linux-aarch64-a3-2
-    - linux-aarch64-a3-4
-    - linux-aarch64-a3-8
+    - linux-aarch64-a3-800t-2
+    - linux-aarch64-a3-800t-4
+    - linux-aarch64-a3-800t-8
     - linux-aarch64-a3-0
     - linux-aarch64-a3-0-cn12-001
     - linux-amd64-cpu-2-hk

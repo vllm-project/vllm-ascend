@@ -157,10 +157,10 @@ extra:
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
   # Version substitutions used by macros plugin
-  vllm_version: v0.22.1
-  vllm_ascend_version: v0.22.1rc1
-  pip_vllm_ascend_version: 0.22.1rc1
-  pip_vllm_version: 0.22.1
+  vllm_version: v0.23.0
+  vllm_ascend_version: v0.23.0
+  pip_vllm_ascend_version: v0.23.0
+  pip_vllm_version: v0.23.0
   cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
@@ -212,6 +212,7 @@ nav:
         - tutorials/models/Kimi-K2-Thinking.md
         - tutorials/models/Kimi-K2.5.md
         - tutorials/models/Kimi-K2.6.md
+        - tutorials/models/Kimi-K3.md
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
         - tutorials/models/Hunyuan-A13B-Instruct.md

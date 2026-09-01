@@ -35,6 +35,32 @@ _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
 
 
+def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is None:
+        return False
+
+    is_decode_bench = getattr(kv_transfer_config, "kv_connector", None) == "DecodeBenchConnector"
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    is_kv_consumer = (
+        kv_role == "kv_consumer"
+        if kv_role is not None
+        else bool(
+            getattr(kv_transfer_config, "is_kv_consumer", False)
+            and not getattr(kv_transfer_config, "is_kv_producer", False)
+        )
+    )
+    if not (is_decode_bench or is_kv_consumer):
+        return False
+
+    scheduler_config = getattr(get_ascend_config(), "scheduler_config", None)
+    # Actual semantics of `recompute_scheduler_enable`:
+    # - Enabled: when preemption occurs on the decode node, the request is sent back
+    #     to the P node to redo prefill, so the decode node only ever decodes;
+    # - Disabled: prefill is executed locally on the decode node.
+    return bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
+
+
 @contextmanager
 def override_mrv2_in_profile_run(enabled: bool):
     """Override MRv2's extra profile-run marker for one forward path.
@@ -56,6 +82,8 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
+    # Disable MegaMoE pending related bug fixes
+    return False
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         _CANN_OPS_TRANSFORMER_AVAILABLE
@@ -119,6 +147,7 @@ def set_ascend_forward_context(
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
+        forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
 
         tp_world_size = get_tensor_model_parallel_world_size()
 
@@ -228,8 +257,9 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
 
     ascend_config = get_ascend_config()
     use_mega_moe = use_cann_megamoe(vllm_config)
+    is_decode_only_node = _is_decode_only_node(vllm_config)
 
-    if ascend_config.enable_prefill_mc2 or use_mega_moe:
+    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not is_decode_only_node):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -495,6 +525,7 @@ class _ExtraForwardContextProxy:
         "moe_comm_type",
         "moe_comm_method",
         "use_mega_moe",
+        "is_decode_only_node",
         "mmrs_fusion",
         "num_tokens",
         "flash_comm_v1_enabled",
