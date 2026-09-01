@@ -411,6 +411,10 @@ def rejection_sample(
         num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        # The kernel contains a max-with-index reduction. Keep AutoBlockify
+        # disabled because this lowering is not safe with parallel block
+        # mapping on the affected Ascend Triton runtime.
+        has_auto_blockify_blacklist_op=True,
     )
 
     # Sample up until the first rejected/bonus token, and store
@@ -481,6 +485,7 @@ def rejection_sample(
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        has_auto_blockify_blacklist_op=True,
     )
 
     # Insert the resampled tokens into the output sampled.
