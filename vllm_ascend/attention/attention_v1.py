@@ -503,9 +503,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if cu_seqlens_q.device != device:
             cu_seqlens_q = cu_seqlens_q.to(device=device)
 
+        # Bake max_seqlen_q from the actual cumulative q lengths (the same
+        # source fa3_forward uses), NOT attn_metadata.max_query_len: FULL-mode
+        # mixed-descriptor warmups report max_query_len == num_tokens even for
+        # an all-decode batch (one query token per request), and the mismatch
+        # fails FA3's scheduler-metadata fingerprint validation.
+        from vllm_ascend.attention.fa3_adapter import _max_seqlen
+
         return get_scheduler_metadata(
             batch_size=len(attn_metadata.seq_lens_list),
-            max_seqlen_q=attn_metadata.max_query_len,
+            max_seqlen_q=_max_seqlen(attn_metadata.actual_seq_lengths_q),
             max_seqlen_k=self._fa3_max_blocks_per_seq(attn_metadata, block_size) * block_size,
             num_heads_q=self.num_heads,
             num_heads_kv=self.num_kv_heads,
