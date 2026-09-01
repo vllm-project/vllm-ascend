@@ -296,6 +296,13 @@ def _select_capacity_and_world_size_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
+_MOE_COMM_SELECTORS = {
+    MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY: _select_capacity_and_expert_density_moe_comm_method,
+    MoECommPolicy.FUSED_OR_CAPACITY: _select_fused_or_capacity_moe_comm_method,
+    MoECommPolicy.CAPACITY_AND_WORLD_SIZE: _select_capacity_and_world_size_moe_comm_method,
+}
+
+
 def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
     """Select the MoE communication method from the active hardware policy,
     parallel settings, and token count.
@@ -323,12 +330,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
     elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
     else:
-        selector_by_policy = {
-            MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY: _select_capacity_and_expert_density_moe_comm_method,
-            MoECommPolicy.FUSED_OR_CAPACITY: _select_fused_or_capacity_moe_comm_method,
-            MoECommPolicy.CAPACITY_AND_WORLD_SIZE: _select_capacity_and_world_size_moe_comm_method,
-        }
-        moe_comm_type = selector_by_policy[moe_comm_policy](
+        moe_comm_type = _MOE_COMM_SELECTORS[moe_comm_policy](
             num_tokens,
             vllm_config,
             mc2_tokens_capacity,
