@@ -16,7 +16,6 @@
 #
 
 # This workflow related to the resources atlas 800 A3 560T (non-exclusive / shared machines)
-# Multi-node and double-node tests use K8s LWS for scheduling and resource allocation.
 # Single-node and multi-card tests run directly on dedicated runners labeled in weekly_config.yaml.
 name: Weekly-A3-560T
 
@@ -77,7 +76,6 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
-  statuses: write
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -90,12 +88,6 @@ concurrency:
   group: ascend-weekly-${{ github.ref }}-a3-560t${{ inputs.request_id && format('-{0}', inputs.request_id) || '' }}
   cancel-in-progress: true
 
-env:
-  # Single source of truth for all shared variables across jobs.
-  # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
-  # so these values are exported as job outputs via the `setup-vars` job below.
-  ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
-
 jobs:
   parse-trigger:
     name: Parse trigger and determine test scope
@@ -105,7 +97,6 @@ jobs:
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
-      ref: ${{ steps.parse.outputs.ref }}
     steps:
       - name: Parse trigger
         id: parse
@@ -114,8 +105,6 @@ jobs:
           script: |
             const eventName = context.eventName;
             const testCases = '${{ inputs.test_cases }}'.trim();
-
-            core.setOutput('ref', context.sha || 'unknown');
 
             if (testCases) {
               core.setOutput('run', 'true');
@@ -135,21 +124,15 @@ jobs:
     needs: parse-trigger
     runs-on: linux-amd64-cpu-8-hk
     outputs:
-      ascend_log_prefix: ${{ steps.export.outputs.ascend_log_prefix }}
       vllm_ascend_branches: ${{ steps.export.outputs.vllm_ascend_branches }}
-      multi_node: ${{ steps.set-matrix.outputs.multi_node }}
-      double_node: ${{ steps.set-matrix.outputs.double_node }}
       single_node: ${{ steps.set-matrix.outputs.single_node }}
       multi_card: ${{ steps.set-matrix.outputs.multi_card }}
     steps:
       - id: export
         run: |
-          {
-            echo "ascend_log_prefix=${{ env.ASCEND_LOG_PREFIX }}"
-            input_branch="${{ inputs.vllm_ascend_branch }}"
-            normalized=$(echo "$input_branch" | tr '/' '-')
-            echo "vllm_ascend_branches=[\"${normalized}\"]"
-          } >> $GITHUB_OUTPUT
+          input_branch="${{ inputs.vllm_ascend_branch }}"
+          normalized=$(echo "$input_branch" | tr '/' '-')
+          echo "vllm_ascend_branches=[\"${normalized}\"]" >> $GITHUB_OUTPUT
 
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -173,7 +156,7 @@ jobs:
         id: set-matrix
         env:
           MATRIX_FILE: ${{ inputs.vllm_ascend_ref != '' && './pr/.github/workflows/configs/weekly_config.yaml' || '.github/workflows/configs/weekly_config.yaml' }}
-          MATRIX_OUTPUTS: '{"multi_node":"a3-560t.multi_node.test_config","double_node":"a3-560t.double_node.test_config","single_node":"a3-560t.single_node.test_config","multi_card":"a3-560t.multi_card.test_config"}'
+          MATRIX_OUTPUTS: '{"single_node":"a3-560t.single_node.test_config","multi_card":"a3-560t.multi_card.test_config"}'
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
@@ -202,131 +185,9 @@ jobs:
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
-  multi-node-tests:
-    name: multi-node
-    needs: [setup-vars, parse-trigger, build-image]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
-    uses: ./.github/workflows/_e2e_nightly_multi_node_560t.yaml
-    with:
-      soc_version: a3-560t
-      test_frequency: weekly
-      runner: linux-aarch64-a3-0-cn12-001
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: ${{ matrix.test_config.config_base_path }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      aop_multi_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
-      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
-      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
-      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
-      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
-      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
-      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
-      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
-      testcase_timeout: 600
-      request_id: ${{ inputs.request_id || '' }}
-      send_ready_signal: false
-      should_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-    secrets:
-      KUBECONFIG_B64_560T: ${{ secrets.KUBECONFIG_B64_560T }}
-      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
-
-  double-node-tests:
-    name: double-node
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
-        test_config: ${{ fromJson(needs.setup-vars.outputs.double_node) }}
-    uses: ./.github/workflows/_e2e_nightly_multi_node_560t.yaml
-    with:
-      soc_version: a3-560t
-      test_frequency: weekly
-      runner: linux-aarch64-a3-0-cn12-001
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
-      ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
-      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-      config_base_path: ${{ matrix.test_config.config_base_path }}
-      name: ${{ matrix.test_config.name }}
-      vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || needs.parse-trigger.outputs.ref }}
-      aop_multi_enabled: ${{ inputs.aop_enabled }}
-      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
-      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
-      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
-      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
-      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
-      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
-      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
-      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
-      bisect_config_base_path: ${{ matrix.test_config.config_base_path }}
-      testcase_timeout: 600
-      request_id: ${{ inputs.request_id || '' }}
-      send_ready_signal: true
-      run_id: ${{ github.run_id }}
-      should_run: >-
-        ${{
-          needs.parse-trigger.outputs.run == 'true' && (
-            needs.parse-trigger.outputs.filter == 'all' ||
-            contains(needs.parse-trigger.outputs.filter, format(',{0},', matrix.test_config.name))
-          )
-        }}
-    secrets:
-      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
-      KUBECONFIG_B64_560T: ${{ secrets.KUBECONFIG_B64_560T }}
-      OBS_ACCESS_KEY_ID: ${{ secrets.OBS_ACCESS_KEY_ID }}
-      OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
-      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
-
-  double-node-pods-started:
-    name: Wait for all double-node pods launched
-    needs: [setup-vars, parse-trigger, build-image, multi-node-tests]
-    if: >-
-      always() &&
-      needs.parse-trigger.outputs.run == 'true' &&
-      (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
-    uses: ./.github/workflows/_nightly_wait_for_pods_ready.yaml
-    with:
-      matrix_json: ${{ needs.setup-vars.outputs.double_node }}
-      filter: ${{ needs.parse-trigger.outputs.filter }}
-      context_prefix: 'double-node-pods-ready-560t'
-      run_id: ${{ github.run_id }}
-
   single-node-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-pods-started]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -373,7 +234,7 @@ jobs:
 
   multi-card-tests:
     name: single-node
-    needs: [setup-vars, parse-trigger, build-image, double-node-pods-started]
+    needs: [setup-vars, parse-trigger, build-image]
     if: >-
       always() &&
       needs.parse-trigger.outputs.run == 'true' &&
@@ -419,19 +280,9 @@ jobs:
       OBS_SECRET_ACCESS_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
-  clear-pre-logs:
-    runs-on: linux-aarch64-a3-0-cn12-001
-    needs: [multi-node-tests, double-node-tests]
-    if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
-    steps:
-      - name: Clear pre-logs on pvc
-        run: |
-          # Clear logs generated before the test to avoid confusion
-          rm -rf "${ASCEND_LOG_PREFIX:?}"/* || true
-
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-a3-560t.zip
-    needs: [parse-trigger, single-node-tests, multi-node-tests, double-node-tests, multi-card-tests]
+    needs: [parse-trigger, single-node-tests, multi-card-tests]
     if: >-
       always() &&
       github.event_name == 'workflow_dispatch' &&
@@ -446,24 +297,3 @@ jobs:
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
-
-  remove-taints:
-    name: Remove node taints
-    needs: [multi-node-tests, double-node-tests, single-node-tests, multi-card-tests]
-    if: >-
-      always() &&
-      inputs.request_id == '' &&
-      (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
-    runs-on: linux-aarch64-a3-0-cn12-001
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
-      env:
-        KUBECONFIG: /tmp/kubeconfig
-    steps:
-      - name: Decode kubeconfig
-        run: echo "${{ secrets.KUBECONFIG_B64_560T }}" | base64 -d > "$KUBECONFIG"
-
-      - name: Remove dedicated taint from test nodes
-        run: |
-          kubectl taint nodes ${{ vars.A3_560T_TAINT_NODES }} dedicated- || true
-

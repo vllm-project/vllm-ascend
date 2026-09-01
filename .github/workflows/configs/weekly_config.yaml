@@ -267,64 +267,64 @@ a3:
     test_config:
       # pytest-driven tests
       - name: engine-func-tests
-        os: linux-aarch64-a3-800t-4
+        os: linux-aarch64-nightly-a3-4
         tests: tests/e2e/weekly/single_node/engine_func_test_robot
       - name: structured_output_qwen3
-        os: linux-aarch64-a3-800t-2
+        os: linux-aarch64-nightly-a3-2
         tests: tests/e2e/weekly/single_node/features/structured_output
       - name: test_qwen3_grid_exceed_65536
-        os: linux-aarch64-a3-800t-2
+        os: linux-aarch64-nightly-a3-2
         tests: tests/e2e/weekly/single_node/features/test_qwen3_grid_exceed_65536.py
       - name: deepseek-v3-2-w8a8
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V3.2-W8A8_A3_weekly.yaml
       - name: Qwen3.5-397B-A17B-w8a8-mtp
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-397B-A17B-W8A8-mtp-A3_weekly.yaml
       - name: Qwen3.5-27B-w8a8-A3
-        os: linux-aarch64-a3-800t-2
+        os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3.5-27B-w8a8-A3.yaml
       - name: Qwen3.5-122B-A10B-W8A8-A3
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-122B-A10B-W8A8-A3.yaml
       - name: GLM-5_1-W8A8_A3_weekly
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5_1-W8A8_A3_weekly.yaml
       - name: glm-5-w4a8
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.yaml
       - name: qwen2-5-vl-7b-epd
-        os: linux-aarch64-a3-800t-4
+        os: linux-aarch64-nightly-a3-4
         config_file_path: Qwen2.5-VL-7B-Instruct-EPD.yaml
       - name: MiniMax-M2.5-w8a8
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: MiniMax-M2.5-W8A8-A3.yaml
       - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
       - name: Qwen3.6-35B-A3B-w8a8-A3-accuracy
-        os: linux-aarch64-a3-800t-2
+        os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3.6-35B-A3B-w8a8-A3-accuracy.yaml
       - name: Qwen3.6-35B-A3B-w4a8-A3
-        os: linux-aarch64-a3-800t-2
+        os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3.6-35B-A3B-w4a8-A3.yaml
       - name: Kimi-K2.6-w4a8-A3
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2.6-w4a8-A3.yaml
       - name: Kimi-K2.7-w4a8-A3
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2.7-w4a8-A3.yaml
       - name: Qwen3.5-122B-A10B-w4a8-A3-accuracy
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-122B-A10B-w4a8-A3-accuracy.yaml
       - name: Qwen3.5-122B-A10B-w4a8-A3
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-122B-A10B-w4a8-A3.yaml
       - name: Minimax_M2.7_w8a8_A3
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Minimax_M2.7_w8a8_A3.yaml
       - name: Qwen3.5-397B-Memcache-perf
-        os: linux-aarch64-a3-800t-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-397B-Memcache-perf.yaml
 310p:
   single_node:
