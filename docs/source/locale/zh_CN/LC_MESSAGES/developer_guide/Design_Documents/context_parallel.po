@@ -54,7 +54,8 @@ msgstr "什么是 CP？"
 msgid ""
 "**Context Parallel (CP)** is a strategy for parallelizing computation "
 "along the sequence dimension across multiple devices."
-msgstr "**上下文并行（Context Parallel，CP）** 是一种在多个设备上沿序列维度进行并行计算的策略。"
+msgstr ""
+"**上下文并行（Context Parallel，CP）** 是一种在多个设备上沿序列维度进行并行计算的策略。"
 
 #: ../../source/developer_guide/Design_Documents/context_parallel.md:13
 msgid ""
