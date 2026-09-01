@@ -792,15 +792,40 @@ class AscendModelSlimConfig(QuantizationConfig):
 
                 logger.debug("Select AscendUnquantizedLinearMethod for %s (layer=%s)", prefix, "LinearBase")
                 return AscendUnquantizedLinearMethod()
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            quant_type = get_quant_type_for_layer(
+                self.quant_description,
+                prefix,
+                "linear",
+                self.packed_modules_mapping,
+            )
+            if (
+                model_type in ("kimi_k3", "kimi_linear")
+                and ".shared_experts." in prefix
+                and quant_type == "W4A8_DYNAMIC"
+            ):
+                # W4A8 linear is intentionally not registered globally. Kimi K3
+                # checkpoints still use it for shared experts, which execute as
+                # a single grouped expert on Ascend.
+                from ..methods.w4a8 import AscendKimiK3W4A8DynamicLinearMethod
+
+                linear_scheme = AscendKimiK3W4A8DynamicLinearMethod()
+            else:
+                linear_scheme = create_scheme_for_layer(
+                    self.quant_description,
+                    prefix,
+                    "linear",
+                    self.packed_modules_mapping,
+                )
             logger.debug("Select AscendLinearMethod for %s (layer=%s)", prefix, "LinearBase")
-            return AscendLinearMethod(scheme)
+            return AscendLinearMethod(linear_scheme)
         elif isinstance(layer, AttentionLayerBase) and (
             self.is_fa_quant_layer(prefix) or self.is_indexer_quant_layer(prefix)
         ):
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "attention", self.packed_modules_mapping)
+            attention_scheme = create_scheme_for_layer(
+                self.quant_description, prefix, "attention", self.packed_modules_mapping
+            )
             logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa/indexer]")
-            return AscendKVCacheMethod(scheme)
+            return AscendKVCacheMethod(attention_scheme)
         elif isinstance(layer, AttentionLayerBase) and self.is_c8_quant_layer(prefix):
             from ..methods.kv_cache.kv_c8 import AscendC8KVCacheAttentionMethod
 
@@ -817,16 +842,18 @@ class AscendModelSlimConfig(QuantizationConfig):
             # Install the ModelSlim-specific loader now so every subsequently
             # registered MoE parameter receives the mapped loader.
             layer.weight_loader = _make_modelslim_moe_weight_loader(layer.weight_loader)
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
+            moe_scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
             logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
-            return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
+            return AscendFusedMoEMethod(moe_scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 logger.debug("Select UnquantizedEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
                 return UnquantizedEmbeddingMethod()
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            embedding_scheme = create_scheme_for_layer(
+                self.quant_description, prefix, "linear", self.packed_modules_mapping
+            )
             logger.debug("Select AscendEmbeddingMethod for %s (layer=%s)", prefix, "VocabParallelEmbedding")
-            return AscendEmbeddingMethod(scheme)
+            return AscendEmbeddingMethod(embedding_scheme)
         logger.debug("No quant method matched for %s, falling back to base", prefix)
         return None
 

@@ -10,6 +10,7 @@ from torch import nn
 
 from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
+    AscendKimiK3ForConditionalGeneration,
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
 )
@@ -303,6 +304,64 @@ def test_projector_applies_optional_modelslim_rotation():
         )
         projector.rot_proj = None
         torch.testing.assert_close(projector(image_features), image_features)
+
+
+def test_projector_always_builds_modelslim_rotation(monkeypatch):
+    class FakeReplicatedLinear(nn.Module):
+        def __init__(self, input_size, output_size, **kwargs):
+            super().__init__()
+            self.input_size = input_size
+            self.output_size = output_size
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        kimi_k3.KimiK25MultiModalProjector,
+        "__init__",
+        lambda self, *_args, **_kwargs: nn.Module.__init__(self),
+    )
+    monkeypatch.setattr(kimi_k3, "ReplicatedLinear", FakeReplicatedLinear)
+
+    projector = AscendKimiK3MultiModalProjector(
+        SimpleNamespace(text_hidden_size=128),
+        prefix="mm_projector",
+    )
+
+    assert projector.rot_proj is not None
+    assert projector.rot_proj.input_size == 128
+    assert projector.rot_proj.output_size == 128
+    assert projector.rot_proj.kwargs["prefix"] == "mm_projector.rot_proj"
+
+
+def test_k3_projector_rotation_is_selected_by_checkpoint_weight(monkeypatch):
+    loaded_weights: set[str] = set()
+
+    class FakeLoader:
+        def __init__(self, model):
+            assert isinstance(model, AscendKimiK3ForConditionalGeneration)
+
+        def load_weights(self, weights, mapper):
+            assert list(weights) == [("unused", torch.ones(1))]
+            assert mapper is not None
+            return loaded_weights
+
+    monkeypatch.setattr(kimi_k3, "AutoWeightsLoader", FakeLoader)
+
+    def make_model():
+        model = AscendKimiK3ForConditionalGeneration.__new__(AscendKimiK3ForConditionalGeneration)
+        nn.Module.__init__(model)
+        model.mm_projector = nn.Module()
+        model.mm_projector.rot_proj = nn.Linear(2, 2, bias=False)
+        return model
+
+    model = make_model()
+    loaded_weights.add("mm_projector.rot_proj.weight")
+    model.load_weights(iter([("unused", torch.ones(1))]))
+    assert model.mm_projector.rot_proj is not None
+
+    model = make_model()
+    loaded_weights.clear()
+    model.load_weights(iter([("unused", torch.ones(1))]))
+    assert not hasattr(model.mm_projector, "rot_proj")
 
 
 def test_k3_dspark_load_weights_rotates_projection_and_target_boundaries(tmp_path):
