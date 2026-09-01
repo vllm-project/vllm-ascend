@@ -21,6 +21,7 @@ from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.ops.triton.mamba.precopy import precopy_mamba_align_fused_kernel
 from vllm_ascend.utils import vllm_version_is
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
@@ -424,6 +425,12 @@ if _can_launch_triton_batch_memcpy():
     # Layerwise KV pool: collect copy metadata grouped per layer so each
     # layer's state copy can run right after its layer load finishes.
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_with_layers
+    # V2 mamba align pre-copy: the upstream kernel vectorizes the temporal
+    # state copy through uint64 loads/stores, which the Ascend vector core
+    # does not support ("vector core exception"). Replace it with the
+    # NPU-safe byte-wise variant; MambaSpecDecodeGPUContext.run_fused_precopy
+    # resolves the kernel through this module attribute at call time.
+    mamba_utils.precopy_mamba_align_fused_kernel = precopy_mamba_align_fused_kernel
 else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
