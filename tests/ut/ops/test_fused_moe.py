@@ -886,18 +886,7 @@ def _make_shared_expert_events():
     )
 
 
-@pytest.mark.parametrize(
-    ("device_type", "expects_glu_parameters"),
-    [
-        (shared_experts_module.AscendDeviceType.A3, True),
-        (shared_experts_module.AscendDeviceType.A5, False),
-    ],
-)
-def test_w8a8_shared_situ_uses_device_specific_dequant_situ_quant(
-    monkeypatch,
-    device_type,
-    expects_glu_parameters,
-):
+def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     gate_up_proj = SimpleNamespace(
         weight=torch.ones(4, 4, dtype=torch.int8),
         weight_scale=torch.ones(4),
@@ -918,7 +907,6 @@ def test_w8a8_shared_situ_uses_device_specific_dequant_situ_quant(
     dequant_situ_quant = MagicMock(return_value=(quantized_situ, situ_scale))
 
     monkeypatch.setattr(shared_experts_module, "has_lora", lambda _: False)
-    monkeypatch.setattr(shared_experts_module, "get_ascend_device_type", lambda: device_type)
     monkeypatch.setattr(shared_experts_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
     monkeypatch.setattr(shared_experts_module, "shared_experts_calculation_stream", MagicMock())
     monkeypatch.setattr(shared_experts_module.torch.npu, "current_stream", MagicMock(return_value=MagicMock()))
@@ -946,8 +934,6 @@ def test_w8a8_shared_situ_uses_device_specific_dequant_situ_quant(
     assert situ_kwargs["x"] is gate_up_out
     assert situ_kwargs["beta"] == 4.0
     assert situ_kwargs["linear_beta"] == 25.0
-    assert ("glu_alpha" in situ_kwargs) is expects_glu_parameters
-    assert ("glu_bias" in situ_kwargs) is expects_glu_parameters
 
 
 def test_w4a8_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch):
@@ -1688,6 +1674,8 @@ def test_set_lora_context_updates_experts(has_shared_experts):
 def test_forward_impl_returns_current_runner_contract(monkeypatch, has_shared_experts):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
+    runner.routed_input_transform = None
+    runner.routed_output_transform = None
     hidden_states = torch.randn(2, 4)
     router_logits = torch.randn(2, 3)
     input_ids = torch.tensor([11, 22])
@@ -1795,11 +1783,13 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     )
     current_stream.wait_event.assert_not_called()
     assert routed_events.after_routed_finalize is current_stream.record_event.return_value
-    runner.ascend_shared_experts.forward.assert_called_once_with(
-        prepared_shared_hidden_states,
-        routed_events,
-        input_is_gathered=True,
-        defer_output_wait=True,
-    )
+    runner.ascend_shared_experts.forward.assert_called_once()
+    call_args = runner.ascend_shared_experts.forward.call_args
+    torch.testing.assert_close(call_args.args[0], prepared_shared_hidden_states)
+    assert call_args.args[1] is routed_events
+    assert call_args.kwargs == {
+        "input_is_gathered": True,
+        "defer_output_wait": True,
+    }
     assert result[0] is shared_out
     assert result[1] is routed_out

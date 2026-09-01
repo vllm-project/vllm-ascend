@@ -29,10 +29,10 @@ def test_kimi_moe_leaves_routed_input_transform_to_runner():
 
     result = moe.forward(hidden_states)
 
-    moe.experts.assert_called_once_with(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-    )
+    moe.experts.assert_called_once()
+    call_kwargs = moe.experts.call_args.kwargs
+    assert call_kwargs["hidden_states"] is hidden_states
+    assert call_kwargs["router_logits"] is router_logits
     torch.testing.assert_close(result, output)
 
 

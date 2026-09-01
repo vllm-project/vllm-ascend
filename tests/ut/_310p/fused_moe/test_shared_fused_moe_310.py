@@ -21,6 +21,8 @@ from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedM
 def _build_runner() -> AscendMoERunner310:
     runner = AscendMoERunner310.__new__(AscendMoERunner310)
     nn.Module.__init__(runner)
+    runner.routed_input_transform = None
+    runner.routed_output_transform = None
     return runner
 
 
