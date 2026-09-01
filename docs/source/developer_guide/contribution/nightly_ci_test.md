@@ -136,6 +136,7 @@ The `pr-accuracy-group-*` entries only run on `/nightly` (PR-triggered) runs;
 | Test name | Description |
 |-----------|-------------|
 | `multi-node-deepseek-v3.2-W8A8-EP` | DeepSeek-V3.2-W8A8 with EP, 4-node |
+| `multi-node-glm-5.2` | GLM-5.1-W8A8, 2-node |
 
 **Double-node tests** (`a3.double_node.test_config`, 2-node, run after multi-node):
 

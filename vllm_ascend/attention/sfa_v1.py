@@ -98,6 +98,30 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
     return False
 
 
+def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
+    for config in configs:
+        if config is None:
+            continue
+        indexer_types = getattr(config, "indexer_types", None)
+        if indexer_types is not None:
+            return indexer_types
+    return None
+
+
+def _has_shared_indexer_layers(configs: tuple[Any, ...]) -> bool:
+    indexer_types = _get_indexer_types(configs)
+    if indexer_types is None:
+        return False
+    return any(isinstance(indexer_type, str) and indexer_type.lower() == "shared" for indexer_type in indexer_types)
+
+
+def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
+    for config in configs:
+        if config is not None and hasattr(config, attr):
+            return bool(getattr(config, attr))
+    return False
+
+
 class AscendSFABackend(AttentionBackend):
     accept_output_buffer: bool = True
 
