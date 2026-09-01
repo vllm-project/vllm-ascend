@@ -19,6 +19,7 @@ import copy
 import functools
 import os
 from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
 from typing import Any, cast
 
 import torch
@@ -34,6 +35,41 @@ from vllm.logger import logger
 
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
+
+
+@contextmanager
+def _disable_pytorch_aot_cache_for_npugraph_ex():
+    """Disable PyTorch cache formats that npugraph_ex cannot serialize.
+
+    PyTorch 2.13 enables bundled AOTAutograd caching while vLLM performs its
+    precompile pass.  Bundling requires every backend compiler to return an
+    ``OutputCode`` instance.  The torch-npu npugraph_ex backend intentionally
+    returns its own ``_CompiledFxGraph`` callable instead, so attempting to
+    bundle that result raises an assertion before model initialization.
+
+    npugraph_ex already owns its graph cache below.  Keep the workaround scoped
+    to its backend invocation and restore every PyTorch setting afterwards.
+    Older PyTorch versions do not expose all of these settings, hence the
+    feature checks.
+    """
+    with ExitStack() as stack:
+        dynamo_config = torch._dynamo.config
+        if hasattr(dynamo_config, "caching_precompile"):
+            stack.enter_context(dynamo_config.patch(caching_precompile=False))
+
+        functorch_config = torch._functorch.config
+        functorch_options = {
+            name: False
+            for name in (
+                "bundled_autograd_cache",
+                "force_autograd_cache",
+                "enable_autograd_cache",
+            )
+            if hasattr(functorch_config, name)
+        }
+        if functorch_options:
+            stack.enter_context(functorch_config.patch(**functorch_options))
+        yield
 
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
@@ -201,11 +237,12 @@ def npugraph_ex_compile(
 
         nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
         backend = nge.get_npu_backend(compiler_config=config)
-        # torch.compile requires the output of the fx graph to be a tuple
-        if not graph_returns_tuple(graph):
-            compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
-        else:
-            compiled_fn = backend(graph, example_inputs)
+        with _disable_pytorch_aot_cache_for_npugraph_ex():
+            # torch.compile requires the output of the fx graph to be a tuple
+            if not graph_returns_tuple(graph):
+                compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
+            else:
+                compiled_fn = backend(graph, example_inputs)
         nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
         return compiled_fn, (key, cache_path)
     except ImportError:
