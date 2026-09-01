@@ -83,8 +83,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                     and spec_decode_mask.all()
                 ):
                     padded_query_lens = np.diff(
-                        input_batch.query_start_loc_np[: num_reqs + 1]
-                    )[input_batch.num_reqs :]
+                        input_batch.query_start_loc_np[:num_reqs + 1]
+                    )[input_batch.num_reqs:]
                     expected_query_len = self.vllm_config.num_speculative_tokens + 1
                     if np.all(padded_query_lens == expected_query_len):
                         # Full graph capture represents every padded request as
