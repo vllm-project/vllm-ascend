@@ -28,9 +28,8 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_otp_group
-from vllm_ascend.lora.dsa import get_dsa_lora_context
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
-from vllm_ascend.ops.cv_linear import CVLinearWrapper, CVLinearWrapperWithLoRA
+from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -1500,9 +1499,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         self.kv_norm = kwargs["kv_norm"]
 
         # CV wrapper: split wq_a/wkv/wq_b into quantize(Vector) + matmul(Cube)
-        self.cv_wq_a = CVLinearWrapperWithLoRA(self.wq_a)
-        self.cv_wkv = CVLinearWrapperWithLoRA(self.wkv)
-        self.cv_wq_b = CVLinearWrapperWithLoRA(self.wq_b)
+        self.cv_wq_a = CVLinearWrapper(self.wq_a)
+        self.cv_wkv = CVLinearWrapper(self.wkv)
+        self.cv_wq_b = CVLinearWrapper(self.wq_b)
 
         self.indexer = kwargs.get("indexer")
         self.compressor = kwargs.get("compressor")
@@ -1776,22 +1775,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         output_padded = output
         forward_context = get_forward_context()
         o_proj_input_shape = (forward_context.num_tokens, self.n_local_heads, self.head_dim)
-        dsa_lora_context = next(
-            (
-                context
-                for context in (
-                    get_dsa_lora_context(self.wq_a),
-                    get_dsa_lora_context(self.wq_b),
-                    get_dsa_lora_context(self.wkv),
-                )
-                if context is not None
-            ),
-            None,
-        )
-        if dsa_lora_context is not None and not self.multistream_dsv4_dsa_overlap:
-            raise NotImplementedError("DeepSeek V4 DSA LoRA currently requires multistream_dsv4_dsa_overlap=true.")
-        if dsa_lora_context is not None and need_gather_q_kv:
-            raise NotImplementedError("DeepSeek V4 DSA LoRA does not yet support FlashComm token gather/unpad routing.")
         if attn_metadata is None:
             # Profiling run: run o_proj on zero input so HCCL collectives are
             # captured by the ACL graph.  Non-OTP just zeros the output.
@@ -1809,13 +1792,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         decode_tokens = attn_metadata[0].num_decode_tokens
         actual_tokens = attn_metadata[0].num_actual_tokens
 
-        prefill_lora_indices = None
-        decode_lora_indices = None
-        if dsa_lora_context is not None:
-            actual_lora_indices = dsa_lora_context.punica_wrapper.get_token_lora_indices(actual_tokens)
-            decode_lora_indices = actual_lora_indices[:decode_tokens]
-            prefill_lora_indices = actual_lora_indices[decode_tokens:actual_tokens]
-
         # Process for Flash Comm V1
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, need_gather_q_kv)
         prefill_hidden_states = hidden_states[decode_tokens:actual_tokens]
@@ -1831,7 +1807,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 prefill_hidden_states,
                 kv_cache,
                 attn_metadata,
-                token_lora_indices=prefill_lora_indices,
             )  # type: ignore[arg-type]
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
@@ -1844,7 +1819,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 decode_hidden_states,
                 kv_cache,
                 attn_metadata,
-                token_lora_indices=decode_lora_indices,
             )
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata[0].decode.cos[layer_name]
@@ -1868,22 +1842,13 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         return output_padded
 
-    def _mla_prolog_multistream(
-        self,
-        hidden_states,
-        cos,
-        sin,
-        swa_kv_cache,
-        slot_mapping,
-        token_lora_indices=None,
-        is_prefill=False,
-    ):
+    def _mla_prolog_multistream(self, hidden_states, cos, sin, swa_kv_cache, slot_mapping, is_prefill=False):
         """3-block multi-stream: 3-stage CV parallel + serial tail
 
         Block partition (V: Vector, C: Cube, AIV: AI Vector):
-          Part1: q_quant + q_lora_A -> q_a_down + q_lora_B || kv prepare
-          Part2: q_norm + q_b_quant + q_b_lora_A           || kv matmul + lora_B
-          Part3: q_b_matmul + q_b_lora_B                   || kv_norm + rope + scatter
+          Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
+          Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
+          Part3: q_b_matmul[C]             ||  kv_norm[V] + rope[V] + scatter[AIV]
           Tail:  q_rms[V] + rope[V] (wait for auxiliary stream to complete)
 
         Each stream's data is self-contained; no cross-stream sync is needed between blocks.
@@ -1894,22 +1859,16 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         is_w8a8 = _is_w8a8_dynamic(self.wq_b)
 
-        # Part1: q_quant + LoRA-A -> q_a_down + LoRA-B  ||  kv prepare
-        q_quant, q_pertoken_scale, q_a_lora = self.cv_wq_a.prepare(
-            hidden_states,
-            token_lora_indices,
-        )
+        # Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
+        q_quant, q_pertoken_scale = self.cv_wq_a.quantize(hidden_states)
 
         e_q_quant_done = main_stream.record_event()
 
         with npu_stream_switch(aux_stream, enabled=True):
             torch.npu.current_stream().wait_event(e_q_quant_done)
-            kv_quant, kv_pertoken_scale, kv_lora = self.cv_wkv.prepare(
-                hidden_states,
-                token_lora_indices,
-            )
+            kv_quant, kv_pertoken_scale = self.cv_wkv.quantize(hidden_states)
 
-        wq_a_result = self.cv_wq_a.matmul_with_lora(q_quant, q_pertoken_scale, q_a_lora)
+        wq_a_result = self.cv_wq_a.matmul(q_quant, q_pertoken_scale)
         main_stream.wait_stream(aux_stream)
 
         # Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
@@ -1917,30 +1876,20 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         with npu_stream_switch(aux_stream, enabled=True):
             torch.npu.current_stream().wait_event(e_part2_start)
-            kv = self.cv_wkv.matmul_with_lora(kv_quant, kv_pertoken_scale, kv_lora)
+            kv = self.cv_wkv.matmul(kv_quant, kv_pertoken_scale)
 
-        # LoRA A must consume the BF16 normalized activation. Decode's fused
-        # RMSNorm+dynamic-quant path exposes only INT8 qr, so use the split
-        # normalization path whenever this projection has a DSA LoRA context.
-        if is_prefill or self.cv_wq_b.has_lora:
+        if is_prefill:
             qr = self.q_norm(wq_a_result)
-            q_b_quant, q_b_scale, q_b_lora = self.cv_wq_b.prepare(
-                qr,
-                token_lora_indices,
-            )
+            q_b_quant, q_b_scale = self.cv_wq_b.quantize(qr)
             qr_pertoken_scale = None
         elif is_w8a8:
             qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                 wq_a_result, self.q_norm.weight, epsilon=self.eps
             )
             q_b_quant, q_b_scale = qr, qr_pertoken_scale
-            q_b_lora = None
         else:
             qr = self.q_norm(wq_a_result)
-            q_b_quant, q_b_scale, q_b_lora = self.cv_wq_b.prepare(
-                qr,
-                token_lora_indices,
-            )
+            q_b_quant, q_b_scale = qr, None
             qr_pertoken_scale = None
 
         main_stream.wait_stream(aux_stream)
@@ -1962,10 +1911,9 @@ class AscendDSAImpl(DSAAttentionImpl):
             )
             DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, slot_mapping)
 
-        if not is_prefill and is_w8a8 and not self.cv_wq_b.has_lora:
-            # Preserve the original fused-decode layout. Its per-token scale
-            # shape differs from npu_dynamic_quant and is intentionally not
-            # passed through CVLinearWrapper.matmul.
+        if is_prefill:
+            q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
+        elif is_w8a8:
             q = torch_npu.npu_quant_matmul(
                 q_b_quant,
                 self.wq_b.weight,
@@ -1975,9 +1923,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 output_dtype=hidden_states.dtype,
             ).unflatten(-1, (self.n_local_heads, self.head_dim))
         else:
-            q = self.cv_wq_b.matmul_with_lora(q_b_quant, q_b_scale, q_b_lora).unflatten(
-                -1, (self.n_local_heads, self.head_dim)
-            )
+            q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
 
         # Serial tail: wait for auxiliary stream then execute q_rms[V] + rope[V]
         main_stream.wait_stream(aux_stream)
@@ -1999,7 +1945,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        token_lora_indices: torch.Tensor | None = None,
     ):
         compress_common_attn_metadata = None
         (compress_kv_cache, swa_kv_cache, state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
@@ -2040,7 +1985,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 sin,
                 swa_kv_cache,
                 swa_prefill_metadata.slot_mapping,
-                token_lora_indices=token_lora_indices,
                 is_prefill=True,
             )
         else:
@@ -2318,7 +2262,6 @@ class AscendDSAImpl(DSAAttentionImpl):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: DSAMetadataList,
-        token_lora_indices: torch.Tensor | None = None,
     ):
         assert attn_metadata[0].decode is not None
         compress_common_attn_metadata = None
@@ -2360,7 +2303,6 @@ class AscendDSAImpl(DSAAttentionImpl):
                 sin,
                 swa_kv_cache,
                 swa_decode_metadata.slot_mapping,
-                token_lora_indices=token_lora_indices,
                 is_prefill=False,
             )
         else:

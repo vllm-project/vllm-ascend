@@ -104,7 +104,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAttentionState
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
-from vllm_ascend.attention.dsa_v1 import AscendDSAMetadata, AscendDSAMetadataBuilder
+from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -1988,8 +1988,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
-                self._prepare_dsa_lora_sgmv_metadata(attn_metadata)
-
                 self._sanitize_placeholder_input_ids_for_forward(
                     scheduler_output,
                     num_tokens_padded,
@@ -3072,46 +3070,6 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
         return attn_metadata, spec_decode_common_attn_metadata
 
-    def _prepare_dsa_lora_sgmv_metadata(
-        self,
-        attn_metadata: PerLayerAttnMetadata | None,
-    ) -> None:
-        """Prepare DSA LoRA routing once per step, outside transformer layers."""
-
-        if self.lora_config is None or attn_metadata is None:
-            return
-
-        metadata_dicts = attn_metadata if isinstance(attn_metadata, list) else (attn_metadata,)
-        dsa_splits: set[tuple[int, int]] = set()
-        for metadata_dict in metadata_dicts:
-            for metadata in metadata_dict.values():
-                if isinstance(metadata, AscendDSAMetadata):
-                    dsa_splits.add((metadata.num_decode_tokens, metadata.num_actual_tokens))
-        if not dsa_splits:
-            return
-        if len(dsa_splits) != 1:
-            raise RuntimeError(f"DSA LoRA does not support multiple token splits in one model step: {dsa_splits}.")
-        num_decode_tokens, num_actual_tokens = dsa_splits.pop()
-
-        worker_lora_manager = getattr(self, "lora_manager", None)
-        # ``self.lora_manager`` is a WorkerLoRAManager. The Punica wrappers
-        # belong to its inner LoRAModelManager returned by
-        # ``create_lora_manager``. Keep the direct-manager fallback for tests
-        # and compatibility with runners that expose the model manager itself.
-        lora_manager = getattr(worker_lora_manager, "_adapter_manager", worker_lora_manager)
-        punica_wrappers = getattr(lora_manager, "punica_wrapper_mapping", {}).values()
-        prepared_wrapper_ids: set[int] = set()
-        for punica_wrapper in punica_wrappers:
-            if not getattr(punica_wrapper, "has_dsa_qkv_lora", False):
-                continue
-            wrapper_id = id(punica_wrapper)
-            if wrapper_id in prepared_wrapper_ids:
-                continue
-            prepare_metadata = getattr(punica_wrapper, "prepare_dsa_sgmv_metadata", None)
-            if prepare_metadata is not None:
-                prepare_metadata(num_decode_tokens, num_actual_tokens)
-                prepared_wrapper_ids.add(wrapper_id)
-
     def _should_build_dummy_attn_metadata(
         self,
         force_attention: bool = False,
@@ -3329,7 +3287,6 @@ class NPUModelRunner(GPUModelRunner):
             # which is introduced by vllm-project/vllm#32005
             num_active_loras=(self.lora_config.max_loras if self.lora_config is not None else num_active_loras),
         ):
-            self._prepare_dsa_lora_sgmv_metadata(attn_metadata)
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:

@@ -14,56 +14,9 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.attention.dsa_v1 import AscendDSAMetadata
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-
-class TestDSALoRASGMVMetadata(unittest.TestCase):
-    @staticmethod
-    def _metadata(num_decode_tokens=6, num_actual_tokens=14):
-        metadata = object.__new__(AscendDSAMetadata)
-        metadata.num_decode_tokens = num_decode_tokens
-        metadata.num_actual_tokens = num_actual_tokens
-        return metadata
-
-    def test_prepares_shared_punica_metadata_once_per_model_step(self):
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.lora_config = object()
-        punica_wrapper = SimpleNamespace(
-            has_dsa_qkv_lora=True,
-            prepare_dsa_sgmv_metadata=MagicMock(),
-        )
-        runner.lora_manager = SimpleNamespace(
-            punica_wrapper_mapping={
-                "language_model": punica_wrapper,
-                "language_model_alias": punica_wrapper,
-            }
-        )
-        metadata = self._metadata()
-
-        runner._prepare_dsa_lora_sgmv_metadata(
-            {
-                "model.layers.0.self_attn.attn": metadata,
-                "model.layers.1.self_attn.attn": metadata,
-            }
-        )
-
-        punica_wrapper.prepare_dsa_sgmv_metadata.assert_called_once_with(6, 14)
-
-    def test_does_not_prepare_metadata_for_wo_only_lora(self):
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.lora_config = object()
-        punica_wrapper = SimpleNamespace(
-            has_dsa_qkv_lora=False,
-            prepare_dsa_sgmv_metadata=MagicMock(),
-        )
-        runner.lora_manager = SimpleNamespace(punica_wrapper_mapping={"language_model": punica_wrapper})
-
-        runner._prepare_dsa_lora_sgmv_metadata({"layer": self._metadata()})
-
-        punica_wrapper.prepare_dsa_sgmv_metadata.assert_not_called()
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

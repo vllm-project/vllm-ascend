@@ -4,12 +4,6 @@
 import torch
 import torch_npu
 
-from vllm_ascend.lora.dsa import (
-    LoRAIntermediate,
-    apply_prepared_dsa_lora,
-    has_dsa_lora,
-    prepare_dsa_lora,
-)
 from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 
 
@@ -149,45 +143,3 @@ class CVLinearWrapper:
     def __getattr__(self, name):
         """Delegate undefined attributes to the inner linear object"""
         return getattr(self.linear, name)
-
-
-class CVLinearWrapperWithLoRA(CVLinearWrapper):
-    """DSA CV split that carries the BF16 LoRA A result between stages."""
-
-    @property
-    def has_lora(self) -> bool:
-        # The context is published after model construction, so this must be a
-        # runtime lookup instead of a value cached by __init__.
-        return has_dsa_lora(self.linear)
-
-    def prepare(
-        self,
-        x: torch.Tensor,
-        token_lora_indices: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, LoRAIntermediate | None]:
-        quantized_x, pertoken_scale = self.quantize(x)
-        lora_intermediate = prepare_dsa_lora(
-            self.linear,
-            x,
-            token_lora_indices,
-        )
-        return quantized_x, pertoken_scale, lora_intermediate
-
-    def matmul_with_lora(
-        self,
-        quantized_x: torch.Tensor,
-        pertoken_scale: torch.Tensor | None = None,
-        lora_intermediate: LoRAIntermediate | None = None,
-        bias=None,
-    ) -> torch.Tensor:
-        output = super().matmul(quantized_x, pertoken_scale, bias)
-        return apply_prepared_dsa_lora(self.linear, output, lora_intermediate)
-
-    def forward(self, x: torch.Tensor, bias=None):
-        quantized_x, pertoken_scale, lora_intermediate = self.prepare(x)
-        return self.matmul_with_lora(
-            quantized_x,
-            pertoken_scale,
-            lora_intermediate,
-            bias,
-        )

@@ -1,6 +1,5 @@
 from vllm.lora import utils as lora_utils
 
-from vllm_ascend.lora.dsa import DSA_LORA_CLASSES
 from vllm_ascend.lora.fused_moe import (
     AscendFusedMoE3DWithLoRA,
     AscendFusedMoEWithLoRA,
@@ -9,7 +8,6 @@ from vllm_ascend.lora.fused_moe import (
 
 def refresh_all_lora_classes():
     ascend_classes = (
-        *DSA_LORA_CLASSES,
         AscendFusedMoEWithLoRA,
         AscendFusedMoE3DWithLoRA,
     )

@@ -28,7 +28,6 @@ from vllm_ascend.attention.utils import (
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.lora.dsa import has_dsa_lora
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
@@ -1320,8 +1319,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
-        if any(has_dsa_lora(linear) for linear in (self.wq_a, self.wq_b, self.wkv, self.wo_a, self.wo_b)):
-            raise NotImplementedError("DeepSeek V4 DSA context parallelism does not yet support PEFT LoRA.")
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
