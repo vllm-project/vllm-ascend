@@ -3538,8 +3538,17 @@ class NPUModelRunner(GPUModelRunner):
                 if profile_seq_lens is not None:
                     seq_lens = profile_seq_lens
                 else:
+                    # The workspace probe must cover the LONGEST KV any replay
+                    # will see, not a fixed 6144: the FULL-graph FIA task
+                    # update rebinds actual_seq_kvlen to the real values at
+                    # every replay, and a workspace sized for 6144 lets the
+                    # kernel write past its end once a sequence exceeds that
+                    # (silent corruption around 10k, EZ9999 MTE invalid GM
+                    # address around 15k+ - reproduced and fixed 2026-09-01).
+                    # Memory cost of the bigger probe is negligible (measured
+                    # graph memory 0.61 -> 0.63 GiB at 49152).
                     seq_lens = (
-                        SEQ_LEN_WITH_MAX_PA_WORKSPACE
+                        max(SEQ_LEN_WITH_MAX_PA_WORKSPACE, self.max_model_len)
                         if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
                         else max_query_len
                     )  # type: ignore[assignment]
