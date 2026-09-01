@@ -19,6 +19,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
+        runner.sfa_dcp_replicated_indexer_size = 1
         runner.runner_only_attn_layers = set()
         runner.is_kv_consumer = False
         runner.vllm_config = MagicMock()

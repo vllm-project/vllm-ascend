@@ -56,6 +56,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     cache_sparse_c8: bool = False
     c8_k_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_cache_dtype)
     c8_k_scale_cache_dtype: torch.dtype = field(default_factory=_get_c8_k_scale_cache_dtype)
+    sfa_dcp_replicated_indexer_size: int = 1
 
     @property
     def page_size_bytes(self) -> int:
@@ -83,7 +84,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
             kv_bytes = num_heads_per_page * kv_dim * get_dtype_size(kv_dtype)
             qli_bytes = num_heads_per_page * index_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-            qli_scale_bytes = num_heads_per_page * 1 * get_dtype_size(self.c8_k_scale_cache_dtype)
+            qli_scale_bytes = (
+                num_heads_per_page * self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
+            )
             return kv_bytes + qli_bytes + qli_scale_bytes
 
         return (
@@ -118,7 +121,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 ckv_virtual = kv_lora_rank * get_dtype_size(self.c8_k_cache_dtype)
                 qk_rope_virtual = 0
                 qli_virtual = index_k_head_dim * get_dtype_size(self.c8_k_cache_dtype)
-                scale_virtual = get_dtype_size(self.c8_k_scale_cache_dtype)
+                scale_virtual = self.sfa_dcp_replicated_indexer_size * get_dtype_size(self.c8_k_scale_cache_dtype)
                 return (ckv_virtual, qk_rope_virtual, qli_virtual, scale_virtual)
 
             # A3: keep the original element-count / byte mix
@@ -126,7 +129,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             index_k_head_dim_virtual = index_k_head_dim // factor
 
             assert get_dtype_size(self.dtype) == get_dtype_size(self.c8_k_scale_cache_dtype)
-            index_k_scale_head_dim_virtual = 1
+            index_k_scale_head_dim_virtual = self.sfa_dcp_replicated_indexer_size
 
             return (
                 kv_lora_rank,
