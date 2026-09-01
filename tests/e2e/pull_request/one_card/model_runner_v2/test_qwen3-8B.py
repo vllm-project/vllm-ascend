@@ -22,9 +22,9 @@ import pytest
 from tests.e2e.conftest import wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import ACCEPTANCE_LENGTH_RTOL, _run_speculative_decoding
 
-MODEL = "/weight/Qwen3-8B"
-EAGLE3_SPECULATOR = "/weight/Qwen3-8B-speculator-eagle3"
-EXPECTED_ACCEPTANCE_LENGTH = 2.13
+MODEL = "Qwen/Qwen3-8B"
+EAGLE3_SPECULATOR = "RedHatAI/Qwen3-8B-speculator.eagle3"
+EXPECTED_ACCEPTANCE_LENGTH = 2.03
 
 
 @pytest.mark.e2e_model(MODEL)
@@ -34,7 +34,7 @@ EXPECTED_ACCEPTANCE_LENGTH = 2.13
     parallel="TP",
     deploy="pd_mix",
     quantization="",
-    hardware="A3",
+    hardware="A2",
     graph_mode="eager",
 )
 @patch.dict(
@@ -74,7 +74,7 @@ def test_qwen3_eagle3_dsd() -> None:
         runner_kwargs={
             "max_model_len": 15500,
             "dtype": "auto",
-            "tensor_parallel_size": 8,
+            "tensor_parallel_size": 1,
             "enable_prefix_caching": False,
             "gpu_memory_utilization": 0.9,
             "enforce_eager": True,
@@ -85,4 +85,4 @@ def test_qwen3_eagle3_dsd() -> None:
         },
         acceptance_length_rtol=ACCEPTANCE_LENGTH_RTOL,
     )
-    assert acceptance_length > 1.0, f"acceptance_length {acceptance_length:.4f} mus be greater than 1.0"
+    assert acceptance_length > 1.0, f"acceptance_length {acceptance_length:.4f} must be greater than 1.0"
