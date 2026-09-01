@@ -49,7 +49,18 @@ from vllm_ascend.utils import (
     olora_tp_enable,
 )
 
+_DSV4_OVERLAP_STREAMS = dict()
+
+def dsv4_overlap_stream(name: str) -> torch.npu.Stream:
+    global _DSV4_OVERLAP_STREAMS
+    if name not in _DSV4_OVERLAP_STREAMS:
+        _DSV4_OVERLAP_STREAMS[name] = torch_npu.npu.Stream()
+    return _DSV4_OVERLAP_STREAMS[name]
+
+
 _DSV4_SWA_OVERLAP_STREAM = None
+_DSV4_QUERY_OVERLAP_STREAM = None
+
 _COMPRESSOR_SP_METADATA_KEY = "_compressor_sp_metadata"
 _COMPRESSOR_SP_STATE_KEY = "_compressor_sp_state"
 _MAIN_COMPRESSOR = "main"
@@ -1521,9 +1532,55 @@ class AscendDSACPImpl(DSAAttentionImpl):
             if full_gather_wo_a_enabled:
                 self._switch_o_proj_to_tp_weight()
 
+        if self.compress_ratio > 1 and self.multistream_dsv4_dsa_overlap:
+            state_stream = dsv4_overlap_stream("state")
+            torch.npu.current_stream().wait_stream(state_stream)
+        notify_kv_cache_written(layer_name)
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
         return output
+
+    def _forward_query(self, hidden_states_local, local_cos, local_sin):
+        if self.wq_a_kv is not None:
+            q_a_kv = self.wq_a_kv(hidden_states_local)
+            q_a, kv = torch.split(q_a_kv, [self.q_lora_rank, self.head_dim], dim=-1)
+        else:
+            q_a = self.wq_a(hidden_states_local)
+            kv = None
+
+        if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
+            self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
+        ):
+            qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
+                q_a, self.q_norm.weight, epsilon=self.eps
+            )
+            qr_kv_ready_evt = torch.npu.current_stream().record_event()
+            q = torch_npu.npu_quant_matmul(
+                qr_local,
+                self.wq_b.weight,
+                self.wq_b.weight_scale,
+                pertoken_scale=qr_pertoken_scale_local,
+                bias=self.wq_b.bias,
+                output_dtype=hidden_states_local.dtype,
+            )
+        else:
+            qr_local = self.q_norm(q_a)
+            qr_kv_ready_evt = torch.npu.current_stream().record_event()
+            q = self.wq_b(qr_local)
+            qr_pertoken_scale_local = None
+
+        q = q.unflatten(-1, (self.num_heads, self.head_dim))
+
+        q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            q.unsqueeze(1),
+            local_cos,
+            local_sin,
+            rotary_mode="interleave",
+            partial_slice=[self.nope_head_dim, self.head_dim],
+        )
+
+        return q, qr_local, qr_pertoken_scale_local, kv, qr_kv_ready_evt
 
     def _forward_swa_kv(
         self,
@@ -1532,7 +1589,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         layer_name,
         hidden_states_local,
         kv: torch.Tensor | None = None,
-        kv_ready_evt: torch.npu.Event | None = None,
         need_gather_q_kv: bool = False,
     ):
         _, swa_kv_cache, _, _, _, _ = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)
@@ -1546,9 +1602,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
         if kv is None:
             assert self.wkv is not None
             kv = self.wkv(hidden_states_local)
-        else:
-            torch.npu.current_stream().wait_event(kv_ready_evt)
-            kv.record_stream(torch.npu.current_stream())
 
         kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
@@ -1587,6 +1640,7 @@ class AscendDSACPImpl(DSAAttentionImpl):
             metadata=compressor_output_metadata.req_metadata,
             state_block_table=compressor_state_metadata.req_metadata.block_table,
             sp_metadata=sp_metadata,
+            delay_sync_sp_state=self.multistream_dsv4_dsa_overlap,
         )
 
     def _forward(
@@ -1652,59 +1706,10 @@ class AscendDSACPImpl(DSAAttentionImpl):
 
         hs_local_ready_evt = torch.npu.current_stream().record_event()
 
-        if self.wq_a_kv is not None:
-            q_a_kv = self.wq_a_kv(hidden_states_local)
-            q_a, kv = torch.split(q_a_kv, [self.q_lora_rank, self.head_dim], dim=-1)
-            kv_ready_evt = torch.npu.current_stream().record_event()
-        else:
-            q_a = self.wq_a(hidden_states_local)
-            kv, kv_ready_evt = None, None
-
-        if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
-            self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
-        ):
-            qr_local, qr_pertoken_scale_local = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
-                q_a, self.q_norm.weight, epsilon=self.eps
-            )
-            q = torch_npu.npu_quant_matmul(
-                qr_local,
-                self.wq_b.weight,
-                self.wq_b.weight_scale,
-                pertoken_scale=qr_pertoken_scale_local,
-                bias=self.wq_b.bias,
-                output_dtype=hidden_states_local.dtype,
-            )
-        else:
-            qr_local = self.q_norm(q_a)
-            q = self.wq_b(qr_local)
-            qr_pertoken_scale_local = None
-
-        q = q.unflatten(-1, (self.num_heads, self.head_dim))
-
-        q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            q.unsqueeze(1),
-            local_cos,
-            local_sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
-
-        swa_aux_stream = dsv4_swa_overlap_stream()
-        with npu_stream_switch(swa_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+        query_aux_stream = dsv4_overlap_stream("query")
+        with npu_stream_switch(query_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
             torch.npu.current_stream().wait_event(hs_local_ready_evt)
-            self._forward_swa_kv(
-                attn_metadata,
-                kv_cache,
-                layer_name,
-                hidden_states_local,
-                kv,
-                kv_ready_evt,
-                need_gather_q_kv,
-            )
-
-        if self.multistream_dsv4_dsa_overlap:
-            torch.npu.current_stream().wait_stream(swa_aux_stream)
+            q, qr_local, qr_pertoken_scale_local, kv, qr_kv_ready_evt = self._forward_query(hidden_states_local, local_cos, local_sin)
 
         # The existing weight all-gather can overlap with subsequent computation.
         o_proj_full_handles = self._maybe_all_gather_o_proj_full_weight(full_gather_wo_a_enabled)
@@ -1730,38 +1735,96 @@ class AscendDSACPImpl(DSAAttentionImpl):
                     hidden_states_local,
                     main_compressor_sp_metadata,
                 )
+            compressor_input_ready_evt = torch.npu.current_stream().record_event()
 
             if self.compress_ratio == 4:
                 assert indexer_compressor_state_metadata is not None
                 assert indexer_compressor_output_metadata is not None
-                self._update_indexer_cache(
-                    compressor_input=compressor_input,
-                    kv_cache=kv_cache,
-                    indexer_state_metadata=indexer_compressor_state_metadata,
-                    indexer_output_metadata=indexer_compressor_output_metadata,
-                    sp_metadata=indexer_compressor_sp_metadata,
-                )
-                compress_topk_idxs = self._indexer_select_topk(
-                    x=hidden_states_local,
-                    qr=qr_local,
-                    kv_cache=kv_cache,
-                    attn_metadata=attn_metadata,
-                    cos=local_cos,
-                    sin=local_sin,
-                    actual_seq_lengths_query=local_seq_lengths_query,
-                    actual_seq_lengths_key=local_seq_lengths_key,
-                    qr_pertoken_scale=qr_pertoken_scale_local,
+                indexer_aux_stream = dsv4_overlap_stream("indexer")
+                with npu_stream_switch(indexer_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+                    torch.npu.current_stream().wait_event(compressor_input_ready_evt)
+                    self._update_indexer_cache(
+                        compressor_input=compressor_input,
+                        kv_cache=kv_cache,
+                        indexer_state_metadata=indexer_compressor_state_metadata,
+                        indexer_output_metadata=indexer_compressor_output_metadata,
+                        sp_metadata=indexer_compressor_sp_metadata,
+                    )
+                    indexer_compressor_done_evt = torch.npu.current_stream().record_event()
+
+                    torch.npu.current_stream().wait_event(qr_kv_ready_evt)
+                    qr_local.record_stream(torch.npu.current_stream())
+                    compress_topk_idxs = self._indexer_select_topk(
+                        x=hidden_states_local,
+                        qr=qr_local,
+                        kv_cache=kv_cache,
+                        attn_metadata=attn_metadata,
+                        cos=local_cos,
+                        sin=local_sin,
+                        actual_seq_lengths_query=local_seq_lengths_query,
+                        actual_seq_lengths_key=local_seq_lengths_key,
+                        qr_pertoken_scale=qr_pertoken_scale_local,
+                    )
+
+            main_compressor_aux_stream = dsv4_overlap_stream("main_compressor_aux_stream")
+            with npu_stream_switch(main_compressor_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+                torch.npu.current_stream().wait_event(compressor_input_ready_evt)
+                self._forward_compressor_kv(
+                    kv_cache,
+                    compressor_input,
+                    main_compressor_output_metadata,
+                    main_compressor_state_metadata,
+                    main_compressor_sp_metadata,
                 )
 
-            self._forward_compressor_kv(
+        # SWA does not depend on preprocessing communication, so it is scheduled later.
+        # Launch SWA all-gather last to avoid blocking compressor communication.
+        swa_aux_stream = dsv4_overlap_stream("swa")
+        with npu_stream_switch(swa_aux_stream, enabled=self.multistream_dsv4_dsa_overlap):
+            if kv is not None:
+                torch.npu.current_stream().wait_event(qr_kv_ready_evt)
+                kv.record_stream(torch.npu.current_stream())
+            self._forward_swa_kv(
+                attn_metadata,
                 kv_cache,
-                compressor_input,
-                main_compressor_output_metadata,
-                main_compressor_state_metadata,
-                main_compressor_sp_metadata,
+                layer_name,
+                hidden_states_local,
+                kv,
+                need_gather_q_kv,
             )
 
-        notify_kv_cache_written(layer_name)
+        if self.multistream_dsv4_dsa_overlap:
+            # main stream wait for aux streams to finish before running attention kernel
+            torch.npu.current_stream().wait_stream(query_aux_stream)
+            torch.npu.current_stream().wait_stream(swa_aux_stream)
+            if self.compress_ratio > 1:
+                if self.compress_ratio == 4:
+                    torch.npu.current_stream().wait_stream(indexer_aux_stream)
+                torch.npu.current_stream().wait_stream(main_compressor_aux_stream)
+            q.record_stream(torch.npu.current_stream())
+
+            # State cache is not required by attention, so it can be written asynchronously on
+            # a separate stream. To avoid impacting compressor execution, perform the state-cache
+            # write only after the compressor completion event.
+            if self.compress_ratio > 1:
+                state_stream = dsv4_overlap_stream("state")
+                with npu_stream_switch(state_stream, enabled=True):
+                    torch.npu.current_stream().wait_stream(main_compressor_aux_stream)
+                    if self.compress_ratio == 4:
+                        torch.npu.current_stream().wait_event(indexer_compressor_done_evt)
+
+                    main_state_cache = DeviceOperator.unpack_dsa_forward_kv_cache(kv_cache, self.compress_ratio)[2]
+                    self.compressor_executor._sync_sp_state(
+                        main_state_cache,
+                        main_compressor_sp_metadata,
+                    )
+                    if self.compress_ratio == 4:
+                        indexer_state_cache = DeviceOperator.unpack_dsa_indexer_kv_cache(kv_cache)[0]
+                        self.indexer_compressor_executor._sync_sp_state(
+                            indexer_state_cache,
+                            indexer_compressor_sp_metadata,
+                        )
+
         record_attention_compute_start()
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
         extra_attn_kwargs: dict = DeviceOperator.get_dsa_sparse_attn_base_kwargs()

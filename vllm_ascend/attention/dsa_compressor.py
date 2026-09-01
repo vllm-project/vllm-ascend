@@ -645,6 +645,7 @@ class CompressorExecutor:
         state_block_table: torch.Tensor,
         sp_metadata: CompressorSPMetadata | None = None,
         hadamard: torch.Tensor | None = None,
+        delay_sync_sp_state: bool = False,
     ) -> None:
         """Dispatch using the SP metadata that also defines cache side effects."""
         if sp_metadata is None:
@@ -665,6 +666,7 @@ class CompressorExecutor:
                 state_block_table=state_block_table,
                 sp_metadata=sp_metadata,
                 hadamard=hadamard,
+                delay_sync_sp_state=delay_sync_sp_state,
             )
 
     ############################################################
@@ -852,6 +854,7 @@ class CompressorExecutor:
         state_block_table: torch.Tensor,
         sp_metadata: CompressorSPMetadata,
         hadamard: torch.Tensor | None = None,
+        delay_sync_sp_state: bool = False,
     ) -> None:
         """Run local compute, aggregate owned KV rows, then replicate state."""
         if sp_metadata.input_count == 0:
@@ -899,10 +902,12 @@ class CompressorExecutor:
             output_cache,
             hadamard=hadamard,
         )
-        self._sync_sp_state(
-            state_cache,
-            sp_metadata,
-        )
+
+        if not delay_sync_sp_state:
+            self._sync_sp_state(
+                state_cache,
+                sp_metadata,
+            )
 
 
 class IndexerCompressorExecutor(CompressorExecutor):
