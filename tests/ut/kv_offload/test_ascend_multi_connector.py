@@ -137,12 +137,12 @@ def test_mamba_state_copy_runs_after_all_connector_loads():
     connector._non_slot_release_connectors = [first, second]
     connector._external_slot_release_sink_configured = False
     connector._mamba_state = SimpleNamespace(
-        do_mamba_copy_for_layer=MagicMock(side_effect=lambda layer: call_order.append(("copy", layer)))
+        do_mamba_copy_for_layer=MagicMock(side_effect=lambda layer: call_order.append("copy:" + layer))
     )
 
     connector.wait_for_layer_load("model.layers.7.linear_attn")
 
-    assert call_order == ["first-load", "second-load", ("copy", "model.layers.7.linear_attn")]
+    assert call_order == ["first-load", "second-load", "copy:model.layers.7.linear_attn"]
 
 
 def test_mamba_state_copy_skipped_without_deferral():

@@ -413,13 +413,13 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
                 kv_cache_config=None,
             )
             mamba_state = MagicMock()
-            mamba_state.do_mamba_copy_for_layer.side_effect = lambda layer: call_order.append(("copy", layer))
+            mamba_state.do_mamba_copy_for_layer.side_effect = lambda layer: call_order.append("copy:" + layer)
             self.assertTrue(connector.prepare_mamba_state_copy(mamba_state))
 
             connector.wait_for_layer_load("layers.0.linear_attn")
             connector.finish_mamba_state_copy()
 
-            self.assertEqual(call_order, ["load", ("copy", "layers.0.linear_attn")])
+            self.assertEqual(call_order, ["load", "copy:layers.0.linear_attn"])
             self.assertIsNone(connector._mamba_state)
 
     def test_mamba_state_copy_not_deferred_after_finish(self):
