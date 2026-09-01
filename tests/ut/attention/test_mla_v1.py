@@ -22,6 +22,7 @@ from vllm_ascend.attention.mla_v1 import (
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
     PrefillMLAPreprocessResult,
+    _mla_nope_zero_rope,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -504,6 +505,42 @@ class TestAscendMLAMetadataBuilder(TestBase):
                     builder = AscendMLAMetadataBuilder(None, ["self_attn"], mock_vllm_config, "cpu")
 
                 self.assertEqual(builder.use_mla_rope, layer_uses_rope)
+
+    def test_zero_rope_cache_only_for_nope_models(self):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+        mock_vllm_config.speculative_config = None
+
+        for qk_rope_head_dim, expected in ((64, None), (0, {})):
+            with self.subTest(qk_rope_head_dim=qk_rope_head_dim):
+                mock_vllm_config.model_config.hf_text_config = SimpleNamespace(
+                    qk_rope_head_dim=qk_rope_head_dim,
+                    mla_use_nope=False,
+                )
+                with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=MagicMock()):
+                    builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, "cpu")
+
+                self.assertEqual(builder.nope_zero_rope_cache, expected)
+
+    def test_mla_nope_zero_rope_reuses_one_buffer_per_shape(self):
+        cache: dict = {}
+        ref = torch.ones(2, 1, 4, 8)
+
+        first = _mla_nope_zero_rope(ref, 64, cache)
+        second = _mla_nope_zero_rope(torch.ones_like(ref), 64, cache)
+
+        self.assertIs(first, second)
+        self.assertEqual(first.shape, (2, 1, 4, 64))
+        self.assertTrue(torch.equal(first, torch.zeros_like(first)))
+        self.assertEqual(len(cache), 1)
+
+        _mla_nope_zero_rope(torch.ones(3, 1, 4, 8), 64, cache)
+        self.assertEqual(len(cache), 2)
 
     def test_ascend_mla_metadata_builder_spec_decode(self):
         mock_vllm_config = MagicMock()

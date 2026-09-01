@@ -120,9 +120,13 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
 def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     hf_config = getattr(model_config, "hf_config", None)
+    if hf_text_config is None:
+        return False
+    # GLM-5.3-Flash kpool indexer also has index_topk; it is not DeepSeek SFA.
+    if hasattr(hf_text_config, "index_kpool") or hasattr(hf_config, "index_kpool"):
+        return False
     return (
-        hf_text_config is not None
-        and hasattr(hf_text_config, "index_topk")
+        hasattr(hf_text_config, "index_topk")
         and not hasattr(hf_text_config, "compress_ratios")
         and not hasattr(hf_config, "compress_ratios")
     )
@@ -1539,6 +1543,10 @@ def enable_sfa(vllm_config) -> bool:
         return False
     hf_text_config = getattr(model_config, "hf_text_config", None)
     if hf_text_config is None:
+        return False
+    # GLM-5.3-Flash kpool indexer also exposes index_topk, but it is not
+    # DeepSeek SFA (no SFA C8 / DSA layout, hybrid MLA+KDA cache).
+    if hasattr(hf_text_config, "index_kpool"):
         return False
     return hasattr(hf_text_config, "index_topk") and not hasattr(hf_text_config, "compress_ratios")
 
