@@ -496,6 +496,18 @@ msgstr ""
 "P 节点启用。"
 
 #: ../../source/user_guide/configuration/additional_config.md
+msgid "`c8_enable_reshape_optim`"
+msgstr "`c8_enable_reshape_optim`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable StoreKVBlock operator achieves acceleration under the "
+"C8 feature (this means that enable_sparse_c8 needs to be enabled). In the"
+" PD separation scenario, only the P node is enabled."
+msgstr ""
+"是否启用 StoreKVBlock 算子在 C8 特性下实现加速（这意味着需要启用 enable_sparse_c8）。在 PD 分离场景中，仅 P 节点启用。"
+
+#: ../../source/user_guide/configuration/additional_config.md
 msgid "`enable_mc2_hierarchy_comm`"
 msgstr "`enable_mc2_hierarchy_comm`"
 

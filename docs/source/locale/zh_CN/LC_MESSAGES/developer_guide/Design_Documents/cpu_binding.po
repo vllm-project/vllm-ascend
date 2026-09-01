@@ -753,10 +753,10 @@ msgstr "168-191"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:221
 msgid ""
-"This avoids overlapping CPU pools even when the two workers are launched "
-"as independent single-card services."
+"Each final NPU pool must have enough CPUs for its role split: at least 5 "
+"CPUs for devices with IRQ binding, and at least 3 CPUs for Ascend 950."
 msgstr ""
-"即使两个工作进程作为独立的单卡服务启动，这也能避免CPU池重叠。"
+"每个最终NPU池必须有足够的CPU用于角色拆分：对于支持IRQ绑定的设备至少需要5个CPU，对于Ascend 950至少需要3个CPU。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:223
 msgid "Logs"
