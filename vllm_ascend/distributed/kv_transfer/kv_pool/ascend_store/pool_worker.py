@@ -144,6 +144,21 @@ class KVPoolWorker:
         self.dcp_rank = get_decode_context_model_parallel_rank() if self.dcp_size > 1 else 0
         self.model_name = model_config.model.split("/")[-1]
 
+        # Global layer addressing for layerwise keys under pipeline parallel:
+        # get_num_layers returns the per-stage layer count, so record the
+        # stage's global layer offset and the model-wide total layers used by
+        # the layerwise key space.
+        self.pp_layer_offset = 0
+        self.total_layers = None
+        try:
+            start, end = model_config.get_layers_start_end_indices(parallel_config)
+            self.pp_layer_offset = start
+            self.total_layers = model_config.get_total_num_hidden_layers()
+        except (AttributeError, Exception):
+            # Fall back to the non-PP layout (offset 0, total == local).
+            self.pp_layer_offset = 0
+            self.total_layers = None
+
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
         self.use_layerwise = use_layerwise
@@ -353,6 +368,29 @@ class KVPoolWorker:
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
 
+        # Layerwise pool-key layer addressing. Without pipeline parallel the
+        # key space is the local layer range [0, num_layers) with offset 0
+        # (identical to previous releases). With PP>1 each stage writes its
+        # own half of the layers; keys then use global layer ids:
+        #   stage 0 writes layers [0, num_layers), stage 1 writes
+        #   [num_layers, 2*num_layers) via layer_offset = num_layers, ...
+        # so that producers and consumers share one global layer key space
+        # regardless of which stage computed the layer.
+        if self.pp_size > 1 and self.total_layers is not None:
+            self.layerwise_key_layers = self.num_layers
+            self.layerwise_key_layer_offset = self.pp_rank * self.num_layers
+            logger.info(
+                "Layerwise PP key space: stage %d/%d writes global layers [%d, %d) (total %d).",
+                self.pp_rank,
+                self.pp_size,
+                self.layerwise_key_layer_offset,
+                self.layerwise_key_layer_offset + self.num_layers,
+                self.total_layers,
+            )
+        else:
+            self.layerwise_key_layers = self.num_layers
+            self.layerwise_key_layer_offset = 0
+
         if self.kv_cache_config is not None:
             base_layers = getattr(
                 self.hf_config,
@@ -487,6 +525,7 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_blocks,
                     self.layerwise_max_transfer_bytes,
                     group_builders=self._build_group_layer_builders(),
+                    layer_offset=self.layerwise_key_layer_offset,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -501,9 +540,10 @@ class KVPoolWorker:
                     self.dcp_size,
                     self.put_step,
                     ready_event_sending,
-                    self.num_layers,
+                    self.layerwise_key_layers,
                     self.layer_save_finished_events,
                     self.sync_save_events,
+                    layer_offset=self.layerwise_key_layer_offset,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -545,6 +585,7 @@ class KVPoolWorker:
                     self.layer_load_finished_events,
                     self.layer_save_finished_events,
                     self.num_layers,
+                    layer_offset=self.layerwise_key_layer_offset,
                 )
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -1753,7 +1794,7 @@ class KVPoolWorker:
         keys = []
         first_flag = True
         for start, end, key in self.token_database.process_tokens(token_len, request.block_hashes, mask_num):
-            keys_multi_layer = key.split_layers(self.num_layers)
+            keys_multi_layer = key.split_layers(self.layerwise_key_layers, self.layerwise_key_layer_offset)
             starts.append(start)
             ends.append(end)
             keys.append(keys_multi_layer)
@@ -1826,7 +1867,7 @@ class KVPoolWorker:
         group_block_size = self.grouped_block_size[group_id]
         group_block_hashes = get_block_hashes(request.block_hashes, group_block_size, self.hash_block_size)
         for start, end, key in self.token_database.process_tokens(request.token_len_chunk, request.block_hashes):
-            keys_multi_layer = key.split_layers(self.num_layers)
+            keys_multi_layer = key.split_layers(self.layerwise_key_layers, self.layerwise_key_layer_offset)
             starts.append(start)
             ends.append(end)
             keys.append(keys_multi_layer)  # [block_num,layer_num]
@@ -2073,7 +2114,10 @@ class KVPoolWorker:
             for start, end, pool_key in self.token_database.process_tokens(
                 token_len, block_hashes, kv_cache_group_id=group_id
             ):
-                keys.extend(item.to_string() for item in pool_key.split_layers(self.num_layers))
+                keys.extend(
+                    item.to_string()
+                    for item in pool_key.split_layers(self.layerwise_key_layers, self.layerwise_key_layer_offset)
+                )
                 starts.append(start)
                 ends.append(end)
         else:
@@ -2119,7 +2163,7 @@ class KVPoolWorker:
                 res = self.m_store.exists(keys)  # type: ignore[assignment]
 
                 if use_layerwise:
-                    res = self.check_all_layers_exists(res, self.num_layers)
+                    res = self.check_all_layers_exists(res, self.layerwise_key_layers)
                 if group_id < len(self.group_uses_align_state) and self.group_uses_align_state[group_id]:
                     hit_end = 0
                     for index in range(len(ends) - 1, -1, -1):
@@ -2318,8 +2362,8 @@ class KVPoolWorker:
                 res = self.m_store.exists(multi_tp_keys)  # type: ignore[assignment]
                 num_block = len(keys)
                 if use_layerwise:
-                    res = self.check_all_layers_exists(res, self.num_layers)
-                    num_block = len(keys) // self.num_layers
+                    res = self.check_all_layers_exists(res, self.layerwise_key_layers)
+                    num_block = len(keys) // self.layerwise_key_layers
                 multi_tp_values = [
                     res[i * num_block : (i + 1) * num_block]  # type: ignore[index]
                     for i in range(num_ranks)
