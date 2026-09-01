@@ -1139,8 +1139,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
 
             # indexer_compressor
             self.indexcom_ape = self.indexer.compressor.ape
-            self.indexcom_wkv = self.indexer.compressor.wkv
-            self.indexcom_wgate = self.indexer.compressor.wgate
+            self.indexcom_fused_wkv_wgate = self.indexer.compressor.fused_wkv_wgate
             self.indexcom_norm = self.indexer.compressor.norm
 
             self.indexcom_head_dim = self.indexer.compressor.head_dim
@@ -1151,8 +1150,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self.compressor_overlap = self.compressor.overlap
 
             self.compressor_ape = self.compressor.ape
-            self.compressor_wkv = self.compressor.wkv
-            self.compressor_wgate = self.compressor.wgate
+            self.compressor_fused_wkv_wgate = self.compressor.fused_wkv_wgate
             self.compressor_norm = self.compressor.norm
             self.compressor_norm_eps = self.compressor.norm_eps
 
@@ -1670,8 +1668,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             )
             compressed_kv = torch.ops._C_ascend.compressor(
                 hidden_states_cache,
-                self.compressor_wkv.weight,
-                self.compressor_wgate.weight,
+                *self.compressor_fused_wkv_wgate.weight.chunk(2, dim=0),
                 state_cache.squeeze(-2),
                 self.compressor_ape,
                 self.compressor_norm.weight,
@@ -1822,8 +1819,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         )
         kv = torch.ops._C_ascend.compressor(
             x,
-            self.indexcom_wkv.weight,
-            self.indexcom_wgate.weight,
+            *self.indexcom_fused_wkv_wgate.weight.chunk(2, dim=0),
             indexer_state_cache.squeeze(-2),
             self.indexcom_ape,
             self.indexcom_norm.weight,

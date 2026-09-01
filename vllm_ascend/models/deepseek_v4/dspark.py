@@ -418,12 +418,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         expert_mapping = self.model.get_expert_mapping()
 
         # (param_name, checkpoint shard name, shard_id) for non-expert
-        # stacked parameters. Ascend keeps wq_a and wkv as separate parameters.
+        # stacked parameters. Attention projections stay separate; compressor
+        # wkv/wgate are loaded into one pre-allocated fused parameter.
         stacked_params_mapping = [
             ("mlp.gate_up_proj", "mlp.gate_proj", 0),
             ("mlp.gate_up_proj", "mlp.up_proj", 1),
             ("shared_experts.gate_up_proj", "shared_experts.gate_proj", 0),
             ("shared_experts.gate_up_proj", "shared_experts.up_proj", 1),
+            ("compressor.fused_wkv_wgate", "compressor.wkv", 0),
+            ("compressor.fused_wkv_wgate", "compressor.wgate", 1),
         ]
 
         params_dict = dict(self.named_parameters())

@@ -70,6 +70,38 @@ class TestCompressorMetadata:
 
 
 class TestCompressorForward:
+    def test_init_preallocates_packed_projection(self):
+        config = SimpleNamespace(hidden_size=1024, qk_rope_head_dim=64, rms_norm_eps=1e-6)
+        merged_projection = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.compressor.MergedColumnParallelLinear",
+                return_value=merged_projection,
+            ) as merged_linear,
+            patch("vllm_ascend.models.deepseek_v4.compressor.RMSNorm"),
+            patch("vllm_ascend.models.deepseek_v4.compressor.AscendCompressorStateCache"),
+        ):
+            compressor = Compressor(
+                vllm_config=SimpleNamespace(),
+                config=config,
+                compress_ratio=4,
+                head_dim=512,
+                cache_config=SimpleNamespace(block_size=128),
+                prefix="model.layers.0.compressor",
+            )
+
+        assert compressor.fused_wkv_wgate is merged_projection
+        merged_linear.assert_called_once_with(
+            1024,
+            [1024, 1024],
+            bias=False,
+            quant_config=None,
+            prefix="model.layers.0.compressor.fused_wkv_wgate",
+            return_bias=False,
+            disable_tp=True,
+        )
+
     @pytest.mark.parametrize(
         ("compress_ratio", "overlap", "expected_coff"),
         [(4, True, 2), (128, False, 1)],
@@ -86,9 +118,12 @@ class TestCompressorForward:
         compressor.compress_ratio = compress_ratio
         compressor.rope_head_dim = 2
         compressor.norm_eps = 1e-6
-        compressor.ape = torch.ones((compress_ratio, 4))
-        compressor.wkv = SimpleNamespace(weight=torch.ones((4, 4)))
-        compressor.wgate = SimpleNamespace(weight=torch.ones((4, 4)))
+        projection_dim = expected_coff * 4
+        compressor.ape = torch.ones((compress_ratio, projection_dim))
+        fused_weight = torch.arange(2 * projection_dim * 4, dtype=torch.float32).view(
+            2 * projection_dim, 4
+        )
+        compressor.fused_wkv_wgate = SimpleNamespace(weight=fused_weight)
         compressor.norm = SimpleNamespace(weight=torch.ones(4))
         cache_req_metadata = SimpleNamespace(
             query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
@@ -108,29 +143,95 @@ class TestCompressorForward:
         compute_metadata = MagicMock(return_value=(compress_cos, compress_sin, slot_mapping))
         compressor._compute_metadata = compute_metadata
 
-        with patch.object(
-            torch.ops._C_ascend,
-            "compressor",
-            create=True,
-            return_value=compressed_kv,
-        ) as compressor_op:
-            actual_kv, actual_slot_mapping = compressor(
-                hidden_states=hidden_states,
-                state_cache=state_cache,
-                metadata=metadata,
-            )
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.compressor.envs_ascend.VLLM_ASCEND_DSA_COMPRESSOR_SPLIT",
+                False,
+            ),
+            patch.object(
+                torch.ops._C_ascend,
+                "compressor",
+                create=True,
+                return_value=compressed_kv,
+            ) as compressor_op,
+        ):
+            actual_kv, actual_slot_mapping = compressor(hidden_states, state_cache, metadata)
 
         assert actual_kv is compressed_kv
         assert actual_slot_mapping is slot_mapping
         compute_metadata.assert_called_once_with(cache_req_metadata)
         call = compressor_op.call_args
         assert call.args[0] is hidden_states
+        assert torch.equal(call.args[1], fused_weight[:projection_dim])
+        assert torch.equal(call.args[2], fused_weight[projection_dim:])
         assert torch.equal(call.args[3], state_cache.squeeze(-2))
         assert call.kwargs["state_block_table"] is state_req_metadata.block_table
         assert call.kwargs["cu_seqlens"] is cache_req_metadata.query_start_loc
         assert call.kwargs["start_pos"] is cache_req_metadata.start_pos
         assert call.kwargs["cmp_ratio"] == compress_ratio
         assert call.kwargs["coff"] == expected_coff
+
+    def test_split_path_uses_one_linear_and_noncontiguous_views(self):
+        compressor = Compressor.__new__(Compressor)
+        torch.nn.Module.__init__(compressor)
+        compressor.overlap = True
+        compressor.compress_ratio = 4
+        compressor.rope_head_dim = 2
+        compressor.norm_eps = 1e-6
+        compressor.ape = torch.ones((4, 8))
+        fused_weight = torch.arange(64, dtype=torch.float32).view(16, 4)
+        compressor.fused_wkv_wgate = SimpleNamespace(weight=fused_weight)
+        compressor.norm = SimpleNamespace(weight=torch.ones(4))
+
+        cache_req_metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            start_pos=torch.tensor([1], dtype=torch.int32),
+        )
+        state_req_metadata = SimpleNamespace(block_table=torch.tensor([[3]], dtype=torch.int32))
+        metadata = AscendCompressorMetadata(
+            cache=SimpleNamespace(req_metadata=cache_req_metadata),
+            state=SimpleNamespace(req_metadata=state_req_metadata),
+        )
+        hidden_states = torch.ones((2, 4))
+        state_cache = torch.ones((1, 2, 1, 16))
+        compress_cos = torch.ones((1, 1, 2))
+        compress_sin = torch.zeros((1, 1, 2))
+        slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
+        compressed_kv = torch.ones((1, 1, 4))
+        mm = torch.arange(32, dtype=torch.float32).view(2, 16)
+        compressor._compute_metadata = MagicMock(return_value=(compress_cos, compress_sin, slot_mapping))
+
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.compressor.envs_ascend.VLLM_ASCEND_DSA_COMPRESSOR_SPLIT",
+                True,
+            ),
+            patch(
+                "vllm_ascend.models.deepseek_v4.compressor.F.linear",
+                return_value=mm,
+            ) as linear,
+            patch.object(
+                torch.ops._C_ascend,
+                "compress_norm_rope",
+                create=True,
+                return_value=compressed_kv,
+            ) as compress_norm_rope,
+        ):
+            actual_kv, actual_slot_mapping = compressor(hidden_states, state_cache, metadata)
+
+        assert actual_kv is compressed_kv
+        assert actual_slot_mapping is slot_mapping
+        linear.assert_called_once_with(hidden_states, fused_weight)
+        call = compress_norm_rope.call_args
+        mm_kv, mm_score = call.args[:2]
+        assert torch.equal(mm_kv, mm[:, :8])
+        assert torch.equal(mm_score, mm[:, 8:])
+        assert mm_kv.stride() == (16, 1)
+        assert mm_score.stride() == (16, 1)
+        assert not mm_kv.is_contiguous()
+        assert not mm_score.is_contiguous()
+        assert call.kwargs["cmp_ratio"] == 4
+        assert call.kwargs["coff"] == 2
 
 
 class TestCompressorStateCache:

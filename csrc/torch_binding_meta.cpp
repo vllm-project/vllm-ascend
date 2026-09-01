@@ -813,6 +813,29 @@ compressor_meta(const at::Tensor &x, const at::Tensor &wkv, const at::Tensor &wg
     return output;
 }
 
+std::tuple<at::Tensor> compress_norm_rope_meta(const at::Tensor &mm_kv, const at::Tensor &mm_score,
+                                                at::Tensor &state_cache, const at::Tensor &ape,
+                                                const at::Tensor &norm_weight, const at::Tensor &rope_sin,
+                                                const at::Tensor &rope_cos,
+                                                const c10::optional<at::Tensor> &state_block_table,
+                                                const c10::optional<at::Tensor> &cu_seqlens,
+                                                const c10::optional<at::Tensor> &seqused,
+                                                const c10::optional<at::Tensor> &start_pos, int64_t rope_head_dim,
+                                                int64_t cmp_ratio, int64_t coff, double norm_eps, int64_t rotary_mode,
+                                                int64_t cache_mode)
+{
+    constexpr int DIM_3 = 3;
+    at::SmallVector<int64_t, 8> cmp_kv_size;
+    if (mm_kv.dim() == DIM_3) {
+        auto cmp_s = (mm_kv.size(1) + cmp_ratio - 1) / cmp_ratio;
+        cmp_kv_size = {mm_kv.size(0), cmp_s, norm_weight.size(0)};
+    } else {
+        cmp_kv_size = {rope_sin.size(0), norm_weight.size(0)};
+    }
+    at::Tensor cmp_kv = at::empty(cmp_kv_size, mm_kv.options().dtype(mm_kv.dtype()));
+    return std::tuple<at::Tensor>(cmp_kv);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> compressor_metadata_meta(
     const at::Tensor &rope_cos, const at::Tensor &rope_sin, const at::Tensor &cu_seqlens,
     const at::Tensor &start_pos, const at::Tensor &kv_block_table, int64_t kv_block_size,
@@ -1991,6 +2014,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
+    ops.impl("compress_norm_rope", &vllm_ascend::meta::compress_norm_rope_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_vllm_quant_lightning_indexer", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_meta);
     ops.impl("npu_vllm_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_metadata_meta);

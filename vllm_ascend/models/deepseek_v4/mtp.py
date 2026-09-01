@@ -262,6 +262,8 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("compressor.fused_wkv_wgate", "compressor.wkv", 0),
+            ("compressor.fused_wkv_wgate", "compressor.wgate", 1),
         ]
 
         expert_params_mapping = fused_moe_make_expert_params_mapping(

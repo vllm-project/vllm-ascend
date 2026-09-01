@@ -1043,6 +1043,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("compressor.fused_wkv_wgate", "compressor.wkv", 0),
+            ("compressor.fused_wkv_wgate", "compressor.wgate", 1),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
