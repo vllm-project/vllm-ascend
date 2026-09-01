@@ -14,7 +14,7 @@ This document describes how to quickly get started with Hy4 model inference depl
 
     **Current status and constraints**
 
-    - Hy4 Preview is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:hy4`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
+    - Hy4 Preview is provided **out-of-the-box** through the official Docker image `quay.io/ascend/vllm-ascend:hy4-a3`. The supporting code has **not yet been merged** into the vLLM-Ascend repository, so installing it from source (`pip install` or building from source) is **not supported** for this model yet.
     - Only **Atlas 800I A3 (A3)** is supported now. Other Ascend hardware (e.g., Atlas 800I A2) is not supported for Hy4 Preview.
     - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for Hy4 Preview. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#9-declaration)).
 
@@ -68,7 +68,7 @@ Because the weights are large, a single A3 node only supports about 1K context. 
 
 ### 3.3 Verify Multi-node Communication (Optional)
 
-If you want to deploy a multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy a multi-node environment, verify multi-node communication as described in [Verify inter-node connectivity](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -77,23 +77,23 @@ If you want to deploy a multi-node environment, you need to verify multi-node co
 #### Download Docker Image
 
 ```bash
-docker pull quay.io/ascend/vllm-ascend:hy4
+docker pull quay.io/ascend/vllm-ascend:hy4-a3
 ```
 
 After a successful download, check the existing images:
 
 ```bash
-docker images | grep hy4
+docker images | grep hy4-a3
 ```
 
-The output should contain the downloaded `quay.io/ascend/vllm-ascend:hy4`.
+The output should contain the downloaded `quay.io/ascend/vllm-ascend:hy4-a3`.
 
 #### Create Docker Container
 
 Use the following command to create the container. The Atlas 800I A3 is a 16-card device, so you need to mount `/dev/davinci[0-15]` and the management devices. Also mount the driver library and the weight directory (this guide assumes the weights are stored on the host at `/mnt/weight` and mounted to the same path inside the container).
 
 ```bash
-export IMAGE=quay.io/ascend/vllm-ascend:hy4
+export IMAGE=quay.io/ascend/vllm-ascend:hy4-a3
 export CONTAINER_NAME=vllm_ascend_hy4
 
 # Generate NPU device mount parameters (Atlas 800I A3: /dev/davinci[0-15])
@@ -131,7 +131,7 @@ docker exec -it ${CONTAINER_NAME} bash
 
 !!! note
 
-    Hy4 Preview is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:hy4` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
+    Hy4 Preview is currently provided **out-of-the-box** via the `quay.io/ascend/vllm-ascend:hy4-a3` Docker image. Because the supporting code has **not yet been merged** into the vLLM-Ascend repository, source-code installation is **not supported** for this model yet; please use the Docker image as described in [4.1 Docker Image Installation](#41-docker-image-installation).
 
 ## 5 Online Service Deployment
 

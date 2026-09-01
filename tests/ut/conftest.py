@@ -124,6 +124,9 @@ if not _npu_available:
     sys.modules["torch_npu"].npu_rms_norm = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_swiglu = MagicMock()  # type: ignore[attr-defined]
     sys.modules["torch_npu"].npu_convert_weight_to_int4pack = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_transpose_batchmatmul = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_scatter_nd_update_ = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch_npu"].npu_dynamic_mx_quant = MagicMock()  # type: ignore[attr-defined]
 
 adapt_patch()
 adapt_patch(True)

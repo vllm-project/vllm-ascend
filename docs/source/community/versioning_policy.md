@@ -68,7 +68,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | Triton Ascend |
 |-------------|--------------|------------------|-------------|--------------------|---------------|
-|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |
+|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_version}} / {{main_torch_npu_version}} | {{main_triton_ascend_version}} |
 
 The release rows and the main row are different installation targets. For a
 release installation, use the vLLM and vLLM Ascend versions from the same
