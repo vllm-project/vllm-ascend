@@ -29,11 +29,21 @@
 
 // 模板参数支持的范围定义
 #if (__CCE_AICORE__ == 310)
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_kernel/quant_lightning_indexer_template_tiling_key.h
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 <<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_kernel/vllm_quant_lightning_indexer_template_tiling_key.h
     ASCENDC_TPL_ARGS_DECL(VllmQuantLightningIndexer,  // 算子OpType
 ========
     ASCENDC_TPL_ARGS_DECL(QuantLightningIndexerCustom,  // 算子OpType
 >>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_kernel/quant_lightning_indexer_template_tiling_key.h
+<<<<<<< HEAD
+=======
+========
+    ASCENDC_TPL_ARGS_DECL(VllmQuantLightningIndexer,  // 算子OpType
+>>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_kernel/vllm_quant_lightning_indexer_template_tiling_key.h
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
                         ASCENDC_TPL_DTYPE_DECL(DT_Q, QLI_TPL_FLOAT32_E4M3FN), ASCENDC_TPL_DTYPE_DECL(DT_K, QLI_TPL_FLOAT32_E4M3FN),
                         ASCENDC_TPL_DTYPE_DECL(DT_OUT, QLI_TPL_INT32), ASCENDC_TPL_BOOL_DECL(PAGE_ATTENTION, 1, 0),
                         ASCENDC_TPL_UINT_DECL(Q_LAYOUT_T, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, QLI_LAYOUT_BSND,
@@ -56,11 +66,21 @@
                             ASCENDC_TPL_UINT_SEL(Q_LAYOUT_T, ASCENDC_TPL_UI_LIST, QLI_LAYOUT_TND),
                             ASCENDC_TPL_UINT_SEL(K_LAYOUT_T, ASCENDC_TPL_UI_LIST, QLI_LAYOUT_TND), ), );
 #else
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_kernel/quant_lightning_indexer_template_tiling_key.h
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 <<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_kernel/vllm_quant_lightning_indexer_template_tiling_key.h
     ASCENDC_TPL_ARGS_DECL(VllmQuantLightningIndexer,  // 算子OpType
 ========
     ASCENDC_TPL_ARGS_DECL(QuantLightningIndexerCustom,  // 算子OpType
 >>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_kernel/quant_lightning_indexer_template_tiling_key.h
+<<<<<<< HEAD
+=======
+========
+    ASCENDC_TPL_ARGS_DECL(VllmQuantLightningIndexer,  // 算子OpType
+>>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_kernel/vllm_quant_lightning_indexer_template_tiling_key.h
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
                         ASCENDC_TPL_DTYPE_DECL(DT_Q, QLI_TPL_INT8), ASCENDC_TPL_DTYPE_DECL(DT_K, QLI_TPL_INT8),
                         ASCENDC_TPL_DTYPE_DECL(DT_OUT, QLI_TPL_INT32), ASCENDC_TPL_BOOL_DECL(PAGE_ATTENTION, 1, 0),
                         ASCENDC_TPL_UINT_DECL(Q_LAYOUT_T, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, QLI_LAYOUT_BSND,

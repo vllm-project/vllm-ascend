@@ -35,11 +35,21 @@ using namespace optiling::detail;
     } while (0)
 
 template <int DT_Q, int DT_K, int DT_OUT, int PAGE_ATTENTION, int Q_LAYOUT_T, int K_LAYOUT_T>
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_kernel/quant_lightning_indexer_custom.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 <<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_kernel/vllm_quant_lightning_indexer.cpp
 __global__ __aicore__ void vllm_quant_lightning_indexer(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
 ========
 __global__ __aicore__ void quant_lightning_indexer_custom(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
 >>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_kernel/quant_lightning_indexer_custom.cpp
+<<<<<<< HEAD
+=======
+========
+__global__ __aicore__ void vllm_quant_lightning_indexer(__gm__ uint8_t *query, __gm__ uint8_t *key, __gm__ uint8_t *weights,
+>>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_kernel/vllm_quant_lightning_indexer.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
                                                    __gm__ uint8_t *queryScale, __gm__ uint8_t *keyScale,
                                                    __gm__ uint8_t *actualSeqLengthsQ, __gm__ uint8_t *actualSeqLengthsK,
                                                    __gm__ uint8_t *blocktable, __gm__ uint8_t *metadata,

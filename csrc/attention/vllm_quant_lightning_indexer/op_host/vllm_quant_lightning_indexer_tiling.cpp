@@ -85,11 +85,21 @@ ge::graphStatus QLIInfoParser::CheckRequiredParaExistence() const
 ge::graphStatus QLIInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 <<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
         OP_LOGE("VllmQuantLightningIndexer", "opName got from TilingContext is nullptr");
 ========
         OP_LOGE("QuantLightningIndexerCustom", "opName got from TilingContext is nullptr");
 >>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+<<<<<<< HEAD
+=======
+========
+        OP_LOGE("VllmQuantLightningIndexer", "opName got from TilingContext is nullptr");
+>>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -853,6 +863,10 @@ static ge::graphStatus TilingPrepareForVllmQuantLightningIndexer(gert::TilingPar
     return ge::GRAPH_SUCCESS;
 }
 
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 <<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
 // --------------------------VllmQuantLightningIndexerTiling类成员函数定义-----------------------
 ge::graphStatus VllmQuantLightningIndexerTiling::DoTiling(QLITilingInfo *tilingInfo)
@@ -860,6 +874,13 @@ ge::graphStatus VllmQuantLightningIndexerTiling::DoTiling(QLITilingInfo *tilingI
 // --------------------------QuantLightningIndexerCustomTiling类成员函数定义-----------------------
 ge::graphStatus QuantLightningIndexerCustomTiling::DoTiling(QLITilingInfo *tilingInfo)
 >>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+<<<<<<< HEAD
+=======
+========
+// --------------------------VllmQuantLightningIndexerTiling类成员函数定义-----------------------
+ge::graphStatus VllmQuantLightningIndexerTiling::DoTiling(QLITilingInfo *tilingInfo)
+>>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 {
     // -------------set blockdim-----------------
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(tilingInfo->platformInfo);
@@ -938,26 +959,50 @@ ge::graphStatus QuantLightningIndexerCustomTiling::DoTiling(QLITilingInfo *tilin
 // --------------------------Tiling函数定义---------------------------
 ge::graphStatus TilingForVllmQuantLightningIndexer(gert::TilingContext *context)
 {
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 <<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
     OP_CHECK_IF(context == nullptr, OP_LOGE("VllmQuantLightningIndexer", "Tiling context is null."),
 ========
     OP_CHECK_IF(context == nullptr, OP_LOGE("QuantLightningIndexerCustom", "Tiling context is null."),
 >>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+<<<<<<< HEAD
+=======
+========
+    OP_CHECK_IF(context == nullptr, OP_LOGE("VllmQuantLightningIndexer", "Tiling context is null."),
+>>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
                return ge::GRAPH_FAILED);
     QLITilingInfo QLIInfo;
     QLIInfoParser QLIInfoParser(context);
     if (QLIInfoParser.ParseAndCheck(QLIInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 <<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
     VllmQuantLightningIndexerTiling QLITiling(context);
 ========
     QuantLightningIndexerCustomTiling QLITiling(context);
 >>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+<<<<<<< HEAD
+=======
+========
+    VllmQuantLightningIndexerTiling QLITiling(context);
+>>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
     return QLITiling.DoTiling(&QLIInfo);
 }
 
 // --------------------------Tiling及函数TilingPrepare函数注册--------
+<<<<<<< HEAD
+=======
+<<<<<<<< HEAD:csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 <<<<<<<< HEAD:csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
 IMPL_OP_OPTILING(VllmQuantLightningIndexer)
     .Tiling(TilingForVllmQuantLightningIndexer)
@@ -967,5 +1012,13 @@ IMPL_OP_OPTILING(QuantLightningIndexerCustom)
     .Tiling(TilingForQuantLightningIndexer)
     .TilingParse<QLICompileInfo>(TilingPrepareForQuantLightningIndexer);
 >>>>>>>> 6e9fabbc3 ([BugFix] Fix duplicate symbol for custom QuantLightningIndexer operator (#10744)):csrc/attention/quant_lightning_indexer_custom/op_host/quant_lightning_indexer_tiling.cpp
+<<<<<<< HEAD
+=======
+========
+IMPL_OP_OPTILING(VllmQuantLightningIndexer)
+    .Tiling(TilingForVllmQuantLightningIndexer)
+    .TilingParse<QLICompileInfo>(TilingPrepareForVllmQuantLightningIndexer);
+>>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900)):csrc/attention/vllm_quant_lightning_indexer/op_host/vllm_quant_lightning_indexer_tiling.cpp
+>>>>>>> db4cc4304 ([BugFix] avoid experimental QLI overriding native QLI (#10900))
 
 }  // namespace optiling
