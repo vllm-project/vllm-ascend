@@ -159,10 +159,7 @@ class KVPoolWorker:
         # Resolve the backend's layerwise protocol (if any) once through the
         # registry; generic code never imports the protocol module by name.
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
-        self.use_gva_layerwise = use_layerwise and self.layerwise_protocol is not None
-        self._layerwise_key_factory = (
-            self.layerwise_protocol.GVAKeyFactory if self.layerwise_protocol is not None else None
-        )
+        self.use_layerwise_transfer = use_layerwise and self.layerwise_protocol is not None
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
@@ -381,7 +378,7 @@ class KVPoolWorker:
                         effective_num_layers,
                     )
                     self.num_layers = effective_num_layers
-            if self.use_gva_layerwise:
+            if self.use_layerwise_transfer:
                 self._layerwise_reuse_layout = build_layerwise_reuse_layout(
                     get_layerwise_kv_cache_specs(self.kv_cache_config),
                     base_layers,
@@ -423,7 +420,7 @@ class KVPoolWorker:
         self.layerwise_offload = False
         self.independent_layers: list[int] = []
         self.prefetch_layer_map: dict[int, int] = {}
-        if self.use_gva_layerwise:
+        if self.use_layerwise_transfer:
             if self._layerwise_reuse_layout is None:
                 cache_layout = build_layerwise_cache_layout(
                     self.num_layers,
@@ -472,7 +469,7 @@ class KVPoolWorker:
         an externally supplied slot-release callback, so the gate lives here
         (at the data-plane consumer) instead of at the connector proxy.
         """
-        if not self.use_gva_layerwise:
+        if not self.use_layerwise_transfer:
             return False
         self.external_slot_release_waiter = waiter
         return True
@@ -487,7 +484,7 @@ class KVPoolWorker:
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
             can_save = self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
-            if self.use_gva_layerwise and can_save:
+            if self.use_layerwise_transfer and can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.m_store,
@@ -525,7 +522,7 @@ class KVPoolWorker:
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
             ready_event = threading.Event()
-            if self.use_gva_layerwise:
+            if self.use_layerwise_transfer:
                 self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
                     self.m_store,
                     self.token_database,
@@ -830,7 +827,7 @@ class KVPoolWorker:
 
         # Initialize store, register buffers, and start transfer threads
         # directly here (like main) — no separate init_backend handshake.
-        if self.use_gva_layerwise:
+        if self.use_layerwise_transfer:
             self.m_store.ensure_initialized()
         self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
@@ -1111,14 +1108,15 @@ class KVPoolWorker:
                 )
             )
 
-    def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
-        """Generate GVA key for layerwise transfer.
+    def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
+        """Full-block key for the layerwise transfer, built by the
+        backend's protocol module.
 
         Single-group models use the PR #11585 format (model@hash@rank) for
         backward compatibility. Multi-group models include group_id
         (model@group_id@hash@rank) to distinguish groups.
         """
-        return self._layerwise_key_factory.full_key(
+        return self.layerwise_protocol.make_full_key(
             self.model_name,
             group_id,
             block_hash_hex,
@@ -1133,7 +1131,7 @@ class KVPoolWorker:
         block_index: int,
         end_token: int,
     ) -> str:
-        return self._layerwise_key_factory.partial_key(
+        return self.layerwise_protocol.make_partial_key(
             self.model_name,
             request.req_id,
             group_id,
@@ -1167,7 +1165,7 @@ class KVPoolWorker:
         (multi-group) or model@hash@head_or_tp_rank (single-group, backward
         compat with PR #11585).
         """
-        if not self.use_gva_layerwise:
+        if not self.use_layerwise_transfer:
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
@@ -1208,7 +1206,7 @@ class KVPoolWorker:
                     hit_full_blocks = pool_hit_tokens // effective_block_size
                     save_start_block = max(save_start_block, hit_full_blocks)
                 candidate_keys = [
-                    self._make_layerwise_gva_key(
+                    self._make_layerwise_full_key(
                         group_id,
                         block_hash_to_str(group_block_hashes[block_idx]),
                     )
@@ -1220,7 +1218,7 @@ class KVPoolWorker:
                 self._refresh_allocated_gvas(candidate_keys)
                 # Skip blocks that are still present and readable in MemCache.
                 while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = self._make_layerwise_gva_key(
+                    key = self._make_layerwise_full_key(
                         group_id, block_hash_to_str(group_block_hashes[save_start_block])
                     )
                     if key in self._allocated_gvas:
@@ -1232,7 +1230,7 @@ class KVPoolWorker:
                 new_keys: list[str] = []
                 new_positions: list[int] = []
                 for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
-                    key = self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
+                    key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
                     cached = self._allocated_gvas.get(key)
                     if cached is not None:
                         block_gvas.append(cached)
@@ -1333,7 +1331,7 @@ class KVPoolWorker:
           1. batch_get_key_info to fetch the GVA (fills block_gvas_np)
           2. batch_add_lease to register the blob locally + acquire a read lease
         """
-        if not self.use_gva_layerwise:
+        if not self.use_layerwise_transfer:
             return
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
@@ -1383,7 +1381,7 @@ class KVPoolWorker:
                     continue
 
                 keys = [
-                    self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[i]))
+                    self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[i]))
                     for i in range(load_start_block, full_blocks)
                 ]
                 block_indices = list(range(load_start_block, full_blocks))

@@ -143,7 +143,7 @@ class TestKVPoolScheduler(unittest.TestCase):
         )
         scheduler.use_eagle = True
         scheduler.cache_transfer_granularity = 16
-        scheduler._get_layerwise_gva_hit_tokens = MagicMock(return_value=64)
+        scheduler._get_layerwise_hit_tokens = MagicMock(return_value=64)
 
         request = MagicMock()
         request.prompt_token_ids = list(range(64))
@@ -791,17 +791,17 @@ class TestKVPoolSchedulerInferMambaGroups(unittest.TestCase):
         self.assertEqual(scheduler._infer_mamba_groups(), [])
 
 
-class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
-    """Test _get_layerwise_gva_hit_tokens."""
+class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
+    """Test _get_layerwise_hit_tokens."""
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
-        # memcache backend makes the constructor resolve the real key
-        # factory; use_layerwise stays False so the test keeps exercising
+        # memcache backend makes the constructor resolve the real protocol
+        # module; use_layerwise stays False so the test keeps exercising
         # the query_start_block offset math it was built around.
         return KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=False)
 
-    def test_layerwise_gva_hit_tokens(self):
+    def test_layerwise_hit_tokens(self):
         cases = [
             (2, [True, True], 32, 0, 32),
             (2, [True, False], 32, 0, 16),
@@ -821,7 +821,7 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
                 scheduler.store_scheduler.batch_get_key_info.return_value = key_infos
                 request = MagicMock()
                 request.block_hashes = [b"\xaa"] * hash_count
-                result = scheduler._get_layerwise_gva_hit_tokens(request, token_count, computed_tokens)
+                result = scheduler._get_layerwise_hit_tokens(request, token_count, computed_tokens)
                 self.assertEqual(result, expected)
 
 

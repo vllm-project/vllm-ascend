@@ -22,11 +22,11 @@ backend_map = {
     "memcache": {
         "name": "MemcacheBackend",
         "path": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
-        # The memcache backend carries an exclusive layerwise transfer
-        # protocol (module path). Generic layers resolve it through
-        # get_layerwise_protocol() and never import the protocol module
-        # by name.
-        "layerwise_protocol": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.gva_protocol",
+        # The backend module opts into the layerwise transfer protocol:
+        # it exposes make_full_key / make_partial_key / make_hit_check_keys /
+        # extract_layout_config at module level. Generic layers resolve the
+        # module through get_layerwise_protocol() and never import it by name.
+        "layerwise_protocol": True,
     },
     "yuanrong": {
         "name": "YuanrongBackend",
@@ -36,13 +36,17 @@ backend_map = {
 
 
 def get_layerwise_protocol(backend_name: str):
-    """Import and return the layerwise protocol module of the backend
-    registered under ``backend_name`` (None when the backend carries
-    none)."""
+    """Return the backend module carrying the layerwise transfer protocol
+    registered under ``backend_name`` (None when the backend opts out).
+
+    The protocol functions live in the backend module itself, so resolving
+    reuses the registered ``path``: no second module path to drift, and
+    backends without the marker (e.g. mooncake, whose module pulls heavy
+    third-party imports at top level) are never imported here."""
     normalized_name = backend_name.strip().lower()
-    module_path = backend_map.get(normalized_name, {}).get("layerwise_protocol")
-    if module_path is None:
+    backend = backend_map.get(normalized_name, {})
+    if not backend.get("layerwise_protocol"):
         return None
     import importlib
 
-    return importlib.import_module(module_path)
+    return importlib.import_module(backend["path"])

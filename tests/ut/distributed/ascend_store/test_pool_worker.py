@@ -252,7 +252,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.num_layers = 4
         worker.num_kv_cache_groups = 2
         worker.hf_config = SimpleNamespace(num_hidden_layers=4)
-        worker.use_gva_layerwise = True
+        worker.use_layerwise_transfer = True
         worker._extra_config = {"layerwise_num_shared_buffers": 2}
         main_spec = FullAttentionSpec(
             block_size=2,
@@ -993,15 +993,15 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64) for block_ids in block_ids_by_group],
         )
 
-    def test_set_external_slot_release_waiter_gated_on_gva(self):
+    def test_set_external_slot_release_waiter_gated_on_layerwise_transfer(self):
         waiter = MagicMock()
 
         worker = self._make_worker()
-        worker.use_gva_layerwise = False
+        worker.use_layerwise_transfer = False
         self.assertFalse(worker.set_external_slot_release_waiter(waiter))
         self.assertIsNone(worker.external_slot_release_waiter)
 
-        worker.use_gva_layerwise = True
+        worker.use_layerwise_transfer = True
         self.assertTrue(worker.set_external_slot_release_waiter(waiter))
         self.assertIs(worker.external_slot_release_waiter, waiter)
 
@@ -1384,7 +1384,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             [partial_key],
         )
         sleep.assert_called_once()
-        self.assertEqual(request.load_keys, [worker._make_layerwise_gva_key(0, "h0"), partial_key])
+        self.assertEqual(request.load_keys, [worker._make_layerwise_full_key(0, "h0"), partial_key])
         self.assertEqual(request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
@@ -1416,7 +1416,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         ):
             worker._prepare_load_gvas([request])
 
-        group0_key = worker._make_layerwise_gva_key(0, "h0")
+        group0_key = worker._make_layerwise_full_key(0, "h0")
         worker.m_store.batch_remove_lease.assert_called_once_with([group0_key])
 
     def test_worker_physical_layer_index_supports_mtp_layers_namespace(self):
@@ -1431,7 +1431,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
     def test_evicted_allocated_gva_is_reallocated(self):
         worker = self._make_gva_worker()
-        key = worker._make_layerwise_gva_key(0, "h0")
+        key = worker._make_layerwise_full_key(0, "h0")
         worker._allocated_gvas[key] = 101
         worker.m_store.batch_is_exist.return_value = [0]
         worker.m_store.batch_alloc.return_value = [202]

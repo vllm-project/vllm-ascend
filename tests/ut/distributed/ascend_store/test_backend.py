@@ -59,13 +59,16 @@ class TestBackendABC(unittest.TestCase):
 # =========================================================================
 class TestLayerwiseProtocolRegistry(unittest.TestCase):
     """``get_layerwise_protocol`` is the generic layers' only knowledge of
-    layerwise support: it resolves the protocol module registered under the
-    backend name (normalized), or None when the entry carries none."""
+    layerwise support: it resolves the backend module carrying the layerwise
+    protocol functions (registered under the normalized backend name), or
+    None when the entry carries no protocol marker."""
 
     def test_get_layerwise_protocol_resolves_module(self):
         protocol = get_layerwise_protocol("memcache")
         self.assertIsNotNone(protocol)
-        self.assertTrue(hasattr(protocol, "GVAKeyFactory"))
+        for func_name in ("make_full_key", "make_partial_key", "make_hit_check_keys", "extract_layout_config"):
+            with self.subTest(func=func_name):
+                self.assertTrue(callable(getattr(protocol, func_name, None)))
 
     def test_get_layerwise_protocol_normalizes_name(self):
         for backend_name in ("MEMCACHE", " Memcache "):
