@@ -168,6 +168,8 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 ::::{tab-item} Original installation
 :sync: original
 
+Currently, this installation method supports only A2. For A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT, use a pre-built image, uv-wheelnext, or source installation.
+
 ```{code-block} bash
    :substitutions:
 
@@ -176,7 +178,6 @@ pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend.
 pip install \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
 vllm-ascend==|pip_vllm_ascend_version|
 
@@ -204,7 +205,7 @@ pip install vllm==|pip_vllm_version|
 # Install vllm-project/vllm-ascend from wheelnext index.
 uv pip install --system \
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+--find-links https://mirrors.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
 --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
 vllm-ascend==|pip_vllm_ascend_version|
 
