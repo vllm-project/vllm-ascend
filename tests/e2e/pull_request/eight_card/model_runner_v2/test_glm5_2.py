@@ -19,15 +19,15 @@ from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
-from vllm.v1.metrics.reader import Counter, Vector
 
-from tests.e2e.pull_request.utils import _run_speculative_decoding
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.utils import _run_speculative_decoding
 
 MODEL = "Eco-Tech/GLM-5.2-w4a8"
 DRAFT_MODEL = "/RedHatAI/GLM-5.2-speculator.dspark"
 EXPECTED_ACCEPTANCE_LENGTH = 10
 DSPARK_EXPECTED_ACCEPTANCE_LENGTH = 3.5
+
 
 @pytest.mark.e2e_model(MODEL)
 @pytest.mark.e2e_coverage(
@@ -147,9 +147,9 @@ def test_glm5_2_dspark_eager() -> None:
             "quantization": "ascend",
             "tensor_parallel_size": 8,
             "max_model_len": 4096,
-            "max_num_batched_tokens":2048,
+            "max_num_batched_tokens": 2048,
             "enforce_eager": True,
-            "enable_prefix_caching":False,
-            "async_scheduling":False,
+            "enable_prefix_caching": False,
+            "async_scheduling": False,
         },
     )
