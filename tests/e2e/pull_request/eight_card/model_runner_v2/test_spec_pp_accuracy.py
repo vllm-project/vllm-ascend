@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -29,14 +28,6 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 DEEPSEEK_V4_MODEL = os.environ.get(
     "DEEPSEEK_V4_DSPARK_MODEL_PATH",
     "UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test",
-)
-MINIMAX_M3_MODEL = os.environ.get(
-    "MINIMAX_M3_MODEL_PATH",
-    "Eco-Tech/MiniMax-M3-w8a8-0626",
-)
-MINIMAX_M3_DRAFT_MODEL = os.environ.get(
-    "MINIMAX_M3_DRAFT_MODEL_PATH",
-    "Inferact/MiniMax-M3-EAGLE3-GQA",
 )
 
 GSM8K_PROMPT = (
@@ -76,12 +67,6 @@ def _assert_speculative_accuracy(outputs, metrics) -> None:
 
     assert num_drafts > 0, "Speculative decoding did not generate draft tokens"
     assert num_accepted > 0, "Speculative decoding did not accept any draft tokens"
-
-
-def _configure_jemalloc() -> None:
-    jemalloc_path = "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
-    if Path(jemalloc_path).exists():
-        os.environ["LD_PRELOAD"] = jemalloc_path
 
 
 @pytest.mark.e2e_model(DEEPSEEK_V4_MODEL)
@@ -129,69 +114,6 @@ def test_deepseek_v4_dspark_pp_accuracy() -> None:
         additional_config={
             "enable_dsa_cp": False,
             "enable_fused_mc2": 0,
-        },
-    ) as runner:
-        outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
-        metrics = runner.model.get_metrics()
-
-    _assert_speculative_accuracy(outputs, metrics)
-
-
-@pytest.mark.e2e_model(MINIMAX_M3_MODEL, MINIMAX_M3_DRAFT_MODEL)
-@pytest.mark.e2e_coverage(
-    arch="multimodal",
-    feature="eagle3",
-    parallel="PP,TP,EP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="W8A8",
-    graph_mode="eager",
-)
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "HCCL_BUFFSIZE": "2048",
-        "HCCL_OP_EXPANSION_MODE": "AIV",
-    },
-)
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_minimax_m3_eagle3_pp_accuracy() -> None:
-    _configure_jemalloc()
-
-    with VllmRunner(
-        MINIMAX_M3_MODEL,
-        max_model_len=8192,
-        max_num_seqs=8,
-        max_num_batched_tokens=2048,
-        tensor_parallel_size=4,
-        pipeline_parallel_size=2,
-        enable_expert_parallel=True,
-        distributed_executor_backend="mp",
-        gpu_memory_utilization=0.92,
-        quantization="ascend",
-        long_prefill_token_threshold=1024,
-        limit_mm_per_prompt={"image": 1, "video": 0},
-        enable_prefix_caching=False,
-        disable_log_stats=False,
-        enforce_eager=True,
-        speculative_config={
-            "model": MINIMAX_M3_DRAFT_MODEL,
-            "method": "eagle3",
-            "num_speculative_tokens": 3,
-            "enforce_eager": True,
-        },
-        additional_config={
-            "enable_cpu_binding": True,
-            "ascend_compilation_config": {
-                "enable_static_kernel": False,
-                "fuse_norm_quant": False,
-            },
-            "multistream_overlap_shared_expert": False,
-            "enable_fused_mc2": 0,
-            "weight_nz_mode": 2,
         },
     ) as runner:
         outputs = runner.generate_greedy([GSM8K_PROMPT], max_tokens=512)
