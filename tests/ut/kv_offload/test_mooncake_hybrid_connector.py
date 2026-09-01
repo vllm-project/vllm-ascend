@@ -55,12 +55,16 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         return thread
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
-        expected_device = torch.device("npu:5")
-        kv_cache = MagicMock(device=expected_device)
+        expected_device_index = 5
+        kv_cache = MagicMock(device=expected_device_index)
         model_config = types.SimpleNamespace(
             is_deepseek_mla=False,
             hf_config=types.SimpleNamespace(compress_ratios=[1]),
-            hf_text_config=types.SimpleNamespace(num_hidden_layers=1),
+            hf_text_config=types.SimpleNamespace(
+                num_hidden_layers=1,
+                head_dim=64,
+                num_key_value_heads=8,
+            ),
         )
         vllm_config = types.SimpleNamespace(
             model_config=model_config,
@@ -78,7 +82,10 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 worker_events[threading.get_ident()].append(("set_device", device_index))
 
         with (
-            patch("torch.npu.set_device", side_effect=record_set_device),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.torch.npu.set_device",
+                side_effect=record_set_device,
+            ),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.is_vl_model",
                 return_value=False,
@@ -135,7 +142,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         handled_worker_events = [events for events in worker_events.values() if any(e == "handle" for e, _ in events)]
         self.assertEqual(len(handled_worker_events), 2)
         for events in handled_worker_events:
-            self.assertEqual(events[0], ("set_device", expected_device.index))
+            self.assertEqual(events[0], ("set_device", expected_device_index))
             self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):

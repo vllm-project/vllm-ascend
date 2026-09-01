@@ -32,7 +32,7 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
-FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "_fake_weight")
+FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ut", "_fake_weight")
 
 
 def initialize_kv_cache(runner: NPUModelRunner):

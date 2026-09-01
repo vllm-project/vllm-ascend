@@ -62,7 +62,8 @@ patch(
     "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_pcp_group", return_value=_mock_pcp_group
 ).start()
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
-patch("torch.npu.set_device").start()
+# Do not permanently patch torch.npu.set_device here — the executor-binding
+# tests need to install a side_effect on the live set_device callable.
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
@@ -803,8 +804,9 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertEqual(result, {"req1", "req2"})
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
-        expected_device = torch.device("npu:5")
-        kv_cache = MagicMock(device=expected_device)
+        expected_device_index = 5
+        # Prefer an int device index so CPU UTs do not depend on torch.device("npu:N").
+        kv_cache = MagicMock(device=expected_device_index)
         worker_events: defaultdict[int, list[tuple[str, int | str]]] = defaultdict(list)
         events_lock = threading.Lock()
         both_workers_started = threading.Event()
@@ -815,7 +817,10 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             with events_lock:
                 worker_events[threading.get_ident()].append(("set_device", cast(int, device_index)))
 
-        with patch("torch.npu.set_device", side_effect=record_set_device):
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.set_device",
+            side_effect=record_set_device,
+        ):
             thread = KVCacheRecvingThread(
                 tp_rank=1,
                 tp_size=4,
@@ -862,7 +867,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         handled_worker_events = [events for events in worker_events.values() if any(e == "handle" for e, _ in events)]
         self.assertEqual(len(handled_worker_events), 2)
         for events in handled_worker_events:
-            self.assertEqual(events[0], ("set_device", expected_device.index))
+            self.assertEqual(events[0], ("set_device", expected_device_index))
             self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):
