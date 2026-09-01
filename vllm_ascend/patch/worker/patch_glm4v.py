@@ -68,14 +68,10 @@ if Glm4vForConditionalGeneration is not None:
         if image_input.get("type") != "image_embeds":
             pixel_values = image_input.get("pixel_values")
             if isinstance(pixel_values, torch.Tensor):
-                setattr(
-                    image_input,
-                    "pixel_values",
-                    _normalize_vision_tensor(
-                        pixel_values,
-                        dtype=self.visual.dtype,
-                        device=self.visual.device,
-                    ),
+                image_input.pixel_values = _normalize_vision_tensor(
+                    pixel_values,
+                    dtype=self.visual.dtype,
+                    device=self.visual.device,
                 )
         return _original_process_image_input(self, image_input)
 
@@ -83,14 +79,10 @@ if Glm4vForConditionalGeneration is not None:
         if video_input.get("type") != "video_embeds":
             pixel_values_videos = video_input.get("pixel_values_videos")
             if isinstance(pixel_values_videos, torch.Tensor):
-                setattr(
-                    video_input,
-                    "pixel_values_videos",
-                    _normalize_vision_tensor(
-                        pixel_values_videos,
-                        dtype=self.visual.dtype,
-                        device=self.visual.device,
-                    ),
+                video_input.pixel_values_videos = _normalize_vision_tensor(
+                    pixel_values_videos,
+                    dtype=self.visual.dtype,
+                    device=self.visual.device,
                 )
         return _original_process_video_input(self, video_input)
 

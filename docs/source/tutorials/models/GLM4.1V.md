@@ -26,10 +26,8 @@ You can use the official docker image to run `GLM-4.1V-9B-Thinking` directly.
 
 Start the docker image on your node.
 
-```{code-block} bash
-   :substitutions:
-
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+```bash
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1g \
@@ -50,7 +48,7 @@ docker run --rm \
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 ## Offline Inference
 
@@ -110,10 +108,6 @@ GLM-4.1V-9B-Thinking can be deployed on a single Atlas A2 (e.g., Ascend-910b) NP
 Run the following script to start the vLLM API server:
 
 ```bash
-:sync-yaml: tests/e2e/models/configs/GLM-4.1V-9B-Thinking.yaml
-:sync-target: test_cases[0].model test_cases[0].server_cmd
-:sync-class: cmd
-
 vllm serve "zai-org/GLM-4.1V-9B-Thinking" \
   --served-model-name glm4v \
   --tensor-parallel-size 1 \
