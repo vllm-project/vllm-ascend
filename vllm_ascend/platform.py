@@ -92,7 +92,7 @@ def _is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     if model_config is None:
         return False
 
-    if model_config.runner_type != "generate":
+    if getattr(model_config, "runner_type", "generate") != "generate":
         return False
 
     if getattr(model_config, "is_hybrid", False):
