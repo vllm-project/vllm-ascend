@@ -25,26 +25,40 @@ QWEN3_5_PREFIX_MAMBA_PROMPTS = [
 
 def _generate_qwen35_mrv2_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[tuple[list[int], str]]:
     outputs: list[tuple[list[int], str]] = []
-    common_kwargs = {
-        "tensor_parallel_size": 2,
-        "enforce_eager": True,
-        "dtype": "float16",
-        "max_model_len": 2048,
-        "max_num_batched_tokens": 2048,
-        "mamba_ssm_cache_dtype": "float16",
-    }
-    if enable_prefix_caching:
-        common_kwargs["enable_prefix_caching"] = True
-        common_kwargs["mamba_cache_mode"] = "align"
-    else:
-        common_kwargs["enable_prefix_caching"] = False
 
-    with (
-        patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
-        VllmRunner("Qwen/Qwen3.5-4B", **common_kwargs) as vllm_model,
-    ):
-        for prompt in QWEN3_5_PREFIX_MAMBA_PROMPTS:
-            outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
+    if enable_prefix_caching:
+        with (
+            patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
+            VllmRunner(
+                "Qwen/Qwen3.5-4B",
+                tensor_parallel_size=2,
+                enforce_eager=True,
+                dtype="float16",
+                max_model_len=2048,
+                max_num_batched_tokens=2048,
+                enable_prefix_caching=True,
+                mamba_cache_mode="align",
+                mamba_ssm_cache_dtype="float16",
+            ) as vllm_model,
+        ):
+            for prompt in QWEN3_5_PREFIX_MAMBA_PROMPTS:
+                outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
+    else:
+        with (
+            patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
+            VllmRunner(
+                "Qwen/Qwen3.5-4B",
+                tensor_parallel_size=2,
+                enforce_eager=True,
+                dtype="float16",
+                max_model_len=2048,
+                max_num_batched_tokens=2048,
+                enable_prefix_caching=False,
+                mamba_ssm_cache_dtype="float16",
+            ) as vllm_model,
+        ):
+            for prompt in QWEN3_5_PREFIX_MAMBA_PROMPTS:
+                outputs.extend(vllm_model.generate_greedy([prompt], max_tokens=8))
     return outputs
 
 
