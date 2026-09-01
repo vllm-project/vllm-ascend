@@ -838,7 +838,7 @@ class KVCacheRecvingThread(threading.Thread):
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
             if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
                 end_layer_index += self.num_draft_layers
-            is_index_cache_plane = any(".index_cache" in name for name in group_spec.get("layer_names", []))
+            is_index_cache_plane = group_spec.get("kv_cache_spec_type") == "AscendSFAIndexerCacheSpec"
 
             def in_partition(metadata_layer_idx: int) -> bool:
                 transformer_layer = (
