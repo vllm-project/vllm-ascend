@@ -68,7 +68,7 @@ It is recommended to download the model weight to a shared directory across mult
 
 **Example:**
 
-If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../installation.md#verify-multi-node-communication) guide for communication verification.
+If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../getting_started/installation.md#installation-multi-node-interconnect) guide for communication verification.
 
 ## 4 Installation
 

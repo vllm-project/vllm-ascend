@@ -98,16 +98,33 @@ def resolve_block_scales(
 
 
 def _mx_quantize(resolved: torch.Tensor, scale_alg: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """Re-quantize a dense matrix to MXFP8, returning the weight and uint8 scale."""
-    return torch_npu.npu_dynamic_mx_quant(
+    """Re-quantize a dense matrix to MXFP8, returning the weight and uint8 scale.
+
+    ``npu_dynamic_mx_quant`` emits the scale with its group axis already split into
+    ``[..., num_groups // 2, 2]`` pairs, whereas both MXFP8 schemes consume the loader
+    layout ``[..., num_groups]`` and pair the groups up themselves. Collapse the trailing
+    axis so a requantized checkpoint reaches them in the same layout as a native one.
+    """
+    quantized, scale = torch_npu.npu_dynamic_mx_quant(
         resolved,
         dst_type=BLOCK_FP8_WEIGHT_DTYPE,
         scale_alg=scale_alg,
     )
+    return quantized, scale.flatten(-2)
 
 
 def _supports_mx_regroup(in_features: int, group_size: int) -> bool:
     return in_features % group_size == 0
+
+
+def _is_absorbed_by_attention(layer: torch.nn.Module) -> bool:
+    """True for projections that MLA/SFA folds into its own weights.
+
+    ``kv_b_proj`` is split into ``W_UK``/``W_UV`` and the layer is disposed right
+    after, so it never runs a matmul. Quantizing it buys nothing and destroys the
+    dense matrix the attention backend has to absorb.
+    """
+    return getattr(layer, "prefix", "").endswith("kv_b_proj")
 
 
 @register_scheme(FP8_METHOD, "linear")
@@ -135,12 +152,10 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             "weight_scale_inv": torch.empty(
                 cdiv(output_size, self.block_n), cdiv(input_size, self.block_k), dtype=torch.float32
             ),
-            # A merged column-parallel loader offsets shards in weight elements,
-            # so it needs to know the scale is one entry per block_n rows.
-            "_packed_dim": 0,
-            "_packed_factor": self.block_n,
-            # A row-parallel loader narrows the scale along the reduction dim.
-            "_input_dim": 1,
+            # Loaders offset shards in weight elements and must convert to scale
+            # entries. Rounding that conversion up matters: a shard whose height
+            # is not a multiple of block_n still owns the tile covering its tail.
+            "_block_quant_scale": (self.block_n, self.block_k),
         }
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -152,6 +167,13 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
             self.model_dtype,
         )
         del layer.weight_scale_inv
+
+        if _is_absorbed_by_attention(layer):
+            # Decided locally rather than on the scheme: the attention backend
+            # splits this layer and disposes of it, so apply() is never reached
+            # and nothing about this layer should speak for any other.
+            layer.weight = torch.nn.Parameter(maybe_trans_nz(resolved), requires_grad=False)
+            return
 
         if self.mxfp8_method is not None and not _supports_mx_regroup(resolved.shape[1], self.mxfp8_method.group_size):
             logger.warning_once(

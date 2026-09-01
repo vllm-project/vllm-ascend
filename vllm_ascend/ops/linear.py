@@ -458,9 +458,16 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if "wo_a" in self.prefix and not get_current_hardware_profile().supports(
+        supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION
-        ):
+        )
+        reshape_bf16_wo_a = (
+            "wo_a" in self.prefix
+            and supports_dynamic_mx_quant_fusion
+            and self.quant_config is None
+            and loaded_weight.dtype == torch.bfloat16
+        )
+        if "wo_a" in self.prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a):
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
                 self.weight.data = (

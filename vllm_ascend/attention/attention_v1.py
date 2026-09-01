@@ -61,8 +61,9 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import is_950, vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
 if vllm_version_is("0.27.1"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -1442,7 +1443,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # ChunkedPrefill mixing prefill+decode: split into a per-phase
                 # FIA call each (A5 only).
                 if (
-                    is_950()
+                    get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
                     and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
                     and attn_metadata.num_decodes > 0
                     and attn_metadata.num_prefills > 0

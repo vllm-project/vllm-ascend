@@ -23,12 +23,11 @@ import torch_npu  # noqa: F401
 from vllm import envs
 from vllm.logger import logger
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
-    AscendDeviceType,
-    get_ascend_device_type,
 )
 
 # TODO(zzzzzz198): Currently three formats(float8_e8m0fnu, float4_e2m1fn_x2, hifloat8) have to be
@@ -52,7 +51,7 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     destination FP8 range, then rounds the E8M0 scale exponent up to avoid
     quantization overflow. MiniMax M3 checkpoints require the latter.
     """
-    if get_ascend_device_type() != AscendDeviceType.A5:
+    if not get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE):
         return 0
 
     if vllm_config is None:
@@ -267,7 +266,7 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
     is_kv_consumer = vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
-    if not is_kv_consumer and get_ascend_device_type() != AscendDeviceType.A5:
+    if not is_kv_consumer and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         return False
     if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
         if layer_name is not None:

@@ -74,10 +74,8 @@ def update_config(config_path: Path, timings: dict[str, list[int]]) -> int:
     # --- parse existing estimated_times ---
     import yaml
 
-    docs = list(yaml.safe_load_all(text))
-    existing: dict[str, int] = {}
-    if len(docs) >= 2 and isinstance(docs[1], dict):
-        existing = docs[1].get("estimated_times", {}) or {}
+    meta = yaml.safe_load(text) or {}
+    existing: dict[str, int] = meta.get("estimated_times", {}) or {}
 
     # --- compute new entries (preserve existing, update from timing data) ---
     new_entries = dict(existing)

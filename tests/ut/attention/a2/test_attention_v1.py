@@ -23,6 +23,7 @@ from vllm_ascend.attention.utils import (
     using_paged_attention,
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import AscendDeviceType
 
@@ -51,7 +52,10 @@ class TestAttentionGraphHelpers(TestBase):
     def test_large_head_uses_paged_attention_on_a2(self):
         vllm_config = MagicMock()
         vllm_config.speculative_config = None
-        with patch("vllm_ascend.attention.utils.get_ascend_device_type", return_value=AscendDeviceType.A2):
+        with patch(
+            "vllm_ascend.attention.utils.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A2),
+        ):
             self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
