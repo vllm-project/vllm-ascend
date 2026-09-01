@@ -193,7 +193,7 @@ def _patch_make_empty_intermediate_tensors(inner_model: nn.Module) -> None:
         aux_layers = getattr(inner_model, "aux_hidden_state_layers", ())
         # A non-first PP rank only receives aux hidden states produced by
         # earlier pipeline stages. Local aux states are appended during forward.
-        num_incoming_aux_layers = sum(layer_idx < inner_model.start_layer for layer_idx in aux_layers)
+        num_incoming_aux_layers = sum(layer_idx <= inner_model.start_layer for layer_idx in aux_layers)
         hidden_size = inner_model.config.hidden_size
         for i in range(num_incoming_aux_layers):
             result.tensors[f"{_AUX_KEY_PREFIX}{i}"] = torch.zeros(
@@ -211,7 +211,13 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
     from vllm.model_executor.models.interfaces import EagleModelMixin
 
-    if isinstance(inner_model, DeepseekV2Model):
+    from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3Model
+
+    if isinstance(inner_model, MiniMaxM3Model):
+        # MiniMax-M3 uses support_torch_compile, which captures the class-level
+        # forward during __init__. Its PP aux propagation must stay native.
+        make_forward = None
+    elif isinstance(inner_model, DeepseekV2Model):
         make_forward = _make_deepseek_v2_forward
     elif isinstance(inner_model, EagleModelMixin):
         make_forward = _make_eagle_mixin_forward
@@ -223,7 +229,7 @@ def patch_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
         )
         return False
 
-    if not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False):
+    if make_forward is not None and not getattr(inner_model, "_eagle3_pp_aux_forward_patched", False):
         inner_model.forward = make_forward().__get__(inner_model, type(inner_model))
         inner_model._eagle3_pp_aux_forward_patched = True
     _patch_make_empty_intermediate_tensors(inner_model)
