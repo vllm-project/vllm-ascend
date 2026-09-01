@@ -551,6 +551,22 @@ class KVPoolWorker:
         except AttributeError:
             return cache.storage().data_ptr()
 
+    def _extract_physical_layer_index(self, layer_name: str) -> int:
+        import regex as re
+
+        m = re.search(r"layers\.(\d+)", layer_name)
+        if m:
+            return int(m.group(1))
+        # MTP layers have names like "mtp.0.self_attn.xxx" without "layers."
+        # prefix. Map them after the main model layers.
+        if ".mtp." in f".{layer_name}.":
+            m = re.search(r"mtp\.(\d+)", layer_name)
+            if m:
+                num_hidden_layers = getattr(self.hf_config, "num_hidden_layers", self.num_layers)
+                return num_hidden_layers + int(m.group(1))
+        m = re.search(r"(\d+)", layer_name)
+        return int(m.group(1)) if m else 0
+
     def _infer_cache_group_metadata(self, group_id: int, layer_names: list[str]):
         group_addrs: list[int] = []
         group_block_lens: list[int] = []
@@ -558,6 +574,10 @@ class KVPoolWorker:
         group_tensors: list[torch.Tensor] = []
         group_block_size_scales: list[int] = []
         for layer_name in layer_names:
+            phys = self._extract_physical_layer_index(layer_name)
+            if phys >= self.num_layers:
+                continue
+            physical_layers.add(phys)
             cache_or_caches = self.kv_caches[layer_name]
             for cache in self._as_cache_tuple(cache_or_caches):
                 base_addr = cache.data_ptr()
@@ -1326,6 +1346,8 @@ class KVPoolWorker:
                 submitted_layers += 1
 
     def wait_for_layer_load(self) -> None:
+        if self.current_layer >= self.num_layers:
+            return
         assert self.layer_load_finished_events is not None
         reset_attention_compute_start_gate()
         self._submit_ready_layer_loads()
