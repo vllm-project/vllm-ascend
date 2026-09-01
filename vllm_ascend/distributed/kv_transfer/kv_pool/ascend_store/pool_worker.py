@@ -1209,6 +1209,7 @@ class KVPoolWorker:
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
 
             if all_group_gvas:
+                request.save_keys = all_group_save_keys
                 request.block_gvas_by_group_np = all_group_gvas
                 request.block_ids_by_group_np = all_group_block_ids
                 request.block_gvas_np = all_group_gvas[0]
