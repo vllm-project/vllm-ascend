@@ -475,7 +475,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         **kwargs,
     ) -> None:
         self.vllm_config = get_current_vllm_config()
-        self.pcp_enabled = self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.pcp_enabled = (
+            type(self) is AscendAttentionBackendImpl
+            and self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+        )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
