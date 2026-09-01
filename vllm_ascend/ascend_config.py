@@ -1400,6 +1400,17 @@ def init_ascend_config(vllm_config):
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
+    unknown_keys = sorted(set(kwargs) - AscendConfig.__dataclass_fields__.keys())
+    # vLLM-Omni shares this mapping with the platform plugin. Preserve its
+    # extension keys on VllmConfig while excluding them from Ascend validation.
+    if unknown_keys and importlib.util.find_spec("vllm_omni") is not None:
+        logger.warning(
+            "The following additional_config keys are invalid for vLLM-Ascend: %s. "
+            "They may be used by vLLM-Omni or another project. "
+            "Please remove them if they are not needed for your use case.",
+            unknown_keys,
+        )
+        kwargs = {k: v for k, v in kwargs.items() if k not in unknown_keys}
 
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,
