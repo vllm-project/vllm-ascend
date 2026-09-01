@@ -535,6 +535,54 @@ test_cases:
       - "0"
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+      - "--limit-mm-per-prompt"
+      - '{"image":3}'
+    test_content:
+      - "image"
+      - "messages"
+    mm_request:
+      images:
+        - "vllm-ascend/mm_request"
+      messages:
+        - role: user
+          content:
+            - type: "text"
+              text: "compare these three pictures"
+            - type: image_url
+              image_url:
+                url: "{IMAGE_0}"
+            - type: image_url
+              image_url:
+                url: "http://image.huawei.com/tiny-lts/v1/images/99d58af0586928f6ecd61f3013996fbd_1180x200.png"
+            - type: image_url
+              image_url:
+                url: "http://image.huawei.com/tiny-lts/v1/images/89c4e25feaddc849ddc7_400x60.png"
+      api_args:
+        max_tokens: 500
+    expected_response:
+      assert_not_empty: true
+      status_code: 200
+    # messages
+    prompts:
+      - "Hello!"
+      - "What is the weather in Shanghai?"
+      - "Count to 5."
+    api_keyword_args:
+      - max_tokens: 100
+      - max_tokens: 100
+        tools:
+          - name: "get_weather"
+            description: "Get weather info"
+            input_schema:
+              type: "object"
+              properties:
+                location:
+                  type: "string"
+      - max_tokens: 50
+        stream: true
     benchmarks:
       perf:
         case_type: performance

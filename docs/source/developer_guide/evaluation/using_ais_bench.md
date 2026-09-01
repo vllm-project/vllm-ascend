@@ -97,7 +97,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
     unzip mmlu.zip
     rm mmlu.zip
     ```
@@ -106,7 +106,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
     unzip gpqa.zip
     rm gpqa.zip
     ```
@@ -115,7 +115,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
     unzip math.zip
     rm math.zip
     ```
@@ -134,7 +134,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
     cd ais_bench/datasets
     mkdir aime/
     cd aime/
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
     unzip aime.zip
     rm aime.zip
     ```
@@ -143,7 +143,7 @@ You can choose one or multiple datasets to execute accuracy evaluation.
 
     ```shell
     cd ais_bench/datasets
-    wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
+    wget https://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
     unzip gsm8k.zip
     rm gsm8k.zip
     ```

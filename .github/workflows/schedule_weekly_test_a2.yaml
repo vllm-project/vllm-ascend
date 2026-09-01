@@ -63,10 +63,10 @@ on:
         options:
           - release
           - daily
-      cann_version:
-        description: 'CANN version for base image tag'
+      base_image_tag:
+        description: 'Base image tag params. Default auto-picks latest image; set a date (YYYYMMDD) to pin it.'
         required: false
-        default: '2026.08.03'
+        default: '{"cann_version":"2026.08.03","base_image_date":"auto"}'
         type: string
 
 permissions:
@@ -90,7 +90,7 @@ env:
   # Single source of truth for all shared variables across jobs.
   # NOTE: GitHub Actions does not support env context in reusable workflow `with:` inputs,
   # so these values are exported as job outputs via the `setup-vars` job below.
-  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12'
+  CANN_IMAGE: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12'
   ASCEND_LOG_PREFIX: '/root/.cache/ascend-logs'
 
 jobs:
@@ -160,7 +160,7 @@ jobs:
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -187,7 +187,8 @@ jobs:
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
       quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
-      cann_version: ${{ inputs.cann_version }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}

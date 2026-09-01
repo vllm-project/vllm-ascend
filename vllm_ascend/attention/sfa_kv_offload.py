@@ -44,6 +44,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_sparse_kv_offload_manager,
 )
+from vllm_ascend.utils import enable_dsa_cp
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
@@ -162,7 +163,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             kv_sharing_target_layer_name,
             **kwargs,
         )
-        if self.enable_dsa_cp:
+        if enable_dsa_cp():
             raise NotImplementedError("Sparse KV offload currently requires TP without context parallelism")
         if self.enable_sparse_sfa_c8:
             raise NotImplementedError(
@@ -259,12 +260,11 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         hidden_states: torch.Tensor,
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
-        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         self._current_layer_name = layer_name
         try:
-            return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output)
+            return super().forward(layer_name, hidden_states, kv_cache, attn_metadata, output)
         finally:
             self._current_layer_name = None
 

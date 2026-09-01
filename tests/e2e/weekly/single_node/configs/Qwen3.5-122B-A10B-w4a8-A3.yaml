@@ -1,0 +1,161 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+test_cases:
+  - name: "Qwen3.5-122B-A10B-in16k-out1k-0-256-64"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
+    envs:
+      HCCL_BUFFSIZE: "2048"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--trust-remote-code"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "140000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--seed"
+      - "1024"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,16,24,32,48,64,96,108,128,192],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":0,"scheduler_config":{"enable_balance_scheduling":true}}'
+      - "--profiler-config"
+      - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in16384-bs1024-prefix0-qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 256
+        max_out_len: 1024
+        batch_size: 64
+        request_rate: 0
+        baseline: 409.7045
+        threshold: 0.97
+  - name: "Qwen3.5-122B-A10B-in128k-out1k-90-16-4"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
+    envs:
+      HCCL_BUFFSIZE: "2048"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--trust-remote-code"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "140000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--seed"
+      - "1024"
+      - "--enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,16,24,32,48,64,96,108,128,192],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":0,"scheduler_config":{"enable_balance_scheduling":true}}'
+      - "--profiler-config"
+      - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 16
+        max_out_len: 1024
+        batch_size: 4
+        request_rate: 0.02
+        baseline: 20.7968
+        threshold: 0.97
+  - name: "Qwen3.5-122B-A10B-in984k-out1k-0-8-2"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
+    envs:
+      HCCL_BUFFSIZE: "2048"
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--trust-remote-code"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "1010000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--seed"
+      - "1024"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,16,24,32,48,64,96,108,128,192],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true}}'
+      - "--profiler-config"
+      - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in1007616-bs16-prefix0-qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 1
+        max_out_len: 1024
+        batch_size: 1
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97

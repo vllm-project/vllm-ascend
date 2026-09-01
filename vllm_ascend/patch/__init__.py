@@ -84,7 +84,29 @@
 #       handles a pre-sharded visible-devices env var, or vLLM-Ascend stops
 #       relying on application-level device slicing for DP.
 #
-# ** 5. File: platform/patch_eplb.py**
+# ** 5. File: platform/patch_dyntra_lb_core.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
+#      `vllm.v1.engine.core.DPEngineCoreProc`
+#    Why:
+#       PD-disaggregated decoder serving can develop uneven attention KV-cache
+#       workloads across data-parallel ranks. Upstream vLLM does not currently
+#       expose an extension point for selecting an Ascend-specific DP engine
+#       core that coordinates dynamic cross-rank scheduling decisions.
+#    How:
+#       When DyntraLB is enabled, replace the DP engine-core process with the
+#       DyntraLB implementation at engine startup. The implementation exchanges
+#       lightweight scheduling metadata across DP ranks and applies the
+#       resulting admission, pause, and resume decisions through the DyntraLB
+#       scheduler while preserving the original path when the feature is off.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/12292
+#    Future Plan:
+#       Remove this patch after upstream vLLM provides stable scheduler and DP
+#       engine-core plugin interfaces, or equivalent dynamic intra-decoder DP
+#       load balancing that vllm-ascend can use without monkey-patching.
+#
+# ** 6. File: platform/patch_eplb.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.parallel.current_platform`
 #   2. `vllm.distributed.eplb.eplb_state._move_to_workspace`
@@ -106,16 +128,17 @@
 #       available in the supported vLLM version. Retain only the NPU backend,
 #       operator, communicator, load normalization, and weight views.
 #
-# ** 6. File: platform/patch_fused_moe.py**
+# ** 7. File: platform/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
-#       vllm's FusedMoE is a factory function (not a class). deepseek_v2 and
-#       other models do `from vllm.model_executor.layers.fused_moe import FusedMoE`
+#       vllm's MoE factory function (formerly FusedMoE, now FusedMoEFactory on main).
+#       deepseek_v2 and other models do
+#       `from vllm.model_executor.layers.fused_moe import FusedMoEFactory`
 #       and call it directly, so on Ascend we must redirect it to AscendMoERunner
 #       before any model is imported.
 #    How：
-#       Patch the FusedMoE binding in both the package `__init__` and the layer
+#       Patch the FusedMoEFactory binding in both the package `__init__` and the layer
 #       module so model imports pick up the Ascend runner. `worker/patch_fused_moe.py`
 #       reuses this platform patch to avoid double-wrapping the factory during
 #       worker initialization.
@@ -125,7 +148,7 @@
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
 #       for selecting the MoE runner implementation.
 #
-# ** 7. File: platform/patch_kv_cache_coordinator.py**
+# ** 8. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
 #    Why:
@@ -149,7 +172,7 @@
 #       Remove this patch when vLLM PR #42524 and #44243 is included in the supported
 #       upstream vLLM version.
 #
-# ** 8. File: platform/patch_kv_cache_utils.py**
+# ** 9. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
 #      `vllm.v1.engine.core.resolve_kv_cache_block_sizes`
@@ -168,7 +191,7 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 9. File: platform/patch_mamba_config.py**
+# ** 10. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -180,7 +203,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 10. File: platform/patch_mamba_config_310.py**
+# ** 11. File: platform/patch_mamba_config_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -191,13 +214,13 @@
 #       On 310P, override verify_and_update_config to align mamba_block_size and
 #       attention block size to the 128-token kernel alignment, ensuring the
 #       attention page size is >= mamba page size. This is the 310P counterpart
-#       of patch_mamba_config.py (loaded only when `is_310p()` is True).
+#       of patch_mamba_config.py (selected by the active hardware profile).
 #    Related PR (if no, explain why):
 #       No, 310P-specific kernel alignment requirement.
 #    Future Plan:
 #       Remove this patch once upstream supports 310P-aligned mamba block sizing.
 #
-# ** 11. File: platform/patch_mamba_manager.py**
+# ** 12. File: platform/patch_mamba_manager.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
 #    Why:
@@ -217,7 +240,7 @@
 #          hybrid prefix cache lookup for DCP.
 #       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
 #
-# ** 12. File: platform/patch_minimax_m2_config.py**
+# ** 13. File: platform/patch_minimax_m2_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.model.ModelConfig._verify_quantization`
 #    Why:
@@ -278,7 +301,7 @@
 #       Drop the alias once upstream registry includes it or the checkpoint
 #       standardizes architecture strings.
 #
-# ** 13. File: platform/patch_mla_prefill_backend.py**
+# ** 14. File: platform/patch_mla_prefill_backend.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.mla.common.get_mla_prefill_backend`
 #    Why:
@@ -300,7 +323,7 @@
 #       platform/device hook so Ascend can be selected (or skipped) without
 #       monkey-patching.
 #
-# ** 14. File: platform/patch_multiproc_executor.py**
+# ** 15. File: platform/patch_multiproc_executor.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
 #    Why:
@@ -313,7 +336,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 15. File: platform/patch_pp_mtp.py**
+# ** 16. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.outputs.ModelRunnerOutput`
 #    Why:
@@ -403,7 +426,7 @@
 #       supports local drafter models with PP > 1, or moves the PP validation to a
 #       separate hook that can be overridden per-model-type.
 #
-# ** 16. File: platform/patch_profiling_chunk.py**
+# ** 17. File: platform/patch_profiling_chunk.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCore.__init__`
 #   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
@@ -431,7 +454,7 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
-# ** 17. File: platform/patch_speculative_config.py**
+# ** 18. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
 #    Why:
@@ -454,7 +477,7 @@
 #       models without a custom `hf_config_override`, or exposes a plugin hook
 #       for MTP model_type/architecture remapping.
 #
-# ** 18. File: platform/patch_structured_output.py**
+# ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
 #      `vllm.v1.structured_output.StructuredOutputManager.grammar_init`
@@ -476,7 +499,7 @@
 #       before grammar compilation or safely handles mixed-backend grammar
 #       failures without killing the engine.
 #
-# ** 19. File: platform/patch_torch_accelerator.py**
+# ** 20. File: platform/patch_torch_accelerator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.accelerator.memory_stats`, `torch.accelerator.memory_reserved`,
 #      `torch.accelerator.reset_peak_memory_stats`, `torch.accelerator.get_memory_info`,
@@ -496,7 +519,7 @@
 #       Remove this patch once `torch.accelerator` correctly routes to the NPU
 #       backend for these memory APIs.
 #
-# ** 20. File: platform/patch_tool_choice_none_content.py**
+# ** 21. File: platform/patch_tool_choice_none_content.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionResponse`
 #      `vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionStreamResponse`
@@ -512,7 +535,7 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 21. File: platform/patch_use_v2_model_runner.py**
+# ** 22. File: platform/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
@@ -555,59 +578,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 2. File: worker/patch_deepseek_mtp.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.deepseek_v2.get_spec_layer_idx_from_weight_name` and
-#      `vllm.model_executor.models.deepseek_mtp.get_spec_layer_idx_from_weight_name`
-#    Why:
-#       When GLM5 uses rotary quant in vllm-ascend, the MTP layer needs to load an extra weight
-#       named `rot.weight`.
-#    How：
-#       If weight name starts with `rot`, return `layer_id + i` like other tensors in MTP layer.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   2. `vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer`
-#    Why:
-#       When GLM5 uses rotary quant in vllm-ascend, the `previous_hidden_states` does not .
-#    How：
-#       If the target model uses rotary quant, a new linear operation is added before `ehnorm`.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   3. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP._rewrite_spec_layer_name`
-#    Why:
-#       Rename `rot.weight` to match the format of weights in `DeepSeekMTP`.
-#    How：
-#       If the weight name is `rot`, rename it to `model.layers.{spec_layer}.rot.weight`.
-#    Related PR (if no, explain why):
-#       Rotary quant is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#   4. `vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.load_weights`
-#    Why:
-#       The `load_weights` method of the DeepSeekMTP model does not apply the `cache_scale_mapper`.
-#    How：
-#       If the weight name is `fa_k.offset`, rename it to `mla_attn.mla_attn.fa_k.offset`.
-#    Related PR (if no, explain why):
-#       ModelSlim quantization (kvcache quantization) is a unique feature of vllm-ascend.
-#    Future Plan:
-#       Remove this patch when vllm supports pluggable weight preprocessing in `load_weights`
-#       or when ModelSlim cache scale naming aligns with upstream conventions.
-#   5. `vllm.model_executor.models.deepseek_v2.GlmMoeDsaForCausalLM.load_weights`
-#    Why:
-#       After vllm PR #41706, GlmMoeDsaForCausalLM.load_weights uses `AutoWeightsLoader` which
-#       does not skip `rot.weight`, and will cause ValueError while loading weights.
-#    How：
-#       Use the `skip_prefixes` parameter to skip certain weight tensors.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/41706
-#    Future Plan:
-#       Remove this patch when vllm supports rotary quant or pluggable `MultiTokenPredictorLayer`.
-#
-# ** 3. File: worker/patch_deepseek_v2.py**
+# ** 2. File: worker/patch_deepseek_v2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.deepseek_v2.DeepseekV2MLAAttention.__init__`
 #    Why:
@@ -625,33 +596,7 @@
 #       Remove this patch when vLLM Ascend depends on a vLLM version that includes
 #       PR #45895.
 #
-# ** 4. File: worker/patch_distributed.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.parallel_state.GroupCoordinator`
-#    Why:
-#       vllm doesn't support all_to_all for GroupCoordinator.
-#    How：
-#       Add all_to_all implementation for GroupCoordinator.
-#    Related PR (if no, explain why):
-#       No, we should use vlLM all2all manager to support all_to_all for npu.
-#    Future Plan:
-#       Remove this patch when the refactor of all2all manager is done.
-#
-# ** 5. File: worker/patch_draft_quarot.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM.load_weights`
-#    Why:
-#       vllm-ascend reused the loading logic of drafter model from vllm,
-#       but vllm doesn't need to apply to Ascend quantization.
-#    How：
-#       Dynamically replace the `load_weights` function at runtime,
-#       and fix `target_config` into the new implementation with a closure.
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/36225
-#    Future Plan:
-#       Remove this patch when vLLM merges the PR.
-#
-# ** 6. File: worker/patch_eagle3_init.py**
+# ** 4. File: worker/patch_eagle3_init.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.llama_eagle3.Eagle3LlamaForCausalLM`,
 #      `vllm.model_executor.models.deepseek_v2.Eagle3DeepseekV2ForCausalLM` /
@@ -676,7 +621,7 @@
 #       Remove this patch once upstream Eagle3 draft models compute
 #       `target_layer_num` from the total (not per-stage) hidden layer count.
 #
-# ** 7. File: worker/patch_eagle3_pp_aux.py**
+# ** 5. File: worker/patch_eagle3_pp_aux.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. Eagle3 target inner models (`DeepseekV2Model`, EagleModelMixin-based models)
 #      `forward`, `make_empty_intermediate_tensors`
@@ -697,11 +642,11 @@
 #       Remove this patch once upstream Eagle3 supports collecting aux hidden
 #       states that span PP stages without cross-stage propagation.
 #
-# ** 8. File: worker/patch_fused_moe.py**
+# ** 6. File: worker/patch_fused_moe.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.FusedMoE`
+#   1. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
 #    Why:
-#       The worker process re-imports the FusedMoE factory after the platform
+#       The worker process re-imports the MoE factory after the platform
 #       patch has already redirected it to AscendMoERunner. Re-applying the
 #       monkey-patch directly would wrap an already-patched factory.
 #    How：
@@ -714,7 +659,7 @@
 #       Remove this module together with platform/patch_fused_moe.py once upstream
 #       exposes a backend dispatch / plugin hook for selecting the MoE runner.
 #
-# ** 9. File: worker/patch_idex_310.py**
+# ** 7. File: worker/patch_idex_310.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
 #      `vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets`
@@ -738,13 +683,24 @@
 #       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
 #       GDN attention backend. RC devices also route upstream GDNAttentionBackend
 #       to the 310P metadata builder.
+#
+#   4. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.rot_pos_emb`
+#      (RC only)
+#    Why:
+#       310P images do not install Triton, so upstream ``HAS_TRITON=False``
+#       already selects ``pos_embed_interpolate_native``; no pos-embed rewrite.
+#       RC still needs blocking H2D in `rot_pos_emb` to avoid indexing races.
+#    How:
+#       On RC only, bind `rot_pos_emb_310` from
+#       `vllm_ascend/_310p/ops/qwen3vl_310.py`.
 #    Related PR (if no, explain why):
 #       No, 310P custom operator and backend behavior are vllm-ascend specific.
 #    Future Plan:
 #       Remove this patch when upstream exposes stable hooks for 310P GDN
-#       chunk metadata, spec-decode input layout, and backend selection.
+#       chunk metadata, spec-decode input layout, backend selection, and
+#       vision rot_pos_emb that does not race on 310P RC.
 #
-# ** 10. File: worker/patch_kimi_k25.py**
+# ** 8. File: worker/patch_kimi_k25.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.kimi_k25_vit.Learnable2DInterpPosEmbDivided_fixed.forward`
 #    Why:
@@ -755,7 +711,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM aligns with the latest main.
 #
-# ** 11. File: worker/patch_mamba_utils.py**
+# ** 9. File: worker/patch_mamba_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel`
 #    Why:
@@ -788,7 +744,7 @@
 #       Remove this patch when:
 #       vLLM itself supports kv transfer for mamba
 #
-# ** 12. File: worker/patch_minimax_m2.py**
+# ** 10. File: worker/patch_minimax_m2.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
 #    Why:
@@ -827,35 +783,7 @@
 #    Future Plan:
 #       Remove this patch when upstream supports MiniMax-M2 fp8 loading on NPU.
 #
-# ** 13. File: worker/patch_minimax_m2_linear_attn.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.__init__`
-#      `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.weight_loader`
-#    Why:
-#       MiniMax-M2 linear attention RMSNorm needs weight sharding that can follow
-#       TP layout (and sometimes kv-head replication) on NPU.
-#    How：
-#       Override `__init__` to parameterize weight shard world/rank and install a
-#       sharded `weight_loader` implementation.
-#    Related PR (if no, explain why):
-#       No, upstream API surface differs across versions.
-#    Future Plan:
-#       Remove this patch when upstream exposes stable sharding hooks for this layer.
-#
-#   2. `vllm.model_executor.layers.mamba.linear_attn.MiniMaxText01RMSNormTP.forward_qk`
-#      (or older `_normalize_qk`)
-#    Why:
-#       q/k norm for linear attention is performance-sensitive. On NPU, a fused
-#       rms_norm kernel is faster and TP needs a global rstd correction.
-#    How：
-#       Replace q/k normalization with NPU rms_norm fast path and TP-global rstd
-#       correction; fall back to upstream implementation on non-NPU.
-#    Related PR (if no, explain why):
-#       No, backend-specific optimization.
-#    Future Plan:
-#       Remove this patch when upstream adds a backend dispatch path for q/k norm.
-#
-# ** 14. File: worker/patch_npugraph_ex_triton.py**
+# ** 12. File: worker/patch_npugraph_ex_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `npugraph_ex.core._concrete_graph.ValuePack`,
 #      `npugraph_ex.npu_fx_compiler._unpack_meta`,
@@ -869,7 +797,7 @@
 #    Future Plan:
 #       Remove this patch when the PTA version used by vllm-ascend has been upgraded.
 #
-# ** 15. File: worker/patch_process_weights_after_loading.py**
+# ** 13. File: worker/patch_process_weights_after_loading.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.model_loader.utils.process_weights_after_loading`
 #      `vllm.model_executor.model_loader.base_loader.process_weights_after_loading`
@@ -894,7 +822,7 @@
 #       Then register `DSAAttention` through vLLM's post-load weight-processing
 #       registry instead of monkey-patching model-loader helpers.
 #
-# ** 16. File: worker/patch_qwen3_5.py**
+# ** 14. File: worker/patch_qwen3_5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_5.Qwen3_5GatedDeltaNet._forward_core`
 #    Why:
@@ -905,7 +833,7 @@
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
 #
-# ** 17. File: worker/patch_qwen3_dflash.py**
+# ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
 #    Why:
@@ -916,31 +844,7 @@
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
 #
-# ** 18. File: hunyuan_vl_processor_compat.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.hunyuan_vision.HunYuanVLProcessingInfo.get_hf_processor`
-#      and the vLLM processor lazy registry
-#    Why:
-#       The supported vLLM refs currently straddle the HunyuanVL processor
-#       migration. v0.23.0 still bundles the processor, while the verified
-#       main ref uses the Transformers-native processor but predates the full
-#       Transformers 5.13 registry and prompt-protocol cleanup.
-#    How:
-#       Preserve the bundled v0.23.0 processor protocol, translate its image
-#       processor registration to Transformers 5.13, and complete the native
-#       processor registry, loader, and tokenizer schema on the main ref.
-#    Related PR:
-#       1. https://github.com/vllm-project/vllm/pull/47872
-#       2. https://github.com/vllm-project/vllm/pull/47867
-#    Future Plan:
-#       Remove this patch and delete the `install_hunyuan_vl_processor_compat()`
-#       call from `vllm_ascend/__init__.py` only after both supported vLLM refs
-#       contain `4a6440acefbd4d977620bdb6dfb7fb325cd9bda7` (vLLM PR #47867,
-#       merged into vLLM main at 2026-07-11 07:56:14 UTC), or an equivalent
-#       fix, and the supported HunyuanOCR tokenizer artifacts expose the named
-#       special-token schema required by Transformers 5.13.
-#
-# ** 19. File: worker/patch_bind_kv_cache.py**
+# ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -953,15 +857,9 @@
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** 20. File: worker/patch_qwen3vl.py**
+# ** 17. File: worker/patch_qwen3vl.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_vl.Qwen3VLForConditionalGeneration._get_deepstack_input_embeds`
-#    Why:
-#       support flash comm v1 for qwen3vl.
-#    How：
-#       override _get_deepstack_input_embeds method with the flash comm v1 implementation.
-#    Future Plan:
-#       Remove this patch when https://github.com/vllm-project/vllm-ascend/issues/5712 is completed.
 #   2. `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.start_layer`,
 #      `vllm.model_executor.models.qwen3_vl_moe.Qwen3MoeLLMForCausalLM.end_layer`
 #    Why:
@@ -984,7 +882,7 @@
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for this fused kernel.
 #
-# ** 21. File: worker/patch_rejection_sampler.py**
+# ** 18. File: worker/patch_rejection_sampler.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.rejection_sampler`
 #    Why:
@@ -999,7 +897,7 @@
 #           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
 #       2. make these functions as costom op, then remove AscendRejectionSampler
 #
-# ** 22. File: worker/patch_routed_experts_capture.py**
+# ** 19. File: worker/patch_routed_experts_capture.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
 #    Why:
@@ -1018,7 +916,7 @@
 #       Remove this patch when upstream vLLM supports MoE communication type abstraction that
 #       can be extended by hardware plugins like vllm-ascend.
 #
-# ** 23. File: worker/patch_step3p5.py**
+# ** 20. File: worker/patch_step3p5.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.step3p5.Step3p5Attention.forward`
 #    Why:
@@ -1035,7 +933,7 @@
 #       Remove this patch once torch.compile fully supports matching pattern from
 #       op's params.
 #
-# ** 24. File: worker/patch_triton.py**
+# ** 21. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
@@ -1065,7 +963,7 @@
 #       Remove this patch when torch_npu's Triton includes
 #       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
 #
-# ** 25. File: worker/patch_v2/patch_attn_utils.py**
+# ** 22. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.attn_utils.get_kv_cache_spec`
 #    Why:
@@ -1084,7 +982,20 @@
 #       Remove this patch once upstream adds a backend hook for KV cache spec
 #       construction or v2 worker no longer depends on the shared v1 helper.
 #
-# ** 26. File: worker/patch_v2/patch_block_table.py**
+#   2. `DeepseekV32IndexerCache.get_attn_backend`
+#    Why:
+#       SFA indexer cache layers require the Ascend cache-only backend;
+#       the upstream indexer backend is GPU-specific.
+#    How：
+#       Route SFA indexer cache layers to the existing
+#       `AscendSFAIndexerBackend`.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/13069
+#    Future Plan:
+#       Remove this patch once upstream adds a backend hook for KV cache spec
+#       construction or v2 worker no longer depends on the shared v1 helper.
+#
+# ** 23. File: worker/patch_v2/patch_block_table.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.block_table.BlockTables`
 #    Why:
@@ -1097,7 +1008,7 @@
 #       remove this patch when vLLM-ascend's BlockTables can initialize
 #       slot mapping as torch.int64 dtype.
 #
-# ** 27. File: worker/patch_v2/patch_dflash_speculator.py**
+# ** 24. File: worker/patch_v2/patch_dflash_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.spec_decode.dflash.speculator.DFlashCudaGraphManager`
 #    Why:
@@ -1112,24 +1023,22 @@
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
 #       graph manager abstraction.
 #
-# ** 28. File: worker/patch_v2/patch_eagle_speculator.py**
+# ** 25. File: worker/patch_v2/patch_eagle_speculator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.PrefillSpeculatorCudaGraphManager`,
-#      `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.DecodeSpeculatorCudaGraphManager`
+#   1. `vllm.v1.worker.gpu.spec_decode.autoregressive.speculator.SpeculatorCudaGraphManager`
 #    Why:
-#       The v2 Eagle spec-decode path uses upstream CUDA graph managers for
-#       prefill/decode spec decoding, which are not usable on Ascend.
+#       The shared v2 autoregressive speculative-decoding path (Eagle/MTP) uses
+#       an upstream CUDA graph manager, which is not usable on Ascend.
 #    How：
-#       Replace the prefill/decode speculator graph managers on the upstream
-#       module with `PrefillEagleAclGraphManager` / `DecodeEagleAclGraphManager`
+#       Replace the shared upstream manager with `AutoRegressiveAclGraphManager`
 #       (ACL graph).
 #    Related PR (if no, explain why):
-#       No, vllm-ascend v2 spec-decode ACL graph integration.
+#       https://github.com/vllm-project/vllm-ascend/pull/14310
 #    Future Plan:
 #       Remove this patch once upstream exposes a backend-dispatchable spec-decode
 #       graph manager abstraction.
 #
-# ** 29. File: worker/patch_v2/patch_input_batch.py**
+# ** 26. File: worker/patch_v2/patch_input_batch.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.input_batch.InputBatch`
 #    Why:
@@ -1140,7 +1049,7 @@
 #    Future Plan:
 #       remove this patch when vLLM-ascend's make_dummy behavior aligns with vLLM.
 #
-# ** 30. File: worker/patch_v2/patch_model_state.py**
+# ** 27. File: worker/patch_v2/patch_model_state.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.model_states.default.init_model_state`
 #    Why:
@@ -1151,7 +1060,23 @@
 #    Future Plan:
 #       remove this when vllm-ascend's attention metadata is align with vllm.
 #
-# ** 31. File: worker/patch_v2/patch_triton.py**
+# ** 27a. File: worker/patch_v2/patch_spec_pp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. PPHandler sampled-token broadcast methods
+#    Why:
+#       Target-driven speculative decoding generates next-step draft tokens
+#       after target sampling. Non-last PP ranks need both results for the same
+#       delayed request-state update.
+#    How:
+#       Defer the target-token broadcast until drafting finishes, then carry
+#       accepted target tokens and next-step draft tokens in the same V2 PP
+#       queue slot.
+#    Related PR (if no, explain why):
+#       No, this enables the Ascend MRV2 implementation.
+#    Future Plan:
+#       Remove when vLLM natively transports draft tokens through PP.
+#
+# ** 28. File: worker/patch_v2/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.sample.logprob`, `vllm.v1.worker.gpu.sample.penalties.apply_penalties`,
 #      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
@@ -1186,7 +1111,7 @@
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
 #
-# ** 32. File: worker/patch_v2/patch_use_v2_model_runner.py**
+# ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
 #    Why:
@@ -1202,7 +1127,7 @@
 #       Remove this module together with the platform patch once vllm-ascend
 #       fully supports the v2 model runner.
 #
-# ** 33. File: worker/patch_v2/patch_uva.py**
+# ** 30. File: worker/patch_v2/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.gpu.states.UvaBuffer`
 #    Why:
@@ -1211,4 +1136,53 @@
 #       make UvaBuffer a dummy class, mimic the interface of vllm UvaBuffer.
 #    Future Plan:
 #       Remove this patch when NPU support UVA.
+#
+# ** 31. File: worker/patch_v2/patch_dspark.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.dspark.utils.load_dspark_model`,
+#      `vllm.v1.worker.gpu.spec_decode.dspark.speculator.load_dspark_model`
+#    Why:
+#       Same-checkpoint DSpark drafts (e.g. DeepSeek-V4 MTP, weights under
+#       `mtp.*`) reuse the target weights and declare no quantization of their
+#       own, but upstream `load_dspark_model` derives the draft quant config via
+#       `get_draft_quant_config`, which returns None for them. That builds an
+#       unquantized draft, and a W4A8/W8A8 target checkpoint cannot be loaded
+#       into it (the draft linear layers lack the `weight_offset`/
+#       `weight_scale`/`scale_bias` params the checkpoint ships), failing with
+#       a KeyError.
+#    How：
+#       For same-checkpoint drafts (`draft_model_config.model ==
+#       model_config.model`), temporarily redirect `get_draft_quant_config` to
+#       the target quant config during `load_dspark_model`, then restore it.
+#       Self-contained drafts (e.g. Qwen3 DSpark speculators) keep their own
+#       quant config.
+#    Future Plan:
+#       Remove this patch once upstream `load_dspark_model` inherits the target
+#       quant config for same-checkpoint drafts.
+#
+# ** 34. File: platform/patch_vision.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.vision.FusedInputNorm.forward`
+#    Why:
+#       Upstream vLLM uses PyTorch 2.13.0, which requires eps > 0 for training
+#       but allows eps >= 0 for inference. vllm-ascend bundles PyTorch 2.10.0,
+#       which does not distinguish scenarios and requires eps > 0 in all cases.
+#       So when upstream FusedInputNorm passes eps=0.0 to F.batch_norm it works
+#       fine upstream, but fails on vllm-ascend with "batch_norm eps must be
+#       positive".
+#    How：
+#       Monkey-patch FusedInputNorm.forward to use eps=1e-5 instead of 0.0.
+#       The patch is guarded with contextlib.suppress(ImportError) so it does
+#       not crash on release wheels (v0.26.0) where FusedInputNorm does not exist.
+#       Upstream PR #51734 (dc5101fb1b, Aug 10) rewrote FusedInputNorm.forward to
+#       use a broadcast multiply-add (x * weight + bias) instead of F.batch_norm,
+#       removing running_mean/running_var. That commit is included in the target
+#       16cfe728, so the patch is gated to v0.27.1 only via vllm_version_is;
+#       on newer versions FusedInputNorm.forward is used as-is (multiply-add).
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/50411
+#       https://github.com/vllm-project/vllm/pull/51734
+#    Future Plan:
+#       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
+#       (which, like upstream, allows eps >= 0 for inference).
 #

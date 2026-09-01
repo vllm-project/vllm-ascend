@@ -268,8 +268,8 @@ def test_layout_includes_mtp_layers():
         {"layerwise_num_shared_buffers": 2},
     )
 
-    assert 4 in layout.layer_entries
-    assert layout.shared_buffer_layers == [[0], [1, 3], [2, 4]]
+    assert 4 in layout.layer_cache_specs
+    assert layout.buffer_slots == ((0,), (1, 3), (2, 4))
     assert layout.prefetch_layer_map == {3: 1, 4: 2}
 
 
@@ -289,7 +289,7 @@ def test_physical_layer_index_supports_mtp_names(
     assert get_layerwise_physical_layer_index(layer_name, 4) == expected
 
 
-def test_complete_physical_cache_signature_controls_reuse():
+def test_main_spec_controls_reuse_regardless_of_indexer():
     main_spec = AscendMLAAttentionSpec(
         block_size=2,
         num_kv_heads=1,
@@ -320,18 +320,71 @@ def test_complete_physical_cache_signature_controls_reuse():
         },
     )
 
-    assert layout.shared_buffer_layers == [[0, 2, 4], [1, 3, 5]]
-    assert layout.prefetch_layer_map == {
-        2: 0,
-        4: 2,
-        3: 1,
-        5: 3,
+    # Identical main specs put every layer in one buffer; the indexer subset rides along.
+    assert layout.buffer_slots == ((0, 1, 2, 3, 4, 5),)
+    assert tuple(layer for layer in layout.buffer_slots[0] if layout.layer_cache_specs[layer].indexer is not None) == (
+        1,
+        3,
+        5,
+    )
+    assert layout.prefetch_layer_map == {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}
+    assert layout.layer_cache_specs[0].indexer is None
+    assert layout.layer_cache_specs[1].indexer is not None
+
+
+def test_cache_spec_roles_do_not_depend_on_order():
+    main_spec = _make_sfa_main_spec()
+    indexer_spec = _make_sfa_indexer_spec()
+    indexer_name = "model.layers.0.self_attn.indexer.k_cache"
+    main_name = "model.layers.0.self_attn.attn"
+    specs = {
+        indexer_name: indexer_spec,
+        main_name: main_spec,
+        "model.layers.1.self_attn.attn": main_spec,
     }
-    assert len(layout.layer_entries[0]) == 1
-    assert len(layout.layer_entries[1]) == 2
+
+    layout = build_layerwise_reuse_layout(
+        specs,
+        2,
+        {
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [],
+        },
+    )
+
+    assert layout.layer_cache_specs[0].main.layer_name == main_name
+    assert layout.layer_cache_specs[0].indexer is not None
+    assert layout.layer_cache_specs[0].indexer.layer_name == indexer_name
 
 
-def test_multi_group_sfa_descriptors_are_merged_by_signature():
+def test_single_indexer_spec_is_the_primary_spec():
+    indexer_name = "model.layers.0.self_attn.indexer.k_cache"
+    layout = build_layerwise_reuse_layout(
+        {indexer_name: _make_sfa_indexer_spec()},
+        1,
+        {"layerwise_num_shared_buffers": 1},
+    )
+
+    assert layout.layer_cache_specs[0].main.layer_name == indexer_name
+    assert layout.layer_cache_specs[0].indexer is None
+
+
+def test_ambiguous_multi_spec_layer_is_rejected():
+    main_spec = _make_sfa_main_spec()
+    specs = {
+        "model.layers.0.self_attn.attn": main_spec,
+        "model.layers.0.self_attn.other_cache": main_spec,
+    }
+
+    with pytest.raises(ValueError, match="multiple cache specs"):
+        build_layerwise_reuse_layout(
+            specs,
+            1,
+            {"layerwise_num_shared_buffers": 1},
+        )
+
+
+def test_multi_group_sfa_descriptors_are_merged_by_main_component():
     main_names = [
         *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
         "model.mtp.0.self_attn.attn",
@@ -379,12 +432,95 @@ def test_multi_group_sfa_descriptors_are_merged_by_signature():
         _make_vllm_config(4, 1),
     )
 
+    # One independent main tensor, one main tensor shared by every reused layer (incl.
+    # MTP), and one indexer tensor shared only by the indexer-bearing layers.
     assert [tensor.shared_by for tensor in kv_cache_config.kv_cache_tensors] == [
         [main_names[0]],
-        [main_names[1], main_names[2], main_names[4]],
-        [indexer_names[0], indexer_names[1], indexer_names[2]],
-        [main_names[3]],
+        [main_names[1], main_names[2], main_names[3], main_names[4]],
+        indexer_names,
     ]
+
+
+def _make_sfa_main_spec(dtype=torch.int8) -> AscendMLAAttentionSpec:
+    return AscendMLAAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=dtype,
+        cache_sparse_sfa_c8=True,
+    )
+
+
+def _make_sfa_indexer_spec() -> AscendSFAIndexerCacheSpec:
+    return AscendSFAIndexerCacheSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.int8,
+        scale_dim=1,
+        scale_dtype=torch.float16,
+        cache_sparse_li_c8=True,
+    )
+
+
+def test_component_sharing_merges_main_across_a_and_b_layers():
+    # GLM5.2/SFA: A-class layers own main + indexer, B-class layers own main only. Every
+    # main spec is identical, so one buffer's main tensor is shared by all layers in the
+    # buffer while its indexer tensor is shared only by the buffer's A-class layers.
+    main_spec = _make_sfa_main_spec()
+    indexer_spec = _make_sfa_indexer_spec()
+    a_layers = [1, 4]  # main + indexer
+    b_layers = [2, 3, 5]  # main only
+    # physical layer 0 is independent; layers 1..5 are reused; 6 = MTP (main only).
+    main_by_layer = {
+        0: "model.layers.0.self_attn.attn",
+        **{layer: f"model.layers.{layer}.self_attn.attn" for layer in (*a_layers, *b_layers)},
+        6: "model.mtp.0.self_attn.attn",
+    }
+    indexer_by_layer = {layer: f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in a_layers}
+    kv_cache_config = SimpleNamespace(
+        kv_cache_tensors=[
+            *(KVCacheTensor(size=main_spec.page_size_bytes, shared_by=[name]) for name in main_by_layer.values()),
+            *(KVCacheTensor(size=indexer_spec.page_size_bytes, shared_by=[name]) for name in indexer_by_layer.values()),
+        ],
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=list(main_by_layer.values()),
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=dict.fromkeys(main_by_layer.values(), main_spec),
+                ),
+            ),
+            SimpleNamespace(
+                layer_names=list(indexer_by_layer.values()),
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=dict.fromkeys(indexer_by_layer.values(), indexer_spec),
+                ),
+            ),
+        ],
+    )
+
+    apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(6, 2))
+
+    main_shared_by = []
+    indexer_shared_by = []
+    for tensor in kv_cache_config.kv_cache_tensors:
+        names = list(tensor.shared_by)
+        if any(".indexer." in name for name in names):
+            indexer_shared_by.append(names)
+        else:
+            main_shared_by.append(names)
+
+    # 1 independent layer + 2 reused buffers == 3 main tensors.
+    assert len(main_shared_by) == 3
+    # The independent layer keeps its own main; every reused layer's main (incl. MTP)
+    # lands in exactly one shared main tensor.
+    assert main_shared_by[0] == [main_by_layer[0]]
+    merged_reused_main = sorted(name for names in main_shared_by[1:] for name in names)
+    assert merged_reused_main == sorted(main_by_layer[layer] for layer in (1, 2, 3, 4, 5, 6))
+    # Indexer layers follow their main slots, so layers 1 and 4 use separate tensors.
+    assert indexer_shared_by == [[indexer_by_layer[1]], [indexer_by_layer[4]]]
 
 
 def test_non_attention_cache_spec_is_rejected():

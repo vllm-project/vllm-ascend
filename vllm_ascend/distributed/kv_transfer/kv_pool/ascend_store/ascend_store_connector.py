@@ -1,5 +1,5 @@
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -28,7 +28,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import AscendStoreKVConnectorWorkerMetadata
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendStoreKVConnectorWorkerMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     get_zmq_rpc_path_lookup,
@@ -86,13 +86,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
-        self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
-        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
-        self.backend_name = backend_name.lower()
-        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
-        self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "consumer_is_to_put", False
-        )
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.use_layerwise = extra_config.get("use_layerwise", False)
+        backend_name = str(extra_config.get("backend", "mooncake")).lower()
+        self.use_gva_layerwise = self.use_layerwise and backend_name == "memcache"
+        self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
         if connector_name == "MooncakeConnectorStoreV1":
@@ -101,17 +99,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 "as the MoonCakeStoreConnector will be removed in the future."
             )
 
-        self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self._current_step_has_real_forward = False
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
-            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-            self.connector_scheduler = KVPoolScheduler(
-                vllm_config, self.use_layerwise, kv_cache_config, page_size_bytes=page_size_bytes
-            )
+            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
@@ -203,6 +197,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
     # Worker Side Methods
     ############################################################
+    def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
+        if not self.use_gva_layerwise or getattr(self, "connector_worker", None) is None:
+            return False
+        self.connector_worker.set_external_slot_release_waiter(waiter)
+        return True
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)

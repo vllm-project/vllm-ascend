@@ -24,15 +24,12 @@ import torch_npu
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
 from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
-DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
-DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
+from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES, get_dynamic_mx_quant_scale_alg
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -303,155 +300,6 @@ class BaseDeviceAdaptor:
         )
 
     @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
-        bsz = attn_metadata.num_decode_tokens
-        hidden_states = hidden_states[:bsz]
-
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], cos_shape[-1])
-
-        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
-        dequant_scale_q_nope = None
-        if atten_obj.fa_quant_layer:
-            quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope = torch_npu.npu_mla_prolog_v2(
-                quantized_x,
-                atten_obj.wd_q,
-                atten_obj.wu_q,
-                atten_obj.W_UK_T,
-                atten_obj.wd_kv,
-                atten_obj.gamma1,
-                atten_obj.gamma2,
-                sin,
-                cos,
-                attn_metadata.slot_mapping[:bsz].to(torch.int64),
-                decode_k_nope,
-                decode_k_pe,
-                dequant_scale_x=pertoken_scale.view(-1, 1),
-                dequant_scale_w_dq=atten_obj.dequant_scale_w_dq,
-                dequant_scale_w_uq_qr=atten_obj.dequant_scale_w_uq_qr,
-                dequant_scale_w_dkv_kr=atten_obj.dequant_scale_w_dkv_kr,
-                quant_scale_ckv=atten_obj.quant_kscale,
-                cache_mode="PA_NZ",
-            )
-        else:
-            decode_q_nope = torch.empty(
-                (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_nope.shape[-1]),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-            decode_q_pe = torch.empty(
-                (hidden_states.shape[0], atten_obj.W_UK_T.shape[0], decode_k_pe.shape[-1]),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-
-            torch.ops._C_ascend.mla_preprocess(
-                hidden_states,
-                atten_obj.wd_qkv,
-                atten_obj.deq_scale_qkv,
-                atten_obj.gamma1,
-                atten_obj.beta1,
-                atten_obj.wu_q,
-                atten_obj.qb_deq_scl,
-                atten_obj.gamma2,
-                cos,
-                sin,
-                atten_obj.W_UK_T,
-                decode_k_nope,
-                decode_k_pe,
-                attn_metadata.slot_mapping[:bsz],
-                quant_scale0=atten_obj.quant_scale0,
-                quant_offset0=atten_obj.quant_offset0,
-                bias0=atten_obj.quant_bias_qkv,
-                quant_scale1=atten_obj.quant_scale1,
-                quant_offset1=atten_obj.quant_offset1,
-                bias1=atten_obj.qb_qt_bias,
-                ctkv_scale=atten_obj.ctkv_scale,
-                q_nope_scale=atten_obj.q_nope_scale,
-                cache_mode="nzcache" if atten_obj.enable_kv_nz else "krope_ctkv",
-                quant_mode="per_tensor_quant_asymm",
-                q_out0=decode_q_nope,
-                kv_cache_out0=decode_k_nope,
-                q_out1=decode_q_pe,
-                kv_cache_out1=decode_k_pe,
-                enable_inner_out=False,
-                inner_out=torch.tensor([], device=hidden_states.device),
-            )
-            decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
-            decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
-
-        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
-
-        from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
-
-        decode_preprocess_res = DecodeMLAPreprocessResult(
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
-        )
-        return decode_preprocess_res, None
-
-    @staticmethod
-    def sfa_preprocess_with_mlapo(
-        sfa_impl,
-        hidden_states: torch.Tensor,
-        kv_cache: tuple,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        num_input_tokens: int,
-    ) -> tuple:
-        k_nope, k_pe = kv_cache[0], kv_cache[1]
-        ql_nope = torch.empty(
-            (num_input_tokens, sfa_impl.W_UK_T.shape[0], k_nope.shape[-1]),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        q_pe = torch.empty(
-            (num_input_tokens, sfa_impl.W_UK_T.shape[0], k_pe.shape[-1]),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        q_c = torch.empty(
-            (num_input_tokens, sfa_impl.q_lora_rank),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        torch.ops._C_ascend.mla_preprocess(
-            hidden_states,
-            sfa_impl.wd_qkv,
-            sfa_impl.deq_scale_qkv,
-            sfa_impl.gamma1,
-            sfa_impl.beta1,
-            sfa_impl.wu_q,
-            sfa_impl.qb_deq_scl,
-            sfa_impl.gamma2,
-            cos,
-            sin,
-            sfa_impl.W_UK_T,
-            k_nope,
-            k_pe,
-            slot_mapping,
-            quant_scale0=sfa_impl.quant_scale0,
-            quant_offset0=sfa_impl.quant_offset0,
-            bias0=sfa_impl.quant_bias_qkv,
-            quant_scale1=sfa_impl.quant_scale1,
-            quant_offset1=sfa_impl.quant_offset1,
-            bias1=sfa_impl.qb_qt_bias,
-            ctkv_scale=sfa_impl.ctkv_scale,
-            q_nope_scale=sfa_impl.q_nope_scale,
-            cache_mode="krope_ctkv",
-            quant_mode="per_tensor_quant_asymm",
-            enable_inner_out=True,
-            q_out0=ql_nope,
-            kv_cache_out0=k_nope,
-            q_out1=q_pe,
-            kv_cache_out1=k_pe,
-            inner_out=q_c,
-        )
-        return hidden_states, ql_nope, q_pe, q_c
-
-    @staticmethod
     def indexer_select_post_process(
         sfa_impl,
         q_li: torch.Tensor,
@@ -659,40 +507,6 @@ class BaseDeviceAdaptor:
 
         return context_layer
 
-    # ===== Sparse Attention Metadata & Op Selectors =====
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        """Returns the metadata-building operator for sparse attention."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
-        """Returns kwargs for sparse attention metadata builder."""
-        return {"device": str(device)}
-
-    @staticmethod
-    def get_dsa_sparse_attn_op():
-        """Returns the sparse attention operator."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv
-
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
-        """Returns base kwargs for sparse attention (extended by caller)."""
-        return {}
-
-    @staticmethod
-    def get_dsa_compressor_slot_mapping_format():
-        """Slot mapping side output format consumed by the DSA scatter op."""
-        return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
-
-    # ===== SWA / Compressor KV Scatter =====
-
-    @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
-
     # ===== Indexer Quant + Scatter =====
 
     @staticmethod
@@ -823,21 +637,10 @@ class BaseDeviceAdaptor:
         return slot_mapping
 
     @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
-        """Format slot_mapping for metadata storage.
-        Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
-        return torch.stack([slot_mapping // block_size, slot_mapping % block_size], axis=-1)
-
-    @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
         """Non-A5: return the cached cu_seqlens_cmp_kv tensor.
         A5 override always returns None."""
         return cmp_kv_tensor
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
-        """Non-A5: add extra kwargs for sparse attention. A5: no-op."""
-        extra_kwargs.update(kwargs_to_add)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
@@ -1154,7 +957,11 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             )
 
         if dynamic_scale is None:
-            hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
+            hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+                hidden_states,
+                dst_type=act_quant_type,
+                scale_alg=get_dynamic_mx_quant_scale_alg(),
+            )
 
         return hidden_states, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(dynamic_scale)
 
@@ -1392,90 +1199,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             value=value,
         )
 
-    @staticmethod
-    def mla_preprocess_only_decode(atten_obj, hidden_states, kv_cache, attn_metadata):
-        bsz = attn_metadata.num_decode_tokens
-        hidden_states = hidden_states[:bsz].unsqueeze(1)
-        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=torch.float8_e4m3fn)
-        dynamic_scale = dynamic_scale.reshape(hidden_states.shape[0] * hidden_states.shape[1], -1)
-        cos_shape = attn_metadata.decode.cos.shape
-        cos = attn_metadata.decode.cos.view(cos_shape[0], 1, cos_shape[-1])
-        sin = attn_metadata.decode.sin.view(cos_shape[0], 1, cos_shape[-1])
-        decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
-        decode_q_nope, decode_q_pe, dequant_scale_q_nope, _, _ = torch_npu.npu_mla_prolog_v3(
-            token_x=hidden_states,
-            weight_dq=atten_obj.weight_dq,
-            weight_uq_qr=atten_obj.weight_uq_qr,
-            weight_uk=atten_obj.W_UK_T,
-            weight_dkv_kr=atten_obj.weight_dkv_kr,
-            rmsnorm_gamma_cq=atten_obj.q_a_layernorm.weight.data,
-            rmsnorm_gamma_ckv=atten_obj.kv_a_layernorm.weight.data,
-            rope_sin=sin,
-            rope_cos=cos,
-            kv_cache=decode_k_nope,
-            kr_cache=decode_k_pe,
-            cache_index=attn_metadata.slot_mapping[:bsz].view(bsz, -1).to(torch.int64),
-            dequant_scale_x=dynamic_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_dq=atten_obj.weight_dq_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_uq_qr=atten_obj.weight_uq_qr_scale.view(torch.float8_e8m0fnu),
-            dequant_scale_w_dkv_kr=atten_obj.weight_dkv_kr_scale.view(torch.float8_e8m0fnu),
-            cache_mode="PA_BSND",
-            query_quant_mode=1 if atten_obj.fa_quant_layer else 0,
-            weight_quant_mode=3,
-            kv_cache_quant_mode=1 if atten_obj.fa_quant_layer else 0,
-            quant_scale_ckv=atten_obj.fak_descale_reciprocal if atten_obj.fa_quant_layer else None,
-        )
-        decode_q_nope = decode_q_nope.view(bsz, atten_obj.num_heads, atten_obj.kv_lora_rank)
-        decode_q_pe = decode_q_pe.view(bsz, atten_obj.num_heads, -1)
-
-        decode_q_nope, decode_q_pe = atten_obj.reorg_decode_q(decode_q_nope, decode_q_pe)
-        from vllm_ascend.attention.mla_v1 import DecodeMLAPreprocessResult
-
-        decode_preprocess_res = DecodeMLAPreprocessResult(
-            decode_q_nope, decode_q_pe, decode_k_nope, decode_k_pe, dequant_scale_q_nope=dequant_scale_q_nope
-        )
-        return decode_preprocess_res, None
-
-    # ===== Sparse Attention Metadata & Op Selectors =====
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
-        return {"kv_quant_mode": 1}
-
-    @staticmethod
-    def get_dsa_sparse_attn_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
-
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
-        return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
-
-    @staticmethod
-    def get_dsa_compressor_slot_mapping_format():
-        """A5 kv_compress_epilog consumes flat slot ids."""
-        return DSA_COMPRESSOR_SLOT_MAPPING_FLAT
-
-    # ===== SWA / Compressor KV Scatter =====
-
-    @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache with fused quantization+compression.
-        A5: kv_compress_epilog handles quant/compress/scatter internally.
-        Input x is unquantized bf16; cache shape is [..., head_dim]."""
-        torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
-            x=x.view(-1, x.shape[-1]),
-            slot_mapping=slot_mapping,
-            quant_group_size=64,
-            quant_mode=2,
-            round_scale_flag=True,
-            layout=1,
-        )
-
     # ===== Indexer Quant + Scatter =====
 
     @staticmethod
@@ -1610,19 +1333,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return slot_mapping
 
     @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
-        """A5: 1D pass-through."""
-        return slot_mapping
-
-    @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
         """A5: cu_seqlens_cmp_kv is always None."""
         return None
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
-        """A5: no-op — A5 ops do not need extra kwargs from this path."""
-        pass
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
@@ -1872,12 +1585,12 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
 
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
-    ascend_device_type = get_ascend_device_type()
-    if ascend_device_type == AscendDeviceType.A5:
-        return A5DeviceAdaptor
-    if ascend_device_type == AscendDeviceType._310P:
-        return Ascend310PDeviceAdaptor
-    return BaseDeviceAdaptor
+    adaptor_by_family = {
+        DeviceAdaptorFamily.STANDARD: BaseDeviceAdaptor,
+        DeviceAdaptorFamily.FP8_OPTIMIZED: A5DeviceAdaptor,
+        DeviceAdaptorFamily.COMPATIBILITY: Ascend310PDeviceAdaptor,
+    }
+    return adaptor_by_family[get_current_hardware_profile().device_adaptor_family]
 
 
 DeviceOperator: type["BaseDeviceAdaptor"] = get_device_adaptor()

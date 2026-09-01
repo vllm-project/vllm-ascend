@@ -216,7 +216,7 @@ jobs:
   report:
     name: Report result
     needs: [e2e-test, trigger-selected-tests]
-    if: always() && needs.e2e-test.result == 'success' && needs.e2e-test.outputs.notify_comment_id != ''
+    if: ${{ !cancelled() && needs.e2e-test.result == 'success' && needs.e2e-test.outputs.notify_comment_id != '' }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
       - name: Update comment with result

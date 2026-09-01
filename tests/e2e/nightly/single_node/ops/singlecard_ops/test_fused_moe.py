@@ -27,13 +27,11 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 
-from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
-    MoEQuantParams,
-    MoeRouterInput,
-    MoETokenDispatchInput,
-    build_fused_experts_input,
-    build_mlp_compute_input,
-)
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
+from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
+from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
 from vllm_ascend.quantization.quant_type import QuantType

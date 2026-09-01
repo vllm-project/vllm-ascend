@@ -23,14 +23,10 @@ Run `pytest tests/e2e/pull_request/one_card/test_xlite.py`.
 
 # ruff: noqa: E501
 
-import os
-
 import pytest
 
 from tests.e2e.conftest import wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import PROMPTS_SHORT, compare_logprobs
-
-os.environ["VLLM_ASCEND_ENABLE_NZ"] = "2"
 
 MODELS: list[str] = ["Qwen/Qwen3-0.6B"]
 
@@ -52,7 +48,10 @@ def test_models_with_xlite_decode_only(model: str):
         "model_name": model,
         "max_model_len": 1024,
         "block_size": 128,
-        "additional_config": {"xlite_graph_config": {"enabled": True, "full_mode": False}},
+        "additional_config": {
+            "weight_nz_mode": 2,
+            "xlite_graph_config": {"enabled": True, "full_mode": False},
+        },
     }
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)
 
@@ -74,6 +73,9 @@ def test_models_with_xlite_full_mode(model: str):
         "model_name": model,
         "max_model_len": 1024,
         "block_size": 128,
-        "additional_config": {"xlite_graph_config": {"enabled": True, "full_mode": True}},
+        "additional_config": {
+            "weight_nz_mode": 2,
+            "xlite_graph_config": {"enabled": True, "full_mode": True},
+        },
     }
     compare_logprobs(runner_kwargs=runner_kwargs, prompts=PROMPTS_SHORT)

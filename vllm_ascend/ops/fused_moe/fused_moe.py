@@ -16,18 +16,23 @@
 #
 import torch
 import torch.nn.functional as F
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
-from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,  # noqa: F401
-    MoERunner,
+from vllm.distributed import (
+    get_dp_group,
+    get_ep_group,
+    get_tp_group,
+    tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
+from vllm.model_executor.layers.fused_moe.layer import MoERunner
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
+from vllm_ascend.ops.fused_moe.shared_experts import (
+    AscendSharedExperts,
+    SharedExpertParallelMode,
+)
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -82,11 +87,26 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             )
 
         setup_moe_comm_method(self.moe_config)
+        alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
+        if alltoall_comm is not None:
+            expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)
+            if expert_ids_per_ep_rank is not None:
+                self.routed_experts.register_buffer(
+                    "expert_ids_per_ep_rank",
+                    expert_ids_per_ep_rank,
+                    persistent=False,
+                )
 
     @property
     def is_internal_router(self) -> bool:
-        gate = self.gate
-        return gate is not None and hasattr(gate, "weight_fp32")
+        if vllm_version_is("0.27.1"):
+            gate = self.gate
+            return gate is not None and hasattr(gate, "weight_fp32")
+        else:
+            # main (cdc4824a21): vllm#51838 removed the gate branch in
+            # DeepseekV2MoE.forward, always passing router_logits=hidden_states.
+            # The runner must recompute router_logits via the gate.
+            return self.gate is not None
 
     @property
     def use_dp_chunking(self) -> bool:
@@ -106,7 +126,26 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             MoECommType.ALLTOALL,
             MoECommType.MC2,
             MoECommType.FUSED_MC2,
-        } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+        } or (moe_comm_type == MoECommType.ALLGATHER and self.moe_config.is_sequence_parallel)
+
+    def _get_shared_expert_parallel_mode(self) -> SharedExpertParallelMode:
+        shared_experts = getattr(self, "ascend_shared_experts", None)
+        if shared_experts is None or not hasattr(shared_experts, "parallel_mode"):
+            return SharedExpertParallelMode.TENSOR_PARALLEL
+        return shared_experts.parallel_mode()
+
+    def _reduce_shared_output_if_needed(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool,
+    ) -> torch.Tensor | None:
+        if (
+            shared_output is not None
+            and fused_output_is_reduced
+            and self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.TENSOR_PARALLEL
+        ):
+            shared_output = tensor_model_parallel_all_reduce(shared_output)
+        return shared_output
 
     @property
     def local_num_experts(self) -> int:
@@ -117,112 +156,181 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
     def ep_rank(self) -> int:
         return self.moe_config.ep_rank
 
-    # main2main compat: `fused_output_is_reduced` was added to upstream
-    # _maybe_reduce_shared_expert_output() in vllm main after 0.26.0.
-    # Ascend already reduces shared expert output in
-    # _forward_shared_experts, so the parameter is accepted for
-    # interface alignment only.
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
+    # Shared-expert layout-specific communication is handled by
+    # AscendSharedExperts, so only standard TP weights need a separate
+    # all-reduce when routed output has already been reduced.
+    def _maybe_reduce_shared_expert_output(  # type: ignore[misc]
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool | None = None,
+    ) -> torch.Tensor | None:
+        if fused_output_is_reduced is None:
+            fused_output_is_reduced = self._fused_output_is_reduced
+        return self._reduce_shared_output_if_needed(
+            shared_output,
+            fused_output_is_reduced,
+        )
 
-        def _maybe_reduce_shared_expert_output(
-            self,
-            shared_output: torch.Tensor | None,
-        ) -> torch.Tensor | None:
-            # _forward_shared_experts already handles shared expert TP
-            # all-reduce for MC2/ALLTOALL/FUSED_MC2. For AllGather the
-            # reduction is done via _maybe_reduce_final_output on the
-            # combined (shared + routed) output.
-            return shared_output
-    else:
+    def _maybe_reduce_routed_output_before_transform(
+        self,
+        fused_output: torch.Tensor,
+        fused_output_is_reduced: bool,
+    ) -> tuple[torch.Tensor, bool]:
+        fused_output, fused_output_is_reduced = super()._maybe_reduce_routed_output_before_transform(
+            fused_output,
+            fused_output_is_reduced,
+        )
 
-        def _maybe_reduce_shared_expert_output(  # type: ignore[misc]
-            self,
-            shared_output: torch.Tensor | None,
-            fused_output_is_reduced: bool | None = None,
-        ) -> torch.Tensor | None:
-            # Ascend handles shared expert reduction in
-            # _forward_shared_experts; the upstream kwarg is unused here.
-            _ = fused_output_is_reduced
-            return shared_output
+        if (
+            self._get_shared_expert_parallel_mode() is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY
+            and not fused_output_is_reduced
+        ):
+            fused_output = tensor_model_parallel_all_reduce(fused_output)
+            fused_output_is_reduced = True
+        return fused_output, fused_output_is_reduced
 
-    # main2main compat: `output_is_reduced` was added to upstream
-    # _maybe_reduce_final_output() in vllm main after 0.26.0.
     # Ascend already handles reduction in its own dispatch path, so
     # the upstream kwarg is accepted for interface alignment only.
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
-
-        def _maybe_reduce_final_output(
-            self,
-            states: torch.Tensor,
-            trunc_size: int,
-        ) -> torch.Tensor:
-            # Sequence-parallel MoE returns a token-sharded result after EP
-            # reduce-scatter.  Qwen3Moe gathers those token shards across TP in
-            # the model, so a TP all-reduce here would sum different token
-            # segments and corrupt the sequence.
-            if not self.moe_config.is_sequence_parallel:
-                states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+    def _maybe_reduce_final_output(  # type: ignore[misc]
+        self,
+        states: torch.Tensor,
+        trunc_size: int | None,
+        output_is_reduced: bool | None = None,
+    ) -> torch.Tensor:
+        if output_is_reduced is None:
+            output_is_reduced = self._fused_output_is_reduced
+        if not output_is_reduced and not self.moe_config.is_sequence_parallel:
+            # Use the normal TP collective when the upstream reduction
+            # contract requires it. Sequence-parallel outputs are token
+            # shards, so reducing them position-wise would corrupt the result.
+            states = tensor_model_parallel_all_reduce(states)
+        if trunc_size is not None and trunc_size > 0:
             return states[..., :trunc_size]
-    else:
-
-        def _maybe_reduce_final_output(  # type: ignore[misc]
-            self,
-            states: torch.Tensor,
-            trunc_size: int | None,
-            output_is_reduced: bool | None = None,
-        ) -> torch.Tensor:
-            _ = output_is_reduced
-            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
-            if trunc_size is not None and trunc_size > 0:
-                return states[..., :trunc_size]
-            return states
+        return states
 
     def set_lora_context(self, lora_context):
         self.routed_experts._ascend_moe_lora_context = lora_context
         if self.ascend_shared_experts is not None:
             self.ascend_shared_experts.set_lora_context(lora_context)
 
-    def _forward_impl(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        shared_experts_input: torch.Tensor | None,
-        input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        with self._sequence_parallel_context():
-            if self.ascend_shared_experts is None:
-                return self.routed_experts.forward_impl(
+    if vllm_version_is("0.27.1"):
+
+        def _forward_impl(
+            self,
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+            shared_experts_input: torch.Tensor | None,
+            input_ids: torch.Tensor | None = None,
+        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+            with self._sequence_parallel_context():
+                shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
+                if self.ascend_shared_experts is None:
+                    return self.routed_experts.forward_impl(
+                        hidden_states=hidden_states,
+                        router_logits=router_logits,
+                        input_ids=input_ids,
+                    )
+                shared_expert_input, shared_input_all_gather_done = (
+                    self.ascend_shared_experts.prepare_input_before_routed_experts(shared_hidden_states)
+                )
+                if self.is_internal_router:
+                    gate = self.gate
+                    assert gate is not None
+                    # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
+                    # increase with extra hidden states. We also assume that all gate
+                    # linear is unquantized so that we the weight is pre-casted in
+                    # process_weights_after_loading of AscendUnquantizedLinearMethod.
+                    hidden_states_fp32 = shared_hidden_states.float()
+                    before_routed_experts = torch.npu.current_stream().record_event()
+                    # v0.27.1: weight_fp32 is guaranteed by is_internal_router.
+                    router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                    after_routed_experts = torch.npu.current_stream().record_event()
+                else:
+                    before_routed_experts = torch.npu.current_stream().record_event()
+                    after_routed_experts = None
+
+                if shared_input_all_gather_done is not None:
+                    torch.npu.current_stream().wait_event(shared_input_all_gather_done)
+                routed_out, fused_moe_events = self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
                     router_logits=router_logits,
                     input_ids=input_ids,
                 )
-            if self.is_internal_router:
-                gate = self.gate
-                assert gate is not None
-                # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
-                # increase with extra hidden states. We also assume that all gate
-                # linear is unquantized so that we the weight is pre-casted in
-                # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                hidden_states_fp32 = hidden_states.float()
-                before_routed_experts = torch.npu.current_stream().record_event()
-                router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
-                after_routed_experts = torch.npu.current_stream().record_event()
-            else:
-                before_routed_experts = torch.npu.current_stream().record_event()
-                after_routed_experts = None
+                fused_moe_events.before_routed_experts = before_routed_experts
+                fused_moe_events.after_routed_experts = after_routed_experts
+                if shared_input_all_gather_done is not None:
+                    fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
 
-            routed_out, fused_moe_events = self.routed_experts.forward_impl(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
-            fused_moe_events.before_routed_experts = before_routed_experts
-            fused_moe_events.after_routed_experts = after_routed_experts
+                shared_out = self.ascend_shared_experts.forward(
+                    shared_expert_input,
+                    fused_moe_events,
+                    input_is_gathered=shared_input_all_gather_done is not None,
+                )
+                return shared_out, routed_out
 
-            shared_out = self.ascend_shared_experts.forward(
-                hidden_states,
-                fused_moe_events,
-            )
-            return shared_out, routed_out
+    else:
+
+        def _forward_impl(
+            self,
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+            shared_experts_input: torch.Tensor | None,
+            input_ids: torch.Tensor | None = None,
+        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+            with self._sequence_parallel_context():
+                shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
+                if self.ascend_shared_experts is None:
+                    if self.is_internal_router:
+                        gate = self.gate
+                        assert gate is not None
+                        hidden_states_fp32 = hidden_states.float()
+                        router_logits = F.linear(
+                            hidden_states_fp32,
+                            gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
+                        )
+                    return self.routed_experts.forward_impl(
+                        hidden_states=hidden_states,
+                        router_logits=router_logits,
+                        input_ids=input_ids,
+                    )
+                shared_expert_input, shared_input_all_gather_done = (
+                    self.ascend_shared_experts.prepare_input_before_routed_experts(shared_hidden_states)
+                )
+                if self.is_internal_router:
+                    gate = self.gate
+                    assert gate is not None
+                    # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
+                    # increase with extra hidden states. We also assume that all gate
+                    # linear is unquantized so that we the weight is pre-casted in
+                    # process_weights_after_loading of AscendUnquantizedLinearMethod.
+                    hidden_states_fp32 = shared_hidden_states.float()
+                    before_routed_experts = torch.npu.current_stream().record_event()
+                    # main (cdc4824a21): is_internal_router only checks self.gate,
+                    # weight_fp32 may be absent, fall back to gate.weight.
+                    router_logits = F.linear(
+                        hidden_states_fp32,
+                        gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
+                    )
+                    after_routed_experts = torch.npu.current_stream().record_event()
+                else:
+                    before_routed_experts = torch.npu.current_stream().record_event()
+                    after_routed_experts = None
+
+                if shared_input_all_gather_done is not None:
+                    torch.npu.current_stream().wait_event(shared_input_all_gather_done)
+                routed_out, fused_moe_events = self.routed_experts.forward_impl(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                )
+                fused_moe_events.before_routed_experts = before_routed_experts
+                fused_moe_events.after_routed_experts = after_routed_experts
+                if shared_input_all_gather_done is not None:
+                    fused_moe_events.after_routed_finalize = torch.npu.current_stream().record_event()
+
+                shared_out = self.ascend_shared_experts.forward(
+                    shared_expert_input,
+                    fused_moe_events,
+                    input_is_gathered=shared_input_all_gather_done is not None,
+                )
+                return shared_out, routed_out

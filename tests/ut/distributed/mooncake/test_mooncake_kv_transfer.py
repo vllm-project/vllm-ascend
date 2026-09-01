@@ -7,13 +7,13 @@ import torch
 if not hasattr(torch, "npu"):
     torch.npu = SimpleNamespace(Event=object)  # type: ignore[attr-defined]
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreSendingThread,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ChunkedTokenDatabase,
     KeyMetadata,
     ReqMeta,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
-    KVCacheStoreSendingThread,
 )
 
 

@@ -95,37 +95,3 @@ def build_token_dispatch_input(
         routing=fused_experts_input.routing,
         quant=fused_experts_input.quant,
     )
-
-
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import (  # noqa: E402
-    MoEFusedExpertsInput,
-    MoEWeights,
-    build_fused_experts_input,
-)
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import (  # noqa: E402
-    MoEMlpComputeInput,
-    build_mlp_compute_input,
-)
-from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput  # noqa: E402
-
-MoERoutingParams = MoeRouterInput
-
-
-__all__ = [
-    "MoEAllGatherCombineMetadata",
-    "MoEAllToAllCombineMetadata",
-    "MoEFusedExpertsInput",
-    "MoEMC2CombineMetadata",
-    "MoEMlpComputeInput",
-    "MoEPrepareOutput",
-    "MoEQuantParams",
-    "MoERoutingParams",
-    "MoeRouterInput",
-    "MoETokenDispatchInput",
-    "MoETokenDispatchOutput",
-    "MoEWeights",
-    "TMoECombineMetadata",
-    "build_fused_experts_input",
-    "build_mlp_compute_input",
-    "build_token_dispatch_input",
-]

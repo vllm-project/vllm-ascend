@@ -11,7 +11,17 @@ on:
         description: 'Quay repository for temp images'
         required: false
         type: string
-        default: 'quay.io/atlas-ci/vllm-atlas-temp'    
+        default: 'quay.io/atlas-ci/vllm-atlas-temp'
+      swr_registry:
+        description: 'swr repository for temp images'
+        required: false
+        type: string
+        default: 'swr.cn-north-12.myhuaweicloud.com'
+      swr_temp_repo:
+        description: 'swr repository for temp images'
+        required: false
+        type: string
+        default: 'swr.cn-north-12.myhuaweicloud.com/modelfoundry/buildkit-test'    
       suffix:
         description: 'The tag subfix to use'
         required: true
@@ -106,7 +116,7 @@ on:
         description: 'CANN Quay URL'
         required: false
         type: string
-        default: 'quay.io/atlas_inference/cann'
+        default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann'
       cann_version:
         description: 'CANN version'
         required: false
@@ -134,6 +144,12 @@ on:
         QUAY_TEMP_PASSWORD:
             description: 'Quay password for pushing temp tag digests'
             required: false
+        SWR_USERNAME:
+            description: 'SWR username for pulling and pushing CANN base images'
+            required: false
+        SWR_PASSWORD:
+            description: 'SWR password for pulling and pushing CANN base images'
+            required: false
 
 defaults:
   run:
@@ -142,27 +158,23 @@ defaults:
 env:
   QUAY_REPO: ${{ inputs.quay_repo }}
   QUAY_TEMP_REPO: ${{ inputs.quay_temp_repo }}
-  # Use this repo's own GHCR namespace so forks (e.g. du-ping1-merge) can write build cache.
-  CACHE_REPO: ghcr.io/${{ github.repository }}
 
 jobs:
   build-push-digest:
     name: build
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner_info.runner }}
+    container:
+      image: swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-a3-ubuntu22.04-py3.12
     permissions:
       packages: write
       contents: read
 
     strategy:
+      max-parallel: 2
       matrix:
-        include:
-          - arch: linux/amd64
-            runner: ubuntu-latest
-            tag: amd64
-
-          - arch: linux/arm64
-            runner: ubuntu-22.04-arm
-            tag: arm64
+        runner_info:
+          - {runner: linux-aarch64-cpu-4, tag: arm64}
+          - {runner: linux-amd64-cpu-4, tag: amd64}
 
     steps:
 
@@ -237,41 +249,13 @@ jobs:
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
 
-    - name: Free up disk space
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-      with:
-        tool-cache: true
-        docker-images: false
-
-    - name: Publish - Login to Quay Temp (for pushing temp tag digest)
-      if: ${{ inputs.should_push }}
-      uses: docker/login-action@v4
-      with:
-        registry: quay.io
-        username: ${{ inputs.quay_temp_username }}
-        password: ${{ secrets.QUAY_TEMP_PASSWORD }}
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
-      with:
-        install: true
-        driver: docker-container
-        use: true
-
-    - name: Login to GitHub Container Registry (for cache)
-      uses: docker/login-action@v4
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
     - name: Compute cache tag
       id: cache-tag
       run: |
         if [ -n "${{ inputs.suffix }}" ]; then
-          echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.tag }}" >> $GITHUB_OUTPUT
+          echo "value=buildcache-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}" >> $GITHUB_OUTPUT
         else
-          echo "value=buildcache-${{ matrix.tag }}" >> $GITHUB_OUTPUT
+          echo "value=buildcache-${{ matrix.runner_info.tag }}" >> $GITHUB_OUTPUT
         fi
 
     - name: Get Dockerfile base image tag
@@ -311,8 +295,8 @@ jobs:
 
     - name: Install csrc cache dependencies
       run: |
-        sudo apt-get update -y
-        sudo apt-get install -y zstd
+        apt-get update -y
+        apt-get install -y zstd
 
     - name: Restore vllm-ascend csrc cache
       id: cache-csrc
@@ -325,21 +309,33 @@ jobs:
           vllm_ascend/include
         key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ steps.get_base_image_tag.outputs.BASE_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
+    - name: Login to SWR
+      uses: docker/login-action@v4
+      with:
+        registry: ${{ inputs.swr_registry }}
+        username: ${{ secrets.SWR_USERNAME }}
+        password: ${{ secrets.SWR_PASSWORD }}
+
     - name: Build and push
       uses: docker/build-push-action@v7
       id: build
       with:
-        platforms: ${{ matrix.arch }}
         # use the current repo path as the build context, ensure .git is contained
         context: .
         file: ${{ inputs.dockerfile || 'Dockerfile' }}
         # only trigger when tag, branch/main push
         push: ${{ inputs.should_push }}
-        outputs: type=image,name=${{ env.QUAY_TEMP_REPO }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
+        outputs: type=image,name=${{ inputs.swr_temp_repo }},push-by-digest=true,name-canonical=true,push=${{ inputs.should_push }}
         # Image builds can compile inside Docker and therefore keep a fallback;
         # NPU test jobs use fail-on-cache-miss instead.
         build-args: |
-          PIP_INDEX_URL=https://pypi.org/simple
+          CANN_QUAY_URL=${{ inputs.cann_quay_url }}
+          APTMIRROR=http://cache-service.nginx-pypi-cache.svc.cluster.local:8081
+          PIP_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          PIP_TRUSTED_HOST=cache-service.nginx-pypi-cache.svc.cluster.local
+          PYTORCH_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu
+          ASCEND_INDEX_URL=http://cache-service.nginx-pypi-cache.svc.cluster.local/ascend/repos/pypi
+          GIT_PROXY=https://gh-proxy.test.osinfra.cn/
           COMPILE_CUSTOM_KERNELS=${{ steps.cache-csrc.outputs.cache-hit == 'true' && '0' || '1' }}
           VLLM_COMMIT=${{ inputs.vllm_commit }}
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
@@ -356,10 +352,10 @@ jobs:
         # To speed up the build, we use registry cache. The cache tag is determined by the suffix and architecture, and shared across different workflow runs.
         # For example, the cache tag for arm64 image with suffix "openeuler" will be "buildcache-openeuler-arm64".
         # When a new image is built and pushed, the cache will also be updated in the registry, so that next build can benefit from it.
-        cache-from: type=registry,ref=${{ env.CACHE_REPO }}:${{ steps.cache-tag.outputs.value }}
-        cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', env.CACHE_REPO, steps.cache-tag.outputs.value) || '' }}
+        cache-from: type=registry,ref=${{ inputs.swr_temp_repo }}:${{ steps.cache-tag.outputs.value }}
+        cache-to: ${{ inputs.should_push && format('type=registry,ref={0}:{1},mode=max', inputs.swr_temp_repo, steps.cache-tag.outputs.value) || '' }}
 
-    # Quay.io automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
+    # Quay.io/swr automatically cleans up untagged digests on a regular basis, with a cycle of approximately one hour. 
     # Add temporary tags to digests to prevent them from being removed.
     - name: Tag digest to prevent GC
       if: ${{ inputs.should_push }}
@@ -371,34 +367,41 @@ jobs:
         if [ "${{ inputs.temp_only }}" = "true" ]; then
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
-          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.tag }}-temp"
+          TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
         else
-          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-temp"
+          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             DATE=$(date +'%Y%m%d')
-            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.tag }}-${DATE}-temp"
+            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
           fi
         fi
-        echo "Creating temp tag: ${{ env.QUAY_TEMP_REPO }}:$TAG"
-        docker buildx imagetools create \
-          -t "${{ env.QUAY_TEMP_REPO }}:$TAG" \
-          "${{ env.QUAY_TEMP_REPO }}@${{ steps.build.outputs.digest }}"
+        echo "Creating temp tag: ${{ env.swr_temp_repo }}:$TAG"
 
+        # Install skopeo if not present (image is Ubuntu-based).
+        if ! command -v skopeo >/dev/null 2>&1; then
+          apt-get update -qq && apt-get install -y -qq skopeo
+        fi
+        CREDS="${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}"
+        skopeo copy \
+          --src-creds "$CREDS" \
+          --dest-creds "$CREDS" \
+          "docker://${{ inputs.swr_temp_repo }}@${{ steps.build.outputs.digest }}" \
+          "docker://${{ inputs.swr_temp_repo }}:$TAG"
 
     - name: Export digest
       run: |
-        mkdir -p ${{ runner.temp }}/digests
+        mkdir -p /tmp/digests
         digest="${{ steps.build.outputs.digest }}"
-        touch "${{ runner.temp }}/digests/${digest#sha256:}"
+        touch "/tmp/digests/${digest#sha256:}"
+        ls -al /tmp/digests
 
     - name: Upload digest
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.tag }}
-        path: ${{ runner.temp }}/digests/*
+        name: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-${{ matrix.runner_info.tag }}
+        path: /tmp/digests/*
         if-no-files-found: error
         retention-days: 1
-
 
   merge-image:
     runs-on: ubuntu-latest
@@ -511,6 +514,13 @@ jobs:
           flavor:
             latest=false
 
+      - name: Login to SWR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.swr_registry }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
       - name: Login to Quay
         uses: docker/login-action@v4
         with:
@@ -523,13 +533,15 @@ jobs:
 
       - name: Merge and push multi-arch image
         env:
-          IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          # Source digests live in SWR (where build-push-digest pushed them);
+          # destination tags come from $TAGS (metadata-action → QUAY_REPO).
+          SOURCE_IMAGE: ${{ inputs.swr_temp_repo }}
           TAGS: ${{ steps.meta.outputs.tags }}
           BUILD_TYPE: ${{ inputs.build_type }}
           SCHEDULE_TAG_PATTERN: ${{ inputs.schedule_tag_pattern }}
           SUFFIX: ${{ env.SUFFIX }}
         run: |
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
 
           echo "Digests: $DIGESTS"
           echo "Current tags:"
@@ -559,10 +571,11 @@ jobs:
             SUFFIX="-${{ inputs.suffix }}"
           fi
           DATE=$(date +'%Y%m%d')
+          # Temp tags were created in SWR by build-push-digest, so clean them up there.
           for arch in amd64 arm64; do
             TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${arch}-${DATE}-temp"
-            skopeo delete --creds "${{ inputs.quay_temp_username }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
-              "docker://${{ env.QUAY_TEMP_REPO }}:${TAG}" || true
+            skopeo delete --creds "${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}" \
+              "docker://${{ inputs.swr_temp_repo }}:${TAG}" || true
           done
 
   merge-image-temp:
@@ -585,6 +598,13 @@ jobs:
           pattern: ${{ inputs.artifact_prefix }}-${{ inputs.suffix }}-amd64
           merge-multiple: true
 
+      - name: Login to SWR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ inputs.swr_registry }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
       - name: Login to Quay Temp
         uses: docker/login-action@v4
         with:
@@ -597,7 +617,10 @@ jobs:
 
       - name: Merge and push multi-arch manifest to QUAY_TEMP_REPO
         env:
+          # IMAGE is the destination (Quay temp); SOURCE_IMAGE is where the
+          # single-arch digests actually live (SWR, pushed by build-push-digest).
           IMAGE: ${{ env.QUAY_TEMP_REPO }}
+          SOURCE_IMAGE: ${{ inputs.swr_temp_repo }}
         run: |
           set -euo pipefail
           SUFFIX=""
@@ -607,7 +630,7 @@ jobs:
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="${IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
-          DIGESTS=$(printf "$IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
           echo "Digests: $DIGESTS"
           echo "Creating multi-arch manifest tag: $TAG"
           docker buildx imagetools create \
@@ -640,8 +663,9 @@ jobs:
           fi
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
+          # Temp tags were created in SWR by build-push-digest, so clean them up there.
           for arch in amd64 arm64; do
             TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${arch}-temp"
-            skopeo delete --creds "${{ inputs.quay_temp_username }}:${{ secrets.QUAY_TEMP_PASSWORD }}" \
-              "docker://${{ env.QUAY_TEMP_REPO }}:${TAG}" || true
+            skopeo delete --creds "${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}" \
+              "docker://${{ inputs.swr_temp_repo }}:${TAG}" || true
           done

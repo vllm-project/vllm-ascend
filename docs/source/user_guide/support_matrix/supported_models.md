@@ -15,6 +15,15 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 #### Core Supported Models
 
+=== "Ascend 950 Products"
+
+    | Model   | Support   | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
+    |-------|--------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
+    |DeepSeek V4-Flash|✅|Native mixed MXFP8/MXFP4 weights||Ascend 950 Products|✅|✅|✅||✅|✅||✅|✅|✅|✅||✅|1M||[DeepSeek V4-Flash](../../tutorials/models/DeepSeek-V4-Flash.md)|
+    |DeepSeek V4-Pro|✅|Native mixed MXFP8/MXFP4 weights||Ascend 950 Products|✅|✅|✅||✅|✅||✅|✅|✅|✅||✅|1M||[DeepSeek V4-Pro](../../tutorials/models/DeepSeek-V4-Pro.md)|
+    |DeepSeek-V3.1|✅|  |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|240k|| [DeepSeek-V3.1](../../tutorials/models/DeepSeek-V3.1.md) |
+    |GLM-5.1|✅| |✅| Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅||✅|200k||[GLM-5.1](../../tutorials/models/GLM5.md) |
+
 === "A2/A3"
 
     |       Model         | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
@@ -32,6 +41,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | GLM-4.x             |   ✅    |      |      |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 198k | [GLM-4.x](../../tutorials/models/GLM4.x.md) |
     | GLM-5/5.1           |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
     | GLM-5.2             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
+    | GLM-5.3             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | 🔵 | ✅ | ✅ | 🔵 | ✅ | ✅ | 200k | [GLM-5.3](../../tutorials/models/GLM5.3.md) |
     | Gemma4              |   🔵    |      |  ✅ |   A2/A3/Ascend950  |     | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
     | Kimi-K2-Thinking    |   🔵    |      |      |       A2/A3       |      |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
     | DeepSeekOCR2        |   ✅    |      |  ✅ |       A2/A3        |     | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
@@ -69,6 +79,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | Phi-3/4                       | 🔵        |                                                                      | A2/A3 |
 | Mistral/Mistral-Instruct      | 🔵        |                                                                      | A2/A3 |
 | Hy3-preview                   | 🔵        |                                                                      | A3    |
+| Hy4-preview (Experimental)    | 🔵        |                                                                      | A3    |
 | DeepSeek V2.5                 | 🟡        | Need test                                                            |       |
 | Mllama                        | 🟡        | Need test                                                            |       |
 | MiniMax-Text                  | 🟡        | Need test                                                            |       |
@@ -105,6 +116,13 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 
 #### Core Supported Models
 
+=== "Ascend 950 Products"
+
+    | Model           | Support  | Note   | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | MLP Weight Prefetch | Doc |
+    |-----------------|----------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
+    |Qwen3.5-397B-A17B|✅        |       |✅    | Ascend 950DT |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
+    |Qwen3.6-27B      |✅        |       |✅    | Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+
 === "A2/A3"
 
     |                Model                | Support | Note | BF16 | Supported Hardware | W8A8 | Chunked Prefill | Automatic Prefix Cache | LoRA | Speculative Decoding | Async Scheduling | Tensor Parallel | Pipeline Parallel | Expert Parallel | Data Parallel | Prefill-decode Disaggregation | Piecewise AclGraph | Fullgraph AclGraph | max-model-len | Doc |
@@ -116,7 +134,9 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3.6-35B-A3B                     | 🔵      |      | ✅  | A2/A3              | ✅ | ✅ | ✅ |  | 🔵 | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 262144 | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
     | Qwen3-Omni-30B-A3B-Thinking         | 🔵      |      |      | A2/A3              |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
     | Kimi-K2.5/Kimi-K2.6                 | 🔵      |      |      | A2/A3              |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
+    | Kimi-K3                             | 🔵      | W4A8; DSpark; FULL_DECODE_ONLY |      | A3 |  |  | ✅ |  | ✅ |  | ✅ |  | ✅ | ✅ |  |  | ✅ |  | [Kimi-K3](../../tutorials/models/Kimi-K3.md) |
     | MiniMax-M3                          | 🔵      | Text, image, video, and ViT DP | ✅ | A2/A3 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | 1M | [MiniMax-M3](../../tutorials/models/MiniMax-M3.md) |
+    | Cohere Transcribe                  | 🔵      | 2B Conformer encoder-decoder ASR, 14 languages (03-2026 & arabic-07-2026) | ✅ | A2/A3 | ❌ |  |  | ❌ | ❌ |  | 🟡 |  |  |  | ❌ | 🟡 | 🟡 |  | [Cohere-Transcribe](../../tutorials/models/Cohere-Transcribe.md) |
 
 === "Atlas 300I DUO"
 
@@ -125,8 +145,10 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3-VL | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
     | Qwen3.5-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
     | Qwen3.5-35B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3.5-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     | Qwen3.6-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3.8-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.8-27B](../../tutorials/models/Qwen3.8-27B.md) |
     | PaddleOCR-VL | ✅ |  | ❌ | Atlas 300I DUO | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
     | Qwen3-ASR | ✅ |  | ❌ | Atlas 300I DUO | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
 

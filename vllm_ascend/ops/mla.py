@@ -22,6 +22,7 @@
 
 import torch
 from torch import nn
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -30,9 +31,6 @@ from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionW
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
-
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.utils import is_vl_model, parse_layer_idx
 
 
 class IndexerWrapper(nn.Module):
@@ -79,6 +77,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
+        non_causal_multi_token_decode: bool = False,
+        allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -90,6 +90,9 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.v_head_dim = v_head_dim
         self.prefix = prefix
         self.skip_topk = skip_topk
+        # This is an upstream CUDA indexer hint. Ascend accepts it to preserve
+        # constructor compatibility, but its indexer does not consume it.
+        del allow_short_prefill_indexer_scoring_skip
         hf_config = get_current_vllm_config().model_config.hf_text_config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
@@ -113,6 +116,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             indexer=ascend_indexer,
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
             # extra args
             rotary_emb=mla_modules.rotary_emb,
             fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
@@ -122,6 +126,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
+            g_proj=mla_modules.g_proj,
+            use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
         )
 
@@ -136,15 +142,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
 
         self.mla_attn.process_weights_after_loading = wrapped_process_weights
 
-        # For VL models (e.g. Kimi K2.5), inputs_embeds at layer 0 comes from
-        # the vision encoder as full [N, H] — it has NOT been reduce-scattered.
-        # We detect this statically at init time (not at runtime via shape checks,
-        # which break graph-mode compilation) so the branch is a constant to dynamo.
         vllm_config = get_current_vllm_config()
-        _is_vl = is_vl_model(vllm_config)
-        _layer_idx = parse_layer_idx(prefix)
-        self.is_vl_first_layer = bool(_is_vl and _layer_idx == 0)
-
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -158,25 +156,18 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
         hidden_dim = self.hidden_size
+        output = torch.empty(
+            (hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+        )
 
-        if _EXTRA_CTX.flash_comm_v1_enabled and self.tp_size > 1 and self.is_vl_first_layer:
-            need_gather_q_kv = False
-            n_out = hidden_states.shape[0] // self.tp_size
-            output = torch.empty((n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device)
-        else:
-            need_gather_q_kv = _EXTRA_CTX.flash_comm_v1_enabled
-            output = torch.empty(
-                (hidden_states.shape[0], hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
-            )
-
-        torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output, self.prefix)
+        torch.ops.vllm.mla_forward(hidden_states, output, self.prefix)
         output = output.view(-1, hidden_dim)
         return output
 
 
+@eager_break_during_capture
 def mla_forward(
     hidden_states: torch.Tensor,
-    need_gather_q_kv: bool,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
@@ -187,15 +178,12 @@ def mla_forward(
     else:
         attn_metadata = forward_context.attn_metadata
     kv_cache = self.mla_attn.kv_cache
-    self.mla_attn.impl.forward(
-        self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
-    )
+    self.mla_attn.impl.forward(self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
     return
 
 
 def mla_forward_fake(
     hidden_states: torch.Tensor,
-    need_gather_q_kv: bool,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:

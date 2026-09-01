@@ -1,3 +1,5 @@
+import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -87,7 +89,7 @@ def _patch_select_moe_comm_method_deps(
 def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     from vllm.forward_context import ForwardContext, override_forward_context
 
-    from vllm_ascend.models import deepseek_v4
+    from vllm_ascend.models.deepseek_v4 import model as deepseek_v4
 
     monkeypatch.setattr(afc.envs_vllm, "VLLM_USE_V2_MODEL_RUNNER", True)
     monkeypatch.setattr(
@@ -117,7 +119,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
         no_compile_layers={},
         attn_metadata={},
         slot_mapping={},
-        additional_kwargs={"flash_comm_v1_enabled": False},
+        additional_kwargs={},
     )
 
     with override_forward_context(forward_context):
@@ -347,23 +349,6 @@ def test_select_moe_comm_method_a3_quant_w8a8(
 
 
 @pytest.mark.parametrize(
-    ("quant_type", "expected"),
-    [
-        ("w4a8", True),
-        ("w8a8", True),
-        ("w8a16", False),
-    ],
-)
-def test_cann_megamoe_supported_by_config_quant_type(
-    quant_type,
-    expected,
-):
-    vllm_config = _make_vllm_config(quant_type=quant_type)
-
-    assert afc._cann_megamoe_supported_by_config(vllm_config) == expected
-
-
-@pytest.mark.parametrize(
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
@@ -415,3 +400,44 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     )
 
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
+
+
+def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
+    vllm_config = _make_vllm_config()
+    seen: dict[str, object] = {"config": None, "inside": False}
+
+    @contextmanager
+    def fake_set_current(config):
+        seen["config"] = config
+        seen["inside"] = True
+        try:
+            yield
+        finally:
+            seen["inside"] = False
+
+    @contextmanager
+    def fake_set_forward_context(**_kwargs):
+        yield
+
+    forward_context = SimpleNamespace(dp_metadata=None)
+
+    monkeypatch.setattr(afc, "set_current_vllm_config", fake_set_current)
+    monkeypatch.setattr(afc, "set_forward_context", fake_set_forward_context)
+    monkeypatch.setattr(afc, "get_forward_context", lambda: forward_context)
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=1))
+    monkeypatch.setattr(afc, "has_layer_idx", lambda _model: False)
+    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
+
+    moe_mod_name = "vllm_ascend.ops.fused_moe.moe_comm_method"
+    if moe_mod_name in sys.modules:
+        monkeypatch.setattr(sys.modules[moe_mod_name], "get_moe_comm_method", lambda _t: None)
+    else:
+        monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: None))
+
+    with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4):
+        assert seen["inside"] is True
+        assert seen["config"] is vllm_config
+
+    assert seen["inside"] is False

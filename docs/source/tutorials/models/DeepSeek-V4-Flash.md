@@ -15,9 +15,9 @@ This document will show the main verification steps of the model, including supp
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -31,13 +31,13 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy a multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy a multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 **Attention**: DSpark is supported on both A2 and A3 in vLLM Ascend `v0.25.0` and later. Use the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731` for A2 or the image `quay.io/ascend/vllm-ascend:DeepSeekV4-flash-0731-a3` for A3.
 
@@ -82,7 +82,7 @@ Select an image based on your machine type and start the docker image on your no
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
-    
+
 === "A2 series"
 
     Start the docker image on each node.
@@ -90,10 +90,10 @@ Select an image based on your machine type and start the docker image on your no
     ```bash
     # deepseek-v4-flash uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    
+
     # deepseek-v4-flash-dspark uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
-    
+
     docker run --rm \
         --name vllm-ascend \
         --shm-size=512g \
@@ -127,7 +127,7 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy a multi-node environment, you need to set up the environment on each node.
 
@@ -183,7 +183,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
             },
         "enable_cpu_binding": true,
         "enable_dsa_cp": true,
-        "enable_flashcomm1": true,
         "multistream_overlap_shared_expert": true}'
     ```
 
@@ -262,11 +261,10 @@ Single-node deployment completes both Prefill and Decode within the same node. T
             "enable_static_kernel": false
             },
         "enable_cpu_binding": true,
-        "enable_flashcomm1": true,
         "multistream_overlap_shared_expert": true}'
     ```
 
-=== "A3 series DSpark"
+=== "A3 series with DSpark"
 
     Run the following script to execute online inference.
 
@@ -306,7 +304,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
             },
             "enable_cpu_binding": true,
             "enable_dsa_cp": true,
-            "enable_flashcomm1": true,
             "multistream_overlap_shared_expert": true
         }'
     ```
@@ -314,13 +311,19 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 Key Parameter Descriptions:
 
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. Adjust it according to your actual scenario.
+- `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.
+- `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
+- `--data-parallel-size` sets the global number of data parallel ranks, while `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure them together according to the deployment topology and available NPUs.
+- `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference. When using a DSpark model, set the speculative decoding method to `dspark`.
+- `--block-size` sets the KV cache block size. To enable the experimental 4K prefix cache hit support, change it from `128` to `32`.
+- `--quantization ascend` enables Ascend quantization for the W8A8 model.
+- `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP) and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
-- `enable_flashcomm1` enables the FlashComm communication optimization.
+- `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_dsa_cp` enables DSA context parallelism, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -479,6 +482,8 @@ Before you start, please:
 
 2. Prepare the script `run_dp_template.sh` on each node.
 
+=== "A3 series"
+
     1. Prefill node
 
         ```shell
@@ -529,7 +534,7 @@ Before you start, please:
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": true, "enable_flashcomm1":true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -626,6 +631,7 @@ Before you start, please:
         ```
 
 === "A3 series with dspark"
+
     1. Prefill node
 
         ```shell
@@ -676,7 +682,7 @@ Before you start, please:
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": false, "enable_flashcomm1":true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": false}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -730,15 +736,15 @@ Before you start, please:
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 120 \
-            --max-num-seqs 60 \
+            --max-num-batched-tokens 256 \
+            --max-num-seqs 32 \
             --async-scheduling \
             --block-size 32 \
             --no-disable-hybrid-kv-cache-manager \
             --no-enable-prefix-caching \
             --trust-remote-code \
             --tokenizer-mode deepseek_v4 \
-            --safetensors-load-strategy 'prefetch' \
+            --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
@@ -768,7 +774,8 @@ Before you start, please:
                     "enable_static_kernel":false
                 },
                 "enable_cpu_binding":true,
-                "multistream_overlap_shared_expert":true
+                "multistream_overlap_shared_expert":true,
+                "recompute_scheduler_enable":true
             }'
         ```
 
@@ -918,8 +925,7 @@ Before you start, please:
             --trust-remote-code \
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
-            --safetensors-load-strategy 'prefetch' \
-            --model-loader-extra-config='{"enable_multithread_load": "true", "num_threads": 128}' \
+            --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
             --tokenizer-mode deepseek_v4 \
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
@@ -1054,9 +1060,11 @@ Before you start, please:
 
 Key Parameter Descriptions:
 
-- `enable_flashcomm1`: enables the communication optimization function on the prefill nodes.
+- `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
+- `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
+- `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
-- `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens. For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
+- `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL`: Controls the retention interval, in tokens, for prefix-cache checkpoints of hybrid attention layers. It is applicable to DeepSeek-V4 and takes effect only when prefix caching is enabled. Under KV-cache pressure, it can improve the effective prefix-cache hit rate for reusable long prefixes. The value must be a non-negative multiple of `--block-size`; for DeepSeek-V4-Flash, 128 times `--block-size` is recommended. Set it to `4096` when `--block-size` is `32`, or `16384` when `--block-size` is `128`.
@@ -1065,7 +1073,7 @@ Deployment Verification:
 
 After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 #### 5.2.3 Ultra-Long Sequence Deployment
 
@@ -1122,7 +1130,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ## 9 Performance Tuning
 
@@ -1152,20 +1160,14 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
-**Notice:**
-
-`max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario. For other settings, please refer to the [Deployment](#5-online-service-deployment) chapter.
-
-Currently, we support 4k prefix cache hit in an experimental manner. You only need to change the value of --block-size from 128 to 32 in the service.
-
 ### 9.2 Tuning Guidelines
 
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.

@@ -64,6 +64,7 @@ def test_device_config_supports_legacy_soc_build_info(monkeypatch):
 def test_import_time_config_does_not_probe_runtime(monkeypatch):
     import torch_npu
 
+    monkeypatch.setattr(_build_info, "__device_type__", "A2")
     get_soc_version = MagicMock(side_effect=AssertionError("runtime probe is not import-safe"))
     monkeypatch.setattr(torch_npu.npu, "get_soc_version", get_soc_version)
 
@@ -74,6 +75,7 @@ def test_import_time_config_does_not_probe_runtime(monkeypatch):
 def test_runtime_device_match_succeeds(monkeypatch):
     import torch_npu
 
+    monkeypatch.setattr(_build_info, "__device_type__", "A2")
     monkeypatch.setattr(torch_npu.npu, "get_soc_version", lambda: 220)
 
     check_ascend_device_type()
@@ -82,6 +84,7 @@ def test_runtime_device_match_succeeds(monkeypatch):
 def test_runtime_device_mismatch_raises_runtime_error(monkeypatch):
     import torch_npu
 
+    monkeypatch.setattr(_build_info, "__device_type__", "A2")
     monkeypatch.setattr(torch_npu.npu, "get_soc_version", lambda: 250)
 
     with pytest.raises(RuntimeError, match="does not match"):

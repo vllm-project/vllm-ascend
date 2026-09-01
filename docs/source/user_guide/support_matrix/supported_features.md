@@ -21,8 +21,8 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 | Beam search                   | 🔵 Experimental  | CI needed                                                              |
 | Guided Decoding               | 🟢 Functional    | [vllm-ascend#177][guided_decoding]                                     |
 | Tensor Parallel               | 🟢 Functional    | Make TP >4 work with graph mode.                                        |
-| Pipeline Parallel             | 🟢 Functional    | Write official guide and tutorial.                                     |
-| Expert Parallel               | 🟢 Functional    | Supports MRv1 legacy EPLB and MRv2 upstream synchronous EPLB; see [EPLB][eplb]. |
+| Pipeline Parallel             | 🟢 Functional    | See [Pipeline Parallelism][pipeline_parallel]. An end-to-end tutorial is planned. |
+| Expert Parallel               | 🟢 Functional    | Supports MRv1 legacy EPLB and MRv2 asynchronous EPLB with the upstream default policy; see [EPLB][eplb]. |
 | Data Parallel                 | 🟢 Functional    | Data Parallel support for Qwen3 MoE.                                   |
 | Prefill Decode Disaggregation | 🟢 Functional    | Functional, xPyD is supported.                                         |
 | Quantization                  | 🟢 Functional    | W8A8 available; working on more quantization method support (W4A8, etc.) |
@@ -47,3 +47,4 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [context_parallel]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/context_parallel.html
 [sleep_mode]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/sleep_mode.html
 [eplb]: https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/expert_parallelism_load_balancer.html
+[pipeline_parallel]: ../feature_guide/pipeline_parallel.md

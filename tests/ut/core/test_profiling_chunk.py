@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from unittest.mock import MagicMock, patch
+from contextlib import ExitStack
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
@@ -30,6 +31,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import ProfilingChunkConfig, clear_ascend_config, init_ascend_config
 from vllm_ascend.core.profiling_chunk_predictor import ChunkSizePredictor, ProfilingChunkManager
 from vllm_ascend.core.scheduler_profiling_chunk import ProfilingChunkScheduler
+from vllm_ascend.utils import vllm_version_is
 
 MODEL = "Qwen/Qwen3-0.6B"
 BLOCK_SIZE = 16
@@ -76,18 +78,40 @@ class TestProfilingChunkConfig(TestBase):
     def test_default_values(self):
         cfg = ProfilingChunkConfig()
         self.assertFalse(cfg.enabled)
+        self.assertFalse(cfg.need_timing)
         self.assertAlmostEqual(cfg.smooth_factor, 1.0)
         self.assertEqual(cfg.min_chunk, 4096)
 
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    def test_need_timing_is_disabled_when_profiling_chunk_is_disabled(self, mock_warning):
+        cfg = ProfilingChunkConfig(enabled=False, need_timing=True)
+
+        self.assertFalse(cfg.need_timing)
+        mock_warning.assert_called_once()
+
     def test_invalid_smooth_factor_raises(self):
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig({"smooth_factor": 0.0})
+            ProfilingChunkConfig(**{"smooth_factor": 0.0})
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig({"smooth_factor": 1.5})
+            ProfilingChunkConfig(**{"smooth_factor": 1.5})
 
     def test_invalid_min_chunk_raises(self):
         with self.assertRaises(ValueError):
-            ProfilingChunkConfig({"min_chunk": 0})
+            ProfilingChunkConfig(**{"min_chunk": 0})
+
+    def test_need_timing_defaults_to_enabled(self):
+        # When need_timing is not provided, it defaults to enabled.
+        cfg = ProfilingChunkConfig(enabled=True)
+        self.assertTrue(cfg.need_timing)
+        cfg = ProfilingChunkConfig(enabled=False)
+        self.assertFalse(cfg.need_timing)
+
+    def test_need_timing_explicit_false_is_preserved(self):
+        # Regression: previously `need_timing if need_timing else enabled`
+        # turned explicit False back into enabled. The None sentinel must
+        # distinguish "not provided" from "explicitly False".
+        cfg = ProfilingChunkConfig(enabled=True, need_timing=False)
+        self.assertFalse(cfg.need_timing)
 
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
@@ -246,18 +270,25 @@ class TestProfilingChunkManager(TestBase):
 
 class TestProfilingChunkScheduler(TestBase):
     @patch("vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config")
-    @patch("vllm_ascend.ascend_config.AscendConfig.__init__", MagicMock(return_value=None))
+    # ProfilingChunkScheduler imports these names inside __init__, so patch the
+    # source module from which that inline import resolves them.
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.ascend_config.get_ascend_config")
     @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
-    def create_scheduler(self, mock_get_ascend_config, mock_init_ascend_config):
+    def create_scheduler(
+        self,
+        mock_get_ascend_config,
+        _mock_profiling_init_ascend_config,
+        mock_balance_init_ascend_config,
+    ):
         profiling_cfg = MagicMock()
         profiling_cfg.enabled = True
         profiling_cfg.smooth_factor = 0.8
         profiling_cfg.min_chunk = 256
         mock_get_ascend_config.return_value.scheduler_config.profiling_chunk_config = profiling_cfg
-        mock_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
+        mock_balance_init_ascend_config.return_value.scheduler_config.short_request_first_config.enabled = False
 
         mock_hf_config = MagicMock()
         mock_hf_config.model_type = "qwen3"
@@ -301,9 +332,6 @@ class TestProfilingChunkScheduler(TestBase):
             cache_config=cache_config,
         )
         vllm_config.parallel_config.pipeline_parallel_size = 2
-        from unittest.mock import PropertyMock
-
-        type(model_config).is_encoder_decoder = PropertyMock(return_value=False)
         vllm_config.model_config.hf_config.is_encoder_decoder = False
 
         kv_cache_config = KVCacheConfig(
@@ -319,13 +347,24 @@ class TestProfilingChunkScheduler(TestBase):
         kv_cache_config.hash_block_size = BLOCK_SIZE
         cache_config.num_gpu_blocks = 10000
 
-        scheduler = ProfilingChunkScheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            block_size=BLOCK_SIZE,
-            log_stats=True,
-            structured_output_manager=MagicMock(spec=StructuredOutputManager),
-        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
+            )
+            if not vllm_version_is("0.27.1"):
+                # vLLM main (post-v0.27.1) reads model_config.uses_mrope in
+                # Scheduler.__init__, which infinitely recurses on a bare
+                # MagicMock hf_config. Override it to keep the UT runnable.
+                stack.enter_context(
+                    patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False)
+                )
+            scheduler = ProfilingChunkScheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                block_size=BLOCK_SIZE,
+                log_stats=True,
+                structured_output_manager=MagicMock(spec=StructuredOutputManager),
+            )
 
         should_advance = MagicMock()
         should_advance.return_value = False

@@ -27,7 +27,7 @@ import regex as re
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 
-MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8")
+MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8-0626")
 GSM8K_QUESTION = "Ali had $21. Leila gave him half of her $100. How much does Ali have now?"
 GSM8K_ANSWER = "71"
 MAX_TOKENS = 512
@@ -74,19 +74,14 @@ def _configure_jemalloc() -> None:
 @pytest.mark.e2e_model(str(MINIMAX_M3_MODEL_PATH))
 @pytest.mark.e2e_coverage(
     arch="multimodal",
-    feature="flashcomm1,aclgraph",
+    feature="aclgraph",
     parallel="TP,EP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W8A8",
     graph_mode="full_decode_only",
 )
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
-    },
-)
+@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"})
 @wait_until_npu_memory_free()
 def test_minimax_m3_gsm8k_one_case() -> None:
     _configure_jemalloc()
@@ -94,9 +89,9 @@ def test_minimax_m3_gsm8k_one_case() -> None:
     example_prompts = [GSM8K_PROMPT_TEMPLATE.format(question=GSM8K_QUESTION)]
     with VllmRunner(
         MINIMAX_M3_MODEL_PATH,
-        max_model_len=10240,
+        max_model_len=8192,
         max_num_seqs=8,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=2048,
         dtype="auto",
         tensor_parallel_size=8,
         enable_expert_parallel=True,
@@ -110,14 +105,12 @@ def test_minimax_m3_gsm8k_one_case() -> None:
         },
         additional_config={
             "enable_cpu_binding": True,
-            "enable_reduce_sample": True,
             "ascend_compilation_config": {
                 "enable_static_kernel": True,
                 "fuse_norm_quant": False,
             },
             "multistream_overlap_shared_expert": False,
             "weight_nz_mode": 2,
-            "enable_flashcomm1": True,
             "enable_shared_expert_dp": True,
         },
     ) as vllm_model:

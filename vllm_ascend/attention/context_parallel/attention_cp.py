@@ -46,7 +46,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.memcache_comm_fence import record_attention_compute_start
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import cp_chunkedprefill_comm_stream, weak_ref_tensors
 
 

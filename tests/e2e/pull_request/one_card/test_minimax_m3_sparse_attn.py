@@ -30,6 +30,9 @@ import torch
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn,
 )
+from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
+    minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
+)
 from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
@@ -247,7 +250,18 @@ def _run_decode_sparse_attention(
         )
         return
 
-    pytest.skip("MiniMax M3 NPU sparse attention currently supports prefill only; decode uses Triton.")
+    minimax_m3_sparse_attn_decode_npu(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        seq_lens,
+        num_kv_heads,
+        sm_scale,
+        output,
+        decode_query_len,
+        block_size=BLOCK_SIZE,
+    )
 
 
 def _synchronize() -> None:
@@ -377,7 +391,12 @@ def test_prefill_index_topk_correctness(
 
     cu_seqlens = torch.zeros(batch + 1, device=DEVICE, dtype=torch.int32)
     cu_seqlens[1:] = q_lens.cumsum(0)
-    block_table = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32).reshape(batch, max_blocks)
+    # Keep an invalid page directly before the view so a block_id=-1 access is
+    # deterministic instead of silently reading neighboring allocator memory.
+    block_table_storage = torch.empty(num_pages + 1, device=DEVICE, dtype=torch.int32)
+    block_table_storage[0] = torch.iinfo(torch.int32).max
+    block_table_storage[1:] = torch.randperm(num_pages, device=DEVICE, dtype=torch.int32)
+    block_table = block_table_storage[1:].reshape(batch, max_blocks)
     idx_q = torch.ones(q_lens.sum().item(), num_idx_heads, head_dim, device=DEVICE)
     index_kv_cache = _allocate_index_kv_cache(num_pages, head_dim, index_layout)
     for req_id in range(batch):

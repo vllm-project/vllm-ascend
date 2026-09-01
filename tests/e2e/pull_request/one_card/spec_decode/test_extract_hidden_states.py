@@ -150,7 +150,7 @@ def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config):
             model=case.model_name,
             tensor_parallel_size=1,
             enforce_eager=case.enforce_eager,
-            enable_chunked_prefill=False,
+            enable_chunked_prefill=True,
             speculative_config={
                 "method": "extract_hidden_states",
                 "num_speculative_tokens": 1,

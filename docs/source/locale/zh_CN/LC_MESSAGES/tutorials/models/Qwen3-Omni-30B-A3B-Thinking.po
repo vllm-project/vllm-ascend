@@ -202,9 +202,6 @@ msgid ""
 "stream and shape limitations."
 msgstr "需要此操作以避免默认 FFTS+ 模式的流和形状限制导致的 HcclAllreduce 失败。"
 
-msgid "## 5 Online Service Deployment"
-msgstr "## 5 在线服务部署"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -371,22 +368,8 @@ msgstr "### 9.2 调优指南"
 msgid "#### 9.2.1 General Tuning Reference"
 msgstr "#### 9.2.1 通用调优参考"
 
-msgid ""
-"Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.\n"
-"Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions."
-msgstr ""
-"请参考[公开性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。\n"
-"请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
-
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
-
-msgid ""
-"For common environment, installation, and general parameter issues, please "
-"refer to the [Public "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
-msgstr ""
-"对于常见的环境、安装和通用参数问题，请参考[公开常见问题解答](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
 
 msgid "**Installation Verification:**"
 msgstr "**安装验证：**"
@@ -485,3 +468,20 @@ msgid ""
 msgstr ""
 "以`Qwen3-Omni-30B-A3B-Thinking`为例进行性能评估。\n"
 "更多详情请参考[vLLM基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid ""
+"Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.\n"
+"Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions."
+msgstr ""
+"调优方法请参考[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。\n"
+"详细功能描述请参考[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
+
+msgid ""
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public "
+"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
+msgstr ""
+"对于常见的环境、安装和通用参数问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"

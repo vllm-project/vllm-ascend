@@ -5,6 +5,8 @@
 # entry under the matching section. PRs that add entries here can be exercised
 # via `/nightly <name>` (or `/nightly <name> --a3-560t` for the 560T cluster)
 # without merging to main.
+# Every A2/A3 multi-node case must set `config_base_path` to its internal_dp/config
+# or external_dp/config directory.
 
 a2:
   single_node:
@@ -31,6 +33,9 @@ a2:
       - name: MiniMax-M2.5-w8a8-QuaRot-A2
         os: linux-aarch64-a2b3-8
         config_file_path: MiniMax-M2.5-w8a8-QuaRot-A2.yaml
+      - name: Qwen3.8-27B-w8a8-A2
+        os: linux-aarch64-a2b3-2
+        config_file_path: Qwen3.8-27B-w8a8-A2.yaml
       - name: rejection-sample
         os: linux-aarch64-a2b3-1
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
@@ -38,12 +43,15 @@ a2:
     test_config:
       - name: multi-node-qwen3-235b-dp
         config_file_path: Qwen3-235B-A22B-A2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-GLM-5.1-w8a8-A2
         config_file_path: GLM5_1-W8A8-A2-dual-nodes.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-Kimi-K2.5-W4A8-A2
         config_file_path: Kimi-K2_5-W4A8-A2-dual-nodes.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
   accuracy:
     nightly:
@@ -88,50 +96,78 @@ a3:
     test_config:
       - name: multi-node-deepseek-v3.2-W8A8-EP
         config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 4
       - name: DeepSeek-V4-Pro-w4a8-1M-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
+      - name: GLM-5.1-w8a8c8-128k-1k-90-50-PD
+        config_file_path: GLM-5.1-W8A8C8-128k-1k-90-50-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: QWEN3_235B_PD_3_5K_1_5k
+        config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 3
+
   double_node:
     test_config:
       - name: multi-node-qwen3-dp
         config_file_path: Qwen3-235B-A22B.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-GLM-5.1-w8a8-A3
         config_file_path: GLM5_1-W8A8-A3-dual-nodes.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-dpsk3.2-2node
         config_file_path: DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-qwen-disagg-pd
         config_file_path: Qwen3-235B-disagg-pd.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-qwen-vl-disagg-pd
         config_file_path: Qwen3-VL-235B-disagg-pd.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-qwenw8a8-2node-eplb
         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
-      - name: multi-node-GLM-5.1-W8A8C8-A3_64k_128k_90_50
-        config_file_path: GLM-5.1-W8A8C8-A3_64k_128k_90_50.yaml
+      - name: multi-node-GLM-5.1-W8A8C8-A3_128k_90_50
+        config_file_path: GLM-5.1-W8A8C8-A3_128k_90_50.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
+        size: 2
+      - name: multi-node-GLM-5.1-W8A8C8-MTP-A3_198k_function
+        config_file_path: GLM-5.1-W8A8C8-A3_198k_function.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-deepseek-v3.1
         config_file_path: DeepSeek-V3.1-BF16.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: multi-node-GLM-5.2-w8a8-A3
         config_file_path: GLM5_2-W8A8-A3-dual-nodes.yaml
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
       - name: Minimax_m2.7_in128k_1k_prefix90_tpot50
         config_file_path: Minimax_m2.7_in128k_1k_prefix90_tpot50.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
       - name: DeepSeek-V4-flash-w8a8-PD-prefix
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
   single_node:
     test_config:
@@ -181,11 +217,32 @@ a3:
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
       - name: Kimi-K2.6-w4a8-A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2.6-w4a8-A3.yaml
       - name: Minimax_m2.7_w8a8_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Minimax_m2.7_w8a8_A3.yaml
+      - name: Qwen3_32b_w8a8_ml_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
+      - name: Deepseek_R1_W8A8_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Deepseek_R1_W8A8_A3.yaml
+      - name: Qwen3.8-27B-w8a8-A3
+        os: linux-aarch64-a3-2
+        config_file_path: Qwen3.8-27B-w8a8-A3.yaml
+      - name: Qwq_32b_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwq_32b_A3.yaml
+      - name: Qwen3_32b_W8A8_wl_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
+      - name: Deepseek_R1_W8A8_Reasoning_output_A3
+        os: linux-aarch64-a3-16
+        config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
+      - name: qwen_3_6_27b_w8a8_A3
+        os: linux-aarch64-a3-16
+        config_file_path: qwen_3_6_27b_w8a8_A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
@@ -217,6 +274,15 @@ a3:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
+      # Qwen3-32B V1/V2 exit-scenario accuracy guards (AIME W8A8 + GPQA bf16):
+      # nightly-only, reusing the same pytest files (V1 vs V2 direct compare).
+      - name: qwen3-32b-w8a8-aime2024-acc
+        os: linux-aarch64-nightly-a3-4
+        tests: tests/e2e/nightly/test_qwen3_32b_w8a8_aime2024_accuracy.py
+      - name: qwen3-32b-bf16-gpqa-acc
+        os: linux-aarch64-nightly-a3-4
+        tests: tests/e2e/nightly/test_qwen3_32b_bf16_gpqa_accuracy.py
+        testcase_timeout: 240
 
 a3-560t:
   multi_node:
@@ -322,6 +388,15 @@ a3-560t:
       - name: Qwen3-30B-QuaRot
         os: linux-aarch64-a3-2-cn12-001
         config_file_path: Qwen3-30B-QuaRot-eagle3.yaml
+      # Qwen3-32B V1/V2 exit-scenario accuracy guards (AIME W8A8 + GPQA bf16):
+      # nightly-only, reusing the same pytest files (V1 vs V2 direct compare).
+      - name: qwen3-32b-w8a8-aime2024-acc
+        os: linux-aarch64-a3-4-cn12-001
+        tests: tests/e2e/nightly/test_qwen3_32b_w8a8_aime2024_accuracy.py
+      - name: qwen3-32b-bf16-gpqa-acc
+        os: linux-aarch64-a3-4-cn12-001
+        tests: tests/e2e/nightly/test_qwen3_32b_bf16_gpqa_accuracy.py
+        testcase_timeout: 240
 
 310p:
   single_node:
@@ -335,13 +410,22 @@ a3-560t:
       - name: Qwen3-32B-w8a8sc-310p
         os: linux-aarch64-310p-4
         config_file_path: Qwen3-32B-w8a8sc-310p.yaml
+      - name: Qwen3.6-27B-W8A8
+        os: linux-aarch64-310p-2
+        config_file_path: Qwen3.6-27B-W8A8-310P-300I-DUO.yaml
+      - name: Qwen3.6-35B-A3B-w8a8
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3.6-35B-W8A8-310P-300I-DUO.yaml
+      - name: Qwen3.6-35B-A3B-w8a8-310p-MTP
+        os: linux-aarch64-310p-4
+        config_file_path: Qwen3.6-35B-A3B-w8a8-310p-MTP.yaml
 
-# a5:
-#   multi_node:
-#     test_config:
-#       - name: Qwen3-235B-W8A8-EPLB
-#         size: 2
-#         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+a5:
+  multi_node:
+    test_config:
+      - name: Qwen3-235B-W8A8-EPLB
+        size: 2
+        config_file_path: Qwen3-235B-W8A8-EPLB-mxfp0.yaml
 #   single_node:
 #     test_config:
 #       - name: Qwen3.5-397B-A17B-w4a8-mtp

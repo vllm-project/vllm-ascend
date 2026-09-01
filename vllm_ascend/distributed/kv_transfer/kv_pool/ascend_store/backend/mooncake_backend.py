@@ -16,12 +16,13 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
+DEFAULT_TENANT_ID = "default"
 
 
 @functools.lru_cache(maxsize=1)
@@ -115,6 +116,9 @@ class MooncakeBackend(Backend):
             except OSError as e:
                 raise RuntimeError(f"Failed to create per-rank SSD offload directory: {rank_path!r} ({e})")
             ssd_kwargs["ssd_offload_path"] = rank_path
+        setup_kwargs = dict(ssd_kwargs)
+        if self.config.tenant_id != DEFAULT_TENANT_ID:
+            setup_kwargs["tenant_id"] = self.config.tenant_id
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
@@ -130,7 +134,7 @@ class MooncakeBackend(Backend):
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
                 engine=transfer_engine.get_engine(),
-                **ssd_kwargs,
+                **setup_kwargs,
             )
         else:
             self.local_seg = local_hostname
@@ -142,7 +146,7 @@ class MooncakeBackend(Backend):
                 protocol=self.config.protocol,
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
-                **ssd_kwargs,
+                **setup_kwargs,
             )
 
         if ret != 0:
@@ -158,6 +162,7 @@ class MooncakeBackend(Backend):
                 "Mooncake SSD offload enabled (Mode A): path=%s",
                 self.config.ssd_offload_path,
             )
+        logger.info("Mooncake tenant_id=%s", self.config.tenant_id)
         return store
 
     @classmethod
@@ -278,6 +283,7 @@ class MooncakeStoreConfig:
     prefer_alloc_in_same_node: bool
     enable_ssd_offload: bool = False
     ssd_offload_path: str = ""
+    tenant_id: str = DEFAULT_TENANT_ID
 
     def __post_init__(self) -> None:
         if not self.enable_ssd_offload:
@@ -312,6 +318,7 @@ class MooncakeStoreConfig:
             prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
             enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
             ssd_offload_path=config.get("ssd_offload_path", ""),
+            tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
         )
 
     @staticmethod
@@ -320,6 +327,15 @@ class MooncakeStoreConfig:
         if not config_path:
             raise ValueError("The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
         return MooncakeStoreConfig.from_file(config_path)
+
+
+def _normalize_tenant_id(value: Any) -> str:
+    if value is None:
+        return DEFAULT_TENANT_ID
+    if not isinstance(value, str):
+        raise TypeError(f"tenant_id must be a string or null, got {type(value).__name__}: {value!r}")
+    tenant_id = value.strip()
+    return tenant_id if tenant_id else DEFAULT_TENANT_ID
 
 
 def _parse_global_segment_size(value) -> int:

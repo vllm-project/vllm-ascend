@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from typing import Any
 
 import torch
@@ -14,9 +13,9 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
+from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
+from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -35,15 +34,7 @@ class AscendDSparkProposer(AscendDflashProposer):
     ):
         super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
-        if vllm_config.speculative_config.draft_sample_method == "probabilistic":
-            raise ValueError(
-                "DSpark probabilistic draft sampling is not supported on the v1 "
-                "model runner; use greedy (the default) instead."
-            )
-        if vllm_version_is("0.26.0"):
-            self.sample_from_anchor = not getattr(self.draft_model_config.hf_config, "dspark_bonus_anchor", False)
-        else:
-            self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
+        self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
         if self.sample_from_anchor:
             self.num_query_per_req = self.num_speculative_tokens
         else:
@@ -52,8 +43,8 @@ class AscendDSparkProposer(AscendDflashProposer):
         blk = 1 + self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
         self._dspark_seed_buffer = torch.zeros(self.max_batch_size, dtype=torch.int64, device=device)
-        # DSpark is not supported in vllm v1, so related property needs to be reset here.
-        del self.hidden_size, self.hidden_states, self._dflash_hidden_states  # type: ignore[has-type]
+        # Replace the target-sized DFlash buffers with the draft model's hidden
+        # size. Assignment releases the old tensors without an explicit del.
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size()
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -65,40 +56,17 @@ class AscendDSparkProposer(AscendDflashProposer):
             dtype=self.dtype,
             device=self.device,
         )
-        # Dynamic verify-length (confidence head) state and buffers. The
-        # hyperparameters can be overridden through
-        # additional_config.dynamic_spec_config.method_params when the dspark
-        # dynamic method is selected; otherwise the defaults below are used.
         dynamic_spec_config = get_ascend_config().dynamic_spec_config
-        dspark_params = dynamic_spec_config.method_params if dynamic_spec_config.method == "dspark" else {}
-        # Initial per-request verify budget before the first recompute.
-        self.initial_verify_budget_per_req = int(dspark_params.get("initial_verify_budget_per_req", 5))
-        # Recompute the budget once this many decoding steps have accumulated.
-        self.budget_update_interval = int(dspark_params.get("budget_update_interval", 50))
-        self.budget_threshold = float(dspark_params.get("budget_threshold", 0.7))
-        self.budget_k = self.initial_verify_budget_per_req
-        # Steps accumulated since the last budget update; cleared to zero on every recompute.
-        self._steps_since_budget_update = 0
-        # Guaranteed minimum verify length per request.
-        self._dspark_min_k = 1
-        # Per-request verify lengths of the latest proposal, consumed by
-        # NPUModelRunner.take_draft_token_ids. None means keep all tokens.
-        self._dspark_num_verify_tokens: torch.Tensor | None = None
-        self._dspark_confidence_logits_buffer = torch.zeros(
-            (self.max_batch_size, self.num_speculative_tokens),
-            dtype=torch.float32,
-            device=device,
-        )
-        self._dspark_num_verify_tokens_buffer = torch.zeros(
-            self.max_batch_size,
-            dtype=torch.int32,
-            device=device,
-        )
-        self._keep_lens = torch.zeros(
-            (self.max_batch_size,),
-            dtype=torch.int32,
-            device=self.device,
-        )
+        self.dynamic_spec = None
+
+        if dynamic_spec_config.method == "dspark":
+            self.dynamic_spec = DynamicSpecScheduler(
+                method="dspark",
+                method_params=dynamic_spec_config.method_params,
+                max_batch_size=self.max_batch_size,
+                num_speculative_tokens=self.num_speculative_tokens,
+                device=device,
+            )
         # DSpark runs eager only (Ascend cudagraph unsupported on this path).
         self.use_cuda_graph = False
         # Max query tokens depend on whether sampling from anchor or not.
@@ -119,47 +87,23 @@ class AscendDSparkProposer(AscendDflashProposer):
             device=device,
         )
 
-        # TODO simplify these comments
-        # block_table / slot_mapping bookkeeping (10 dicts below). v1 self-
-        # manages per kv_cache_group_id / per layer because it lacks v2's
-        # BlockTables scaffold; v2 injects a single self.block_tables
-        # (BlockTables, with .slot_mappings) + build_slot_mappings_by_layer,
-        # so the speculator holds none of these. P2 refactor target (move to
-        # runner).
-
-        # per-gid block_table from runner (just read)
+        # The v1 runner owns block tables and slot mappings. Keep per-group
+        # references here because K3 draft layers can span multiple cache
+        # groups with different logical block sizes.
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
-        # per-gid slot_mapping from runner (just read)
         self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
+        # Per-gid logical block size used to expand slot mappings. The KV
+        # manager's physical page can be larger when hybrid cache groups share
+        # one allocation, so kv_cache_spec.block_size is not interchangeable
+        # with the attention kernel's block size.
+        self._per_group_kernel_block_sizes: dict[int, int] = {}
 
-        # per-gid block_table (use in proposer)
         self._per_group_block_table_buffers: dict[int, torch.Tensor] = {}
-        # per-gid query slot_mapping buffer
         self._per_group_query_slot_mapping_buffers: dict[int, torch.Tensor] = {}
-        # per-gid context slot_mapping buffer
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
-
-        # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
 
-    def update_num_verify_tokens(
-        self,
-        last_hidden_states: torch.Tensor,
-        draft_token_ids: torch.Tensor,
-        num_reqs: int,
-    ) -> None:
-        """Predict per-request verify lengths with the confidence head.
-
-        Two stages: first compute the shared verify-token budget, then
-        allocate it across requests. The result is published through
-        ``self._dspark_num_verify_tokens`` and consumed by
-        ``NPUModelRunner.take_draft_token_ids``.
-        """
-        confidence_logits = self._compute_confidence_logits(last_hidden_states, draft_token_ids, num_reqs)
-        self._compute_verify_budget(confidence_logits)
-        self._dspark_num_verify_tokens = self._allocate_verify_budget(confidence_logits)
-
-    def _compute_confidence_logits(
+    def _compute_confidence(
         self,
         last_hidden_states: torch.Tensor,
         draft_token_ids: torch.Tensor,
@@ -173,98 +117,27 @@ class AscendDSparkProposer(AscendDflashProposer):
         # The confidence head concatenates both inputs, so their dtypes must
         # match; it upcasts to float32 internally.
         flat_markov = markov_embs.reshape(num_tokens, markov_embs.shape[-1]).to(flat_hidden.dtype)
-        conf_raw = self.model.confidence_logits(flat_hidden, flat_markov)
-        confidence_logits = self._dspark_confidence_logits_buffer[:num_reqs]
-        confidence_logits.copy_(conf_raw.reshape(num_reqs, self.num_speculative_tokens))
-        return confidence_logits
+        conf_raw = self.model.compute_confidence(flat_hidden, flat_markov)
+        confidence = self._dspark_confidence_logits_buffer[:num_reqs]
+        confidence.copy_(conf_raw.reshape(num_reqs, self.num_speculative_tokens))
+        return confidence
 
-    def _compute_verify_budget(self, confidence_logits: torch.Tensor) -> None:
-        """Recompute the per-request verify budget every `budget_update_interval` steps."""
-        self._steps_since_budget_update += 1
-        if self._steps_since_budget_update < self.budget_update_interval:
-            return
-        self._steps_since_budget_update = 0
-        num_reqs = confidence_logits.shape[0]
-        # Approximated budget allocation via averaged per-position anticipated acceptance.
-        # .item() waits for the NPU computation to finish and copies the result to the CPU,
-        # so this introduces a synchronization on only budget-update steps
-        mean_k = float((confidence_logits.sigmoid() > self.budget_threshold).sum().item()) / float(num_reqs)
-        new_budget_k = math.ceil(mean_k)
-        # Previously measured on Qwen3-8b on A3 the next behaviour of verification costs
-        # of adjacent budgets differ slightly: the next odd budget is approximately equal
-        # to or even less than the previous even one as example s 64: k7 - 54.3; k6 - 52.9
-        # this happens because when adding a bonus token during verification, the odd budget turns
-        # into an even one, and even forms are processed more efficiently by the current core
-        # during verification, possibly due to operations like next_power_of_2()
-        if new_budget_k % 2 == 0:
-            new_budget_k += 1
-        self.budget_k = max(1, min(new_budget_k, self.num_speculative_tokens))
-
-    def _allocate_verify_budget(self, confidence_logits: torch.Tensor) -> torch.Tensor:
-        """Distribute the verify budget across requests by survival probability."""
-        num_reqs, num_draft_tokens = confidence_logits.shape
-        min_k = self._dspark_min_k
-        extra_budget_per_req = max(self.budget_k - min_k, 0)
-        conf_prob = torch.sigmoid(confidence_logits.float()).clamp_(min=1e-6, max=1.0)
-        survival = torch.cumprod(conf_prob, dim=1)
-
-        keep_lens = self._keep_lens[:num_reqs]
-        keep_lens.fill_(min_k)
-        candidate_window = survival[:, min_k:]
-
-        num_budget_tokens = min(
-            num_reqs * extra_budget_per_req,
-            candidate_window.numel(),
-        )
-
-        if num_budget_tokens > 0:
-            flat_survival = candidate_window.reshape(-1)
-
-            survival_eps = 0.0
-            valid = flat_survival >= survival_eps
-
-            masked_survival = torch.where(
-                valid,
-                flat_survival,
-                torch.full_like(flat_survival, float("-inf")),
-            )
-            _, top_indices = torch.topk(masked_survival, k=num_budget_tokens)
-
-            candidate_cols = num_draft_tokens - min_k
-
-            chosen_requests = top_indices // candidate_cols
-            chosen_valid = valid[top_indices].to(keep_lens.dtype)
-
-            keep_lens.scatter_add_(
-                0,
-                chosen_requests.to(torch.int64),
-                chosen_valid,
-            )
-
-        keep_lens.clamp_(min=min_k, max=num_draft_tokens)
-
-        num_verify_tokens = self._dspark_num_verify_tokens_buffer[:num_reqs]
-        num_verify_tokens.copy_(keep_lens)
-        return num_verify_tokens
-
-    def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None) -> None:
+    def initialize_attn_backend(
+        self,
+        kv_cache_config,
+        kernel_block_sizes: list[int] | None = None,
+    ) -> None:
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
 
-        attention_groups_list: list[dict[tuple[str, str], AttentionGroup]] = []
-        # the draft layers have multiple kv_cache_groups
-        if not hasattr(self.model, "get_draft_kv_cache_layer_names"):
-            raise RuntimeError(
-                "DSpark standard-cache path requires the draft model to expose get_draft_kv_cache_layer_names"
-            )
-
         self._draft_attn_layer_names = set(self.model.get_draft_kv_cache_layer_names())
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
+        self._per_group_kernel_block_sizes = {}
+        self.draft_attn_groups: list[AttentionGroup] = []
 
-        # there are many kv groups other than one
         for kv_cache_gid, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
             draft_layer_names_in_group = set(kv_cache_group_spec.layer_names) & self._draft_attn_layer_names
             if not draft_layer_names_in_group:
@@ -280,33 +153,31 @@ class AscendDSparkProposer(AscendDflashProposer):
                 key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
 
                 if key not in attention_groups:
+                    kernel_block_size = int(
+                        kernel_block_sizes[kv_cache_gid]
+                        if kernel_block_sizes is not None and kv_cache_gid < len(kernel_block_sizes)
+                        else layer_kv_cache_spec.block_size
+                    )
                     attn_group = AttentionGroup(
                         attn_backend,
                         [layer_name],
                         layer_kv_cache_spec,
                         kv_cache_gid,
                     )
-                    attn_group.create_metadata_builders(self.vllm_config, self.device)
+                    attn_group.create_metadata_builders(
+                        self.vllm_config,
+                        self.device,
+                        kernel_block_size=kernel_block_size,
+                    )
+                    self._per_group_kernel_block_sizes[kv_cache_gid] = kernel_block_size
                     attention_groups[key] = attn_group
                 else:
                     attention_groups[key].layer_names.append(layer_name)
 
-            attention_groups_list.append(attention_groups)
-
-        self.draft_attn_groups = [
-            attention_group
-            for attention_groups in attention_groups_list
-            for attention_group in attention_groups.values()
-        ]
-        self.kv_cache_gid = 0
-        if not self.draft_attn_groups:
-            raise RuntimeError(
-                "DSpark standard-cache path requires registered draft attention "
-                f"groups. Missing layers: {self.attn_layer_names}"
-            )
+            self.draft_attn_groups.extend(attention_groups.values())
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
-        self.kernel_block_size = int(self.draft_attn_groups[0].kv_cache_spec.block_size)
+        self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
 
         name_to_gid = {
             ln: gid
@@ -375,14 +246,13 @@ class AscendDSparkProposer(AscendDflashProposer):
         # Query block: reuse the DFlash inputs kernel logic (host-side ref)
         # per kv-cache-group to fill positions / input_ids / query slot_mapping
         # / token_indices.
-        draft_attn_groups = getattr(self, "draft_attn_groups", [])
-        for attn_group in draft_attn_groups:
+        for attn_group in self.draft_attn_groups:
             gid = attn_group.kv_cache_group_id
-            gid_block_table = self._per_group_block_table_buffers.get(gid)
-            if gid_block_table is None:
-                continue
-            kv_block_size = int(attn_group.kv_cache_spec.block_size)
-            copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid[1,](
+            gid_block_table = self._per_group_block_table_buffers[gid]
+            kernel_block_size = self._per_group_kernel_block_sizes[gid]
+            copy_and_expand_dflash_and_dspark_inputs_kernel[
+                (_compute_num_programs(self._dflash_num_context, num_query_total),)
+            ](
                 # Inputs
                 next_token_ids_ptr=next_token_ids,
                 target_positions_ptr=target_positions,
@@ -403,7 +273,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 num_rejected_tokens_ptr=num_rejected_tokens_gpu,
                 # Scalars
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
-                block_size=kv_block_size,
+                block_size=kernel_block_size,
                 num_query_per_req=self.num_query_per_req,
                 num_speculative_tokens=self.num_speculative_tokens,
                 total_input_tokens=self._dflash_num_context,
@@ -422,6 +292,15 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         cad.query_start_loc = self.arange_dflash[: batch_size + 1] * self.num_query_per_req
         cad.seq_lens = effective_seq_lens + self.num_query_per_req
+        # The model runner has already corrected this canonical host mirror
+        # with the accepted-token count. Extend it on CPU alongside the device
+        # lengths, without another reject D2H copy or attention-side wait.
+        if cad._seq_lens_cpu is not None:
+            draft_seq_lens_cpu = cad._seq_lens_cpu.clone()
+            draft_seq_lens_cpu[:batch_size].add_(self.num_query_per_req)
+            cad._seq_lens_cpu = draft_seq_lens_cpu
+            if getattr(cad, "seq_lens_cpu", None) is not None:
+                cad.seq_lens_cpu = draft_seq_lens_cpu
         cad.query_start_loc_cpu = (
             torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * self.num_query_per_req
         ).to(torch.int32)
@@ -437,8 +316,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.max_seq_len = cad.max_seq_len + self.num_query_per_req
         cad.slot_mapping = self._per_group_query_slot_mapping_buffers[primary_gid][:num_query_total]
         cad.positions = self.positions  # this would be sliced in attention backend
-        # Currently, attention causality across draft layers are uniform.
-        cad.causal = self.model.get_draft_attn_causal()[0]
+        if hasattr(self.model, "get_draft_attn_causal"):
+            # Currently, attention causality across draft layers are uniform.
+            cad.causal = self.model.get_draft_attn_causal()[0]
+        else:
+            cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 

@@ -31,12 +31,19 @@ trigger (case FAIL)
 * **Compile only on C++ changes**: by default (`--native-check per-commit`) a
   rebuild happens only when that commit's own diff touches
   `*.cpp/*.cc/*.cu/*.h/*.hpp/*.cuh`, `csrc/**`, `CMakeLists.txt`, or `setup.py`.
-  Pure `.py`/yaml changes are picked up live by the editable install (vLLM is
-  never touched). `--native-check since-build` widens the check to all changes
-  since the last build (safer across bisect jumps).
+  Pure `.py`/yaml changes are picked up live by the editable install.
+  `--native-check since-build` widens the check to all changes since the last
+  build (safer across bisect jumps).
 * **SKIP semantics**: a flaky/unconfirmed FAIL, a build failure, or a collection
   error (pytest rc 2/3/4/5, e.g. a conftest ImportError) becomes `SKIP` instead
   of a misleading FAIL — like `git bisect skip`.
+* **Dependency adaptation**: the tool reads vLLM from
+  `.github/vllm-release-tag.commit`, torch-npu from `requirements.txt` (with
+  `pyproject.toml` as fallback). If the good and bad endpoints declare the same
+  vLLM and torch-npu versions, no version checks run. If either endpoint
+  version differs, every candidate is adapted before pytest: vLLM is checked
+  out from the configured vLLM source directory (default
+  `/vllm-workspace/vllm`) and torch-npu is reinstalled with pip.
 
 ## Status tables (good source, read-only)
 

@@ -93,7 +93,6 @@ def server(
     env = {
         **os.environ,
         "VLLM_SERVER_DEV_MODE": "1",
-        "VLLM_ASCEND_ENABLE_NZ": "0",
         "HF_HUB_OFFLINE": "1",
     }
     base = _DUMMY_ARGS if dummy_weights else _BASE_ARGS
@@ -107,6 +106,8 @@ def server(
         str(port),
         "--served-model-name",
         "m",
+        "--additional-config",
+        '{"weight_nz_mode": 0}',
         *(base + (extra_args or [])),
     ]
     # Establish the test process's NPU device context while the card is still
@@ -236,7 +237,7 @@ def pause(url, mode="abort", clear_cache=True):
     return requests.post(
         f"{url}/pause",
         params={"mode": mode, "clear_cache": clear_cache},
-        timeout=15,
+        timeout=60,
     ).status_code
 
 

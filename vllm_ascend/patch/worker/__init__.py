@@ -17,7 +17,7 @@
 
 from vllm.triton_utils import HAS_TRITON
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -27,12 +27,11 @@ if HAS_TRITON:
 import vllm_ascend.patch.worker.patch_process_weights_after_loading  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
-import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
 
-if not is_310p():
+if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
@@ -48,10 +47,8 @@ try:  # noqa: SIM105
 except ImportError:
     pass
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
-import vllm_ascend.patch.worker.patch_draft_quarot  # noqa
 import vllm_ascend.patch.worker.patch_eagle3_init  # noqa
 import vllm_ascend.patch.worker.patch_cudagraph  # noqa
-import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_v2  # noqa
 
 # vLLM's use_v2_model_runner may enable the v2 runner without the
@@ -70,6 +67,7 @@ import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 
 import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
+import vllm_ascend.patch.worker.patch_v2.patch_dspark  # noqa
 
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

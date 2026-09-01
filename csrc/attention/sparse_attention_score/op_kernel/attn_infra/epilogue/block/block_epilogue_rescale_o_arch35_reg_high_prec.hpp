@@ -11,6 +11,7 @@
 #ifndef EPILOGUE_BLOCK_BLOCK_EPILOGUE_RESCALE_O_ARCH35_REG_HIGH_PREC
 #define EPILOGUE_BLOCK_BLOCK_EPILOGUE_RESCALE_O_ARCH35_REG_HIGH_PREC
 
+#include <limits>
 #include "../../../attn_infra/base_defs.hpp"
 #include "../../../attn_infra/arch/resource.hpp"
 #include "../../../attn_infra/epilogue/dispatch_policy.hpp"
@@ -31,6 +32,7 @@ template <
     class ElementO_,
     class ElementOTmp_,
     class ElementS_,
+    class ElementKV_,
     class TileCopy_,
     class OTmpSrcPos_ // the src TPosition of pv res, viable configurations: GM/L0C
 >
@@ -39,6 +41,7 @@ class BlockEpilogue<
     ElementO_,
     ElementOTmp_,
     ElementS_,
+    ElementKV_,
     TileCopy_,
     OTmpSrcPos_>
 {
@@ -48,6 +51,7 @@ public:
     using ElementO = ElementO_;
     using ElementOTmp = ElementOTmp_;
     using SMDtype = ElementS_;
+    using ElementKV = ElementKV_;
     using TileCopy = TileCopy_;
     using OTmpSrcPos = OTmpSrcPos_;
 
@@ -59,7 +63,8 @@ public:
     static constexpr uint32_t RESCALE_ROW_MAX_ELEM_NUM = 64;
     static constexpr uint32_t RESCALE_COL_MAX_ELEM_NUM = 128;
     static constexpr uint32_t RESCALE_VREG_SIZE = 256 / sizeof(ElementOTmp);
-
+    static constexpr float MAX_VALUE_RECIPROCAL_FP8 = 1.0f / 448.0f;
+    static constexpr bool FULL_QUANT_FP8 = AscendC::IsSameType<ElementKV, fp8_e4m3fn_t>::value;
     __aicore__ inline
     BlockEpilogue(Arch::Resource<ArchTag> &resource)
     {
@@ -70,6 +75,7 @@ public:
         constexpr uint32_t DM_UB_TENSOR_OFFSET = GM_UB_TENSOR_OFFSET + 64 * sizeof(float);
         constexpr uint32_t LL_UB_TENSOR_OFFSET = DM_UB_TENSOR_OFFSET + 3 * 64 * sizeof(float);
         constexpr uint32_t GL_UB_TENSOR_OFFSET = LL_UB_TENSOR_OFFSET +  64 * sizeof(float);
+        constexpr uint32_t LSE_UB_TENSOR_OFFSET = GL_UB_TENSOR_OFFSET + 64 * sizeof(float);
 
         for (uint32_t i = 0; i < UB_OTMP_BUF_STAGES; i++) {
             loUbTensor[i] = resource.ubBuf.template GetBufferByByte<ElementOTmp>(
@@ -78,7 +84,9 @@ public:
         goUbTensor32 = resource.ubBuf.template GetBufferByByte<ElementOTmp>(GO_UB_TENSOR_OFFSET);
         goUbTensor16 = resource.ubBuf.template GetBufferByByte<ElementO>(GO_UB_TENSOR_OFFSET);
         glUbTensor32 = resource.ubBuf.template GetBufferByByte<float>(GL_UB_TENSOR_OFFSET);
+        gmUbTensor32 = resource.ubBuf.template GetBufferByByte<float>(GM_UB_TENSOR_OFFSET);
         dmUbTensor32 = resource.ubBuf.template GetBufferByByte<float>(DM_UB_TENSOR_OFFSET);
+        lseUbTensor32 = resource.ubBuf.template GetBufferByByte<float>(LSE_UB_TENSOR_OFFSET);
     }
 
     __aicore__ inline
@@ -106,7 +114,7 @@ public:
         }
     }
 
-    template <class TensorDst>
+    template <bool IS_FD, class TensorDst>
     __aicore__ inline
     void SubCoreCompute(TensorDst &gOTensorTlaTile,
                         uint32_t curTileMod,
@@ -115,7 +123,12 @@ public:
                         bool isLastKvSTile,
                         uint32_t colStrideCurSubCore,
                         Arch::CrossCoreFlag mm2ToReFlag,
-                        bool isFullQuantFp8)
+                        AscendC::GlobalTensor<float> &gPartialO,
+                        AscendC::GlobalTensor<float> &gPartialLse,
+                        uint32_t fdTaskId,
+                        uint32_t groupRowOffset,
+                        uint32_t groupSize,
+                        uint32_t fdLseSubStride)
     {
         uint32_t rowNumCurSubCore = tla::get<0>(gOTensorTlaTile.shape());
         uint32_t colNumCurSubCore = tla::get<1>(gOTensorTlaTile.shape());
@@ -173,36 +186,45 @@ public:
         SetCrossCoreSync<4, PIPE_V>(mm2ToReFlag);
         if (isLastKvSTile) {
             AscendC::PipeBarrier<PIPE_V>();
-            if (isFullQuantFp8) {
-                if (dStages == 1) {
-                    deQuantScaleO<DRegSplitStages::ONE>(goUb, rowNumCurSubCore, colStrideCurSubCore, colTail,
-                                                        vlElemNum);
-                } else if (dStages == 2) {
-                    deQuantScaleO<DRegSplitStages::TWO>(goUb, rowNumCurSubCore, colStrideCurSubCore, colTail,
-                                                        vlElemNum);
+            if constexpr (IS_FD) {
+                const uint32_t rowCountAlign = RoundUp(rowNumCurSubCore, 8);
+                AscendC::Ln(lseUbTensor32, glUbTensor32, rowCountAlign);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::Add(lseUbTensor32, lseUbTensor32, gmUbTensor32, rowCountAlign);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                const uint64_t oOffset = static_cast<uint64_t>(fdTaskId) * groupSize * colStrideCurSubCore +
+                    static_cast<uint64_t>(groupRowOffset) * colStrideCurSubCore;
+                AscendC::DataCopy(gPartialO[oOffset], goUbTensor32,
+                                  rowNumCurSubCore * colStrideCurSubCore);
+                const uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
+                const uint64_t lseOffset = static_cast<uint64_t>(fdTaskId) * 2 * fdLseSubStride +
+                    subBlockIdx * fdLseSubStride;
+                AscendC::DataCopyPad(gPartialLse[lseOffset], lseUbTensor32,
+                    AscendC::DataCopyExtParams(1, rowNumCurSubCore * sizeof(float), 0, 0, 0));
+            } else {
+                if (std::is_same<ElementO, bfloat16_t>::value) {
+                    AscendC::Cast(
+                        goUbTensor16, goUbTensor32,
+                        AscendC::RoundMode::CAST_RINT,
+                        rowNumCurSubCore * colStrideCurSubCore);
+                } else {
+                    AscendC::Cast(
+                        goUbTensor16, goUbTensor32,
+                        AscendC::RoundMode::CAST_NONE,
+                        rowNumCurSubCore * colStrideCurSubCore);
                 }
                 AscendC::PipeBarrier<PIPE_V>();
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+                auto ubOLayoutTla = tla::MakeLayout(
+                    tla::MakeShape(rowNumCurSubCore, colNumCurSubCore),
+                    tla::MakeStride(colStrideCurSubCore, tla::Int<1>{})
+                );
+                auto ubOTensorTla = tla::MakeTensor(goUbTensor16, ubOLayoutTla, Arch::PositionUB{});
+                copyUbToGmO(gOTensorTlaTile, ubOTensorTla);
             }
-            if (std::is_same<ElementO, bfloat16_t>::value) {
-                AscendC::Cast(
-                    goUbTensor16, goUbTensor32,
-                    AscendC::RoundMode::CAST_RINT,
-                    rowNumCurSubCore * colStrideCurSubCore);
-            } else {
-                AscendC::Cast(
-                    goUbTensor16, goUbTensor32,
-                    AscendC::RoundMode::CAST_NONE,
-                    rowNumCurSubCore * colStrideCurSubCore);
-            }
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            auto ubOLayoutTla = tla::MakeLayout(
-                tla::MakeShape(rowNumCurSubCore, colNumCurSubCore),
-                tla::MakeStride(colStrideCurSubCore, tla::Int<1>{})
-            );
-            auto ubOTensorTla = tla::MakeTensor(goUbTensor16, ubOLayoutTla, Arch::PositionUB{});
-            copyUbToGmO(gOTensorTlaTile, ubOTensorTla);
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
     }
@@ -307,6 +329,9 @@ public:
             Mul(mulVreg, goPreVreg, dmVreg, pregTail);
             Add(goCurVreg, mulVreg, loVreg, pregTail);
             Div(divVreg, goCurVreg, glVreg, pregTail);
+            if constexpr (FULL_QUANT_FP8) {
+                Muls(divVreg, divVreg, MAX_VALUE_RECIPROCAL_FP8, pregTail);
+            }
             StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride, divVreg, pregTail);
         }
     }
@@ -346,6 +371,10 @@ public:
             Add(goCurVreg1, mulVreg1, loVreg1, pregTail);
             Div(divVreg0, goCurVreg0, glVreg, pregFull);
             Div(divVreg1, goCurVreg1, glVreg, pregTail);
+            if constexpr (FULL_QUANT_FP8) {
+                Muls(divVreg0, divVreg0, MAX_VALUE_RECIPROCAL_FP8, pregFull);
+                Muls(divVreg1, divVreg1, MAX_VALUE_RECIPROCAL_FP8, pregTail);
+            }
             StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride, divVreg0, pregFull);
             StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride + vlElemNum, divVreg1, pregTail);
         }
@@ -374,6 +403,9 @@ public:
             LoadAlign<ElementOTmp, LoadDist::DIST_BRC_B32>(glVreg, glUb + i);
             LoadAlign<ElementOTmp, LoadDist::DIST_NORM>(goCurVreg, loUb + i * colStride);
             Div(divVreg, goCurVreg, glVreg, pregTail);
+            if constexpr (FULL_QUANT_FP8) {
+                Muls(divVreg, divVreg, MAX_VALUE_RECIPROCAL_FP8, pregTail);
+            }
             StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride, divVreg, pregTail);
         }
     }
@@ -398,53 +430,12 @@ public:
             LoadAlign<ElementOTmp, LoadDist::DIST_NORM>(goCurVreg1, loUb + i * colStride + vlElemNum);
             Div(divVreg0, goCurVreg0, glVreg, pregFull);
             Div(divVreg1, goCurVreg1, glVreg, pregTail);
+            if constexpr (FULL_QUANT_FP8) {
+                Muls(divVreg0, divVreg0, MAX_VALUE_RECIPROCAL_FP8, pregFull);
+                Muls(divVreg1, divVreg1, MAX_VALUE_RECIPROCAL_FP8, pregTail);
+            }
             StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride, divVreg0, pregFull);
             StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride + vlElemNum, divVreg1, pregTail);
-        }
-    }
-
-    template <DRegSplitStages dRegSplitStages>
-    __simd_vf__ inline void deQuantScaleO(__ubuf__ ElementOTmp *goUb, uint32_t row, uint32_t colStride,
-                                          uint32_t colTail, uint32_t vlElemNum)
-    {
-    }
-
-    template <>
-    __simd_vf__ inline void deQuantScaleO<DRegSplitStages::ONE>(__ubuf__ ElementOTmp *goUb, uint32_t row,
-                                                                uint32_t colStride, uint32_t colTail,
-                                                                uint32_t vlElemNum)
-    {
-        using namespace AscendC::MicroAPI;
-        RegTensor<ElementOTmp> oVreg;
-        MaskReg pregTail = UpdateMask<float>(colTail);
-
-        for (uint16_t i = 0; i < row; ++i) {
-            LoadAlign<ElementOTmp, LoadDist::DIST_NORM>(oVreg, goUb + i * colStride);
-            constexpr float maxValueReciprocal = 1.0f / 448.0f;
-            Muls(oVreg, oVreg, maxValueReciprocal, pregTail);
-            StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride, oVreg, pregTail);
-        }
-    }
-
-    template <>
-    __simd_vf__ inline void deQuantScaleO<DRegSplitStages::TWO>(__ubuf__ ElementOTmp *goUb, uint32_t row,
-                                                                uint32_t colStride, uint32_t colTail,
-                                                                uint32_t vlElemNum)
-    {
-        using namespace AscendC::MicroAPI;
-        RegTensor<ElementOTmp> oVreg0;
-        RegTensor<ElementOTmp> oVreg1;
-        MaskReg pregAll = CreateMask<float, MaskPattern::ALL>();
-        MaskReg pregTail = UpdateMask<float>(colTail);
-
-        for (uint16_t i = 0; i < row; ++i) {
-            LoadAlign<ElementOTmp, LoadDist::DIST_NORM>(oVreg0, goUb + i * colStride);
-            LoadAlign<ElementOTmp, LoadDist::DIST_NORM>(oVreg1, goUb + i * colStride + vlElemNum);
-            constexpr float maxValueReciprocal = 1.0f / 448.0f;
-            Muls(oVreg0, oVreg0, maxValueReciprocal, pregAll);
-            Muls(oVreg1, oVreg1, maxValueReciprocal, pregTail);
-            StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride, oVreg0, pregAll);
-            StoreAlign<ElementOTmp, StoreDist::DIST_NORM_B32>(goUb + i * colStride + vlElemNum, oVreg1, pregTail);
         }
     }
 
@@ -456,8 +447,7 @@ public:
                     uint32_t gatheredKvSTileIdx,
                     bool isFirstKvSTile,
                     bool isLastKvSTile,
-                    Arch::CrossCoreFlag mm2ToReFlag,
-                    bool isFullQuantFp8 = false)
+                    Arch::CrossCoreFlag mm2ToReFlag)
     {
         uint32_t rowNumOri = actualOriShape[0];
         uint32_t colNumOri = actualOriShape[1];
@@ -477,21 +467,87 @@ public:
         auto gOTensorTlaTile = GetTile(gOTensor,
             tla::MakeCoord(rowOffsetCurSubCore, 0), tla::MakeShape(rowNumCurSubCore, colNumCurSubCore));
         uint32_t ubOTmpBufId = gatheredKvSTileIdx % UB_OTMP_BUF_STAGES;
+        AscendC::GlobalTensor<float> dummyPartialO;
+        AscendC::GlobalTensor<float> dummyPartialLse;
 
         if (rowNumCurSubCore > 0) {
-            SubCoreCompute(
+            SubCoreCompute<false>(
                 gOTensorTlaTile,
                 curTileMod,
                 ubOTmpBufId,
                 isFirstKvSTile,
                 isLastKvSTile,
                 colStrideCurSubCore,
-                mm2ToReFlag,
-                isFullQuantFp8);
+                mm2ToReFlag, dummyPartialO, dummyPartialLse, 0, rowOffsetCurSubCore, rowNumOri, 0);
         } else {
             Arch::CrossCoreWaitFlag<4, PIPE_V>(mm2ToReFlag);
             Arch::CrossCoreSetFlag<4, PIPE_V>(mm2ToReFlag);
         }
+    }
+
+    template <class TensorDst>
+    __aicore__ inline
+    void ProcessPartial(TensorDst &gOTensor,
+                        GemmCoord actualOriShape,
+                        uint32_t curTileMod,
+                        uint32_t gatheredKvSTileIdx,
+                        bool isFirstKvSTile,
+                        bool isLastKvSTile,
+                        Arch::CrossCoreFlag mm2ToReFlag,
+                        AscendC::GlobalTensor<float> &gPartialO,
+                        AscendC::GlobalTensor<float> &gPartialLse,
+                        uint32_t fdTaskId,
+                        uint32_t fdLseSubStride)
+    {
+        uint32_t rowNumOri = actualOriShape[0];
+        uint32_t colNumOri = actualOriShape[1];
+        uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
+        uint32_t rowNumSplit = RoundUp(rowNumOri, 8) / AscendC::GetSubBlockNum();
+        rowNumSplit = (rowNumOri < rowNumSplit) ? rowNumOri : rowNumSplit;
+        uint32_t rowNumCurSubCore = (subBlockIdx == 0) ? rowNumSplit : (rowNumOri - rowNumSplit);
+        uint32_t rowOffsetCurSubCore = rowNumSplit * subBlockIdx;
+        uint32_t colStrideCurSubCore = RoundUp(colNumOri, 8);
+        auto gOTensorTlaTile = GetTile(gOTensor,
+            tla::MakeCoord(rowOffsetCurSubCore, 0), tla::MakeShape(rowNumCurSubCore, colNumOri));
+        uint32_t ubOTmpBufId = gatheredKvSTileIdx % UB_OTMP_BUF_STAGES;
+        if (rowNumCurSubCore > 0) {
+            SubCoreCompute<true>(gOTensorTlaTile, curTileMod, ubOTmpBufId,
+                isFirstKvSTile, isLastKvSTile, colStrideCurSubCore, mm2ToReFlag,
+                gPartialO, gPartialLse, fdTaskId, rowOffsetCurSubCore, rowNumOri, fdLseSubStride);
+        } else {
+            Arch::CrossCoreWaitFlag<4, PIPE_V>(mm2ToReFlag);
+            Arch::CrossCoreSetFlag<4, PIPE_V>(mm2ToReFlag);
+        }
+    }
+
+    __aicore__ inline
+    void WriteNeutralPartial(AscendC::GlobalTensor<float> &gPartialO,
+                             AscendC::GlobalTensor<float> &gPartialLse,
+                             uint32_t fdTaskId,
+                             uint32_t groupSize,
+                             uint32_t colNum,
+                             uint32_t fdLseSubStride)
+    {
+        uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
+        uint32_t rowNumSplit = RoundUp(groupSize, 8) / AscendC::GetSubBlockNum();
+        rowNumSplit = (groupSize < rowNumSplit) ? groupSize : rowNumSplit;
+        uint32_t rowNum = subBlockIdx == 0 ? rowNumSplit : groupSize - rowNumSplit;
+        uint32_t rowOffset = rowNumSplit * subBlockIdx;
+        if (rowNum == 0) {
+            return;
+        }
+        AscendC::Duplicate(goUbTensor32, 0.0f, rowNum * colNum);
+        AscendC::Duplicate(lseUbTensor32, std::numeric_limits<float>::lowest(), RoundUp(rowNum, 8));
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        const uint64_t oOffset = static_cast<uint64_t>(fdTaskId) * groupSize * colNum +
+            static_cast<uint64_t>(rowOffset) * colNum;
+        AscendC::DataCopy(gPartialO[oOffset], goUbTensor32, rowNum * colNum);
+        const uint64_t lseOffset = static_cast<uint64_t>(fdTaskId) * 2 * fdLseSubStride +
+            subBlockIdx * fdLseSubStride;
+        AscendC::DataCopyPad(gPartialLse[lseOffset], lseUbTensor32,
+            AscendC::DataCopyExtParams(1, rowNum * sizeof(float), 0, 0, 0));
     }
 
 private:
@@ -500,6 +556,8 @@ private:
     AscendC::LocalTensor<SMDtype> glUbTensor16;
     AscendC::LocalTensor<float> dmUbTensor32;
     AscendC::LocalTensor<float> glUbTensor32;
+    AscendC::LocalTensor<float> gmUbTensor32;
+    AscendC::LocalTensor<float> lseUbTensor32;
     AscendC::LocalTensor<ElementO> goUbTensor16;
     AscendC::LocalTensor<ElementOTmp> goUbTensor32;
 

@@ -13,7 +13,7 @@ setup.
 
 For Prefill-side NPU memory reduction through cross-layer KV buffer reuse,
 including MTP and sparse C8 layouts, see
-[Layerwise Prefill KV Cache Offload](layerwise_prefill_kv_offload.md).
+[Layerwise and Sparse KV Cache Offloading](layerwise_and_sparse_kv_cache_offloading.md).
 
 ## How It Works (Brief)
 

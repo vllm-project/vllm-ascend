@@ -15,7 +15,7 @@ on:
         required: false
         type: string
         description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.1-910b-ubuntu22.04-py3.12"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.1.0-910b-ubuntu22.04-py3.12"
       config_file_path:
         required: true
         type: string
@@ -83,12 +83,59 @@ on:
         type: boolean
         default: false
         description: enable Pod AOP pipeline on failure
+      bisect_good_commit:
+        required: false
+        type: string
+        default: ''
+        description: explicit good commit for bisect (overrides good_table lookup)
+      bisect_bad_commit:
+        required: false
+        type: string
+        default: 'HEAD'
+        description: bad commit to bisect from (default HEAD)
+      bisect_fail_confirm_retries:
+        required: false
+        type: string
+        default: ''
+        description: flaky guard retry count for bisect (default 1)
+      bisect_trial_timeout:
+        required: false
+        type: string
+        default: ''
+        description: per-trial pytest timeout in seconds for bisect (default 7200)
+      bisect_barrier_timeout:
+        required: false
+        type: string
+        default: ''
+        description: multi-node barrier timeout in seconds for bisect (default 3600)
+      bisect_no_verify_good:
+        required: false
+        type: boolean
+        default: false
+        description: skip good endpoint verification in bisect
+      bisect_no_verify_bad:
+        required: false
+        type: boolean
+        default: false
+        description: skip bad endpoint verification in bisect
+      bisect_force_initial_build:
+        required: false
+        type: boolean
+        default: false
+        description: clean-rebuild on the first bisect trial
+      bisect_config_base_path:
+        required: false
+        type: string
+        default: ''
+        description: override CONFIG_BASE_PATH for bisect
     secrets:
       KUBECONFIG_B64:
         required: true
       OBS_ACCESS_KEY_ID:
         required: false
       OBS_SECRET_ACCESS_KEY:
+        required: false
+      OPENLIBING_SECRET:
         required: false
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -116,6 +163,7 @@ jobs:
       env:
         KUBECONFIG: /tmp/kubeconfig
         NAMESPACE: vllm-project
+        OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
     steps:
       - name: Decode kubeconfig
         run: echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > "$KUBECONFIG"
@@ -162,6 +210,7 @@ jobs:
       - name: Prepare scripts
         run: |
           install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+          install -D tests/e2e/nightly/scripts/bisect_args.sh /root/.cache/tests/bisect_args.sh
 
       - name: Clear resources
         run: |
@@ -194,6 +243,16 @@ jobs:
           done
 
       - name: Launch cluster
+        env:
+          BISECT_GOOD_COMMIT: ${{ inputs.bisect_good_commit }}
+          BISECT_BAD_COMMIT: ${{ inputs.bisect_bad_commit }}
+          BISECT_FAIL_CONFIRM_RETRIES: ${{ inputs.bisect_fail_confirm_retries }}
+          BISECT_TRIAL_TIMEOUT: ${{ inputs.bisect_trial_timeout }}
+          BISECT_BARRIER_TIMEOUT: ${{ inputs.bisect_barrier_timeout }}
+          BISECT_NO_VERIFY_GOOD: ${{ inputs.bisect_no_verify_good }}
+          BISECT_NO_VERIFY_BAD: ${{ inputs.bisect_no_verify_bad }}
+          BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
+          BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
         run: |
           set -euo pipefail
 
@@ -209,9 +268,13 @@ jobs:
           runner="${{ inputs.soc_version }}"
           echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
-          if [ "${{ inputs.soc_version }}" = "a3" ]; then
-            npu_per_node=16
-            pvc_name=gy005-az5-vllm-ascend
+          if [ "${{ inputs.soc_version }}" = "a5" ]; then
+              npu_per_node=8
+              npu_resource_name=huawei.com/npu
+              shared_volume_path=/mnt/share
+          elif [ "${{ inputs.soc_version }}" = "a3" ]; then
+              npu_per_node=16
+              pvc_name=gy005-az5-vllm-ascend
           else
             npu_per_node=8
             pvc_name=vllm-project-hk001
@@ -232,13 +295,26 @@ jobs:
             -D is_pr_test="$is_pr_test" \
             -D vllm_ascend_ref="$vllm_ascend_ref" \
             -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
-            -D pvc_name="$pvc_name" \
+            -D pvc_name="${pvc_name:-}" \
             -D benchmark_job_name="$benchmark_job_name" \
             -D runner="$runner" \
             -D aop_multi_enabled="${{ inputs.aop_multi_enabled }}" \
             -D good_table="/root/.cache/vllm-ascend/${{ inputs.vllm_ascend_branch || 'main' }}/${{ inputs.test_frequency }}/good_table.csv" \
+            -D openlibing_secret="$OPENLIBING_SECRET" \
+            -D vllm_ascend_branch="${{ inputs.vllm_ascend_branch }}" \
             -D soc_version="${{ inputs.soc_version }}" \
+            -D npu_resource_name="${npu_resource_name:-}" \
+            -D shared_volume_path="${shared_volume_path:-}" \
             -D max_good_age_days="${{ inputs.test_frequency == 'weekly' && 8 || 3 }}" \
+            -D bisect_good_commit="$BISECT_GOOD_COMMIT" \
+            -D bisect_bad_commit="$BISECT_BAD_COMMIT" \
+            -D bisect_fail_confirm_retries="$BISECT_FAIL_CONFIRM_RETRIES" \
+            -D bisect_trial_timeout="$BISECT_TRIAL_TIMEOUT" \
+            -D bisect_barrier_timeout="$BISECT_BARRIER_TIMEOUT" \
+            -D bisect_no_verify_good="$BISECT_NO_VERIFY_GOOD" \
+            -D bisect_no_verify_bad="$BISECT_NO_VERIFY_BAD" \
+            -D bisect_force_initial_build="$BISECT_FORCE_INITIAL_BUILD" \
+            -D bisect_config_base_path="$BISECT_CONFIG_BASE_PATH" \
             --outfile lws.yaml
 
           kubectl apply -f ./lws.yaml

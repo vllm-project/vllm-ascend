@@ -82,9 +82,6 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export TASK_QUEUE_ENABLE=1
 # Enable the AIVector core to directly schedule ROCE communication.
 export HCCL_OP_EXPANSION_MODE="AIV"
-# Enable FlashComm_v1 optimization when tensor parallel is enabled.
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-
 vllm serve /data/Qwen3-32B \
   --served-model-name qwen3 \
   --trust-remote-code \

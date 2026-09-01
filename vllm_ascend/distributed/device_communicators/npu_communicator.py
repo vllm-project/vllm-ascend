@@ -19,8 +19,6 @@ import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import DeviceCommunicatorBase
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class _NpuAll2AllManager:
     """No-op all2all_manager for NPU. Used by vLLM main's fault-tolerance
@@ -40,72 +38,21 @@ class _NpuAll2AllManager:
 
 
 class NPUCommunicator(DeviceCommunicatorBase):
-    # main2main compat: `use_all2all` was added to upstream
-    # DeviceCommunicatorBase.__init__() in vllm main after 0.26.0.
-    # NPU does not support all2all (uses mc2 / all_gather for MoE),
-    # so the parameter is only accepted for interface alignment.
-    # Remove the version gate once 0.26.0 support is dropped.
-    if vllm_version_is("0.26.0"):
-
-        def __init__(
-            self,
-            cpu_group: dist.ProcessGroup,
-            device: torch.device | None = None,
-            device_group: dist.ProcessGroup | None = None,
-            unique_name: str = "",
-        ):
-            super().__init__(cpu_group, device, device_group, unique_name)
-            self.device = torch.npu.current_device()
-            self.ca_comm = None
-            self.all2all_manager = _NpuAll2AllManager()
-
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self,
-            cpu_group: dist.ProcessGroup,
-            device: torch.device | None = None,
-            device_group: dist.ProcessGroup | None = None,
-            unique_name: str = "",
-            use_all2all: bool = False,
-        ):
-            super().__init__(
-                cpu_group,
-                device,
-                device_group,
-                unique_name,
-                use_all2all=use_all2all,
-            )
-            self.device = torch.npu.current_device()
-            self.ca_comm = None
-            self.all2all_manager = _NpuAll2AllManager()
-
-    def all_to_all(
+    def __init__(
         self,
-        input_: torch.Tensor,
-        scatter_dim: int = 0,
-        gather_dim: int = -1,
-        scatter_sizes: list[int] | None = None,
-        gather_sizes: list[int] | None = None,
-    ) -> torch.Tensor:
-        if scatter_dim < 0:
-            scatter_dim += input_.dim()
-        if gather_dim < 0:
-            gather_dim += input_.dim()
-
-        if scatter_sizes is not None and gather_sizes is not None:
-            input_list = [t.contiguous() for t in torch.split(input_, scatter_sizes, scatter_dim)]
-            output_list = []
-            tensor_shape_base = input_list[self.rank].size()
-            for i in range(self.world_size):
-                tensor_shape = list(tensor_shape_base)
-                tensor_shape[gather_dim] = gather_sizes[i]
-                output_list.append(torch.empty(tensor_shape, dtype=input_.dtype, device=input_.device))
-
-        else:
-            input_list = [t.contiguous() for t in torch.tensor_split(input_, self.world_size, scatter_dim)]
-            output_list = [torch.empty_like(input_list[i]) for i in range(self.world_size)]
-
-        dist.all_to_all(output_list, input_list, group=self.device_group)
-        output_tensor = torch.cat(output_list, dim=gather_dim).contiguous()
-        return output_tensor
+        cpu_group: dist.ProcessGroup,
+        device: torch.device | None = None,
+        device_group: dist.ProcessGroup | None = None,
+        unique_name: str = "",
+        use_all2all: bool = False,
+    ):
+        super().__init__(
+            cpu_group,
+            device,
+            device_group,
+            unique_name,
+            use_all2all=use_all2all,
+        )
+        self.device = torch.npu.current_device()
+        self.ca_comm = None
+        self.all2all_manager = _NpuAll2AllManager()

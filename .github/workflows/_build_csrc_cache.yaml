@@ -182,7 +182,7 @@ jobs:
           # Indexes for triton-ascend and the CPU PyTorch wheel come from
           # UV_EXTRA_INDEX_URL. Passing --extra-index-url here would replace it.
           uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.1
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
           uv pip install -e .
 
       - name: Verify csrc artifacts

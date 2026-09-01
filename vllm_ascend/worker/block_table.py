@@ -3,7 +3,11 @@ import torch
 from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    KVCacheSpecKind,
+    get_kv_cache_spec_kind,
+)
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
@@ -30,33 +34,19 @@ class BlockTable:
         self.max_num_reqs = max_num_reqs
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
-        compress_ratio = 1
-        if (
+        is_mamba_group = (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
-            and isinstance(kv_cache_group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        ):
-            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()), None)
-            if kv_cache_spec is not None and hasattr(kv_cache_spec, "compress_ratio"):
-                compress_ratio = kv_cache_spec.compress_ratio
-        if (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and self.dcp_world_size > 1
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        ):
-            max_num_blocks_per_req = max_num_blocks_per_req * self.dcp_world_size
-        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
+            and get_kv_cache_spec_kind(kv_cache_group.kv_cache_spec) == KVCacheSpecKind.MAMBA
+        )
+        # The KV cache spec already provides the per-rank table capacity.
+        # Mamba state is replicated across DCP ranks, not sharded then expanded.
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
-        self.is_mamba_group = (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        )
+        self.is_mamba_group = is_mamba_group
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -96,7 +86,13 @@ class BlockTable:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
-        self.slot_mapping = self._make_buffer(self.max_num_batched_tokens + 2 * self.max_num_reqs, dtype=torch.int32)
+        # MTP slot preparation appends up to num_speculative_tokens - 1
+        # draft positions for every request beyond the scheduler token limit.
+        num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
+        self.slot_mapping = self._make_buffer(
+            self.max_num_batched_tokens + num_mtp_draft_slots,
+            dtype=torch.int32,
+        )
 
         self.kernel_sizes = kernel_sizes
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size

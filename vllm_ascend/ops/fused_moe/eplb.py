@@ -84,43 +84,55 @@ def map_to_physical(
     return physical_ids if physical_ids.dtype == topk_ids.dtype else physical_ids.to(topk_ids.dtype)
 
 
-def record_local_expert_load(
-    expert_tokens: torch.Tensor,
-    group_list_type: int,
-    expert_load_view: torch.Tensor,
-    ep_rank: int,
-    ep_size: int,
-) -> None:
-    """Accumulate this rank's local physical-expert load into global slots."""
-    if expert_load_view.numel() % ep_size != 0:
-        raise ValueError("Physical experts must be evenly distributed across EP ranks.")
-
-    num_local_physical_experts = expert_load_view.numel() // ep_size
-    if expert_tokens.numel() < num_local_physical_experts:
-        raise ValueError("expert_tokens has fewer entries than the number of local physical experts.")
-
-    local_load = expert_tokens[:num_local_physical_experts]
-    if group_list_type != 1:
-        local_load = torch.cat((local_load[:1], local_load[1:] - local_load[:-1]))
-
-    local_load_view = expert_load_view.narrow(
-        0,
-        ep_rank * num_local_physical_experts,
-        num_local_physical_experts,
-    )
-    local_load_view.add_(local_load)
-
-
-def _map_to_physical_fake(
+def map_to_physical_and_record(
     topk_ids: torch.Tensor,
     expert_replica_routing_table: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+    num_unpadded_tokens: torch.Tensor,
+) -> torch.Tensor:
+    """Map logical IDs and record load only while collection is enabled."""
+    if topk_ids.device.type != "cpu":
+        from vllm_ascend.ops.triton.eplb import map_to_physical_and_record_triton
+
+        return map_to_physical_and_record_triton(
+            topk_ids,
+            expert_replica_routing_table,
+            expert_load_view,
+            record_enabled,
+            num_unpadded_tokens,
+        )
+
+    physical_ids = map_to_physical(topk_ids, expert_replica_routing_table)
+    if bool(record_enabled):
+        unpadded_physical_ids = physical_ids[: int(num_unpadded_tokens)].reshape(-1)
+        valid_physical_ids = unpadded_physical_ids[
+            (unpadded_physical_ids >= 0) & (unpadded_physical_ids < expert_load_view.numel())
+        ]
+        if valid_physical_ids.numel() > 0:
+            expert_load_view.add_(
+                torch.bincount(
+                    valid_physical_ids.to(torch.int64),
+                    minlength=expert_load_view.numel(),
+                ).to(expert_load_view.dtype)
+            )
+    return physical_ids
+
+
+def _map_to_physical_and_record_fake(
+    topk_ids: torch.Tensor,
+    expert_replica_routing_table: torch.Tensor,
+    expert_load_view: torch.Tensor,
+    record_enabled: torch.Tensor,
+    num_unpadded_tokens: torch.Tensor,
 ) -> torch.Tensor:
     return torch.empty_like(topk_ids)
 
 
 direct_register_custom_op(
-    op_name="ascend_eplb_map_to_physical",
-    op_func=map_to_physical,
-    fake_impl=_map_to_physical_fake,
+    op_name="ascend_eplb_map_to_physical_and_record",
+    op_func=map_to_physical_and_record,
+    mutates_args=["expert_load_view"],
+    fake_impl=_map_to_physical_and_record_fake,
     dispatch_key="PrivateUse1",
 )
