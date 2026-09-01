@@ -23,7 +23,6 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
-from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -72,8 +71,6 @@ _ATTN_KEYS_BUFFER = None
 # entry is (cache_seqlens, cu_seqlens_q, block_table); the data is refreshed
 # before every replay by refresh_fa3_graph_params.
 _FA3_GRAPH_TENSORS: dict = {}
-# num_tokens keys already reported as missing at decode replay (log once).
-_FA3_REPLAY_WARNED: set = set()
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -602,7 +599,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         (task group + event) it has no replay-side update mechanism, so the
         captured buffers must be overwritten before the replay or the graph
         keeps reading capture-time data (block_table=zeros) and produces wrong
-        output.
+        output. Both decode and mixed (prefill+decode) batches replay FA3
+        FULL graphs keyed by num_tokens; per-request layouts may differ from
+        capture freely — the FA3 kernel decodes task layouts from the
+        refreshed cu_seqlens_q at replay time (zero-length slots are skipped).
 
         The copies run on the *current* stream, not on ``update_stream`` +
         ``wait_stream``: a ``notify wait`` task fails under FULL aclgraph
@@ -610,29 +610,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         so nothing meaningful is lost by serializing them before the replay.
         """
         global _FA3_GRAPH_TENSORS
-        first_meta = next(iter(forward_context.attn_metadata.values()), None)
-        is_decode_replay = first_meta is not None and (
-            first_meta.attn_state == AscendAttentionState.DecodeOnly
-        )
-        fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens) if is_decode_replay else None
-        if is_decode_replay and fa3_tensors is None and _FA3_GRAPH_TENSORS:
-            # Without a refresh the graph replays stale capture-time buffers
-            # (silent decode corruption) — surface the key mismatch once.
-            global _FA3_REPLAY_WARNED
-            if num_tokens not in _FA3_REPLAY_WARNED:
-                _FA3_REPLAY_WARNED.add(num_tokens)
-                logger.warning(
-                    "FA3 decode replay: no captured graph tensors for "
-                    "num_tokens=%s (captured keys=%s); skipping buffer refresh.",
-                    num_tokens, sorted(_FA3_GRAPH_TENSORS),
-                )
+        fa3_tensors = _FA3_GRAPH_TENSORS.get(num_tokens)
         if fa3_tensors is None:
             return
         cache_seqlens, cu_seqlens_q, block_table_buf = fa3_tensors
         for meta in forward_context.attn_metadata.values():
             if meta.seq_lens is not None:
                 n_batch = cache_seqlens.numel()
-                n_actual = meta.seq_lens.numel()
+                n_actual = min(meta.seq_lens.numel(), n_batch)
                 n_pad = n_batch - n_actual
 
                 # Real lengths first; padding requests get KV length 1 and read
@@ -643,15 +628,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if n_pad > 0:
                     cache_seqlens[n_actual:].fill_(1)
 
-                # Real cumulative first, then one query token per padding request.
+                # Real cumulative rows first (leading zero), remaining slots
+                # left flat — zero-length requests the FA3 kernel skips.
                 n_cu = cu_seqlens_q.numel()
                 n_cu_actual = min(meta.query_start_loc.numel(), n_cu)
                 cu_seqlens_q[:n_cu_actual].copy_(meta.query_start_loc[:n_cu_actual])
                 if n_cu_actual < n_cu:
-                    last = int(cu_seqlens_q[n_cu_actual - 1].item())
-                    for i in range(n_cu_actual, n_cu):
-                        last += 1
-                        cu_seqlens_q[i] = last
+                    cu_seqlens_q[n_cu_actual:].fill_(
+                        int(cu_seqlens_q[n_cu_actual - 1].item())
+                    )
 
                 if meta.block_tables is not None:
                     n_bt_r = min(meta.block_tables.shape[0], block_table_buf.shape[0])
@@ -675,16 +660,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
 
-        # An FA3 decode graph has no task-group entries, and graph_params for
-        # this num_tokens may belong to a CANN prefill graph — updating those
-        # handles with decode data would corrupt the prefill graph. The FA3
-        # buffers are refreshed by refresh_fa3_graph_params before the replay.
+        # An FA3 graph bucket (decode or mixed) has no task-group entries,
+        # and graph_params for this num_tokens may belong to a CANN graph —
+        # updating those handles with FA3-bucket data would corrupt it. The
+        # FA3 buffers are refreshed by refresh_fa3_graph_params before the
+        # replay.
         global _FA3_GRAPH_TENSORS
-        first_meta = next(iter(forward_context.attn_metadata.values()), None)
-        is_decode_replay = first_meta is not None and (
-            first_meta.attn_state == AscendAttentionState.DecodeOnly
-        )
-        if is_decode_replay and num_tokens in _FA3_GRAPH_TENSORS:
+        if num_tokens in _FA3_GRAPH_TENSORS:
             return
 
         if using_paged_attention(num_tokens, vllm_config):
