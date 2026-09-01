@@ -1081,6 +1081,7 @@ def test_k3_w4a8_mxfp_multistream_schedule_on_a3_and_a5(monkeypatch, device_type
         torch.randn(4, 4, dtype=torch.bfloat16),
         events,
         input_is_gathered=True,
+        defer_output_wait=True,
     )
 
     assert result is reduced_out
@@ -1300,18 +1301,20 @@ def test_sp_multistream_custom_op_fake_returns_local_token_shape(hidden_dim_unpa
 
 
 @pytest.mark.parametrize(
-    ("mode", "multistream_overlap", "uses_sp_custom_op"),
+    ("mode", "multistream_overlap", "has_routed_input_transform", "uses_sp_custom_op"),
     [
-        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, True, True),
-        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, False, False),
-        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP, True, False),
-        (SharedExpertParallelMode.TENSOR_PARALLEL, True, False),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, True, True, True),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, True, False, False),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY, False, True, False),
+        (SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP, True, True, False),
+        (SharedExpertParallelMode.TENSOR_PARALLEL, True, True, False),
     ],
 )
 def test_runner_selects_sp_multistream_custom_op(
     monkeypatch,
     mode,
     multistream_overlap,
+    has_routed_input_transform,
     uses_sp_custom_op,
 ):
     upstream_forward_entry = object()
@@ -1364,6 +1367,7 @@ def test_runner_selects_sp_multistream_custom_op(
         router=object(),
         routed_experts=routed_experts,
         shared_experts=object(),
+        routed_input_transform=object() if has_routed_input_transform else None,
     )
 
     if uses_sp_custom_op:
@@ -1392,7 +1396,11 @@ def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypa
         assert states is hidden_states
         return routed_states, None
 
-    runner.ascend_shared_experts = SimpleNamespace(start_input_all_gather=MagicMock(side_effect=start_all_gather))
+    runner.ascend_shared_experts = SimpleNamespace(
+        multistream_overlap=True,
+        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        start_input_all_gather=MagicMock(side_effect=start_all_gather),
+    )
     runner.routed_input_transform = MagicMock(side_effect=latent_down)
     monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", lambda: current_stream)
 
@@ -1402,6 +1410,24 @@ def test_sp_multistream_all_gather_starts_before_routed_input_transform(monkeypa
     assert shared_input is gathered_states
     assert operation_order == ["all_gather", "latent_down", "wait_all_gather"]
     current_stream.wait_event.assert_called_once_with(all_gather_done)
+
+
+def test_runner_without_routed_input_transform_keeps_original_shared_input_path():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    hidden_states = torch.randn(4, 4)
+    runner._shared_experts = object()
+    runner.routed_input_transform = None
+    runner.ascend_shared_experts = SimpleNamespace(
+        multistream_overlap=True,
+        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        start_input_all_gather=MagicMock(),
+    )
+
+    routed_input, shared_input = runner.apply_routed_input_transform(hidden_states)
+
+    assert routed_input is hidden_states
+    assert shared_input is hidden_states
+    runner.ascend_shared_experts.start_input_all_gather.assert_not_called()
 
 
 def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
@@ -1417,7 +1443,9 @@ def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
 
     runner.routed_output_transform = MagicMock(side_effect=latent_up)
     runner.ascend_shared_experts = SimpleNamespace(
-        wait_for_output=MagicMock(side_effect=lambda: operation_order.append("join_shared_output"))
+        multistream_overlap=True,
+        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        wait_for_output=MagicMock(side_effect=lambda: operation_order.append("join_shared_output")),
     )
 
     result = runner.apply_routed_output_transform(latent_states)
@@ -1426,14 +1454,33 @@ def test_sp_multistream_reduce_scatter_overlaps_routed_output_transform():
     assert operation_order == ["latent_up", "join_shared_output"]
 
 
+def test_runner_without_routed_output_transform_does_not_defer_shared_output_join():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    fused_output = torch.randn(4, 4)
+    runner.routed_output_transform = None
+    runner.ascend_shared_experts = SimpleNamespace(
+        multistream_overlap=True,
+        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        wait_for_output=MagicMock(),
+    )
+
+    result = runner.apply_routed_output_transform(fused_output)
+
+    assert result is fused_output
+    runner.ascend_shared_experts.wait_for_output.assert_not_called()
+
+
 def test_sp_multistream_fp16_scaling_joins_shared_output_before_inplace_write():
     runner = AscendMoERunner.__new__(AscendMoERunner)
     shared_output = torch.randn(4, 4, dtype=torch.float16)
     fused_output = torch.randn(4, 4, dtype=torch.float16)
     operation_order = []
     runner.routed_scaling_factor = 2.0
+    runner.routed_output_transform = object()
     runner.ascend_shared_experts = SimpleNamespace(
-        wait_for_output=MagicMock(side_effect=lambda: operation_order.append("join_shared_output"))
+        multistream_overlap=True,
+        parallel_mode=MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY),
+        wait_for_output=MagicMock(side_effect=lambda: operation_order.append("join_shared_output")),
     )
 
     result_shared, result_fused = runner._maybe_apply_routed_scale_to_output(shared_output, fused_output)
@@ -1509,6 +1556,7 @@ def test_sp_multistream_down_projection_overlaps_combine_and_reduce_scatter_wait
         hidden_states,
         events,
         input_is_gathered=True,
+        defer_output_wait=True,
     )
 
     assert result is reduced_out
@@ -1528,6 +1576,15 @@ def test_sp_multistream_down_projection_overlaps_combine_and_reduce_scatter_wait
 
     shared_experts.wait_for_output()
 
+    default_stream.wait_stream.assert_called_once_with(auxiliary_stream)
+
+    default_stream.wait_stream.reset_mock()
+    shared_experts.forward(
+        hidden_states,
+        events,
+        input_is_gathered=True,
+        defer_output_wait=False,
+    )
     default_stream.wait_stream.assert_called_once_with(auxiliary_stream)
 
 
@@ -1700,6 +1757,8 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
         before_combine=None,
     )
     runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=(routed_out, routed_events)))
+    runner.routed_input_transform = object()
+    runner.routed_output_transform = object()
     num_tokens = 3
     prepared_shared_hidden_states = shared_hidden_states[:num_tokens]
     runner.ascend_shared_experts = SimpleNamespace(
@@ -1740,6 +1799,7 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
         prepared_shared_hidden_states,
         routed_events,
         input_is_gathered=True,
+        defer_output_wait=True,
     )
     assert result[0] is shared_out
     assert result[1] is routed_out
