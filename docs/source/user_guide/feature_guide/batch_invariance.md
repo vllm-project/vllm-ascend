@@ -28,29 +28,32 @@ We will support Ascend 950 Products and other NPUs in the future.
 
 ## Software Requirements
 
-Batch invariance requires a custom operator library for Atlas A2 and A3 inference products, and users need to set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to build `batch_invariant_ops` wheel during the installation process. Here's a specific example of the operation:
+Batch invariance requires custom operators for Atlas A2 and A3 inference products. Set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend from source to build and install the required operator packages.
+
+The A2 and A3 Dockerfiles set `VLLM_BATCH_INVARIANT=1` while installing vllm-ascend from source, so the resulting images include both the batch-invariant operator run package and the `batch_invariant_ops` wheel. This is a build-time setting only; set `VLLM_BATCH_INVARIANT=1` again when starting the server or running offline inference to enable batch invariance at runtime.
 
 The `batch_invariant_ops` build and installation process consists of two stages as in the [build_batch_invariant_ops.sh](https://github.com/vllm-project/vllm-ascend/blob/main/csrc/build_batch_invariant_ops.sh), which must run in order:
 
 1. Install the operator run package. It provides the device-side batch-invariant operators implemented with AscendC.
 2. Build and install the `batch_invariant_ops` wheel. It provides the PyTorch extension interfaces that invoke the AscendC operators.
 
-### Option 1: vllm-ascend is NOT installed
+### Option 1: Install vllm-ascend from source
 
-The `batch_invariant_ops` wheel are built into the vllm-ascend installation flow. Set `VLLM_BATCH_INVARIANT=1` to enable the building of `batch_invariant_ops` wheel:
+The environment variable is consumed by the source build. It works with both a regular source installation and an editable source installation when custom kernel compilation is enabled:
 
 ```bash
-# original
-pip install \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
-    vllm-ascend=={{ pip_vllm_ascend_version }}
-# set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to build `batch_invariant_ops` wheel.
-VLLM_BATCH_INVARIANT=1 pip install \
-    --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
-    vllm-ascend=={{ pip_vllm_ascend_version }}
+# Regular source installation
+COMPILE_CUSTOM_KERNELS=1 VLLM_BATCH_INVARIANT=1 \
+    pip install . --no-build-isolation
+
+# Editable source installation
+COMPILE_CUSTOM_KERNELS=1 VLLM_BATCH_INVARIANT=1 \
+    pip install -e . --no-build-isolation
 ```
 
-## Option 2: vllm-ascend is ALREADY installed
+Setting `VLLM_BATCH_INVARIANT=1` while installing a prebuilt vllm-ascend wheel does not rebuild these operators. Use a source installation as above, or install the operator packages separately as described below.
+
+### Option 2: vllm-ascend is already installed
 
 Enter the vllm-ascend installation directory and build and install the `batch_invariant_ops` wheel:
 
