@@ -587,6 +587,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # TP-sharded. This is part of the DSA-CP mixed-mode data path rather
         # than an independent user-facing feature switch.
         self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+        self._o_proj_dynamic_quant = False
 
         if self.enable_dsa_cp:
             self.local_num_heads = self.num_heads * self.tp_size
@@ -862,6 +863,46 @@ class AscendSFAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    def _check_o_proj_dynamic_quant(self) -> bool:
+        return hasattr(self.o_proj, "weight_scale")
+
+    def _maybe_init_o_proj_tp_full_params(self):
+        if self._check_o_proj_dynamic_quant():
+            self._o_proj_dynamic_quant = True
+            self._init_dynamic_quant_o_proj_tp_full_params()
+        else:
+            self._init_o_proj_tp_full_params()
+
+    def _init_dynamic_quant_o_proj_tp_full_params(self):
+        """
+        Initialize TP-mode and Full-mode parameters for o_proj weight,
+        preparing for weight switching in PD mix stage.
+
+        For PD mix stage:
+        - Use original TP o_proj weight for decode phase
+        - Need full-gather o_proj weight from all TP ranks for prefill phase
+        """
+        if AscendSFAImpl.o_proj_full_pool is None:
+            sample = self.o_proj.weight
+            AscendSFAImpl.o_proj_full_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, sample.shape[1]), dtype=sample.dtype, device=sample.device
+            )
+        if AscendSFAImpl.o_proj_full_weight_scale_pool is None:
+            sample = self.o_proj.weight_scale
+            AscendSFAImpl.o_proj_full_weight_scale_pool = torch.empty(
+                (sample.shape[0] * self.tp_size, sample.shape[1], sample.shape[2]),
+                dtype=sample.dtype,
+                device=sample.device,
+            )
+
+        # Save TP-mode parameters (original sharded weights)
+        self.o_proj_tp_weight = self.o_proj.weight.clone().detach()
+        self.o_proj_tp_weight_scale = self.o_proj.weight_scale.clone().detach()
+
+        # Initially switch to TP mode for graph capture
+        self.o_proj.weight.set_(self.o_proj_tp_weight)
+        self.o_proj.weight_scale.set_(self.o_proj_tp_weight_scale)
+
     def _init_o_proj_tp_full_params(self):
         """
         Initialize TP-mode aliases and Full-mode buffers for DSA-CP o_proj.
@@ -955,6 +996,51 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
         return self._get_o_proj_linear_method().apply(self.o_proj, attn_output)
+
+    def _handle_dynamic_quant_o_proj_weight_switch_and_forward(
+        self,
+        attn_output: torch.Tensor,
+        output: torch.Tensor,
+        o_proj_full_handle: torch.distributed.Work | None,
+        o_proj_full_weight_scale_handle: torch.distributed.Work | None,
+        should_shard_weight: bool,
+    ) -> tuple[torch.Tensor, bool]:
+        """
+        Handle o_proj weight switching between TP-mode and Full-mode, and execute forward computation.
+        """
+        # Gather o_proj weight from all TP ranks for Full-mode computation
+        if should_shard_weight:
+            # Wait for the completion of o_proj weight all-gather operation
+            if o_proj_full_handle is not None:
+                o_proj_full_handle.wait()
+            if o_proj_full_weight_scale_handle is not None:
+                o_proj_full_weight_scale_handle.wait()
+
+            # Switch o_proj to Full-mode (gathered weight from all TP ranks)
+            self.o_proj.weight.set_(AscendSFAImpl.o_proj_full_pool)
+            self.o_proj.weight_scale.set_(AscendSFAImpl.o_proj_full_weight_scale_pool)
+
+            # Apply quantization method and execute forward computation
+            output[...] = self.o_proj.quant_method.quant_method.apply(self.o_proj, attn_output)
+
+            # Switch o_proj back to TP-mode for subsequent decode operations
+            self.o_proj.weight.set_(self.o_proj_tp_weight)
+            self.o_proj.weight_scale.set_(self.o_proj_tp_weight_scale)
+
+            return output, False
+        else:
+            # For decode scenario: perform all-to-all communication on o_proj input activations
+            # Reshape for all-to-all: [batch * seq, tp_size, head_dim] -> [tp_size, batch * seq, head_dim]
+            send = (
+                attn_output.view(-1, self.tp_size, self.num_heads * self.v_head_dim)
+                .permute(1, 0, 2)
+                .reshape(-1, self.num_heads * self.v_head_dim)
+            )
+
+            attn_output = torch.empty_like(send)
+            torch.distributed.all_to_all_single(attn_output, send, group=get_tp_group().device_group)
+
+            return attn_output, True
 
     def _handle_o_proj_weight_switch_and_forward(
         self,
