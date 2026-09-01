@@ -589,6 +589,11 @@ class NPUModelRunner(GPUModelRunner):
         self.sparse_kv_offload_manager = None
         self.tp_rank = get_tensor_model_parallel_rank() if model_parallel_is_initialized() else 0
 
+        # Pinned staging buffers whose lifetime must outlive the statement that
+        # enqueued their async H2D copy. See _pinned_h2d() for why this is
+        # required and synchronize_input_prep() for the safe release point.
+        self._pinned_keepalive: list[torch.Tensor] = []
+
         # Per-request metadata consumed by the Sparse KV offload resident LRU.
         self._offload_req_ids_tensor = None
         self._offload_token_to_req = None
@@ -1401,6 +1406,30 @@ class NPUModelRunner(GPUModelRunner):
         input_ids = self.input_ids.gpu[:num_forward_tokens]
         input_ids.masked_fill_(input_ids == PLACEHOLDER_TOKEN_ID, 0)
 
+    def _pinned_h2d(self, np_arr: np.ndarray) -> torch.Tensor:
+        """Async H2D copy of a host-side numpy array with a safe pinned lifetime.
+
+        The chained form `torch.from_numpy(x).pin_memory().to(dev, non_blocking=True)`
+        only keeps the *device* tensor alive: the pinned staging buffer it copies
+        from is a temporary that is freed as soon as the expression ends. The
+        pinned allocator then hands that same block to the next `.pin_memory()`
+        call, which memcpys new data into it while the earlier H2D may still be
+        queued on the stream -- the device then reads corrupt metadata. That is
+        the EZ9999 "MTE accesses an invalid GM address" failure seen on
+        multi-request / high-context batches: the corrupt indices are consumed
+        by kernels launched later in the step, so the fault is delayed and hits
+        many cores at once.
+
+        Holding the staging buffer until the next step's
+        `synchronize_input_prep()` entry (`prepare_inputs_event.synchronize()`)
+        guarantees the copy has completed before the buffer can be recycled,
+        without adding any per-step device sync.
+        """
+        pinned = torch.from_numpy(np_arr).pin_memory()
+        dev = pinned.to(self.device, non_blocking=True)
+        self._pinned_keepalive.append(pinned)
+        return dev
+
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
@@ -1447,11 +1476,15 @@ class NPUModelRunner(GPUModelRunner):
         target_logits_indices += arange
 
         # TODO: Optimize the CPU -> NPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).pin_memory().to(self.device, non_blocking=True)
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).pin_memory().to(self.device, non_blocking=True)
-        logits_indices = torch.from_numpy(logits_indices).pin_memory().to(self.device, non_blocking=True)
-        target_logits_indices = torch.from_numpy(target_logits_indices).pin_memory().to(self.device, non_blocking=True)
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).pin_memory().to(self.device, non_blocking=True)
+        # NOTE: these must go through _pinned_h2d (not a chained
+        # .pin_memory().to(...)): each of the five staging buffers is a
+        # temporary that would otherwise be recycled by the next statement's
+        # .pin_memory() while its H2D is still in flight.
+        cu_num_draft_tokens = self._pinned_h2d(cu_num_draft_tokens)
+        cu_num_sampled_tokens = self._pinned_h2d(cu_num_sampled_tokens)
+        logits_indices = self._pinned_h2d(logits_indices)
+        target_logits_indices = self._pinned_h2d(target_logits_indices)
+        bonus_logits_indices = self._pinned_h2d(bonus_logits_indices)
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
@@ -1911,6 +1944,12 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                # Entry already ran prepare_inputs_event.synchronize(), so every
+                # H2D enqueued during the previous step has completed: the pinned
+                # staging buffers kept alive by _pinned_h2d can be recycled now.
+                # Only safe when the event protocol is actually armed.
+                if self.prepare_inputs_event is not None:
+                    self._pinned_keepalive.clear()
                 # Fix up prev_req_id_to_index for requests that were discarded
                 # in the previous sample_tokens step. If a request has
                 # prev_num_draft_len > 0 but is missing from
@@ -2125,6 +2164,13 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
+                if os.environ.get("GLM53_SYNC_PREP_END") == "1":
+                    # Bisect knob: drain the default stream before the forward
+                    # starts. If the device fault disappears with this on, the
+                    # bad work was enqueued during input prep (a bad H2D
+                    # destination or a bad prep-side kernel), not in the model
+                    # forward of a previous step.
+                    torch.npu.synchronize()
 
                 self._sanitize_placeholder_input_ids_for_forward(
                     scheduler_output,
