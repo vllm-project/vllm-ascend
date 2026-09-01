@@ -731,11 +731,17 @@ def test_dsa_cp_device_metadata_tasks(
             "sl_cpu": builder.seq_lens,
         }
     }
-    build_local_metadata = (
-        MagicMock(side_effect=lambda: builder.start_pos_prefill.fill_(1)) if device_metadata_enabled else None
-    )
+    build_local_metadata = MagicMock(side_effect=lambda: builder.start_pos_prefill.fill_(1))
     builder._ensure_device_local_metadata = MagicMock(
-        return_value=(0, 3, 3, 3, query_start_loc, builder.seq_lens, build_local_metadata)
+        return_value=(
+            0,
+            3,
+            3,
+            3,
+            query_start_loc,
+            builder.seq_lens,
+            build_local_metadata if device_metadata_enabled else None,
+        )
     )
     builder._get_cmp_seqlens_for_metadata = MagicMock(return_value=None)
     builder._build_sas_metadata = MagicMock(return_value=builder.req_sas_metadata)
@@ -813,7 +819,7 @@ def test_dsa_cp_device_metadata_tasks(
 
 
 def test_dsa_cp_device_local_metadata_is_deferred_and_reused():
-    cache = {}
+    cache: dict[str, dict[str, torch.Tensor]] = {}
 
     def make_builder():
         builder = AscendDSACPMetadataBuilder.__new__(AscendDSACPMetadataBuilder)
