@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from abc import ABC, abstractmethod
+import os
 
 import torch
 import torch.distributed as dist
@@ -34,6 +35,40 @@ from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_sp, enable_sp_by_pass
+
+# Token-dim padding via `torch.cat` with a persistent zero block, replacing
+# `nn.functional.pad` in the MoE prepare paths. On NPU each `F.pad` lowers to
+# two device kernels (a full-output MemSet plus a PadV3 copy) while the padded
+# data is only a few KB in decode, so the pair is pure launch overhead
+# (~44us per MoE layer in a Kimi K3 TP16 decode profile). The cat variant is
+# one ConcatD kernel per tensor and is safe under cudagraph replay: the cat
+# output is a fresh tensor per call (each captured graph owns its output
+# buffer), and the zero block is never written after allocation, so the
+# zero-tail property is structural — no cross-call bookkeeping.
+# Set VLLM_ASCEND_PAD_CAT=0 to fall back to F.pad.
+_PAD_CAT_ENABLED = os.environ.get("VLLM_ASCEND_PAD_CAT", "1") != "0"
+
+# (width..., dtype, device) -> zero block of [_PAD_ZERO_BLOCK_ROWS, width...].
+# One block per tensor width serves every pad size: pad rows needed are always
+# < tp_size (<= 64), and any smaller pad is a slice view of the block.
+_PAD_ZERO_BLOCK_ROWS = 64
+_PAD_ZERO_BLOCKS: dict[tuple, torch.Tensor] = {}
+
+
+def _pad_tokens_with_cat(x: torch.Tensor, padded_len: int) -> torch.Tensor:
+    """Token-dim padding of `x` ([n, ...] -> [padded_len, ...]) by concatenating
+    a slice of a cached zero block: value-equivalent to
+    `F.pad(x, (0, 0, 0, padded_len - n))` at one kernel instead of two."""
+    key = (*x.shape[1:], x.dtype, str(x.device))
+    zero_block = _PAD_ZERO_BLOCKS.get(key)
+    if zero_block is None or zero_block.shape[0] < padded_len - x.shape[0]:
+        zero_block = torch.zeros(
+            (max(_PAD_ZERO_BLOCK_ROWS, padded_len - x.shape[0]), *x.shape[1:]),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        _PAD_ZERO_BLOCKS[key] = zero_block
+    return torch.cat([x, zero_block[: padded_len - x.shape[0]]], dim=0)
 
 
 class PrepareAndFinalize(ABC):
@@ -164,8 +199,12 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
                 )
 
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if _PAD_CAT_ENABLED:
+                    hidden_states = _pad_tokens_with_cat(hidden_states, self.num_tokens + pad_size)
+                    router_logits = _pad_tokens_with_cat(router_logits, self.num_tokens + pad_size)
+                else:
+                    hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                    router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
                 padded_hidden_states_shape = hidden_states.shape
 
             if self.tp_size > 1:
@@ -287,8 +326,12 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             pad_size = target_pad_length - self.num_tokens
 
             if pad_size > 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                if _PAD_CAT_ENABLED:
+                    hidden_states = _pad_tokens_with_cat(hidden_states, target_pad_length)
+                    router_logits = _pad_tokens_with_cat(router_logits, target_pad_length)
+                else:
+                    hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                    router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
                 padded_hidden_states_shape = hidden_states.shape
 
             # Slice across TP ranks
