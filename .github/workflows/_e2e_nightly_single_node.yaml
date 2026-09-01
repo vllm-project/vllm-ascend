@@ -302,8 +302,7 @@ jobs:
           echo "Running pytest with tests path: ${{ inputs.tests }}"
           mkdir -p /tmp/test-logs
           set -o pipefail
-          pytest -sv "${{ inputs.tests }}" \
-            --ignore=tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py \
+          pytest -sv -rs "${{ inputs.tests }}" \
             2>&1 | tee /tmp/test-logs/pytest-driven.log
 
       - name: Run Pytest (YAML-driven)
