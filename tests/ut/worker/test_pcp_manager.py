@@ -11,7 +11,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import math
 from unittest.mock import MagicMock
 
 import numpy as np
