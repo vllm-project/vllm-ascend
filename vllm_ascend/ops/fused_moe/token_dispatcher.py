@@ -281,16 +281,15 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         #   a specific combine communication quant mode. An explicit comm_quant_mode
         #   (set by deeper quant config) still wins, to avoid silently overriding
         #   a deliberate per-layer quant decision.
-        if comm_quant_mode is not None:
+        combine_quant_mode = get_ascend_config().combine_quant_mode
+        if combine_quant_mode:
+            quant_mode = combine_quant_mode
+        elif comm_quant_mode is not None:
             quant_mode = comm_quant_mode
+        elif quant_type == QuantType.W8A8MXFP:
+            quant_mode = 4
         else:
-            combine_quant_mode = get_ascend_config().combine_quant_mode
-            if combine_quant_mode:
-                quant_mode = combine_quant_mode
-            elif quant_type == QuantType.W8A8MXFP:
-                quant_mode = 4
-            else:
-                quant_mode = 0
+            quant_mode = 0
         kwargs_mc2 = {
             "expand_x": hidden_states,
             "expert_ids": topk_ids,
