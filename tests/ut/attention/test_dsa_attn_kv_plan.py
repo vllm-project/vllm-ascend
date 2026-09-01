@@ -17,6 +17,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     resolve_dsv4_cache_dtype,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
 
 _DSA_C_ASCEND_OPS = (
@@ -47,7 +48,10 @@ def _cache_config(cache_dtype: str = "auto"):
 
 
 def _on(device_type):
-    return mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=device_type)
+    return mock.patch(
+        "vllm_ascend.attention.dsa_attn_kv_plan.get_current_hardware_profile",
+        return_value=get_hardware_profile(device_type),
+    )
 
 
 def test_get_dsa_attn_kv_plan_requires_vllm_config():
@@ -56,14 +60,14 @@ def test_get_dsa_attn_kv_plan_requires_vllm_config():
 
 
 def test_a5_fp8_plan_uses_flat_shared_kv():
-    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+    with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_FLAT
         assert plan.get_dsa_sparse_attn_metadata_kwargs("npu:0") == {"kv_quant_mode": 1}
 
 
 def test_a5_bf16_plan_uses_sparse_flash_mla():
-    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+    with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_sparse_attn_op() is sparse_flash_mla
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
@@ -74,7 +78,7 @@ def test_a5_bf16_plan_uses_sparse_flash_mla():
 
 
 def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
-    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A3):
+    with _on(AscendDeviceType.A3):
         plan = get_dsa_attn_kv_plan(_config(True))
         assert plan.get_dsa_compressor_slot_mapping_format() == DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
         kwargs: dict[str, Any] = {}
@@ -83,7 +87,7 @@ def test_non_a5_plan_preserves_shared_kv_runtime_kwargs():
 
 
 def test_scatter_skips_none_updates():
-    with mock.patch("vllm_ascend.attention.dsa_attn_kv_plan.get_ascend_device_type", return_value=AscendDeviceType.A5):
+    with _on(AscendDeviceType.A5):
         plan = get_dsa_attn_kv_plan(_config(False))
         cache = torch.zeros(2, 1, 4)
         with mock.patch.object(torch.ops._C_ascend, "kv_compress_epilog") as epilog:

@@ -25,18 +25,19 @@ import time
 from pathlib import Path
 
 import regex as re
+import zhconv
 from openai import AsyncOpenAI
 from polib import POEntry, pofile
 
 SYSTEM_PROMPT = (
     "You are a professional technical documentation translator specializing in "
-    "translating MkDocs markdown documentation from English to Chinese. "
+    "translating MkDocs markdown documentation from English to Simplified Chinese (简体中文). "
     "You produce accurate, consistent translations of all gettext PO file entries "
     "without skipping any. You never add explanations, markdown fences, or extra text "
     "outside the PO file content."
 )
 
-TRANSLATION_PROMPT = """Translate these PO file entries (gettext format) from English to Chinese.
+TRANSLATION_PROMPT = """Translate these PO file entries (gettext format) from English to Simplified Chinese (简体中文).
 
 You are given a list of msgid/msgstr pairs where every msgstr is empty ("").
 For each msgid, fill in the Chinese translation in the corresponding msgstr.
@@ -140,6 +141,18 @@ def _normalize_msgid(text: str) -> str:
     while lines and not lines[-1]:
         lines.pop()
     return "\n".join(lines)
+
+
+def _convert_po_to_simplified(po):
+    """Convert all msgstr values in a PO file from Traditional to Simplified Chinese.
+
+    This is a safety net to catch any Traditional Chinese characters that the
+    translation model may have produced despite the prompt requesting Simplified
+    Chinese only.
+    """
+    for entry in po:
+        if entry.msgstr:
+            entry.msgstr = zhconv.convert(entry.msgstr, "zh-cn")
 
 
 class POTranslator:
@@ -246,6 +259,7 @@ class POTranslator:
                 print("FAILED (merge)")
                 return False
 
+            _convert_po_to_simplified(po)
             po.save(str(path))
             if merged < len(untranslated):
                 print(f"OK ({merged}/{len(untranslated)} merged)")

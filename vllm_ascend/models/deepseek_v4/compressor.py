@@ -38,7 +38,7 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
 class AscendCompressorStateCache(CompressorStateCache):
@@ -126,7 +126,9 @@ class Compressor(nn.Module):
             self.dim,
             self.coff * self.head_dim,
             bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
+            quant_config=None
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else quant_config,
             prefix=f"{prefix}.wkv",
             return_bias=False,
         )
@@ -134,13 +136,17 @@ class Compressor(nn.Module):
             self.dim,
             self.coff * self.head_dim,
             bias=False,
-            quant_config=None if get_ascend_device_type() in {AscendDeviceType.A5} else quant_config,
+            quant_config=None
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else quant_config,
             prefix=f"{prefix}.wgate",
             return_bias=False,
         )
 
         # A5 compressor kernel needs float for norm_weight input
-        norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
+        norm_dtype = (
+            torch.float32 if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE) else None
+        )
         self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
 
         state_dtype = torch.float32

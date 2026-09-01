@@ -54,13 +54,12 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
-    AscendDeviceType,
     calc_split_factor,
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
-    get_ascend_device_type,
 )
 
 if TYPE_CHECKING:
@@ -82,7 +81,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         else 1
     )
 
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         c8_k_cache_dtype = torch.float8_e4m3fn
         c8_k_scale_cache_dtype = torch.float32
     else:
@@ -446,7 +445,7 @@ def _view_dsv4_cache(
         )
         cache_shapes.append(scale_shape)
         cache_dtypes.append(scale_dtype)
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             full_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
                 kv_cache_spec.storage_block_size,
@@ -871,7 +870,11 @@ def _reshape_kv_cache_v2(
 
             if sparse_sfa_c8:
                 raw_k_tensor = raw_cache
-                k_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+                k_dtype = (
+                    torch.float8_e4m3fn
+                    if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+                    else torch.int8
+                )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):
