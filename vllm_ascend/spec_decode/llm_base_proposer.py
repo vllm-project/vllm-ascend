@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, replace
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
@@ -112,17 +112,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
     def _create_draft_vllm_config(self) -> VllmConfig:
-        """Expose the validated draft model config during model construction.
+        """Expose the draft runner type during model construction.
 
         ``_get_model`` calls this hook before ``get_model`` installs the
         returned config as the current vLLM config. Attention constructors can
         then identify the draft model from ``runner_type="draft"``.
+
+        Keep the target-derived model config otherwise unchanged. Replacing it
+        with ``draft_model_config`` changes how generic proposers construct
+        their layers and can invalidate target parallel settings.
         """
         draft_vllm_config = super()._create_draft_vllm_config()
-        return replace(
-            draft_vllm_config,
-            model_config=self.speculative_config.draft_model_config,
-        )
+        draft_vllm_config = copy.copy(draft_vllm_config)
+        draft_vllm_config.model_config = copy.copy(draft_vllm_config.model_config)
+        draft_vllm_config.model_config.runner_type = self.speculative_config.draft_model_config.runner_type
+        return draft_vllm_config
 
     @staticmethod
     def _get_multimodal_image_token_index(model_name: str, config: Any) -> int:
