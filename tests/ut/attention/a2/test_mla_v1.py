@@ -1196,8 +1196,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.head_padding, 0)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
-        """Test head padding computation for num_heads that are not power of 2 (e.g. GLM-4.7-Flash with 20 heads)."""
+    def test_init_does_not_pad_non_power_of_two_heads(self, mock_get_current_vllm_config):
+        """Test that arbitrary head counts no longer require padding."""
         mock_get_current_vllm_config.return_value = MagicMock()
         kwargs = {
             "kv_lora_rank": 32,
@@ -1232,8 +1232,8 @@ class TestAscendMLAImpl(TestBase):
             **kwargs,
         )
         self.assertEqual(impl.num_heads, 20)
-        self.assertEqual(impl.num_heads_padded, 32)  # next power of 2
-        self.assertEqual(impl.head_padding, 12)  # 32 - 20
+        self.assertEqual(impl.num_heads_padded, 20)
+        self.assertEqual(impl.head_padding, 0)
 
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
