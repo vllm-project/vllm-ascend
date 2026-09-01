@@ -3451,7 +3451,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(local_ids, [([70, 71, 72, 73], [80, 81, 82, 83])])
         self.assertEqual(remote_ids, [([50, 51, 52, 53], [60, 61, 62, 63])])
 
-    def test_issue_13934_dcp_split_transfer_groups_use_kv_cache_group_id(self):
+    def test_dcp_split_transfer_groups_use_kv_cache_group_id(self):
         """DCP metadata is cache-group indexed, not transfer-group indexed."""
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
         worker._is_hma_required = True

@@ -24,7 +24,7 @@ from vllm.distributed import (
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -39,6 +39,7 @@ from vllm_ascend.models.deepseek_v4 import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.utils import enable_dsa_cp
 
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.(gate_proj|up_proj|down_proj)\.scale$")
 
@@ -120,13 +121,14 @@ class DeepseekV4DSparkModel(nn.Module):
         )
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
-        self.main_proj = ReplicatedLinear(
+        self.main_proj = ColumnParallelLinear(
             config.hidden_size * len(self.target_layer_ids),
             config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=None,
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
+            gather_output=True,
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         first_layer.main_proj = self.main_proj
@@ -432,9 +434,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
                 break
             else:
                 if "attn_sink" in name:
-                    narrow = loaded_weight[head_start:head_end]
+                    if enable_dsa_cp():
+                        narrow = loaded_weight
+                    else:
+                        narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
-                        params_dict[name][: narrow.shape[0]].copy_(narrow)
+                        params_dict[name].copy_(narrow)
                     loaded_params.add(name)
                     continue
                 param = params_dict[name]

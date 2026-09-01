@@ -35,8 +35,8 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
-from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -146,19 +146,16 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            if _CANN_OPS_TRANSFORMER_AVAILABLE:
-                # MegaMoe bg16 Need to use ND format to support
-                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-            else:
+            use_megamoe = use_cann_megamoe(get_current_vllm_config())
+            if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-                if enable_fused_mc2 == 1 and self.dynamic_eplb:
-                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                    del layer.w13_weight
-                    del layer.w2_weight
-                    torch.npu.empty_cache()
+            if use_megamoe or self.dynamic_eplb:
+                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+                del layer.w13_weight
+                del layer.w2_weight
+                torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
@@ -260,7 +257,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if _CANN_OPS_TRANSFORMER_AVAILABLE:
+            if _EXTRA_CTX.use_megamoe:
                 w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
                 w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
                 w1_scale = None
