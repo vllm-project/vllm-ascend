@@ -389,6 +389,45 @@ class TestBlockTableComputeSlotMapping(TestBase):
 
         self._test_slot_mapping_for_ranks(dcp_world_size=8, cp_kv_cache_interleave_size=128, test_configs=test_configs)
 
+    def test_compute_slot_mapping_skipped_for_non_attention_group(self):
+        """Test that slot mapping computation is skipped for non-attention groups.
+
+        kernel_sizes[0]==0 marks non-attention groups (Mamba/compressor state
+        cache) that don't participate in slot_mapping computation. Both
+        compute_slot_mapping() and compute_slot_mapping_draft() must return
+        early without touching the slot_mapping buffer or invoking the kernel.
+        """
+        self.kernel_sizes = [0]
+        block_table = self.create_block_table(dcp_world_size=1, dcp_rank=0, cp_kv_cache_interleave_size=1)
+
+        num_reqs = 2
+        req_indices = np.array([0, 0, 1, 1], dtype=np.int32)
+        positions = np.array([0, 1, 0, 1], dtype=np.int32)
+        num_tokens = positions.shape[0]
+        query_start_loc = torch.from_numpy(np.array([0, 2, 4], dtype=np.int32))
+
+        # Poison the slot_mapping buffer to verify it stays untouched.
+        block_table.slot_mapping.np[:] = -1
+
+        from vllm_ascend.worker import block_table as block_table_module
+
+        with patch.object(block_table_module, "_compute_slot_mapping_kernel") as mock_kernel:
+            block_table.compute_slot_mapping(
+                num_reqs,
+                query_start_loc,
+                torch.from_numpy(positions.astype(np.int64)),
+            )
+            mock_kernel.assert_not_called()
+
+        with patch.object(block_table_module, "_compute_slot_mapping_kernel") as mock_kernel:
+            block_table.compute_slot_mapping_draft(req_indices, positions)
+            mock_kernel.assert_not_called()
+
+        np.testing.assert_array_equal(
+            block_table.slot_mapping.np[:num_tokens],
+            np.full(num_tokens, -1, dtype=np.int32),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

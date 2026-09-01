@@ -23,7 +23,11 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -966,6 +970,54 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_k_cache.dtype, torch.int8)
         self.assertEqual(indexer_scale_cache.shape, (2, 16, 1, 1))
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
+
+    def test_may_reinitialize_input_batch_small_block_sliding_window_mla(self):
+        """Small-block sliding-window MLA groups skip slot mapping like Mamba.
+
+        AscendSlidingWindowMLASpec groups with block_size < 8 cannot run the
+        slot-mapping kernel, so may_reinitialize_input_batch() must append
+        [0] to kernel_block_sizes (same as Mamba groups) and skip the
+        attention branch.
+        """
+        runner = self._build_runner()
+        runner.max_model_len = 128
+        runner.max_encoder_len = 0
+        runner.max_num_reqs = 4
+        runner.max_num_tokens = 512
+        runner.pin_memory = False
+        runner.is_pooling_model = False
+        runner.cache_config = SimpleNamespace(block_size=128, enable_prefix_caching=False)
+        runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
+        runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+        runner.model_config.get_vocab_size = lambda: 51200
+        runner.vllm_config.speculative_config = None
+        runner.input_batch = SimpleNamespace(logitsprocs=[])
+
+        sliding_spec = AscendSlidingWindowMLASpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=512 + 64,
+            dtype=torch.bfloat16,
+            sliding_window=8,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[KVCacheTensor(size=sliding_spec.page_size_bytes * 2, shared_by=["self_attn"])],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=["self_attn"], kv_cache_spec=sliding_spec)],
+        )
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch") as mock_input_batch,
+            patch(
+                "vllm_ascend.worker.model_runner_v1.get_decode_context_model_parallel_world_size",
+                return_value=1,
+            ),
+        ):
+            runner.may_reinitialize_input_batch(kv_cache_config)
+            mock_input_batch.assert_called_once()
+
+        self.assertEqual(runner.kernel_block_sizes, [[0]])
+        self.assertEqual(mock_input_batch.call_args.kwargs["kernel_block_sizes"], [[0]])
 
 
 class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
