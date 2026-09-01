@@ -68,7 +68,12 @@ from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 if vllm_version_is("0.27.1"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+    try:
+        from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+    except ImportError:
+        # Some development vLLM checkouts expose PCP at the legacy public
+        # path even though their version string is not exactly 0.27.1.
+        from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
