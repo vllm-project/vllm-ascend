@@ -29,7 +29,7 @@ The following hardware and software stack is validated together for this release
     | Layer | Component | Validated version / requirement | Role |
     | --- | --- | --- | --- |
     | Runtime environment | Python | `{{ release_image_python_version }}` | Python version used by the validated release image |
-    | Host enablement | Ascend HDK | 26.0.RC1 | Driver and firmware requirements for the selected CANN release |
+    | Host enablement | Ascend HDK | `{{ release_hdk_version }}` | Driver and firmware requirements for the selected CANN release |
     | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` | Ascend user-space runtime, including the CANN Toolkit and hardware-specific Ops packages |
     | Ascend runtime | NNAL | `{{ release_nnal_version }}` | Provides `libatb.so` and ATB runtime capabilities |
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
