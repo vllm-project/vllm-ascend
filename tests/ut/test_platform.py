@@ -273,6 +273,25 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(self.platform.get_device_name(device_id), device_name)
         mock_get_device_name.assert_called_once_with(0)
 
+    def test_get_device_total_memory_before_npu_init(self):
+        mock_npu = MagicMock()
+        mock_npu.is_initialized.return_value = False
+        with patch.object(torch, "npu", mock_npu, create=True):
+            with pytest.raises(NotImplementedError):
+                self.platform.get_device_total_memory(device_id=0)
+        mock_npu.is_initialized.assert_called_once_with()
+        mock_npu.mem_get_info.assert_not_called()
+
+    def test_get_device_total_memory_after_npu_init(self):
+        mock_npu = MagicMock()
+        mock_npu.is_initialized.return_value = True
+        mock_npu.mem_get_info.return_value = (8 << 30, 16 << 30)
+        with patch.object(torch, "npu", mock_npu, create=True):
+            total_memory = self.platform.get_device_total_memory(device_id=1)
+        self.assertEqual(total_memory, 16 << 30)
+        mock_npu.is_initialized.assert_called_once_with()
+        mock_npu.mem_get_info.assert_called_once_with(1)
+
     @patch("torch.npu.get_device_properties")
     def test_get_device_uuid(self, mock_get_device_properties):
         device_id = 0
