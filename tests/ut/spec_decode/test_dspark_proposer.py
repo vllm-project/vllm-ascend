@@ -68,7 +68,8 @@ class _DSparkProposerTestBase:
             speculative_config=SimpleNamespace(
                 draft_sample_method=draft_sample_method,
                 draft_model_config=draft_model_config,
-            )
+            ),
+            parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
         )
 
     @classmethod
@@ -92,6 +93,7 @@ class _DSparkProposerTestBase:
             runner: object | None = None,
         ) -> None:
             del runner
+            proposer.vllm_config = vllm_config
             proposer.draft_model_config = vllm_config.speculative_config.draft_model_config
             proposer.num_speculative_tokens = block_size
             proposer.max_batch_size = num_reqs
@@ -106,6 +108,8 @@ class _DSparkProposerTestBase:
                 if draft_attn_causal is not None
                 else SimpleNamespace()
             )
+            proposer.dcp_size = 1
+            proposer.dcp_rank = 0
 
         dynamic_spec_config = SimpleNamespace(method="", method_params={})
         with (
@@ -464,6 +468,52 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert torch.equal(cad.seq_lens, expected)
         assert torch.equal(cad._seq_lens_cpu, expected)
         assert torch.equal(cad.seq_lens_cpu, expected)
+
+    def test_dcp_populates_parallel_drafting_metadata(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+        num_reqs, block_size, max_num_tokens = 2, 3, 64
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens,
+            num_reqs=num_reqs,
+            block_size=block_size,
+        )
+        proposer.dcp_size = 8
+        proposer.dcp_rank = 3
+        proposer.vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        local_seq_lens = torch.arange(num_reqs * proposer.dcp_size, dtype=torch.int32).reshape(
+            num_reqs, proposer.dcp_size
+        )
+
+        with patch(
+            "vllm_ascend.spec_decode.dspark_proposer.get_dcp_local_seq_lens",
+            return_value=local_seq_lens,
+        ) as get_local_seq_lens:
+            _num_query_total, _token_indices, cad, long_seq_args = self._invoke_set_inputs_first_pass(
+                proposer,
+                num_reqs=num_reqs,
+                block_size=block_size,
+            )[:4]
+
+        get_local_seq_lens.assert_called_once_with(
+            cad._seq_lens_cpu,
+            proposer.dcp_size,
+            proposer.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        )
+        assert long_seq_args == (None, None)
+        assert np.array_equal(cad.context_parallel_metadata.num_computed_tokens_of_dcp, local_seq_lens.numpy())
+        assert torch.equal(
+            cad.context_parallel_metadata.query_lens_cpu,
+            torch.full((num_reqs,), block_size, dtype=torch.int32),
+        )
+        kwargs = kernel[1,].call_args.kwargs
+        assert kwargs["total_cp_world_size"] == 8
+        assert kwargs["current_cp_rank"] == 3
+        assert kwargs["cp_kv_cache_interleave_size"] == 1
+        assert kwargs["PAD_ID"] == -1
 
 
 class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):

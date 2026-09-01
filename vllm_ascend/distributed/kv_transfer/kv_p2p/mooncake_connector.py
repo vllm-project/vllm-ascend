@@ -2032,6 +2032,10 @@ class MooncakeConnectorScheduler:
             logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
+        decode_topology = self.vllm_config.kv_transfer_config.get_from_extra_config("decode", {}) or {}
+        configured_dcp_size = decode_topology.get("dcp_size")
+        advertised_remote_dcp_size = int(configured_dcp_size) if configured_dcp_size is not None else self.dcp_size
+
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -2041,7 +2045,7 @@ class MooncakeConnectorScheduler:
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             remote_pcp_size=self.pcp_size,
-            remote_dcp_size=self.dcp_size,
+            remote_dcp_size=advertised_remote_dcp_size,
             remote_ptp_size=self.tp_size,
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
