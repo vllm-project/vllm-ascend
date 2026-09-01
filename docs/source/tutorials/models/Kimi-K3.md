@@ -40,7 +40,7 @@ memory.
 ### 3.2 Verify Multi-Node Communication
 
 Before launching the four-node service, follow
-[Verify Multi-Node Communication](../../installation.md#verify-multi-node-communication).
+[Verify Multi-Node Communication](../../getting_started/installation.md#installation-multi-node-interconnect).
 Use a reachable address and the correct communication interface on each node.
 All nodes must use the same model revision and compatible software stack.
 
@@ -51,7 +51,7 @@ only to the Atlas A3 series.
 
 ### 4.1 Docker Image Installation
 
-Follow the [installation requirements](../../installation.md#requirements) for
+Follow the [installation requirements](../../getting_started/installation.md#installation-requirements) for
 the host driver and firmware. Start the A3 container below on every node.
 
 The example uses the main-branch nightly image for the vLLM 0.27-based stack.
@@ -120,7 +120,7 @@ export IMAGE=vllm-ascend-kimi-k3:main
 Use the resulting image on every node with the container command in Section 4.1,
 replacing its `IMAGE` value. Record the source revision and image digest.
 For an installation outside Docker, follow the
-[source installation guide](../../installation.md#set-up-using-python), using
+[source installation guide](../../getting_started/installation.md#installation-existing-cann-install), using
 the selected main checkout and its verified vLLM commit instead of the older
 release versions in the generic examples.
 

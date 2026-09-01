@@ -30,7 +30,7 @@ from vllm_ascend.config_utils import config
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+_MEGA_MOE_SUPPORTED = None
 
 
 def is_mega_moe_supported() -> bool:
@@ -41,6 +41,9 @@ def is_mega_moe_supported() -> bool:
     during config init (AscendConfig._validate_user_input_ranges rolls back
     megamoe), and a direct import binds a stale snapshot for the bool.
     """
+    global _MEGA_MOE_SUPPORTED
+    if _MEGA_MOE_SUPPORTED is None:
+        _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
     return _MEGA_MOE_SUPPORTED
 
 
@@ -454,7 +457,7 @@ class AscendConfig:
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
         global _MEGA_MOE_SUPPORTED
-        if self.enable_fused_mc2 == 1:
+        if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             _MEGA_MOE_SUPPORTED = False
         elif self.enable_fused_mc2 == 2:

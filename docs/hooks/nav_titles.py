@@ -81,10 +81,10 @@ TITLES = {
         "zh": "服务性能分析指南",
     },
     "faqs.md": {"en": "FAQs", "zh": "常见问题"},
-    "getting_started.md": {"en": "Overview", "zh": "概览"},
+    "getting_started/overview.md": {"en": "Overview", "zh": "概览"},
     "index.md": {"en": "Home", "zh": "首页"},
-    "installation.md": {"en": "Installation", "zh": "安装指南"},
-    "quick_start.md": {"en": "Quick Start", "zh": "快速开始"},
+    "getting_started/installation.md": {"en": "Installation", "zh": "安装指南"},
+    "getting_started/quick_start.md": {"en": "Quick Start", "zh": "快速开始"},
     "tutorials/features/dynamic_chunked_pipeline_parallel.md": {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",

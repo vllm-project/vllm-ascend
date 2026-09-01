@@ -7,6 +7,7 @@ import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -858,6 +859,9 @@ class AscendSFADCPMetadataBuilder(
 
 
 class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
+    can_return_lse_for_decode: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -1000,9 +1004,22 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             raise RuntimeError(
                 f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
             )
+        if topk_indices.numel() == 0:
+            return topk_indices
 
-        # Remap the topk indices from the replicated view to the DCP-local KV cache view.
-        # We use float32 for better performance on Ascend.
+        if HAS_TRITON and topk_indices.is_npu:
+            from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
+
+            return remap_sparse_indices_triton(
+                topk_indices,
+                self.dcp_size,
+                self.dcp_rank,
+                self._dcp_interleave_size,
+            )
+
+        # Fallback for environments without Triton: remap the topk indices from
+        # the replicated view to the DCP-local KV cache view. We use float32 for
+        # better performance on Ascend.
         topk_indices_fp32 = topk_indices.to(torch.float32)
         interleave_size = self._dcp_interleave_size
         local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)

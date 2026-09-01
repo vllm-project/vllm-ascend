@@ -43,6 +43,10 @@ class AscendDeepSeekMTP(DeepSeekMTP):
         mtp_layer_idx = self.model.mtp_start_layer_idx
         own_head_weight = f"model.layers.{mtp_layer_idx}.shared_head.head.weight"
         if own_head_weight not in loaded_weights:
+            # GLM-5.3 and friends ship no MTP head, leaving shared_head.head at
+            # its allocation-time contents. Record that so the proposer shares
+            # the target head instead of inspecting those values.
+            self.has_own_lm_head = False
             return
 
         self.has_own_lm_head = True

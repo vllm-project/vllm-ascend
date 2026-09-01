@@ -133,6 +133,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_full_graph_params,
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -170,7 +171,6 @@ from vllm_ascend.spec_decode.utils import (
     update_num_computed_tokens_for_batch_change,
 )
 from vllm_ascend.utils import (
-    AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
     embedding_tp_enable,
@@ -178,7 +178,6 @@ from vllm_ascend.utils import (
     enable_sfa,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
-    get_ascend_device_type,
     get_c_env,
     global_stream,
     is_hidden_state_cache_spec,
@@ -380,7 +379,7 @@ class NPUModelRunner(GPUModelRunner):
         self.enable_sparse_sfa_c8 = self.ascend_config.enable_sparse_sfa_c8
         self.enable_sparse_li_c8 = self.ascend_config.enable_sparse_li_c8
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
                 self.c8_k_scale_cache_dtype = torch.float32
             else:
@@ -4447,7 +4446,7 @@ class NPUModelRunner(GPUModelRunner):
                                                 current_kv_cache_spec.num_kv_heads,
                                                 current_kv_cache_spec.scale_dim
                                                 )
-                        if get_ascend_device_type() in {AscendDeviceType.A5}:
+                        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
                             indexer_full_shape = self.attn_backend.get_kv_cache_shape(
                                 num_blocks, current_kv_cache_spec.storage_block_size,
                                 current_kv_cache_spec.num_kv_heads,
