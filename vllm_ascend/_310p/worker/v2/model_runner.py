@@ -870,11 +870,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         if query_start_loc is not None:
             query_lens = self._get_valid_query_lens(idx_mapping, query_start_loc)
             self._advance_num_computed_tokens(valid_indices, query_lens)
-        self.model_state.postprocess_state(
-            idx_mapping,
-            num_sampled,
-            self.req_states.num_computed_tokens.gpu,
-        )
+        self.model_state.postprocess_state(idx_mapping, num_sampled)
 
     @staticmethod
     def _get_valid_query_lens(
