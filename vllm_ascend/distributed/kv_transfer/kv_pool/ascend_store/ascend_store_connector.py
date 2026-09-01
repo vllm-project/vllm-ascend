@@ -88,6 +88,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
+        if self.use_layerwise and not vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "AscendStoreConnector with use_layerwise=true requires the "
+                "V2 model runner (set VLLM_USE_V2_MODEL_RUNNER=1): the "
+                "per-layer mamba state copy is only implemented for "
+                "vllm_ascend/worker/v2."
+            )
         backend_name = str(extra_config.get("backend", "mooncake")).lower()
         self.use_gva_layerwise = self.use_layerwise and backend_name == "memcache"
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
@@ -102,6 +109,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self._current_step_has_real_forward = False
+        # Handle to the (V2) mamba hybrid model state while its per-layer
+        # align pre-copy is deferred behind this connector's layerwise loads.
+        self._mamba_state: Any = None
+        self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -230,6 +241,28 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
         self.connector_worker.wait_for_layer_load()
+        # Mamba state copy must run AFTER this layer's load finishes,
+        # otherwise the copy would race with the in-flight layerwise load and
+        # read half-loaded state. The model state no-ops for non-mamba layers
+        # and for layers whose copy already ran.
+        if self._mamba_state is not None:
+            self._mamba_state.do_mamba_copy_for_layer(layer_name)
+
+    def prepare_mamba_state_copy(self, mamba_state) -> bool:
+        """Take over the mamba align pre-copy for this step (V2 model runner).
+
+        Called by the mamba hybrid model state from ``preprocess_state``. When
+        True is returned the state skips its bulk pre-copy launch and each
+        layer's copy is executed from :meth:`wait_for_layer_load` right after
+        that layer's KV load (conv/ssm state included) completes.
+        """
+        if not self.requires_mamba_state_copy_after_layer_load:
+            return False
+        self._mamba_state = mamba_state
+        return True
+
+    def finish_mamba_state_copy(self) -> None:
+        self._mamba_state = None
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs

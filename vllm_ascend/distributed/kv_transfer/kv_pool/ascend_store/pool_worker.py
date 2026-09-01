@@ -1045,16 +1045,6 @@ class KVPoolWorker:
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
-            if (
-                getattr(self, "use_eagle", False)
-                and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1
-            ):
-                # Full-hit path: the trailing block is recomputed and will be
-                # re-stored by the normal save path, so never skip it here.
-                logger.debug(
-                    "Reqid: %s full-hit tail recompute path, tail block will be re-stored",
-                    request.req_id,
-                )
             group_block_hashes = get_block_hashes(
                 request.block_hashes,
                 block_size,
@@ -1340,16 +1330,6 @@ class KVPoolWorker:
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
-            if (
-                getattr(self, "use_eagle", False)
-                and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1
-            ):
-                # Full-hit path: the trailing block is recomputed and will be
-                # re-stored by the normal save path, so never skip it here.
-                logger.debug(
-                    "Reqid: %s full-hit tail recompute path, tail block will be re-stored",
-                    request.req_id,
-                )
             block_hashes = request.block_hashes
 
             all_group_load_gvas: list[np.ndarray] = []

@@ -27,6 +27,17 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        # Handle to the (V2) mamba hybrid model state while its per-layer
+        # align pre-copy is deferred behind a layerwise child connector.
+        self._mamba_state: Any = None
+        self.requires_mamba_state_copy_after_layer_load = any(
+            getattr(
+                connector,
+                "requires_mamba_state_copy_after_layer_load",
+                False,
+            )
+            for connector in self._connectors
+        )
 
     def _configure_layerwise_reuse_completion(self) -> None:
         # Producers that report when a shared physical KV slot is safe to reuse.
@@ -67,6 +78,26 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             connectors = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
         for connector in connectors:
             connector.wait_for_layer_load(layer_name)
+        # Mamba state copy runs after every child connector finished this
+        # layer's load so the copy never reads half-loaded state. The model
+        # state no-ops for non-mamba layers and for already-copied layers.
+        if (mamba_state := getattr(self, "_mamba_state", None)) is not None:
+            mamba_state.do_mamba_copy_for_layer(layer_name)
+
+    def prepare_mamba_state_copy(self, mamba_state) -> bool:
+        """Take over the mamba align pre-copy for this step (V2 model runner).
+
+        Returns True when any child connector executes per-layer copies from
+        its ``wait_for_layer_load``; see
+        ``AscendStoreConnector.prepare_mamba_state_copy``.
+        """
+        if not self.requires_mamba_state_copy_after_layer_load:
+            return False
+        self._mamba_state = mamba_state
+        return True
+
+    def finish_mamba_state_copy(self) -> None:
+        self._mamba_state = None
 
     def save_kv_layer(
         self,
