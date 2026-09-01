@@ -25,17 +25,16 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, get_current_hardware_profile
+from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
+from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
+from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES, get_dynamic_mx_quant_scale_alg
 
-# These kernels are imported after DeviceOperator is defined below.  Importing
-# them here triggers vllm_ascend.ops.__init__, whose fused-MoE registration
-# imports this module back and otherwise observes a partially initialized
-# DeviceOperator on older vLLM development checkouts.
-chunk_scaled_dot_kkt_fwd_kernel = None
-solve_tril_16x16_kernel = None
-fused_gdn_gating_patch = None
-triton_q_rms = None
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
+else:
+    triton_q_rms = None  # type: ignore
 
 
 class BaseDeviceAdaptor:
@@ -1595,12 +1594,3 @@ def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
 
 
 DeviceOperator: type["BaseDeviceAdaptor"] = get_device_adaptor()
-
-# Complete the optional Triton imports only after the adaptor class hierarchy
-# and the public DeviceOperator alias are available to fused-MoE registration.
-from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd_kernel
-from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
-from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
-
-if HAS_TRITON:
-    from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
