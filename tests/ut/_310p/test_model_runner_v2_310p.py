@@ -14,10 +14,14 @@ from vllm.sampling_params import SamplingParams
 import vllm_ascend._310p.worker.v2.model_runner as model_runner_module
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
-from vllm_ascend._310p.worker.v2.model_state import Ascend310PModelState
+from vllm_ascend._310p.worker.v2.model_state import (
+    Ascend310PMambaHybridModelState,
+    Ascend310PModelState,
+)
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
 def _make_vllm_config(**overrides):
@@ -47,6 +51,138 @@ def _make_vllm_config(**overrides):
 
 def test_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config())
+
+
+def test_config_accepts_qwen3_vl_multimodal_mrope() -> None:
+    """Qwen3-VL is multimodal + MRoPE; 310P MRv2 must allow it."""
+    config = _make_vllm_config()
+    config.model_config.is_multimodal_model = True
+    config.model_config.uses_mrope = True
+    NPUModelRunner310V2._validate_config(config)
+
+
+def test_config_accepts_qwen35_hybrid() -> None:
+    """Qwen3.5 is hybrid + multimodal + MRoPE; 310P MRv2 must allow it."""
+    config = _make_vllm_config()
+    config.model_config.is_hybrid = True
+    config.model_config.is_multimodal_model = True
+    config.model_config.uses_mrope = True
+    NPUModelRunner310V2._validate_config(config)
+
+
+def test_310p_hybrid_model_state_keeps_ascend_hybrid_behavior() -> None:
+    assert issubclass(Ascend310PMambaHybridModelState, AscendMambaHybridModelState)
+
+
+def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
+    state = object.__new__(Ascend310PMambaHybridModelState)
+    state.num_accepted_tokens_gpu = torch.zeros(4, dtype=torch.int32)
+    idx_mapping = torch.tensor([0, -1, 2], dtype=torch.int32)
+
+    state.postprocess_state(idx_mapping, num_sampled=3)
+    torch.testing.assert_close(state.num_accepted_tokens_gpu, torch.tensor([3, 0, 3, 0], dtype=torch.int32))
+
+    num_sampled = torch.tensor([2, 9, 4], dtype=torch.int32)
+    state.postprocess_state(idx_mapping, num_sampled=num_sampled)
+    torch.testing.assert_close(state.num_accepted_tokens_gpu, torch.tensor([2, 0, 4, 0], dtype=torch.int32))
+
+
+def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
+    state = object.__new__(Ascend310PMambaHybridModelState)
+    config = object()
+    model = object()
+    encoder_cache = object()
+    device = torch.device("cpu")
+    with (
+        patch.object(AscendMambaHybridModelState, "__init__") as parent_init,
+        patch.object(Ascend310PMambaHybridModelState, "_replace_310p_rope_state") as replace_rope,
+    ):
+        Ascend310PMambaHybridModelState.__init__(state, config, model, encoder_cache, device)
+    parent_init.assert_called_once_with(state, config, model, encoder_cache, device)
+    replace_rope.assert_called_once_with(encoder_cache)
+    assert isinstance(state._capture_seq_lens_by_ptr, dict)
+
+
+def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
+    """Qwen3.5 is_hybrid must select Ascend310PMambaHybridModelState on 310P."""
+    from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
+
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(is_hybrid=True))
+    model = MagicMock(spec=["forward"])  # no get_model_state_cls
+    encoder_cache = object()
+    device = torch.device("cpu")
+    expected = object()
+
+    with (
+        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True),
+        patch(
+            "vllm_ascend._310p.worker.v2.model_state.Ascend310PMambaHybridModelState",
+            return_value=expected,
+        ) as hybrid_cls,
+    ):
+        state = init_asecnd_model_state(vllm_config, model, encoder_cache, device)
+
+    assert state is expected
+    hybrid_cls.assert_called_once_with(vllm_config, model, encoder_cache, device)
+
+
+def test_get_kv_cache_spec_restores_qwen35_linear_attn() -> None:
+    """Qwen3.5 GDN layers may be omitted by upstream V2; 310P restores them."""
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.vllm_config = object()
+    restored = object()
+    linear_layer = SimpleNamespace(get_kv_cache_spec=lambda _cfg: restored)
+    runner.compilation_config = SimpleNamespace(
+        static_forward_context={
+            "model.layers.0.self_attn": object(),
+            "model.layers.1.linear_attn": linear_layer,
+            "model.layers.2.linear_attn": SimpleNamespace(get_kv_cache_spec=lambda _cfg: None),
+        }
+    )
+
+    with patch.object(
+        NPUModelRunner,
+        "get_kv_cache_spec",
+        return_value={"model.layers.0.self_attn": object()},
+    ):
+        specs = runner.get_kv_cache_spec()
+
+    assert "model.layers.1.linear_attn" in specs
+    assert specs["model.layers.1.linear_attn"] is restored
+    assert "model.layers.2.linear_attn" not in specs
+
+
+def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
+    """Qwen3.5 hybrid Mamba/GDN state must stay ND (not FRACTAL_NZ)."""
+
+    class FakeMambaSpec:
+        block_size = 1
+        page_size_bytes = 64
+        shapes = [(4, 8), (2, 4)]
+        dtypes = [torch.float16, torch.float16]
+
+    spec = FakeMambaSpec()
+    layer_name = "model.layers.1.linear_attn"
+    kv_cache_config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
+        kv_cache_tensors=[SimpleNamespace(size=128, shared_by=[layer_name])],
+    )
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.kernel_block_sizes = [1]
+    runner.attn_groups = [[SimpleNamespace(backend=object, layer_names=[layer_name])]]
+
+    with patch.object(model_runner_module, "MambaSpec", FakeMambaSpec):
+        caches = runner._allocate_kv_cache_tensors(kv_cache_config, {})
+
+    states = caches[layer_name]
+    assert isinstance(states, list)
+    assert len(states) == 2
+    assert states[0].shape == (2, 4, 8)
+    assert states[1].shape == (2, 2, 4)
+    assert states[0].dtype == torch.float16
 
 
 def test_runner_installs_310p_request_state() -> None:

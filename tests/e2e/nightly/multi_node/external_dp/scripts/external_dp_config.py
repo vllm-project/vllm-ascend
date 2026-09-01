@@ -111,6 +111,11 @@ class ExternalDPConfig:
     benchmark_cases: list[dict[str, Any]] = field(default_factory=list)
     special_dependencies: dict[str, str] = field(default_factory=dict)
     kv_pool: KVPoolConfig | None = None
+    test_content: list[str] = field(default_factory=list)
+    chat_prompts: list[Any] = field(default_factory=list)
+    acceptance_rate: dict[str, Any] = field(default_factory=dict)
+    api_keyword_args: dict[str, Any] | list | None = None
+    expected_response: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_disaggregated_prefill(self) -> bool:
@@ -210,6 +215,11 @@ class ExternalDPConfigLoader:
             benchmark_cases=benchmark_cases,
             special_dependencies=dict(raw_config.get("special_dependencies", {})),
             kv_pool=kv_pool,
+            test_content=list(raw_config.get("test_content", [])),
+            chat_prompts=list(raw_config.get("chat_prompts", [])),
+            acceptance_rate=dict(raw_config.get("acceptance_rate", {})),
+            api_keyword_args=raw_config.get("api_keyword_args"),
+            expected_response=dict(raw_config.get("expected_response", {})),
         )
         cls._validate_config(config)
         return config

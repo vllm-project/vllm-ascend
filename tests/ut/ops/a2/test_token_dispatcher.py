@@ -21,7 +21,6 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import numpy as np
 import pytest
 import torch
-import torch_npu
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
@@ -166,7 +165,6 @@ class TestTokenDispatcherWithMC2(TestBase):
     def test_init(self):
         self.assertEqual(self.dispatcher.ep_rank_id, 0)
         self.assertEqual(self.dispatcher.ep_world_size, 8)
-        self.assertEqual(self.dispatcher.enable_dispatch_v2, hasattr(torch_npu, "npu_moe_distribute_dispatch_v2"))
         self.assertTrue(self.dispatcher.need_extra_args)
         self.assertEqual(self.dispatcher.global_bs, 0)
 

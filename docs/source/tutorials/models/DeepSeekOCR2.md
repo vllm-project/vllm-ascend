@@ -24,7 +24,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -32,7 +32,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can use our official docker image to run `DeepSeek-OCR-2` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A2 series"
 
@@ -124,7 +124,6 @@ Run the following script to execute online inference.
 #!/bin/sh
 
 export VLLM_USE_V1=1
-export VLLM_ASCEND_ENABLE_NZ=0
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 export TASK_QUEUE_ENABLE=1
@@ -140,6 +139,7 @@ vllm serve /root/.cache/DeepSeek-OCR-2 \
     --gpu-memory-utilization 0.8 \
     --allowed-local-media-path / \
     --additional-config '{
+      "weight_nz_mode": 0,
       "enable_cpu_binding": true,
       "multistream_overlap_shared_expert": true,
       "ascend_compilation_config": {"fuse_qknorm_rope": false}
