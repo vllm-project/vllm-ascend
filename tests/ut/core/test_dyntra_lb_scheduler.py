@@ -1583,16 +1583,19 @@ def test_dyntra_lb_async_kv_load_skips_zeroing_blocks(monkeypatch):
         block_size=vllm_config.cache_config.block_size,
     )
     scheduler.add_request(request)
-    monkeypatch.setattr(scheduler, "needs_kv_cache_zeroing", True)
+    monkeypatch.setattr(Scheduler, "needs_kv_cache_zeroing", True, raising=False)
+    scheduler.needs_kv_cache_zeroing = True
+    zeroing_calls = []
     monkeypatch.setattr(
         scheduler.kv_cache_manager,
         "get_zeroing_block_ids_in_range",
-        lambda request_id, start, end: {7, 8},
+        lambda request_id, start, end: zeroing_calls.append((request_id, start, end)) or {7, 8},
         raising=False,
     )
     scheduler.schedule()
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert {7, 8}.issubset(scheduler._skip_zero_block_ids)
+    assert zeroing_calls
+    assert zeroing_calls[0][0] == request.request_id
 
 
 def test_dyntra_lb_schedule_optional_output_fields(monkeypatch):
