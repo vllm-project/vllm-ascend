@@ -328,11 +328,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Prefer _seq_lens_cpu (always available, updated during draft
         # iterations) over seq_lens_cpu (None in async spec decode mode).
         if common_attn_metadata._seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata._seq_lens_cpu[:num_reqs]
+            seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
-            seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
         else:
-            seq_lens = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+            seq_lens_cpu = common_attn_metadata.seq_lens[:num_reqs].to("cpu")
+        # Some backends consume the device tensor below, while Python lists
+        # should always be derived from the maintained CPU mirror.
+        seq_lens = seq_lens_cpu
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         # this slot_mapping override doesn't work since vllm will override it again. We should fix it vllm.
@@ -348,11 +351,14 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
 
-        # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
-        query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
+        if common_attn_metadata.query_start_loc is not None:
+            query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+        else:
+            # Keep compatibility with callers that only provide the CPU view.
+            query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
 
         actual_seq_lengths_q = query_start_loc_cpu[1:].tolist()
-        seq_lens_list = seq_lens.tolist()
+        seq_lens_list = seq_lens_cpu.tolist()
         # Sequence-parallel (or cudagraph) padding makes the model runner insert a
         # dummy padding request into query_start_loc to satisfy the FIA TND-layout
         # constraint (sum of q lengths == hidden_states.shape[0]), bumping the
@@ -377,7 +383,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if len(seq_lens_list) < num_reqs_fia:
             padding_len = num_reqs_fia - len(seq_lens_list)
             seq_lens_list = seq_lens_list + [1] * padding_len
-            seq_lens = torch.cat([seq_lens, seq_lens.new_ones(padding_len)])
+            seq_lens_uses_cpu_mirror = seq_lens is seq_lens_cpu
+            seq_lens_cpu = torch.cat([seq_lens_cpu, seq_lens_cpu.new_ones(padding_len)])
+            if seq_lens_uses_cpu_mirror:
+                seq_lens = seq_lens_cpu
+            else:
+                seq_lens = torch.cat([seq_lens, seq_lens.new_ones(padding_len)])
         if block_table is not None and block_table.shape[0] < num_reqs_fia:
             block_table = torch.cat(
                 [
@@ -401,7 +412,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             block_tables=block_table,
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
             seq_lens_list=seq_lens_list,
             max_query_len=common_attn_metadata.max_query_len,
             actual_seq_lengths_q=actual_seq_lengths_q,

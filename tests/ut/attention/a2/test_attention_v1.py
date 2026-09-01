@@ -154,6 +154,43 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         torch.Tensor.pin_memory = lambda x: x  # noqa
         self.builder = AscendAttentionMetadataBuilder(None, None, self.mock_vllm_config, self.mock_device)
 
+    def _build_common_metadata(
+        self,
+        *,
+        query_start_loc: torch.Tensor | None,
+        query_start_loc_cpu: torch.Tensor,
+        seq_lens: torch.Tensor,
+        internal_seq_lens_cpu: torch.Tensor | None,
+        public_seq_lens_cpu: torch.Tensor | None,
+    ) -> AscendCommonAttentionMetadata:
+        num_reqs = query_start_loc_cpu.numel() - 1
+        return AscendCommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            _seq_lens_cpu=internal_seq_lens_cpu,
+            seq_lens_cpu=public_seq_lens_cpu,
+            num_computed_tokens_cpu=None,
+            num_reqs=num_reqs,
+            num_actual_tokens=int(query_start_loc_cpu[-1]),
+            max_query_len=1,
+            block_table_tensor=torch.zeros((num_reqs, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(int(query_start_loc_cpu[-1]), dtype=torch.int32),
+            causal=True,
+            actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
+            positions=torch.arange(int(query_start_loc_cpu[-1])),
+            attn_state=AscendAttentionState.DecodeOnly,
+            max_seq_len=int(seq_lens.max()),
+        )
+
+    def _build_and_capture(self, common_attn_metadata: AscendCommonAttentionMetadata):
+        with patch.object(
+            AscendAttentionMetadataBuilder,
+            "metadata_cls",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ):
+            return self.builder.build(0, common_attn_metadata)
+
     def test_reorder_batch(self):
         mock_input_batch = MagicMock()
         mock_scheduler_output = MagicMock()
@@ -187,6 +224,147 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
+
+    def test_parallel_drafting_reuses_device_metadata_and_internal_cpu_mirror(self):
+        query_start_loc = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        query_start_loc_cpu = query_start_loc.clone()
+        seq_lens = torch.tensor([17, 18, 19], dtype=torch.int32)
+        seq_lens_cpu = seq_lens.clone()
+        common_attn_metadata = self._build_common_metadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            internal_seq_lens_cpu=seq_lens_cpu,
+            public_seq_lens_cpu=None,
+        )
+        self.builder.speculative_config = SimpleNamespace(parallel_drafting=True)
+        to_sources: list[torch.Tensor] = []
+        tolist_sources: list[torch.Tensor] = []
+        original_to = torch.Tensor.to
+        original_tolist = torch.Tensor.tolist
+
+        def tracked_to(tensor, *args, **kwargs):
+            to_sources.append(tensor)
+            return original_to(tensor, *args, **kwargs)
+
+        def tracked_tolist(tensor, *args, **kwargs):
+            tolist_sources.append(tensor)
+            return original_tolist(tensor, *args, **kwargs)
+
+        with (
+            patch.object(torch.Tensor, "to", new=tracked_to),
+            patch.object(torch.Tensor, "tolist", new=tracked_tolist),
+        ):
+            metadata = self._build_and_capture(common_attn_metadata)
+
+        self.assertEqual(metadata.query_start_loc.data_ptr(), query_start_loc.data_ptr())
+        self.assertIs(metadata.seq_lens, seq_lens)
+        self.assertEqual(metadata.seq_lens_cpu.data_ptr(), seq_lens_cpu.data_ptr())
+        self.assertEqual(metadata.seq_lens_list, [17, 18, 19])
+        self.assertFalse(any(source is query_start_loc_cpu for source in to_sources))
+        self.assertFalse(any(source.data_ptr() == seq_lens.data_ptr() for source in tolist_sources))
+        self.assertTrue(any(source.data_ptr() == seq_lens_cpu.data_ptr() for source in tolist_sources))
+
+    def test_parallel_drafting_uses_public_cpu_mirror(self):
+        query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+        seq_lens = torch.tensor([21, 22], dtype=torch.int32)
+        public_seq_lens_cpu = seq_lens.clone()
+        common_attn_metadata = self._build_common_metadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc.clone(),
+            seq_lens=seq_lens,
+            internal_seq_lens_cpu=None,
+            public_seq_lens_cpu=public_seq_lens_cpu,
+        )
+        self.builder.speculative_config = SimpleNamespace(parallel_drafting=True)
+
+        metadata = self._build_and_capture(common_attn_metadata)
+
+        self.assertIs(metadata.seq_lens, seq_lens)
+        self.assertEqual(metadata.seq_lens_cpu.data_ptr(), public_seq_lens_cpu.data_ptr())
+        self.assertEqual(metadata.seq_lens_list, [21, 22])
+
+    def test_cross_attention_keeps_device_seq_lens_and_cpu_list(self):
+        class DummyCrossAttentionSpec:
+            pass
+
+        query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+        seq_lens = torch.tensor([23, 24], dtype=torch.int32)
+        seq_lens_cpu = seq_lens.clone()
+        common_attn_metadata = self._build_common_metadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc.clone(),
+            seq_lens=seq_lens,
+            internal_seq_lens_cpu=seq_lens_cpu,
+            public_seq_lens_cpu=None,
+        )
+        self.builder.kv_cache_spec = DummyCrossAttentionSpec()
+
+        with patch(
+            "vllm_ascend.attention.attention_v1.CrossAttentionSpec",
+            DummyCrossAttentionSpec,
+        ):
+            metadata = self._build_and_capture(common_attn_metadata)
+
+        self.assertIs(metadata.seq_lens, seq_lens)
+        self.assertEqual(metadata.seq_lens_cpu.data_ptr(), seq_lens_cpu.data_ptr())
+        self.assertEqual(metadata.seq_lens_list, [23, 24])
+        self.assertEqual(metadata.slot_mapping.dtype, torch.int32)
+
+    def test_regular_decode_reuses_device_query_start_loc(self):
+        query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+        query_start_loc_cpu = query_start_loc.clone()
+        seq_lens_cpu = torch.tensor([9, 10], dtype=torch.int32)
+        common_attn_metadata = self._build_common_metadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens_cpu.clone(),
+            internal_seq_lens_cpu=seq_lens_cpu,
+            public_seq_lens_cpu=None,
+        )
+
+        metadata = self._build_and_capture(common_attn_metadata)
+
+        self.assertEqual(metadata.query_start_loc.data_ptr(), query_start_loc.data_ptr())
+        self.assertEqual(metadata.seq_lens.data_ptr(), seq_lens_cpu.data_ptr())
+        self.assertEqual(metadata.seq_lens_cpu.data_ptr(), seq_lens_cpu.data_ptr())
+
+    def test_missing_mirrors_keep_copy_fallbacks(self):
+        query_start_loc_cpu = torch.tensor([0, 1, 2], dtype=torch.int32)
+        seq_lens = torch.tensor([11, 12], dtype=torch.int32)
+        common_attn_metadata = self._build_common_metadata(
+            query_start_loc=None,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            internal_seq_lens_cpu=None,
+            public_seq_lens_cpu=None,
+        )
+
+        metadata = self._build_and_capture(common_attn_metadata)
+
+        self.assertEqual(metadata.query_start_loc.tolist(), [0, 1, 2])
+        self.assertEqual(metadata.seq_lens_cpu.tolist(), [11, 12])
+        self.assertEqual(metadata.seq_lens_list, [11, 12])
+
+    def test_parallel_drafting_pads_device_and_cpu_seq_lens(self):
+        query_start_loc = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+        seq_lens = torch.tensor([31, 32], dtype=torch.int32)
+        seq_lens_cpu = seq_lens.clone()
+        common_attn_metadata = self._build_common_metadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc.clone(),
+            seq_lens=seq_lens,
+            internal_seq_lens_cpu=seq_lens_cpu,
+            public_seq_lens_cpu=None,
+        )
+        self.builder.speculative_config = SimpleNamespace(parallel_drafting=True)
+
+        metadata = self._build_and_capture(common_attn_metadata)
+
+        self.assertEqual(metadata.seq_lens.tolist(), [31, 32, 1])
+        self.assertEqual(metadata.seq_lens_cpu.tolist(), [31, 32, 1])
+        self.assertEqual(metadata.seq_lens_list, [31, 32, 1])
+        self.assertEqual(metadata.block_tables.shape[0], 3)
 
     @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
     def test_build(self, mock_ascend_metadata):
