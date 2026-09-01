@@ -242,8 +242,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
                 head_size = key_width
                 if query_width % head_size != 0:
                     raise ValueError(
-                        "Cannot infer the FP8 RoPE head size from "
-                        f"query_width={query_width}, key_width={key_width}"
+                        f"Cannot infer the FP8 RoPE head size from query_width={query_width}, key_width={key_width}"
                     )
             query_fp8, key_fp8 = rope_forward_triton_fp8(
                 query.view(num_tokens, -1, head_size),
