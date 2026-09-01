@@ -1044,6 +1044,21 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self._draft_token_ids = None
 
+        # Build prev_positions mapping: current pos -> prev pos (-1 if new).
+        # Used for gathering from previous iteration's GPU tensors.
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        self._compute_prev_positions(num_reqs)
+
+        # Guard against empty _draft_token_ids tensor flowing into
+        # upstream gpu_model_runner._prepare_input_ids which only
+        # checks for None, not numel()==0.
+        if (
+            hasattr(self, "_draft_token_ids")
+            and torch.is_tensor(self._draft_token_ids)
+            and self._draft_token_ids.numel() == 0
+        ):
+            self._draft_token_ids = None
+
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         # Calculate M-RoPE positions.
