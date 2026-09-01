@@ -46,7 +46,6 @@ from vllm_ascend.attention.utils import (
     PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_dcp,
-    enable_pcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -85,10 +84,7 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["AscendAttentionBackendImpl"]:
-        dcp_enabled = enable_dcp()
-        if dcp_enabled:
-            if enable_pcp():
-                raise NotImplementedError("Ascend MRV2 GQA does not support PCP and DCP simultaneously yet.")
+        if enable_dcp():
             from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPImpl
 
             return AscendAttentionDCPImpl
@@ -96,10 +92,7 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
-        dcp_enabled = enable_dcp()
-        if dcp_enabled:
-            if enable_pcp():
-                raise NotImplementedError("Ascend MRV2 GQA does not support PCP and DCP simultaneously yet.")
+        if enable_dcp():
             from vllm_ascend.attention.context_parallel.attention_cp import AscendAttentionDCPMetadataBuilder
 
             return AscendAttentionDCPMetadataBuilder
