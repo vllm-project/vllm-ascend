@@ -132,6 +132,26 @@ def to_weight_nz_list(w_nd: torch.Tensor) -> list[torch.Tensor]:
 WeightType = torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]
 
 
+def _restore_mxfp_semantic_dtype(tensors: WeightType, semantic_dtype: torch.dtype) -> WeightType:
+    """View byte-backed MX tensors with the dtype required by ACLNN.
+
+    The model loader can retain packed MXFP4 weights and E8M0 scales as
+    uint8 tensors after an NPU format conversion. The bytes and storage
+    format are already correct, but ACLNN needs the logical MX dtype in the
+    tensor descriptor. view(dtype) only changes that descriptor and does
+    not copy the device storage.
+    """
+
+    def restore_dtype(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.view(semantic_dtype) if tensor.dtype == torch.uint8 else tensor
+
+    if isinstance(tensors, list):
+        return [restore_dtype(tensor) for tensor in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(restore_dtype(tensor) for tensor in tensors)
+    return restore_dtype(tensors)
+
+
 def grouped_matmul_situ_quant(
     x: torch.Tensor,
     x_scale: torch.Tensor,
@@ -171,6 +191,14 @@ def grouped_matmul_situ_quant(
     _load_native_extension()
     if weight_format not in ("nz", "nd"):
         raise ValueError(f"weight_format must be 'nz' or 'nd', got {weight_format!r}")
+
+    # npu_format_cast can leave production packed MX tensors exposed as
+    # uint8. Restore their logical dtype at this custom-op boundary, so
+    # OpDef and ACLNN see MXFP4/E8M0 rather than ordinary byte tensors.
+    import torch_npu
+
+    weight = _restore_mxfp_semantic_dtype(weight, torch_npu.float4_e2m1fn_x2)
+    weight_scale = _restore_mxfp_semantic_dtype(weight_scale, torch_npu.float8_e8m0fnu)
 
     is_list = isinstance(weight, (list, tuple))
     op = (
