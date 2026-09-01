@@ -132,6 +132,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                 if layer_name in runner_only_attn_layers:
                     continue
                 kv_cache = static_forward_context[layer_name].kv_cache
+                cache_tensors: tuple[tuple[torch.Tensor, int], ...]
                 if isinstance(kv_cache, torch.Tensor):
                     cache_tensors = ((kv_cache, packed_block_dim),)
                 elif isinstance(kv_cache, (tuple, list)):
