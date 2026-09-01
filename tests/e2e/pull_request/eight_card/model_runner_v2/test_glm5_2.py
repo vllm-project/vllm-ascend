@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 from vllm import SamplingParams
+from vllm.config import CompilationConfig
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import _run_speculative_decoding
