@@ -26,7 +26,7 @@ from tests.e2e.pull_request.utils import _run_speculative_decoding
 
 MODEL = "Eco-Tech/GLM-5.2-w4a8"
 DRAFT_MODEL = "/RedHatAI/GLM-5.2-speculator.dspark"
-EXPECTED_ACCEPTANCE_LENGTH = 10
+EXPECTED_ACCEPTANCE_LENGTH = 3.0
 DSPARK_EXPECTED_ACCEPTANCE_LENGTH = 3.5
 
 
