@@ -118,7 +118,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             model_version="deepseek_v4",
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
-scale_dtype=torch.float
+            scale_dtype=torch.float
             if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
             else torch.float16,
             **ratio_kwargs,
