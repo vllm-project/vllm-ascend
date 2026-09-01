@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -59,7 +60,7 @@ void gmsq_fused_256_impl(uint32_t blockDim, void *stream, void *x, void *wPtrTbl
                           void *groupList, int32_t E, int32_t kNum, int32_t nNum, int32_t nBlock,
                           int32_t NP, int32_t N, int32_t N2, int32_t K, int32_t C, int32_t glType,
                           float beta, float invBeta, int32_t hasLinear, float linBeta,
-                          float invLinBeta, int32_t skipUnpack);
+                          float invLinBeta, int32_t skipUnpack, int32_t nzInput);
 
 // AIV epilogue UB budget: the x_scale chunk buffer + static per-row buffers
 // must stay within the AIV UB. Measured overflow threshold on Ascend910_9382
@@ -222,6 +223,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
         std::vector<uintptr_t> fullWPtrs(static_cast<size_t>(experts));
         std::vector<uintptr_t> fullSPtrs(static_cast<size_t>(experts));
         bool ptrsOk = true;
+        int64_t nzCount = 0;
         for (int64_t e = 0; e < experts; e++) {
             if (weight[e].data_ptr() == nullptr || weight_scale[e].data_ptr() == nullptr) {
                 ptrsOk = false;
@@ -233,15 +235,27 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
             if (wfmt != ACL_FMT_ND && wfmt != ACL_FMT_FRACTAL_NZ) {
                 ptrsOk = false;
             }
+            nzCount += (wfmt == ACL_FMT_FRACTAL_NZ) ? 1 : 0;
         }
+        TORCH_CHECK(nzCount == 0 || nzCount == experts,
+                    "grouped_matmul_situ_quant: mixed ND/FRACTAL_NZ weight experts are not "
+                    "supported; all experts must use the same format");
 
+        // Debug/test affordance: force the native-NZ unpack path regardless of
+        // the reported tensor format. Needed on torch_npu builds whose
+        // npu_format_cast cannot materialize a 2D-int32 FRACTAL_NZ (the bytes
+        // must then already hold the int8-NZ tiling of the packed weight).
+        static const bool forceNzInput = (std::getenv("GMSQ_FORCE_NZ_INPUT") != nullptr);
+        bool srcIsNz = forceNzInput || (nzCount == experts);
         FusedMetaCache &fc = g_fusedCache;
         bool hit = ptrsOk && fc.valid && (fc.K == K) && (fc.N == N) && (fc.C == C) &&
-                   (fc.glType == group_list_type) && (fc.fullWPtrs == fullWPtrs) &&
+                   (fc.glType == group_list_type) && (fc.srcIsNz == srcIsNz) &&
+                   (fc.fullWPtrs == fullWPtrs) &&
                    (fc.fullSPtrs == fullSPtrs) && fc.tbl.defined() && fc.wsFlat.defined();
 
         if (!hit) {
             // ---- CACHE MISS: build static pointer tables + workspace (no D2H) ----
+            fc.srcIsNz = srcIsNz;
             fc.ndWeights.clear();
             fc.ndScales.clear();
             fc.weightRefs.clear();
@@ -252,11 +266,21 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
             wPtrsAll.reserve(static_cast<size_t>(experts));
             scPtrsAll.reserve(static_cast<size_t>(experts));
             for (int64_t e = 0; e < experts; e++) {
-                at::Tensor wNd = EnsureNd(weight[static_cast<size_t>(e)], fc.ndWeights);
+                at::Tensor wNd;
+                if (srcIsNz) {
+                    // Native int4 FRACTAL_NZ: the int32 carrier views an int8
+                    // packed-NZ storage (W4A8 convention: process_weights
+                    // transpose -> maybe_trans_nz -> view(int32)). Keep the
+                    // native geometry — no TransData, the kernel unpacks from
+                    // int8-NZ addressing directly.
+                    wNd = weight[static_cast<size_t>(e)];
+                } else {
+                    wNd = EnsureNd(weight[static_cast<size_t>(e)], fc.ndWeights);
+                    TORCH_CHECK(wNd.is_contiguous(), "weight[e] must be contiguous (ND)");
+                }
                 at::Tensor sNd = EnsureNd(weight_scale[static_cast<size_t>(e)], fc.ndScales);
                 fc.weightRefs.push_back(weight[static_cast<size_t>(e)]);
                 fc.scaleRefs.push_back(weight_scale[static_cast<size_t>(e)]);
-                TORCH_CHECK(wNd.is_contiguous(), "weight[e] must be contiguous (ND)");
                 TORCH_CHECK(sNd.is_contiguous(), "weight_scale[e] must be contiguous (ND)");
                 wPtrsAll.push_back(reinterpret_cast<uintptr_t>(wNd.data_ptr()));
                 scPtrsAll.push_back(reinterpret_cast<uintptr_t>(sNd.data_ptr()));
@@ -354,6 +378,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
         int32_t K32f = static_cast<int32_t>(K);
         int32_t C32f = static_cast<int32_t>(C);
         int32_t glType32 = static_cast<int32_t>(group_list_type);
+        int32_t nzInput32 = srcIsNz ? 1 : 0;
 
         // P54: N-block scheduling was computed once per cache build (see the
         // cache-miss path above); the steady-state launch path just reads it.
@@ -368,14 +393,15 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant(
         opCmd.SetCustomHandler(
             [gmsqStream, fusedBlockDim, x, wPtrTf, scPtrTf, wInt8, accWs, scaleF32, x_scale, y,
              y_scale, group_list, E32f, kNumV, nNum256V, gemmNBlock, NP32f, N32f, N232f, K32f,
-             C32f, glType32, betaF, invBeta, hasLinear, lbF, invLb, skipUnpack]() -> int {
+             C32f, glType32, nzInput32, betaF, invBeta, hasLinear, lbF, invLb,
+             skipUnpack]() -> int {
                 gmsq_fused_256_impl(fusedBlockDim, gmsqStream, x.data_ptr(), wPtrTf.data_ptr(),
                                      scPtrTf.data_ptr(), wInt8.data_ptr(), accWs.data_ptr(),
                                      scaleF32.data_ptr(), x_scale.data_ptr(), y.data_ptr(),
                                      y_scale.data_ptr(), group_list.data_ptr(), E32f, kNumV,
                                      nNum256V, gemmNBlock, NP32f, N32f, N232f, K32f, C32f,
                                      glType32, betaF, invBeta, hasLinear, lbF, invLb,
-                                     skipUnpack);
+                                     skipUnpack, nzInput32);
                 return 0;
             });
         opCmd.Run();
