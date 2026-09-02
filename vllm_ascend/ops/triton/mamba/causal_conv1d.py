@@ -124,7 +124,17 @@ def causal_conv1d_update_ascendc(
                         pad_slot_id=PAD_SLOT_ID,
                         run_mode=1,
                     )
-                    sd_view.copy_(shadow)
+                    if os.environ.get("GLM53_NO_WRITEBACK") != "1":
+                        sd_view.copy_(shadow)
+                    if (
+                        os.environ.get("GLM53_SYNC_CONV_DECODE") == "1"
+                        and not torch.npu.is_current_stream_capturing()
+                    ):
+                        # Bisect knob: drain after every spec conv (34 layers
+                        # -> 34 syncs per verify step). If the fault disappears
+                        # here, the corrupting work is enqueued between two
+                        # conv calls (KDA recurrent / MLA / MoE), not the conv.
+                        torch.npu.synchronize()
                     _CONV_CUSTOM_AVAILABLE = True
                     return result.to(orig_dtype)
                 raise RuntimeError(

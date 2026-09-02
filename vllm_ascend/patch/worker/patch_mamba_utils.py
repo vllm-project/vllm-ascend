@@ -1,6 +1,7 @@
 # mypy: ignore-errors
 
 import itertools
+import os
 from typing import Any
 
 import torch
@@ -82,10 +83,29 @@ def _stage_mamba_copy_metadata(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
 
 
 def _do_mamba_copy_block_npu(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
-    """Copy state after KV load using metadata staged during preprocessing."""
+    """Copy state after KV load using metadata staged during preprocessing.
+
+    Uses the tensor-pair copy path (dst.copy_(src.clone())) by default: the
+    Ascend triton batch_memcpy port dropped upstream's is_left_overlap guard,
+    and align-mode state moves copy between slots of ONE pool where src/dst
+    ranges can overlap. The clone materialises the source first, giving
+    memmove semantics exactly like upstream's guarded kernel. GLM53_BATCH_MEMCPY=1
+    restores the raw pointer kernel for A/B.
+    """
     n = copy_bufs.offset
     if n == 0:
         return
+    if os.environ.get("GLM53_BATCH_MEMCPY") != "1":
+        pairs = getattr(copy_bufs, "_tensor_copy_pairs", None)
+        if pairs is not None and len(pairs) == n:
+            for src_state, dst_state in pairs:
+                dst_state.copy_(src_state.clone())
+            copy_bufs._tensor_copy_pairs = []
+            return
+        if pairs is not None and len(pairs) == 0:
+            # No pairs collected (should not happen - the torch collector is
+            # bound below) - fall through to the pointer kernel.
+            pass
     _batch_memcpy_triton(
         copy_bufs.src_ptrs.gpu[:n],
         copy_bufs.dst_ptrs.gpu[:n],
@@ -254,6 +274,9 @@ def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
 if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
+    # Collect tensor pairs alongside the pointer buffers so the copy can use
+    # the overlap-safe torch path (see _do_mamba_copy_block_npu).
+    mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_npu
     mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
 else:
