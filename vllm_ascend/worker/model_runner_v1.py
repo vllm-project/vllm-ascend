@@ -724,7 +724,11 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, cudagraph_mode
 
-        if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
+        if should_skip_allreduce_across_dp_group(
+            self.vllm_config,
+            is_draft_model,
+            model_instance=None if is_draft_model else self.model,
+        ):
             num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 

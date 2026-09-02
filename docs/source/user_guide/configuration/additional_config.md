@@ -71,7 +71,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. `0` disables the fused path and `1` enables it when the model and parallel configuration support it. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. With `1`, MegaMoe is selected from instantiated layer capabilities: A2/A3 support BF16/W8A8/W4A8, and A5 supports W4A8 MXFP with `group_size=32`. Unsupported layouts keep the non-MegaMoe path. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
@@ -81,6 +81,42 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 
 The details of each configuration option are as follows:
+
+**enable_fused_mc2 (CANN MegaMoe / dispatch_ffn_combine)**
+
+When `enable_fused_mc2=1`, MoE communication may be replaced by the fused
+`dispatch_ffn_combine` or `mega_moe` operator. On A5 the MegaMoe path is
+selected from the instantiated MoE layer capabilities instead of checkpoint
+metadata; unsupported layer layouts keep the decomposed MC2/AllToAll path.
+
+| Item | A2 / A3 | A5 (Ascend 950PR / 950DT) |
+| ---- | ------- | ------------------------- |
+| Quantization | W8A8 / W4A8 (INT) and BF16 | W4A8 MXFP only, `group_size=32` |
+| Activation | SwiGLU | SwiGLU and SiTU (`activation_params={beta, linear_beta}`) |
+| Max routed experts | 1024 | 2048 (must be divisible by EP size) |
+| Max EP world size | 64 | 1024 |
+| Max top-k | 16 | 32 |
+| Hidden size | [1024, 8192], multiple of 512 | [1024, 8192], multiple of 512 |
+
+Notes for A5:
+
+- Requires a `cann_ops_transformer` build with SiTUGLU support and the
+  `mega_moe` custom operator package. If the package is installed under
+  `${ASCEND_HOME_PATH}/opp/vendors`, make sure `ASCEND_CUSTOM_OPP_PATH` also
+  contains that vendor directory. vLLM Ascend prepends its own bundled vendors
+  path at startup, which otherwise shadows the installed package and makes the
+  call fall back to the built-in older operator.
+- The symmetric buffer receive capacity uses the operator's automatic mode
+  (`max_recv_token_num=0`); `mega_moe_max_tokens` is not used on A5.
+- The MegaMoe path is mutually exclusive with
+  `multistream_overlap_shared_expert`; the latter is force-disabled when
+  `enable_fused_mc2=1`.
+
+```bash
+vllm serve <model> \
+    --tensor-parallel-size 8 --enable-expert-parallel \
+    --additional-config '{"enable_fused_mc2": 1}'
+```
 
 **xlite_graph_config**
 
