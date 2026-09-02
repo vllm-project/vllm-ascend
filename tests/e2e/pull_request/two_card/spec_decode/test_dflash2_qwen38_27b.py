@@ -67,12 +67,12 @@ def test_qwen38_27b_dflash_acceptance_tp2(
     num_speculative_tokens,
     additional_config,
 ):
-+    # The config.json file of the weight does not support sliding window,
-+    # which may cause accuracy problems.
+    # The config.json file of the weight does not support sliding window,
+    # which may cause accuracy problems.
     draft_model_path = "UploadWeight/Qwen3.8-27B-DFlash2"
     config_path = os.path.join(draft_model_path, "config.json")
     if os.path.exists(config_path):
-   +    with open(config_path, encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
         if "layer_types" in config and isinstance(config["layer_types"], list):
             config["layer_types"] = ["full_attention"] * len(config["layer_types"])
@@ -87,7 +87,7 @@ def test_qwen38_27b_dflash_acceptance_tp2(
             "method": "dflash",
             "model": "UploadWeight/Qwen3.8-27B-DFlash2",
             "num_speculative_tokens": num_speculative_tokens,
-+           "enforce_eager": True,
+            "enforce_eager": True,
         },
         expected_acceptance_length=expected_acceptance_length,
         runner_kwargs={
