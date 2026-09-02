@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -17,6 +17,8 @@ from vllm_ascend.memcache_comm_fence import AttentionComputeStartGate
 
 _GROUPED_BLOCK_HASH_DOMAIN = b"vllm-ascend-grouped-block-hash-v1\0"
 _GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES = 4
+# ponytail: each operation owns a fresh dict, so block size is the only cache key.
+GroupedBlockHashCache = dict[int, Sequence[BlockHash | str]]
 
 HYBRID_CACHE_C128_CHUNK_CONFIG_KEY = "hybrid_cache_c128_chunk"
 HYBRID_CACHE_C128_CHUNK_MULTIPLIER = 4
@@ -35,6 +37,29 @@ class HybridCacheC128Config:
     c128_slots_per_page: int | None = None
 
 
+# Parameters related to the key
+@dataclass
+class KeyMetadata:
+    """name of the LLM model"""
+
+    model_name: str
+    """ worker id when running under a distributed setting """
+    head_or_tp_rank: int
+    """ Initialize the current prefill context model parallel rank """
+    pcp_rank: int
+    """ Initialize the current decode context model parallel rank """
+    dcp_rank: int
+    """ Initialize the current pipeline parallel rank """
+    pp_rank: int
+    """ Initialize the current kv cache group id """
+    kv_cache_group_id: int = 0
+    """ Differentiate kv/state keys that share the same chunk hash """
+    cache_role: str = "kv"
+    """ Family name for compress-aware hybrid cache layouts """
+    cache_family: str = "default"
+    
+    
+
 @dataclass(frozen=True)
 class TransferChunk:
     """One external key and its raw-token/cache-slot placement."""
@@ -51,6 +76,7 @@ class TransferChunk:
 class TransferChunkWithBlockId(TransferChunk):
     block_id: int
     block_ids: tuple[int, ...] = ()
+
 
 
 def aggregate_c128_page_chunks(
@@ -75,34 +101,6 @@ def aggregate_c128_page_chunks(
     ]
 
 
-# Parameters related to the key
-@dataclass
-class KeyMetadata:
-    """name of the LLM model"""
-
-    model_name: str
-    """ worker id when running under a distributed setting """
-    head_or_tp_rank: int
-    """ Initialize the current prefill context model parallel rank """
-    pcp_rank: int
-    """ Initialize the current decode context model parallel rank """
-    dcp_rank: int
-    """ Initialize the current pipeline parallel rank """
-    pp_rank: int
-    """ Initialize the current kv cache group id """
-    kv_cache_group_id: int = 0
-    """ Differentiate kv/state keys that share the same chunk hash """
-    cache_role: str = "kv"
-    """ Family name for compress-aware hybrid cache layouts """
-    cache_family: str = "default"
-    """ Versioned namespace for an opt-in external transfer layout """
-    transfer_namespace: str | None = None
-    """ First authoritative cache slot in a full-page value """
-    slot_start: int | None = None
-    """ Exclusive end of the authoritative cache-slot range """
-    slot_end: int | None = None
-
-
 @dataclass(order=True)
 class PoolKey:
     key_metadata: KeyMetadata
@@ -119,19 +117,11 @@ class PoolKey:
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
-                self.key_metadata.transfer_namespace,
-                self.key_metadata.slot_start,
-                self.key_metadata.slot_end,
                 self.chunk_hash,
             )
         )
 
     def to_string(self):
-        transfer_suffix = ""
-        if self.key_metadata.transfer_namespace is not None:
-            transfer_suffix += f"@transfer:{self.key_metadata.transfer_namespace}"
-        if self.key_metadata.slot_start is not None and self.key_metadata.slot_end is not None:
-            transfer_suffix += f"@range:{self.key_metadata.slot_start}_{self.key_metadata.slot_end}"
         return (
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
@@ -140,7 +130,6 @@ class PoolKey:
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
-            f"{transfer_suffix}"
             f"@{self.chunk_hash}"
         )
 
@@ -174,20 +163,12 @@ class LayerPoolKey(PoolKey):
                 self.key_metadata.kv_cache_group_id,
                 self.key_metadata.cache_role,
                 self.key_metadata.cache_family,
-                self.key_metadata.transfer_namespace,
-                self.key_metadata.slot_start,
-                self.key_metadata.slot_end,
                 self.chunk_hash,
                 self.layer_id,
             )
         )
 
     def to_string(self):
-        transfer_suffix = ""
-        if self.key_metadata.transfer_namespace is not None:
-            transfer_suffix += f"@transfer:{self.key_metadata.transfer_namespace}"
-        if self.key_metadata.slot_start is not None and self.key_metadata.slot_end is not None:
-            transfer_suffix += f"@range:{self.key_metadata.slot_start}_{self.key_metadata.slot_end}"
         return (
             f"{self.key_metadata.model_name}"
             f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
@@ -195,30 +176,9 @@ class LayerPoolKey(PoolKey):
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
             f"@cache_family:{self.key_metadata.cache_family}"
-            f"{transfer_suffix}"
             f"@layer_id:{self.layer_id}"
             f"@{self.chunk_hash}"
         )
-
-
-def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
-    if compress_ratio is None:
-        return "default"
-    if compress_ratio <= 1:
-        return "c1"
-    return f"c{compress_ratio}"
-
-
-def infer_cache_family_ratio(cache_family: str | None) -> int:
-    if not cache_family or not cache_family.startswith("c"):
-        return 1
-    ratio = cache_family[1:]
-    return int(ratio) if ratio.isdigit() else 1
-
-
-def get_cache_family_granularity(block_size: int, cache_family: str | None) -> int:
-    return block_size * infer_cache_family_ratio(cache_family)
-
 
 def resolve_hybrid_cache_c128_config(
     vllm_config: Any,
@@ -298,6 +258,25 @@ def resolve_hybrid_cache_c128_config(
         c128_group_id=c128_group_id,
         c128_slots_per_page=c128_block_size,
     )
+    
+
+def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
+    if compress_ratio is None:
+        return "default"
+    if compress_ratio <= 1:
+        return "c1"
+    return f"c{compress_ratio}"
+
+
+def infer_cache_family_ratio(cache_family: str | None) -> int:
+    if not cache_family or not cache_family.startswith("c"):
+        return 1
+    ratio = cache_family[1:]
+    return int(ratio) if ratio.isdigit() else 1
+
+
+def get_cache_family_granularity(block_size: int, cache_family: str | None) -> int:
+    return block_size * infer_cache_family_ratio(cache_family)
 
 
 def _get_layer_compress_ratio(
@@ -360,7 +339,6 @@ def infer_group_cache_families(
             )
             families.append("mixed")
     return families
-
 
 class ChunkedTokenDatabase:
     def __init__(
@@ -534,16 +512,6 @@ class ChunkedTokenDatabase:
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
-
-    def prepare_block_info(self, start: int, end: int, block_ids: list[int]) -> tuple[int, list[int]]:
-        block_size = self.block_size[0]
-        block_id = block_ids[start // block_size]
-        block_len = self.group_block_len.get(0, [])
-        size_list = []
-        for i in range(len(block_len)):
-            size = int(block_len[i] / block_size * (end - start))
-            size_list.append(size)
-        return block_id, size_list
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int], layer_id: int):
         group_block_size = self.get_block_size(0)
@@ -822,7 +790,7 @@ class ChunkedTokenDatabase:
             return
         if not isinstance(block_hashes[0], str):
             block_hashes = [
-                h.hex() if not isinstance(h, str) else h  # type: ignore[union-attr]
+                h.hex()  # type: ignore[union-attr]
                 for h in block_hashes
             ]
         start_idx = 0
@@ -943,15 +911,19 @@ def get_block_hashes(
     block_hashes: BlockHashList | list[str],
     group_block_size: int,
     hash_block_size: int,
-) -> BlockHashList | list[str]:
+    grouped_hash_cache: GroupedBlockHashCache | None = None,
+) -> Sequence[BlockHash | str]:
     if group_block_size == hash_block_size:
         return block_hashes
     assert group_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
-    scale_factor = group_block_size // hash_block_size
-    return [
-        _rehash_block_hash_group(block_hashes[idx : idx + scale_factor])
-        for idx in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
-    ]
+    if grouped_hash_cache is None:
+        return _LazyGroupedBlockHashList(block_hashes, group_block_size // hash_block_size)
+    if group_block_size not in grouped_hash_cache:
+        grouped_hash_cache[group_block_size] = _LazyGroupedBlockHashList(
+            block_hashes,
+            group_block_size // hash_block_size,
+        )
+    return grouped_hash_cache[group_block_size]
 
 
 def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
@@ -965,11 +937,62 @@ def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHa
     return BlockHash(hasher.digest())
 
 
+def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
+    if isinstance(block_hash, str):
+        if len(block_hash) == 64:
+            try:
+                return bytes.fromhex(block_hash)
+            except ValueError:
+                return block_hash.encode("utf-8")
+        return block_hash.encode("utf-8")
+    return bytes(block_hash)
+
+
+class _LazyGroupedBlockHashList(Sequence[BlockHash]):
+    def __init__(
+        self,
+        block_hashes: Sequence[BlockHash | str],
+        scale_factor: int,
+    ) -> None:
+        self._block_hashes = block_hashes
+        self._scale_factor = scale_factor
+        self._length = len(block_hashes) // scale_factor
+        self._cache: dict[int, BlockHash] = {}
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[idx] for idx in range(*index.indices(self._length))]
+        if index < 0:
+            index += self._length
+        if index < 0 or index >= self._length:
+            raise IndexError(index)
+        if index in self._cache:
+            return self._cache[index]
+        start = index * self._scale_factor
+        grouped_hash = _rehash_block_hash_group(self._block_hashes[start : start + self._scale_factor])
+        self._cache[index] = grouped_hash
+        return grouped_hash
+
+
+def _rehash_block_hash_group(block_hashes: Sequence[BlockHash | str]) -> BlockHash:
+    hasher = hashlib.sha256()
+    hasher.update(_GROUPED_BLOCK_HASH_DOMAIN)
+    hasher.update(len(block_hashes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
+    for block_hash in block_hashes:
+        hash_bytes = block_hash_to_bytes(block_hash)
+        hasher.update(len(hash_bytes).to_bytes(_GROUPED_BLOCK_HASH_LENGTH_PREFIX_BYTES, "big"))
+        hasher.update(hash_bytes)
+    return BlockHash(hasher.digest())
+
+
 def block_hash_to_str(block_hash: BlockHash | str) -> str:
     return block_hash if isinstance(block_hash, str) else block_hash.hex()
 
 
-def _block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
+def block_hash_to_bytes(block_hash: BlockHash | str) -> bytes:
     if isinstance(block_hash, str):
         if len(block_hash) == 64:
             try:
@@ -989,6 +1012,8 @@ class LoadSpec:
     kvpool_cached_tokens: int
     # Whether the scheduler allow us to load the tokens
     can_load: bool
+    # Raw KVPool hit length used to avoid storing an already pooled prefix.
+    kvpool_store_skip_tokens: int | None = None
 
     token_len: int = 0
 
@@ -1026,13 +1051,6 @@ class RequestTracker:
     sizes_per_chunk: list[list[int]] | None = None
 
     last_block_key: str | None = None
-
-    mamba_group_ids: list[int] | None = None
-
-    # spec blocks for mamba cache group
-    num_speculative_blocks: int = 0
-
-    block_sizes: list[int] | None = None
 
     mamba_group_ids: list[int] | None = None
 
@@ -1178,7 +1196,6 @@ class ReqMeta:
     kv_cache_group_ids: list[int] | None = None
     kv_cache_families_by_group: list[str] | None = None
     skip_null_blocks_by_group: list[bool] | None = None
-    disable_tp_key_sharding: bool = False
     num_prompt_tokens: int | None = None
 
     # The following parameters are only used for kv event generation
@@ -1201,7 +1218,6 @@ class ReqMeta:
         kv_cache_group_ids: list[int] | None = None,
         kv_cache_families_by_group: list[str] | None = None,
         skip_null_blocks_by_group: list[bool] | None = None,
-        disable_tp_key_sharding: bool = False,
         num_prompt_tokens: int | None = None,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
@@ -1242,7 +1258,6 @@ class ReqMeta:
         self.kv_cache_group_ids = kv_cache_group_ids
         self.kv_cache_families_by_group = kv_cache_families_by_group
         self.skip_null_blocks_by_group = skip_null_blocks_by_group
-        self.disable_tp_key_sharding = disable_tp_key_sharding
         self.num_prompt_tokens = num_prompt_tokens
         self.token_ids = token_ids
         self.original_block_size = original_block_size
@@ -1465,7 +1480,7 @@ class LayerMultiBlockReqMeta:
     ends: list[int]
     block_ids_by_group: list[list[int]]
     layer_id: int
-    block_hashes: list[Any] = field(default_factory=list)
+    block_hashes: Sequence[Any] = field(default_factory=list)
     is_last_chunk: bool | None = True
     current_event: torch.npu.Event | None = None
     token_ids: list[int] | None = None
@@ -1485,7 +1500,7 @@ class LayerMultiBlockReqMeta:
         block_ids: list[int] | list[list[int]] | None = None,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
-        block_hashes: list[Any] | None = None,
+        block_hashes: Sequence[Any] | None = None,
         kv_cache_group_id: int = 0,
     ) -> None:
         self.req_id = req_id
