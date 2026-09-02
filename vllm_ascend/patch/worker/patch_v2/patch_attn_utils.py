@@ -4,6 +4,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.logger import init_logger
 
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl
 from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
@@ -12,10 +13,38 @@ from vllm_ascend.worker.v2.attn_utils import (
 )
 
 logger = init_logger(__name__)
+_reshape_debug_emitted = False
 
 
 def _get_ascend_sfa_indexer_backend(_self):
     return AscendSFAIndexerBackend
+
+
+_upstream_reshape_and_cache = AscendAttentionBackendImpl.reshape_and_cache
+
+
+def _reshape_and_cache_with_diagnostics(self, *args, **kwargs):
+    global _reshape_debug_emitted
+    if not _reshape_debug_emitted:
+        kv_cache = kwargs.get("kv_cache")
+        if kv_cache is None and len(args) >= 4:
+            kv_cache = args[3]
+        logger.warning(
+            "Ascend MRV2 attention cache binding: kv_cache=%s, key_cache=%s, value_cache=%s",
+            (
+                type(kv_cache).__name__,
+                [tuple(item.shape) for item in kv_cache]
+                if isinstance(kv_cache, tuple)
+                else getattr(kv_cache, "shape", None),
+            ),
+            getattr(self.key_cache, "shape", None),
+            getattr(self.value_cache, "shape", None),
+        )
+        _reshape_debug_emitted = True
+    return _upstream_reshape_and_cache(self, *args, **kwargs)
+
+
+AscendAttentionBackendImpl.reshape_and_cache = _reshape_and_cache_with_diagnostics
 
 
 _upstream_allocate_kv_cache = vllm.v1.worker.gpu.attn_utils.allocate_kv_cache
