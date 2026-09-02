@@ -1,35 +1,63 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
 name: Selected Tests
+
 on:
   workflow_call:
     inputs:
-      base_ref:
-        required: false
-        type: string
-      base_sha:
-        required: false
-        type: string
-      ref:
-        required: false
-        type: string
-      test_groups:
-        required: false
-        type: string
       vllm:
+        type: string
+        required: true
+        description: 'The vllm commit hash or tag to test.'
+      test_groups:
+        type: string
+        required: true
+        description: 'JSON array of test groups from select_tests.py'
+      ref:
+        type: string
         required: false
-        type: boolean
-      # ========== 新增下面3个，把参数加回来 ==========
+        default: ''
+        description: 'The vllm-ascend ref to test.'
+      base_ref:
+        type: string
+        required: false
+        default: 'main'
+        description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
+      base_sha:
+        type: string
+        required: false
+        default: ''
+        description: 'The fixed base commit to rebase onto.'
+      # ========== 仅在此处追加新增参数，不打乱原有顺序与注释 ==========
       upload_timing:
-        required: false
         type: boolean
+        required: false
         default: false
+        description: 'Upload test_timing_data.json as artifact'
       timeout-minutes:
-        required: false
         type: number
-        default: 60
-      enable-coverage:
         required: false
+        default: 120
+        description: 'Selected tests job timeout in minutes.'
+      enable-coverage:
         type: boolean
+        required: false
         default: false
+        description: 'Whether to run tests with coverage enabled.'
     secrets:
       OBS_ACCESS_KEY_PRECISION:
         required: false
