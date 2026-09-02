@@ -553,6 +553,10 @@ def rejection_sample(
         # kernel signatures receive valid pointers/strides. The kernels
         # will never read from it when HAS_DRAFT_LOGITS=False.
         draft_logits = target_logits.new_empty(1, 1, 1)
+    else:
+        # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
+        # vocab size is larger than the draft's due to padding.
+        vocab_size = min(vocab_size, draft_logits.size(-1))
 
     # Compute the block-level logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
