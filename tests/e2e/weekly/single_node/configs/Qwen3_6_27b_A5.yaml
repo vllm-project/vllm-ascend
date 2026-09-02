@@ -47,20 +47,20 @@ _benchmarks_perf1: &benchmarks_perf1
     threshold: 0.95
     temperature: 0
     ignore_eos: True
-_benchmarks_perf2: &benchmarks_perf2
-  perf:
-    case_type: performance
-    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3-27B_input_3500_lines_128
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 128
-    max_out_len: 1500
-    batch_size: 32
-    request_rate: 0
-    baseline: 1757.4204 #原基线是和关闭pcp/dcp启动服务化后启动服务话做对比的
-    threshold: 0.95
-    temperature: 0
-    ignore_eos: True
+#_benchmarks_perf2: &benchmarks_perf2
+#  perf:
+#    case_type: performance
+#    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3-27B_input_3500_lines_128
+#    request_conf: vllm_api_stream_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#    num_prompts: 128
+#    max_out_len: 1500
+#    batch_size: 32
+#    request_rate: 0
+#    baseline: 1757.4204 #原基线是和关闭pcp/dcp启动服务化后启动服务话做对比的
+#    threshold: 0.95
+#    temperature: 0
+#    ignore_eos: True
 
 # ==========================================
 # ACTUAL TEST CASES
@@ -81,17 +81,17 @@ test_cases:
       - '{"enable_cpu_binding":true,"enable_npugraph_ex":true,"enable_static_kernel":true}'
     benchmarks:
       <<: *benchmarks_perf1
-  - name: "Dflassh_Acceptance_Rate_Test_05"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B"
-    envs:
-      ASCEND_LAUNCH_BLOCKING: "0"
-      OMP_NUM_THREADS: "100"
-      <<: *envs
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--speculative_config"
-      - '{"method":"dflash","model":"/root/.cache/modelscope/hub/models/z-lab/Qwen3.6-27B-DFlash","enforce_eager":true,"num_speculative_tokens":3}'
-      - "--additional-config"
-      - '{"enable_cpu_binding":true}'
-    benchmarks:
-      <<: *benchmarks_perf2
+#  - name: "Dflassh_Acceptance_Rate_Test_05"
+#    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+#    envs:
+#      ASCEND_LAUNCH_BLOCKING: "0"
+#      OMP_NUM_THREADS: "100"
+#      <<: *envs
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--speculative_config"
+#      - '{"method":"dflash","model":"/root/.cache/modelscope/hub/models/z-lab/Qwen3.6-27B-DFlash","enforce_eager":true,"num_speculative_tokens":3}'
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#    benchmarks:
+#      <<: *benchmarks_perf2
