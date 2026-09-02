@@ -240,6 +240,16 @@ jobs:
         run: |
           set -x
           python3 -m pip install pyyaml -q
+          python3 -c "
+import yaml, pprint
+d = yaml.safe_load(open('${{ env.DAILY_CONFIG }}'))
+print('=== full daily_config ===')
+pprint.pprint(d)
+print('\n=== a2.nightly_hf ===')
+pprint.pprint(d.get('a2',{}).get('nightly_hf','KEY_NOT_EXIST'))
+print('\n=== a3.nightly_hf ===')
+pprint.pprint(d.get('a3',{}).get('nightly_hf','KEY_NOT_EXIST'))
+"
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
 
   verify-image:
