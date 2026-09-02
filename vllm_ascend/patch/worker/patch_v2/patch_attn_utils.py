@@ -41,6 +41,12 @@ def _reshape_and_cache_with_diagnostics(self, *args, **kwargs):
             getattr(self.value_cache, "shape", None),
         )
         _reshape_debug_emitted = True
+    if self.key_cache is not None and self.key_cache.dim() != 4:
+        logger.warning(
+            "Ascend MRV2 invalid key cache before reshape: type=%s shape=%s",
+            type(self.key_cache).__name__,
+            getattr(self.key_cache, "shape", None),
+        )
     return _upstream_reshape_and_cache(self, *args, **kwargs)
 
 
