@@ -43,6 +43,14 @@ class AscendPCPManager(PCPManager):
 
     vllm_config: VllmConfig
 
+    @property
+    def global_batch(self) -> AscendInputBatch:
+        """Return the scheduled batch retained before PCP partitioning."""
+        global_batch = self._global_batch
+        if not isinstance(global_batch, AscendInputBatch):
+            raise RuntimeError("PCP global batch is unavailable before partition_batch().")
+        return global_batch
+
     @staticmethod
     def validate_config(
         vllm_config: VllmConfig,
@@ -55,8 +63,6 @@ class AscendPCPManager(PCPManager):
         if pcp_size <= 1:
             return
 
-        if parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError("MRV2 PCP does not support PP yet.")
         if model_config.is_encoder_decoder:
             raise NotImplementedError("MRV2 PCP does not support encoder-decoder models yet.")
         if supports_mm_inputs:

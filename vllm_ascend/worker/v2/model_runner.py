@@ -216,6 +216,20 @@ class NPUModelRunner(GPUModelRunner):
         return AscendPCPManager
 
     def sample_tokens(self, grammar_output):
+        pcp_manager = self.pcp_manager
+        if (
+            pcp_manager is not None
+            and not self.is_last_pp_rank
+            and self.execute_model_state is not None
+        ):
+            assert isinstance(pcp_manager, AscendPCPManager)
+            # The last PP stage restores PCP outputs to the global request
+            # layout before sampling. Non-last stages do not own final hidden
+            # states, but their PP receive/postprocess path must use that same
+            # global request layout rather than PCP-local segment rows.
+            self.execute_model_state = self.execute_model_state._replace(
+                input_batch=pcp_manager.global_batch,
+            )
         output = super().sample_tokens(grammar_output)
 
         if self.use_spec_pp and self.is_last_pp_rank:
