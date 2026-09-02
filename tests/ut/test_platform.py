@@ -647,9 +647,11 @@ class TestNPUPlatform(TestBase):
     def test_get_device_total_memory_before_npu_init(self):
         mock_npu = MagicMock()
         mock_npu.is_initialized.return_value = False
-        with patch.object(torch, "npu", mock_npu, create=True):
-            with pytest.raises(NotImplementedError):
-                self.platform.get_device_total_memory(device_id=0)
+        with (
+            patch.object(torch, "npu", mock_npu, create=True),
+            pytest.raises(NotImplementedError),
+        ):
+            self.platform.get_device_total_memory(device_id=0)
         mock_npu.is_initialized.assert_called_once_with()
         mock_npu.mem_get_info.assert_not_called()
 
