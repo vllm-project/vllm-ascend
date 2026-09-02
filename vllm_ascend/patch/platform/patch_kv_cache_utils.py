@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
-from dataclasses import fields, replace
+from dataclasses import replace
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
@@ -225,27 +225,14 @@ def _unify_kv_cache_spec_page_size(
         if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
     }
     if replicated_specs:
-        # First ask vLLM to align the ordinary per-lane pages.  Present the
-        # draft as a plain FullAttentionSpec here: its DCP multiplier describes
-        # additional physical storage, not a larger scheduler page.  Feeding
-        # that multiplied size to the generic unifier either changes the draft
-        # block size or pads every target layer to the replicated allocation.
+        # First ask vLLM to align only the target's ordinary pages.  The draft's
+        # DCP multiplier describes additional physical storage, not a larger
+        # scheduler page.  Feeding either the multiplied draft page or its GQA
+        # page into the generic unifier can change the logical block size.
         ordinary_specs = {
-            name: (
-                FullAttentionSpec(
-                    **{
-                        field.name: (
-                            None
-                            if field.name == "page_size_padded"
-                            else getattr(spec, field.name)
-                        )
-                        for field in fields(FullAttentionSpec)
-                    }
-                )
-                if name in replicated_specs
-                else spec
-            )
+            name: spec
             for name, spec in kv_cache_spec.items()
+            if name not in replicated_specs
         }
         try:
             aligned_ordinary_specs = _orig_unify_kv_cache_spec_page_size(
@@ -261,14 +248,16 @@ def _unify_kv_cache_spec_page_size(
             aligned_specs = {
                 name: (
                     replace(
-                        spec,
-                        block_size=kv_cache_spec[name].block_size,
+                        kv_cache_spec[name],
                         page_size_padded=base_page_size,
                     )
                     if name in replicated_specs
                     else spec
                 )
-                for name, spec in aligned_ordinary_specs.items()
+                for name, spec in {
+                    **aligned_ordinary_specs,
+                    **replicated_specs,
+                }.items()
             }
             if (
                 _get_kimi_k3_dspark_mixed_kv_cache_groups(aligned_specs)
