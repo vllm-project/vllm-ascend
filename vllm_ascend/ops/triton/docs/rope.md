@@ -46,7 +46,7 @@ Source: `vllm_ascend/ops/triton/rope.py` (host wrapper: `rope_forward_triton`).
 
     The rotation is evaluated in fp32 before the fixed-scale E4M3 conversion.
 - **Algorithm flow** (processed row by row, independently):
-  1. The unified wrapper selects this path only for `out_dtype=torch.float8_e4m3fn`, requires `cos_sin_cache`, `positions`, and an explicit `rope_dim`, then `_rope_forward_triton_fp8` makes Q/K contiguous and validates or allocates contiguous E4M3 output buffers.
+  1. The Ascend `rope_forward_oot` dispatcher selects the Triton path for `out_dtype=torch.float8_e4m3fn`; `rope_forward_triton` then requires `cos_sin_cache`, `positions`, and an explicit `rope_dim`, and `_rope_forward_triton_fp8` makes Q/K contiguous and validates or allocates contiguous E4M3 output buffers.
   2. The host computes `pass_dim = head_dim - rope_dim`, pads the rotary half and pass-through tail independently to powers of two, and selects Q/K head tiles as `min(next_power_of_2(num_heads), 16)`.
   3. It launches `min(num_tokens, max(get_vectorcore_num() * 8, 256))` persistent programs; each program strides over token rows by the number of launched programs.
   4. For each row, the kernel indexes `cos_sin_cache` with `positions[row_idx]`, loads the cosine and sine halves, and converts them to fp32.

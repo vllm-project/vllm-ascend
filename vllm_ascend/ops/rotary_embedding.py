@@ -161,12 +161,27 @@ def rope_forward_oot(
     rotary_dim: int,
     is_neox_style: bool,
     offsets: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if out_dtype == torch.float8_e4m3fn and key is None:
+        raise ValueError("float8_e4m3fn RoPE output requires a key tensor")
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
+    if out_dtype is not None and out_dtype != torch.float8_e4m3fn:
+        raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
     if HAS_TRITON:
         num_tokens = query.shape[0]
+        if out_dtype == torch.float8_e4m3fn:
+            query_width = query.numel() // num_tokens
+            key_width = key.numel() // num_tokens
+            if query_width % head_size != 0 or key_width % head_size != 0:
+                head_size = key_width
+                if query_width % head_size != 0:
+                    raise ValueError(
+                        f"Cannot infer the FP8 RoPE head size from query_width={query_width}, key_width={key_width}"
+                    )
+            rotary_dim = min(rotary_dim, head_size)
         query, key = rope_forward_triton(
             query.view(num_tokens, -1, head_size),
             key.view(num_tokens, -1, head_size),
@@ -174,8 +189,11 @@ def rope_forward_oot(
             positions=positions,
             rope_dim=rotary_dim,
             is_neox_style=is_neox_style,
+            out_dtype=out_dtype,
         )
     else:
+        if out_dtype == torch.float8_e4m3fn:
+            raise RuntimeError("float8_e4m3fn RoPE output requires Triton")
         # npu_mrope handles both full and partial rotary internally:
         # it splits query into queryRot[..., :rotary_dim] and queryPass[..., rotary_dim:],
         # where rotary_dim is inferred from cos_sin_cache.shape[-1].
@@ -227,38 +245,18 @@ class AscendRotaryEmbedding(RotaryEmbedding):
             tp_group = get_tp_group()
             positions = torch.ops.vllm.all_gather(positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name)
 
-        if out_dtype == torch.float8_e4m3fn:
-            if not HAS_TRITON:
-                raise RuntimeError("float8_e4m3fn RoPE output requires Triton")
-            if key is None:
-                raise ValueError("float8_e4m3fn RoPE output requires a key tensor")
-            query_shape, key_shape = query.shape, key.shape
-            num_tokens = query.shape[0]
-            query_width = query.numel() // num_tokens
-            key_width = key.numel() // num_tokens
-            if query_width % self.head_size == 0 and key_width % self.head_size == 0:
-                head_size = self.head_size
-            else:
-                head_size = key_width
-                if query_width % head_size != 0:
-                    raise ValueError(
-                        f"Cannot infer the FP8 RoPE head size from query_width={query_width}, key_width={key_width}"
-                    )
-            query_fp8, key_fp8 = rope_forward_triton(
-                query.view(num_tokens, -1, head_size),
-                key.view(num_tokens, -1, head_size),
-                cos_sin_cache=self.cos_sin_cache,
-                positions=positions,
-                rope_dim=min(self.rotary_dim, head_size),
-                is_neox_style=is_neox_style,
-                out_dtype=torch.float8_e4m3fn,
-            )
-            return query_fp8.view(query_shape), key_fp8.view(key_shape)
-        if out_dtype is not None:
-            raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
-        return torch.ops.vllm.npu_rotary_embedding(
-            positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
+        rope_args = (
+            positions,
+            query,
+            key,
+            self.cos_sin_cache,
+            self.head_size,
+            self.rotary_dim,
+            is_neox_style,
         )
+        if out_dtype is None:
+            return torch.ops.vllm.npu_rotary_embedding(*rope_args)
+        return torch.ops.vllm.npu_rotary_embedding(*rope_args, out_dtype=out_dtype)
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
