@@ -43,6 +43,52 @@ from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 
+def zero_experts_compute(
+    expert_indices: torch.Tensor,
+    expert_scales: torch.Tensor,
+    num_experts: int,
+    zero_expert_type: str,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute zero-expert contributions and remap their IDs.
+
+    Zero experts participate in top-k routing but produce zero (or
+    identity-pass-through) output.  Their IDs are remapped to expert 0
+    with weight 0 so that downstream CANN MoE operators (which require
+    IDs in ``[0, num_experts)``) can process them without index errors.
+
+    Args:
+        expert_indices: ``(num_tokens, top_k)`` selected expert IDs.
+        expert_scales:  ``(num_tokens, top_k)`` routing weights.
+        num_experts: Number of real (non-zero) experts.
+        zero_expert_type: ``"identity"`` (pass-through) or ``"zero"``.
+        hidden_states: ``(num_tokens, hidden_dim)`` input hidden states.
+
+    Returns:
+        Remapped ``(expert_indices, expert_scales, zero_expert_result)``.
+    """
+    if zero_expert_type == "identity":
+        normal_expert_mask = expert_indices < num_experts
+        zero_expert_scales = torch.where(normal_expert_mask, 0.0, expert_scales)
+
+        hidden_states_expanded = hidden_states.unsqueeze(1)
+        zero_expert_scales_expanded = zero_expert_scales.unsqueeze(2)
+        result = hidden_states_expanded * zero_expert_scales_expanded
+        result = result.sum(dim=1)
+
+    elif zero_expert_type == "zero":
+        result = torch.zeros_like(hidden_states)
+
+    else:
+        raise ValueError(f"Unsupported zero_expert_type: {zero_expert_type}")
+
+    zero_expert_mask = expert_indices >= num_experts
+    expert_indices = torch.where(zero_expert_mask, 0, expert_indices)
+    expert_scales = torch.where(zero_expert_mask, 0.0, expert_scales)
+
+    return expert_indices, expert_scales, result
+
+
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
@@ -533,6 +579,24 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             enable_force_load_balance=enable_force_load_balance,
             input_ids=input_ids,
         )
+
+        zero_expert_num = getattr(self, "zero_expert_num", 0)
+        zero_expert_type = getattr(self, "zero_expert_type", None)
+        zero_expert_result: torch.Tensor | None = None
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            num_logical_experts = get_moe_num_logical_experts(
+                self,
+                self.moe_config.num_experts,
+                global_redundant_expert_num=self.global_redundant_expert_num,
+            )
+            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=num_logical_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=hidden_states,
+            )
+
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:
