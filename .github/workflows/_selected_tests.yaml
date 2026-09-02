@@ -124,7 +124,7 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
           path: ./vllm-empty
-  
+
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
@@ -165,14 +165,14 @@ jobs:
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
-  
+
           # Match the cache producer's tracked csrc build inputs exactly.
           CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
             exit 1
           fi
-  
+
           CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
 
@@ -204,18 +204,18 @@ jobs:
       - name: Install Mooncake wheel
         run: |
           set -euxo pipefail
-  
+
           apt-get install -y --no-install-recommends \
             libibverbs1 \
             ibverbs-providers \
             librdmacm1 \
             libnuma1
           ldconfig
-  
+
           pip install --no-cache-dir --no-deps \
             -i https://mirrors.aliyun.com/pypi/simple/ \
             mooncake-transfer-engine-npu==0.3.11.post1
-    
+
           pip show mooncake-transfer-engine-npu || true
 
       - name: Install vllm-project/vllm-ascend with device
@@ -445,6 +445,7 @@ jobs:
             python3 - <<'EOF'
             import os
             from obs import ObsClient
+
             OBS_BUCKET = 'vllm-ascend'
             OBS_PREFIX = 'ci/precision-test'
             client = ObsClient(
@@ -452,6 +453,7 @@ jobs:
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
                 server='https://obs.cn-north-4.myhuaweicloud.com'
             )
+
             uploads = [
                 ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
                 ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
@@ -524,7 +526,6 @@ jobs:
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
                 server='https://obs.cn-north-4.myhuaweicloud.com',
             )
-
             resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
             if resp.status >= 300:
                 raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
