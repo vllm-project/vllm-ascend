@@ -516,8 +516,19 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
 
+  get_latest_real_base_sha:
+    runs-on: ubuntu-latest
+    outputs:
+      real_base_sha: ${{ steps.fetch_main_sha.outputs.sha }}
+    steps:
+      - name: Fetch main branch latest commit hash remotely
+        id: fetch_main_sha
+        run: |
+          git ls-remote --heads https://github.com/vllm-project/vllm-ascend.git main | awk '{print $1}' >> "$GITHUB_OUTPUT"
+
   run-selected-tests:
     needs:
+      - get_latest_real_base_sha
       - pre-commit
       - select-tests
       - ensure-csrc-cache
@@ -544,7 +555,8 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
+      # 替换：使用远程实时main sha，绕过pr事件缓存的旧base_sha
+      base_sha: ${{ needs.get_latest_real_base_sha.outputs.real_base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
     secrets: inherit
 
