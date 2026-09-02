@@ -25,6 +25,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH):
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
+    import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa
 import vllm_ascend.patch.platform.patch_minimax_m2_config  # noqa
