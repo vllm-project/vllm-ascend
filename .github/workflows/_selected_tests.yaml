@@ -22,6 +22,11 @@ on:
         description: test groups json string
         required: true
         type: string
+    secrets:    # ←新增这一块
+      OBS_ACCESS_KEY_PRECISION:
+        required: false
+      OBS_SECRET_ACCESS_KEY_PRECISION:
+        required: false
     outputs:
       coverage_artifact_name:
         value: ${{ jobs.dispatch.outputs.coverage_artifact_name }}
