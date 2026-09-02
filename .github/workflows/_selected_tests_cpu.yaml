@@ -15,11 +15,13 @@ on:
         description: target base branch name e.g. main
         required: true
         type: string
+      # -------- fix start --------
       base_sha:
         description: base commit sha, optional. empty skip rebase
         required: false
         default: ""
         type: string
+      # -------- fix end --------
       test_groups:
         description: json test groups
         required: true
