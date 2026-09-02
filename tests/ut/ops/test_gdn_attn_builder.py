@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import TypedDict
 from unittest.mock import patch
 
 import pytest
@@ -13,6 +14,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.ops import gdn as gdn_module
 from vllm_ascend.ops import gdn_attn_builder as ascend_gdn_attn_builder
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.ops.gdn_attn_builder import (
@@ -68,6 +70,13 @@ class BatchSpec:
     @property
     def batch_size(self) -> int:
         return len(self.seq_lens)
+
+
+class _DispatchCalls(TypedDict):
+    custom_op_modes: list[bool]
+    fused: int
+    stock_core: int
+    norm: int
 
 
 def create_common_attn_metadata(
@@ -298,6 +307,334 @@ def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
+
+
+def test_rocm_named_upstream_hook_delegates_to_ascend_implementation():
+    tensors = [torch.empty(0) for _ in range(4)]
+    captured = []
+    attention = SimpleNamespace(_forward_core_ascend=lambda *args: captured.extend(args))
+
+    AscendGatedDeltaNetAttention._forward_core_rocm(attention, *tensors)
+
+    assert captured == tensors
+
+
+@pytest.mark.parametrize(
+    (
+        "gqa_interleaved_layout",
+        "request_kind",
+        "expected_fused_calls",
+        "expected_stock_core_calls",
+        "expected_norm_calls",
+    ),
+    [
+        # A compatible packed-layout decode must use the fused kernel.
+        pytest.param(False, "decode", 1, 0, 0, id="packed-layout-decode"),
+        # Prefill passes the static layout gate but must fall back at runtime.
+        pytest.param(False, "prefill", 0, 1, 1, id="packed-layout-prefill"),
+        # An incompatible projection layout must stay on the stock path.
+        pytest.param(True, "decode", 0, 1, 1, id="interleaved-layout-decode"),
+    ],
+)
+def test_qwen35_fused_dispatch_requires_packed_layout_and_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    gqa_interleaved_layout: bool,
+    request_kind: str,
+    expected_fused_calls: int,
+    expected_stock_core_calls: int,
+    expected_norm_calls: int,
+):
+    """Only a compatible packed-layout decode may invoke the fused kernel."""
+    is_prefill = request_kind == "prefill"
+    query_len = 4 if is_prefill else 1
+    seq_len = query_len if is_prefill else 5
+    _, _, layer_metadata = _build_attn_metadata(
+        BatchSpec(
+            seq_lens=[seq_len],
+            query_lens=[query_len],
+            name=f"qwen35_{request_kind}_layout_{gqa_interleaved_layout}",
+        ),
+        num_speculative_tokens=0,
+        num_decode_draft_tokens_cpu=None,
+    )
+    assert layer_metadata.num_prefills == int(is_prefill)
+    assert layer_metadata.num_decodes == int(not is_prefill)
+    monkeypatch.setattr(
+        gdn_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer0": layer_metadata}),
+    )
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_GDN_DECODE_TILE_PIPELINE", "1")
+    monkeypatch.setattr(
+        gdn_module,
+        "maybe_save_kv_layer_to_connector",
+        lambda *args, **kwargs: None,
+    )
+
+    # Count calls at the fused and stock boundaries to verify dispatch only;
+    # the underlying NPU kernel numerics are covered by operator tests.
+    calls: _DispatchCalls = {
+        "custom_op_modes": [],
+        "fused": 0,
+        "stock_core": 0,
+        "norm": 0,
+    }
+    num_tokens = layer_metadata.num_actual_tokens
+    projected_qkvz = torch.zeros((num_tokens, 12288), dtype=torch.bfloat16)
+    projected_qkvz[:, 8192:] = 2
+    projected_ba = torch.zeros((num_tokens, 64), dtype=torch.bfloat16)
+    mixed_qkv = projected_qkvz[:, :8192]
+    z = projected_qkvz[:, 8192:].reshape(num_tokens, 32, 128)
+    b, a = projected_ba.chunk(2, dim=-1)
+
+    class RecordingNorm:
+        def __init__(self):
+            self.weight = torch.empty(0)
+            self.eps = 1e-6
+
+        def __call__(self, core_attn_out, gate):
+            calls["norm"] += 1
+            return core_attn_out + gate
+
+    def fake_fused_decode(**kwargs):
+        calls["fused"] += 1
+        return torch.full(
+            (kwargs["projected_qkvz"].shape[0], kwargs["num_v_heads"], kwargs["head_dim"]),
+            6,
+            dtype=torch.bfloat16,
+        )
+
+    def record_stock_core(_mixed_qkv, _b, _a, core_attn_out):
+        # This is a routing spy; stock-kernel numerics are covered separately.
+        calls["stock_core"] += 1
+        core_attn_out.fill_(3)
+
+    def supports_packed_dispatch(hidden_states):
+        return AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(attention, hidden_states)
+
+    def try_fused_decode(qkvz, ba):
+        return AscendGatedDeltaNetAttention._try_qwen35_decode_tile(attention, qkvz, ba)
+
+    def fake_attention_core(*args, **kwargs):
+        # Mirror the upstream custom-op callback selection on CPU.
+        use_packed_callback = kwargs.get("use_aiter", args[5] if len(args) > 5 else False)
+        calls["custom_op_modes"].append(use_packed_callback)
+        if use_packed_callback:
+            AscendGatedDeltaNetAttention._forward_core_ascend(attention, *args[:4])
+        else:
+            attention._forward_core(*args[:4])
+
+    monkeypatch.setattr(gdn_module, "gdn_decode_tile", fake_fused_decode)
+    monkeypatch.setattr(
+        gdn_module,
+        "fused_qkvzba_split_reshape_cat",
+        lambda *_args, **_kwargs: (mixed_qkv, z, b, a),
+    )
+    monkeypatch.setattr(
+        torch.ops.vllm,
+        "qwen_gdn_attention_core",
+        fake_attention_core,
+    )
+
+    attention = SimpleNamespace(
+        _supports_qwen35_decode_tile_pipeline=supports_packed_dispatch,
+        _try_qwen35_decode_tile=try_fused_decode,
+        _split_ba_for_tp=lambda ba: ba.chunk(2, dim=-1),
+        _forward_core=record_stock_core,
+        in_proj_qkvz=lambda hidden_states: (projected_qkvz, None),
+        in_proj_ba=lambda hidden_states: (projected_ba, None),
+        out_proj=lambda hidden_states: (hidden_states, None),
+        norm=RecordingNorm(),
+        conv1d=SimpleNamespace(weight=torch.zeros((8192, 1, 4), dtype=torch.bfloat16)),
+        kv_cache=(torch.empty(0), torch.empty(0)),
+        A_log=torch.empty(0),
+        dt_bias=torch.empty(0),
+        key_dim=2048,
+        value_dim=4096,
+        num_k_heads=16,
+        num_v_heads=32,
+        head_k_dim=128,
+        head_v_dim=128,
+        conv_kernel_size=4,
+        activation="silu",
+        tp_size=1,
+        gqa_interleaved_layout=gqa_interleaved_layout,
+        prefix="layer0",
+    )
+    hidden_states = torch.zeros((num_tokens, 4096), dtype=torch.bfloat16)
+    output = torch.empty_like(hidden_states)
+
+    is_packed_dispatch_supported = AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
+        attention, hidden_states
+    )
+    assert is_packed_dispatch_supported == (not gqa_interleaved_layout)
+
+    AscendGatedDeltaNetAttention.forward(attention, hidden_states, output)
+
+    assert calls["custom_op_modes"] == [not gqa_interleaved_layout]
+    assert calls["fused"] == expected_fused_calls
+    assert calls["stock_core"] == expected_stock_core_calls
+    assert calls["norm"] == expected_norm_calls
+    expected_output = 6 if expected_fused_calls == 1 else 5
+    assert torch.equal(output, torch.full_like(output, expected_output))
+
+
+def test_qwen35_piecewise_decode_uses_real_metadata_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """PIECEWISE pads projections but not per-request GDN metadata."""
+    _, _, layer_metadata = _build_attn_metadata(
+        BatchSpec(
+            seq_lens=[5, 9],
+            query_lens=[1, 1],
+            name="piecewise_projection_padding",
+        ),
+        num_speculative_tokens=0,
+        num_decode_draft_tokens_cpu=None,
+    )
+    monkeypatch.setattr(
+        gdn_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer0": layer_metadata}),
+    )
+
+    captured = {}
+
+    def fake_decode_tile(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(
+            (kwargs["projected_qkvz"].shape[0], 32, 128),
+            dtype=torch.bfloat16,
+        )
+
+    monkeypatch.setattr(gdn_module, "gdn_decode_tile", fake_decode_tile)
+    attention = SimpleNamespace(
+        key_dim=2048,
+        value_dim=4096,
+        num_v_heads=32,
+        num_k_heads=16,
+        head_k_dim=128,
+        tp_size=1,
+        conv1d=SimpleNamespace(weight=torch.zeros((8192, 1, 4), dtype=torch.bfloat16)),
+        kv_cache=(torch.empty(0), torch.empty(0)),
+        A_log=torch.empty(0),
+        dt_bias=torch.empty(0),
+        norm=SimpleNamespace(weight=torch.empty(0), eps=1e-6),
+        prefix="layer0",
+    )
+    projected_qkvz = torch.zeros((8, 12288), dtype=torch.bfloat16)
+    projected_ba = torch.zeros((8, 64), dtype=torch.bfloat16)
+
+    result = AscendGatedDeltaNetAttention._try_qwen35_decode_tile(
+        attention,
+        projected_qkvz,
+        projected_ba,
+    )
+
+    assert result is not None
+    assert result.shape == (2, 32, 128)
+    assert captured["projected_qkvz"].shape == (2, 12288)
+    assert captured["projected_ba"].shape == (2, 64)
+    assert captured["cache_indices"].numel() == 2
+    assert captured["query_start_loc"].numel() == 3
+
+
+def test_qwen35_decode_pipeline_accepts_larger_batch_and_divisible_tp(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    batch = 32
+    _, _, layer_metadata = _build_attn_metadata(
+        BatchSpec(
+            seq_lens=[5] * batch,
+            query_lens=[1] * batch,
+            name="decode_batch_32",
+        ),
+        num_speculative_tokens=0,
+        num_decode_draft_tokens_cpu=None,
+    )
+    monkeypatch.setattr(
+        gdn_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"layer0": layer_metadata}),
+    )
+
+    captured = {}
+
+    def fake_decode_tile(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(
+            (
+                kwargs["projected_qkvz"].shape[0],
+                kwargs["num_v_heads"],
+                kwargs["head_dim"],
+            ),
+            dtype=torch.bfloat16,
+        )
+
+    monkeypatch.setattr(gdn_module, "gdn_decode_tile", fake_decode_tile)
+    attention = SimpleNamespace(
+        key_dim=2048,
+        value_dim=4096,
+        num_v_heads=32,
+        num_k_heads=16,
+        head_k_dim=128,
+        tp_size=4,
+        conv1d=SimpleNamespace(weight=torch.zeros((8192, 1, 4), dtype=torch.bfloat16)),
+        kv_cache=(torch.empty(0), torch.empty(0)),
+        A_log=torch.empty(0),
+        dt_bias=torch.empty(0),
+        norm=SimpleNamespace(weight=torch.empty(0), eps=1e-6),
+        prefix="layer0",
+    )
+
+    result = AscendGatedDeltaNetAttention._try_qwen35_decode_tile(
+        attention,
+        torch.zeros((batch, 3072), dtype=torch.bfloat16),
+        torch.zeros((batch, 16), dtype=torch.bfloat16),
+    )
+
+    assert result is not None
+    assert result.shape == (batch, 8, 128)
+    assert captured["cache_indices"].numel() == batch
+    assert captured["num_qk_heads"] == 4
+    assert captured["num_v_heads"] == 8
+
+
+def test_qwen35_decode_pipeline_accepts_supported_dtypes_and_divisible_tp(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_GDN_DECODE_TILE_PIPELINE", "1")
+    attention = SimpleNamespace(
+        tp_size=1,
+        in_proj_qkvz=object(),
+        gqa_interleaved_layout=False,
+        num_k_heads=16,
+        num_v_heads=32,
+        head_k_dim=128,
+        head_v_dim=128,
+        conv_kernel_size=4,
+        activation="silu",
+    )
+
+    for dtype in (torch.bfloat16, torch.float16):
+        assert AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
+            attention,
+            torch.empty((2, 4096), dtype=dtype),
+        )
+    assert not AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
+        attention,
+        torch.empty((2, 4096), dtype=torch.float32),
+    )
+    attention.tp_size = 4
+    assert AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
+        attention,
+        torch.empty((32, 4096), dtype=torch.bfloat16),
+    )
+    attention.tp_size = 3
+    assert not AscendGatedDeltaNetAttention._supports_qwen35_decode_tile_pipeline(
+        attention,
+        torch.empty((2, 4096), dtype=torch.bfloat16),
+    )
 
 
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
