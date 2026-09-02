@@ -65,11 +65,13 @@ def _prepare_pcp_inputs_to_capture(
     else:
         # vLLM #53515 passes PCP-local input buffers into graph capture, so the
         # dummy batch must not be partitioned a second time. vLLM #53869
-        # supplies the capture-only block tables and PCP slot mappings instead.
+        # supplies capture-only PCP metadata instead. The block tables must
+        # retain the same PCP-local backing that runtime prepare_attn updates,
+        # because the SFA full graph cannot rebind their captured pointer.
         input_batch = cudagraph_utils.InputBatch.make_dummy(
             num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
         )
-        input_block_tables = _block_tables.get_dummy_block_tables(num_reqs)
+        input_block_tables = pcp_manager.get_dummy_block_tables(num_reqs)
         slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
