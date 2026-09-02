@@ -13,6 +13,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -571,6 +572,84 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             backend.get_kv_cache_shape.call_args.args[:2],
             (num_kernel_blocks, kernel_block_size),
         )
+    def test_reshape_cache_only_uses_upstream_bhnc_axis_order(self):
+        """vLLM #51718 standardized cache-only views as [B, H, N, C]."""
+        runner = self._build_runner()
+        layer_name = "model.cache_only_layers.0.attn"
+        spec = HiddenStateCacheSpec(
+            block_size=4,
+            num_kv_heads=2,
+            head_size=3,
+            dtype=torch.float16,
+            cache_dtype_str="auto",
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
+
+        with patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False):
+            cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: raw})[layer_name]
+
+        self.assertEqual(cache.shape, (2, 2, 4, 3))
+
+    def test_reshape_hybrid_attention_strips_padding_without_block_splitting(self):
+        """vLLM #51718 pads hybrid pages independently of kernel splitting."""
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        runner.use_hybrid_blocks = False
+        layer_name = "model.layers.0.self_attn.attn"
+        unpadded_page_size = 4 * 2 * (3 + 3) * torch.float16.itemsize
+        spec = FullAttentionSpec(
+            block_size=4,
+            num_kv_heads=2,
+            head_size=3,
+            head_size_v=3,
+            dtype=torch.float16,
+            page_size_padded=unpadded_page_size + 32,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=[layer_name],
+            )
+        ]
+        raw_size = spec.page_size_bytes * 2
+        raw_caches = (
+            torch.zeros(raw_size, dtype=torch.int8),
+            (
+                torch.zeros(raw_size // 2, dtype=torch.int8),
+                torch.zeros(raw_size // 2, dtype=torch.int8),
+            ),
+        )
+
+        for raw_cache in raw_caches:
+            with (
+                self.subTest(combined=isinstance(raw_cache, torch.Tensor)),
+                patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False),
+            ):
+                k_cache, v_cache = runner._reshape_kv_cache_tensors(
+                    kv_cache_config,
+                    {layer_name: raw_cache},
+                )[layer_name]
+
+            self.assertEqual(k_cache.shape, (2, 4, 2, 3))
+            self.assertEqual(v_cache.shape, (2, 4, 2, 3))
 
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")

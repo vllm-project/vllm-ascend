@@ -38,6 +38,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -143,6 +144,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: Any = None,
+        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        dp_sync: Any = None,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
         because npu attention metadata needs more information,
@@ -150,6 +153,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
+        sync_state = num_tokens_across_dp if vllm_version_is("0.27.1") else dp_sync
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with build_attn_metadata_wrapper(), torch_gather_wrapper():
@@ -165,7 +169,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
