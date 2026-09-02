@@ -86,52 +86,6 @@ def test_hybrid_and_fdo_share_safe_int32_position_staging_scope():
         assert not model_runner_310p._uses_dflash_graph_int32_position_staging_310(config)
 
 
-def test_hybrid_and_fdo_share_alignment_safe_rejection_scope():
-    config = object()
-
-    with (
-        patch.object(
-            model_runner_310p,
-            "is_310p_dflash_full_and_piecewise",
-            return_value=True,
-        ),
-        patch.object(
-            model_runner_310p,
-            "is_310p_dflash_full_decode_only",
-            return_value=False,
-        ),
-    ):
-        assert model_runner_310p._uses_dflash_graph_alignment_safe_rejection_310(config)
-
-    with (
-        patch.object(
-            model_runner_310p,
-            "is_310p_dflash_full_and_piecewise",
-            return_value=False,
-        ),
-        patch.object(
-            model_runner_310p,
-            "is_310p_dflash_full_decode_only",
-            return_value=True,
-        ),
-    ):
-        assert model_runner_310p._uses_dflash_graph_alignment_safe_rejection_310(config)
-
-    with (
-        patch.object(
-            model_runner_310p,
-            "is_310p_dflash_full_and_piecewise",
-            return_value=False,
-        ),
-        patch.object(
-            model_runner_310p,
-            "is_310p_dflash_full_decode_only",
-            return_value=False,
-        ),
-    ):
-        assert not model_runner_310p._uses_dflash_graph_alignment_safe_rejection_310(config)
-
-
 @pytest.mark.parametrize(
     ("platform_310p", "method", "mode", "expected"),
     [

@@ -20,8 +20,9 @@ from __future__ import annotations
 import math
 
 import torch
-import torch_npu
 from vllm.model_executor.layers.fla.ops.utils import tensor_cache
+
+from vllm_ascend._310p.ops.adn_rms_norm import adn_rms_norm_or_fallback
 
 
 @tensor_cache
@@ -39,5 +40,9 @@ def l2norm_310p(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     # RMSNorm: y = x / sqrt(mean(x^2) + eps_rms) * weight
     # With weight=1/sqrt(dim), this equals x / sqrt(sum(x^2) + dim * eps_rms).
     # L2 norm needs y = x / sqrt(sum(x^2) + eps), so eps_rms = eps / dim.
-    y, _ = torch_npu.npu_rms_norm(x_2d, weight, eps / dim)
+    y = adn_rms_norm_or_fallback(
+        x_2d,
+        weight,
+        eps / dim,
+    )
     return y.reshape(orig_shape)

@@ -36,6 +36,7 @@ from vllm_ascend._310p.dflash_full_and_piecewise import (
 from vllm_ascend._310p.dflash_full_decode_only import (
     is_310p_dflash_full_decode_only,
 )
+from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
 from vllm_ascend._310p.ops.rotary_embedding import (
     AscendRotaryEmbedding310,
     clear_full_decode_draft_rope_310,
@@ -317,19 +318,21 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         descriptor_tokens: int,
         runtime_mode: CUDAGraphMode,
     ) -> bool:
-        """Refresh stable query/context RoPE inputs for compiled FDO draft."""
+        """Refresh stable query/context RoPE inputs outside a compiled graph."""
         runner = getattr(self, "runner", None)
         scope_config = getattr(runner, "vllm_config", self.vllm_config)
         uses_full_decode_only = is_310p_dflash_full_decode_only(scope_config)
         uses_hybrid_graph = is_310p_dflash_full_and_piecewise(scope_config)
-        uses_precomputed_rope = uses_full_decode_only or uses_hybrid_graph
+        uses_piecewise = is_310p_dflash_piecewise(scope_config)
+        uses_precomputed_rope = (
+            uses_full_decode_only or uses_hybrid_graph or uses_piecewise
+        )
         if getattr(self, "method", None) != "dflash" or not uses_precomputed_rope:
             return False
-        # FDO and Hybrid compile the rotary branch while FULL precomputed
+        # FDO, Hybrid and Piecewise compile the rotary branch while precomputed
         # buffers are selected. The compiled callable keeps those stable
-        # addresses when runtime dispatch later selects NONE or PIECEWISE, so
-        # every call in either configured mode must refresh the same buffers
-        # from its current logical positions.
+        # addresses, so every call in each configured mode must refresh them
+        # from the current logical positions.
         query_descriptor_tokens = descriptor_tokens
         if uses_hybrid_graph:
             max_query_tokens = getattr(self, "max_query_tokens", None)
@@ -369,14 +372,14 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         )
         if context_positions_buffer.shape[0] < context_descriptor_tokens:
             raise RuntimeError(
-                "310P DFlash FULL context-position buffer is smaller than the "
+                "310P DFlash graph context-position buffer is smaller than the "
                 f"descriptor: capacity={context_positions_buffer.shape[0]}, "
                 f"descriptor={context_descriptor_tokens}"
             )
         context_positions = context_positions_buffer[:context_descriptor_tokens]
         if not 0 <= context_actual_tokens <= context_descriptor_tokens:
             raise RuntimeError(
-                "310P DFlash FULL context extent is outside the descriptor: "
+                "310P DFlash graph context extent is outside the descriptor: "
                 f"actual={context_actual_tokens}, "
                 f"descriptor={context_descriptor_tokens}"
             )
@@ -388,7 +391,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
                 None,
             )
             if draft_rotary is None:
-                raise RuntimeError("310P DFlash FULL draft model has no Ascend rotary embedding")
+                raise RuntimeError("310P DFlash graph draft model has no Ascend rotary embedding")
             self._full_decode_draft_rotary_310 = draft_rotary
 
         capacity_tokens = max(
@@ -416,7 +419,7 @@ class AscendSpecDecodeBaseProposer310(AscendSpecDecodeBaseProposer):
         self._full_decode_draft_context_rope_cos_310 = context_cos
         self._full_decode_draft_context_rope_sin_310 = context_sin
         logger.debug(
-            "[310p-dflash-full-decode-only/rope-precompute] "
+            "[310p-dflash-graph/rope-precompute] "
             "component=draft actual_runtime=%s descriptor_tokens=%d "
             "query_actual=%d "
             "context_actual=%d query_positions_ptr=%d "

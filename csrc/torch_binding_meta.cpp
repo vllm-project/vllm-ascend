@@ -683,6 +683,45 @@ npu_copy_and_expand_dflash_inputs_meta(
             out_context_positions, out_context_slot_mapping, out_token_indices};
 }
 
+at::Tensor adn_rms_norm_meta(
+    const at::Tensor& x,
+    const at::Tensor& gamma,
+    double epsilon)
+{
+    TORCH_CHECK(x.scalar_type() == at::kHalf,
+                "adn_rms_norm only supports FP16 x");
+    TORCH_CHECK(gamma.scalar_type() == at::kHalf,
+                "adn_rms_norm only supports FP16 gamma");
+    TORCH_CHECK(x.dim() > 0,
+                "adn_rms_norm requires x to have at least one dimension");
+    const c10::SymInt hiddenSize = x.sym_size(-1);
+    TORCH_CHECK(hiddenSize == c10::SymInt(128) ||
+                    hiddenSize == c10::SymInt(256) ||
+                    hiddenSize == c10::SymInt(2048),
+                "adn_rms_norm requires x.shape[-1] in {128, 256, 2048}");
+    // Do not call numel() here: the leading dimensions can be symbolic while
+    // torch.compile traces a decode graph.  Empty concrete inputs are rejected
+    // by the Python dispatcher and the NPU binding before kernel launch.
+    TORCH_CHECK(gamma.dim() == 1 && gamma.sym_size(0) == hiddenSize,
+                "adn_rms_norm requires one-dimensional gamma with size x.shape[-1]");
+    // Hidden-size checks above use SymInt so the changing decode row dimension
+    // remains symbolic.  Contiguity is validated by the concrete-device
+    // binding because calling
+    // is_contiguous() on a FakeTensor can specialize its symbolic row count.
+    return at::empty_symint(x.sym_sizes(), x.options());
+}
+
+at::Tensor npu_rejection_sample_greedy_310_meta(
+    const at::Tensor &cu_num_draft_tokens,
+    const at::Tensor &draft_token_ids,
+    const at::Tensor &target_argmax,
+    const at::Tensor &bonus_token_ids,
+    at::Tensor &output_token_ids,
+    int64_t max_spec_len)
+{
+    return output_token_ids;
+}
+
 at::Tensor npu_causal_conv1d_custom_meta(
     const at::Tensor& output,
     const at::Tensor& x,
@@ -1672,6 +1711,32 @@ at::Tensor chunk_fwd_o_meta(
     return o;
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> chunk_gated_delta_rule_compute_wy_meta(
+    const at::Tensor & q,
+    const at::Tensor & k,
+    const at::Tensor & v,
+    const at::Tensor & g,
+    const at::Tensor & beta,
+    c10::optional<int64_t> chunk_size)
+{
+    (void)k;
+    (void)beta;
+    (void)chunk_size;
+    const c10::SymInt B = q.sym_size(0);
+    const c10::SymInt T = q.sym_size(1);
+    const c10::SymInt Hk = q.sym_size(2);
+    const c10::SymInt K = q.sym_size(3);
+    const c10::SymInt Hv = v.sym_size(2);
+    const c10::SymInt V = v.sym_size(3);
+
+    at::Tensor q_kernel = at::empty_symint(c10::SymDimVector{B, Hk, T, K}, q.options());
+    at::Tensor k_kernel = at::empty_symint(c10::SymDimVector{B, Hk, T, K}, q.options());
+    at::Tensor w_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T, K}, q.options());
+    at::Tensor u_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T, V}, v.options());
+    at::Tensor g_kernel = at::empty_symint(c10::SymDimVector{B, Hv, T}, g.options().dtype(at::kFloat));
+    return std::make_tuple(q_kernel, k_kernel, w_kernel, u_kernel, g_kernel);
+}
+
 void store_kv_block_metadata(
     const at::Tensor &slot_mapping_npu,
     const at::Tensor &group_len,
@@ -1711,8 +1776,14 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("chunk_gated_delta_rule_fwd_h", &vllm_ascend::meta::chunk_gated_delta_rule_fwd_h_meta);
     // chunk_fwd_o
     ops.impl("chunk_fwd_o", &vllm_ascend::meta::chunk_fwd_o_meta);
+    // chunk_gated_delta_rule_compute_wy
+    ops.impl("chunk_gated_delta_rule_compute_wy", &vllm_ascend::meta::chunk_gated_delta_rule_compute_wy_meta);
     // CopyAndExpandDflashInputs
     ops.impl("npu_copy_and_expand_dflash_inputs", &vllm_ascend::meta::npu_copy_and_expand_dflash_inputs_meta);
+    // AdnRmsNorm
+    ops.impl("adn_rms_norm", &vllm_ascend::meta::adn_rms_norm_meta);
+    // RejectionSampleGreedy310
+    ops.impl("npu_rejection_sample_greedy_310", &vllm_ascend::meta::npu_rejection_sample_greedy_310_meta);
 }
 }
 #else

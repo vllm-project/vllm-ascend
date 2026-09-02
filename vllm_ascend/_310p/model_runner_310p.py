@@ -88,11 +88,6 @@ def _uses_dflash_graph_int32_position_staging_310(vllm_config: Any) -> bool:
     return is_310p_dflash_full_decode_only(vllm_config) or is_310p_dflash_full_and_piecewise(vllm_config)
 
 
-def _uses_dflash_graph_alignment_safe_rejection_310(vllm_config: Any) -> bool:
-    """Scope aligned greedy rejection writes to 310P DFlash FULL graph modes."""
-    return is_310p_dflash_full_decode_only(vllm_config) or is_310p_dflash_full_and_piecewise(vllm_config)
-
-
 def _resize_dflash_draft_kv_cache_specs(
     kv_cache_specs: dict[str, KVCacheSpec],
     draft_layer_names: set[str],
@@ -293,14 +288,7 @@ class NPUModelRunner310(NPUModelRunner):
         logger.info_once("Weight layout uses FRACTAL_NZ.")
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
-            self.rejection_sampler = AscendRejectionSampler310(
-                self.sampler,
-                use_fdo_alignment_safe_greedy=(
-                    _uses_dflash_graph_alignment_safe_rejection_310(
-                        self.vllm_config
-                    )
-                ),
-            )
+            self.rejection_sampler = AscendRejectionSampler310(self.sampler)
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
             # Keep dispatcher's internal query_len in sync to avoid key-init assert.
