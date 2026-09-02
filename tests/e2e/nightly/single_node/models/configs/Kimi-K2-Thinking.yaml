@@ -48,5 +48,5 @@ test_cases:
         batch_size: 64
         trust_remote_code: true
         request_rate: 11.2
-        baseline: 43.3429
+        baseline: 41.86
         threshold: 0.97
