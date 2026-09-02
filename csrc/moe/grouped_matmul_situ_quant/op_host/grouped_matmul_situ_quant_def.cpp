@@ -16,16 +16,22 @@ public:
             .DataType({ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
+        // Weights arrive as transposed views of NZ-format storage (loader does
+        // npu_format_cast(...).transpose(1,2)); NZ tensors cannot be made
+        // contiguous (.contiguous() rejects internal format), and the kernel
+        // already reads them via format metadata — accept them as-is.
         this->Input("weight")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E2M1})
             .Format({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ_C0_16})
-            .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ_C0_16});
+            .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ_C0_16})
+            .IgnoreContiguous();
         this->Input("weight_scale")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND});
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND})
+            .IgnoreContiguous();
         this->Input("group_list")
             .ParamType(REQUIRED)
             .DataType({ge::DT_INT64, ge::DT_INT64})
