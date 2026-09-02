@@ -720,7 +720,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _uses_dcp_replicated_dspark_draft_kv(self) -> bool:
         """Whether this runner uses a DCP-sharded K3 target and GQA DSpark."""
-        if self.dcp_size <= 1 or not self._draft_uses_qwen3_gqa_dspark():
+        if getattr(self, "dcp_size", 1) <= 1 or not self._draft_uses_qwen3_gqa_dspark():
             return False
         architectures = getattr(self.model_config, "architectures", ()) or ()
         if not architectures:

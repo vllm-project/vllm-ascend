@@ -301,7 +301,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self.draft_attn_groups: list[AttentionGroup] = []
         draft_vllm_config = (
             self._create_draft_vllm_config()
-            if self.replicated_draft_kv
+            if getattr(self, "replicated_draft_kv", False)
             else self.vllm_config
         )
 
@@ -526,7 +526,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             cad.causal = False
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
-        if self.replicated_draft_kv:
+        if getattr(self, "replicated_draft_kv", False):
             cad.context_parallel_metadata = None
             cad.dcp_local_seq_lens = None
 
