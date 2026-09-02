@@ -239,12 +239,16 @@ jobs:
         run: |
           set -x
           python3 -m pip install pyyaml -q
-          RAW_OUT=$(python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix 2>&1)
+          # 捕获退出码
+          RAW_OUT=$(python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix 2>err.log; echo RET=$? >&2)
+          RET=$(grep RET= err.log | cut -d= -f2)
+          echo "script exit code: ${RET}"
+          echo "==== script stderr log ===="
+          cat err.log
           echo "RAW_OUT==>"
           echo "${RAW_OUT}"
           echo "<==RAW_OUT"
 
-          # 关键兜底：脚本输出为空，输出合法空数组，避免fromJson("")
           if [[ -z "${RAW_OUT}" ]]; then
             echo "a2_nightly_hf=[]" >> "$GITHUB_OUTPUT"
             echo "a3_nightly_hf=[]" >> "$GITHUB_OUTPUT"
