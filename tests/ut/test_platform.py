@@ -155,7 +155,7 @@ class TestNPUPlatform(TestBase):
             use_mla=False,
             hf_config=SimpleNamespace(
                 model_type="qwen3",
-                architectures=["Qwen3DSparkModel"],
+                architectures=["DSparkDraftModel"],
             ),
         )
         config = SimpleNamespace(
