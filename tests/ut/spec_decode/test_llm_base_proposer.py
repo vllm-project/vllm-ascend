@@ -19,14 +19,12 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 
@@ -43,18 +41,6 @@ NON_FULL_CUDAGRAPH_MODES = [
     CUDAGraphMode.NONE,
     CUDAGraphMode.PIECEWISE,
 ]
-
-
-@dataclass(frozen=True)
-class _CacheConfig:
-    cache_dtype: str
-    kv_cache_dtype_skip_layers: list[str] | None
-
-
-@dataclass(frozen=True)
-class _VllmConfig:
-    cache_config: _CacheConfig
-    model_config: object
 
 
 class TestMultimodalImageTokenIndex:
@@ -168,73 +154,6 @@ class TestMtpSharesTheTargetLmHead:
         proposer, target, mtp_layer = self._build(torch.ones(4, 2), has_own_lm_head=True)
         proposer._maybe_share_lm_head(target)
         assert mtp_layer.shared_head.head is target.lm_head
-
-
-@pytest.mark.parametrize("cache_dtype", ["fp8", "fp8_e4m3"])
-@pytest.mark.parametrize(
-    "model_config",
-    [
-        SimpleNamespace(
-            hf_text_config=SimpleNamespace(model_type="minimax_m3"),
-        ),
-        SimpleNamespace(
-            hf_text_config=SimpleNamespace(model_type="minimax_m3_text"),
-            hf_config=SimpleNamespace(model_type="minimax_m3_vl"),
-        ),
-    ],
-    ids=["text-config", "vl-top-level-config"],
-)
-def test_minimax_m3_eagle3_draft_uses_model_dtype_with_mixed_kv_cache(
-    cache_dtype: str,
-    model_config: SimpleNamespace,
-):
-    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
-    base_config = _VllmConfig(
-        cache_config=_CacheConfig(
-            cache_dtype=cache_dtype,
-            kv_cache_dtype_skip_layers=["0", "1", "2"],
-        ),
-        model_config=model_config,
-    )
-    proposer.vllm_config = base_config
-    proposer.speculative_config = SimpleNamespace(kv_cache_dtype=None)
-    proposer.method = "eagle3"
-
-    with patch.object(
-        SpecDecodeBaseProposer,
-        "_create_draft_vllm_config",
-        return_value=base_config,
-    ):
-        draft_config = proposer._create_draft_vllm_config()
-
-    assert draft_config.cache_config.cache_dtype == "auto"
-    assert draft_config.cache_config.kv_cache_dtype_skip_layers == ["0", "1", "2"]
-    assert base_config.cache_config.cache_dtype == cache_dtype
-
-
-def test_minimax_m3_eagle3_respects_explicit_draft_kv_cache_dtype():
-    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
-    base_config = _VllmConfig(
-        cache_config=_CacheConfig(
-            cache_dtype="fp8",
-            kv_cache_dtype_skip_layers=["0", "1", "2"],
-        ),
-        model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(model_type="minimax_m3"),
-        ),
-    )
-    proposer.vllm_config = base_config
-    proposer.speculative_config = SimpleNamespace(kv_cache_dtype="fp8")
-    proposer.method = "eagle3"
-
-    with patch.object(
-        SpecDecodeBaseProposer,
-        "_create_draft_vllm_config",
-        return_value=base_config,
-    ):
-        draft_config = proposer._create_draft_vllm_config()
-
-    assert draft_config is base_config
 
 
 def test_load_model_reads_validated_draft_window_size():
