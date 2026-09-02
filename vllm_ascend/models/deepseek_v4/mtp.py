@@ -138,7 +138,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         shape, dtype = x.size(), x.dtype
         x = x.flatten(1).float()
-        x_norm = self.hc_norm(x)
+        x_norm = self.hc_norm(x.to(torch.bfloat16))
+        x_norm = x_norm.to(hc_fn.dtype)
         mixes = torch.nn.functional.linear(x_norm, hc_fn)
         pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.hc_eps
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
