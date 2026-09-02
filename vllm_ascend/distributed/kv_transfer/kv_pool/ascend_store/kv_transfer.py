@@ -893,12 +893,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
 
+    def _record_load_finished(
+        self,
+        req_id: str,
+        num_keys: int,
+        num_failed_keys: int = 0,
+        path: str = "async",
+    ) -> None:
+        if self.worker is not None:
+            self.worker._record_load_finished(req_id, num_keys, num_failed_keys=num_failed_keys, path=path)
+
     def _handle_request(self, req_meta: ReqMeta):
         try:
             load_spec = req_meta.load_spec
             req_id = req_meta.req_id
             if load_spec is None:
                 logger.error("KV pool async recv request %s has no load spec; skip load.", req_id)
+                self._record_load_finished(req_id, 0)
                 self.set_finished_request(req_id)
                 return
 
@@ -906,12 +917,13 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
                 group_block_size = self._get_block_size(0)
                 mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
-                self.worker._load_kv_tp_mismatch(
+                num_keys, num_failed_keys = self.worker._load_kv_tp_mismatch(
                     req_meta.block_hashes,
                     req_meta.block_ids_by_group[0],
                     token_len,
                     mask_num,
                 )
+                self._record_load_finished(req_id, num_keys, num_failed_keys=num_failed_keys)
                 self.set_finished_request(req_id)
                 return
 
@@ -951,6 +963,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     size_list.append(size)
                     block_id_list.append(block_id)
             if not key_list:
+                self._record_load_finished(req_id, 0)
                 self.set_finished_request(req_id)
                 return
             key_list_c = key_list[self.tp_rank % len(key_list) :] + key_list[: self.tp_rank % len(key_list)]
@@ -1007,6 +1020,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 req_meta.kv_cache_group_ids or [0],
                 len(key_list_c),
             )
+            num_failed_keys = sum(1 for r in ret if r != 0) if ret is not None else len(key_list_c)
+            self._record_load_finished(req_id, len(key_list_c), num_failed_keys=num_failed_keys)
             self.set_finished_request(req_id)
         finally:
             self.request_queue.task_done()

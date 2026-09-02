@@ -804,6 +804,7 @@ class TestKVTransferTpMismatchDispatch(unittest.TestCase):
     def test_recving_dispatches_to_worker_when_tp_mismatch(self):
         worker = MagicMock()
         worker.tp_mismatch = True
+        worker._load_kv_tp_mismatch.return_value = (1, 0)
         t, _ = self._make_recving(worker=worker)
         req = ReqMeta(
             req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None

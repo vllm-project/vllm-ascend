@@ -334,6 +334,46 @@ class TestAscendStoreConnector(unittest.TestCase):
             mock_worker_cls.return_value.get_kv_events.return_value = events
             self.assertIsInstance(connector.get_kv_connector_kv_cache_events(), expected_type)
 
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
+    def test_get_kv_connector_stats_worker_role_does_not_crash(self, mock_worker_cls, mock_lookup_cls):
+        """Regression test: worker-role instances must not raise AttributeError.
+
+        The upstream metrics framework calls get_kv_connector_stats() on
+        worker-role instances (kv_connector_model_runner_mixin), so the
+        scheduler-side attribute must exist (None) rather than be absent.
+        """
+        config = self._make_vllm_config()
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=None,
+        )
+        self.assertIsNone(connector.connector_scheduler)
+
+        # Worker side: delegate to the worker's get_stats.
+        result = connector.get_kv_connector_stats()
+        mock_worker_cls.return_value.get_stats.assert_called_once()
+        self.assertIs(result, mock_worker_cls.return_value.get_stats.return_value)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
+    def test_get_kv_connector_stats_scheduler_role_prefers_scheduler(self, mock_scheduler_cls):
+        config = self._make_vllm_config()
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        connector = AscendStoreConnector(
+            vllm_config=config,
+            role=KVConnectorRole.SCHEDULER,
+            kv_cache_config=MagicMock(),
+        )
+        self.assertIsNone(connector.connector_worker)
+
+        result = connector.get_kv_connector_stats()
+        mock_scheduler_cls.return_value.get_stats.assert_called_once()
+        self.assertIs(result, mock_scheduler_cls.return_value.get_stats.return_value)
+
 
 class TestAscendStoreConnectorLayerwise(unittest.TestCase):
     """Test connector methods that are specific to layerwise mode."""
