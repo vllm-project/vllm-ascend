@@ -23,7 +23,17 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
+    backend_map,
+    get_layerwise_protocol,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+    extract_layout_config,
+    make_full_key,
+    make_hit_check_keys,
+    make_partial_key,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend import (
     DEFAULT_TENANT_ID,
     MooncakeBackend,
@@ -49,6 +59,33 @@ class TestBackendABC(unittest.TestCase):
     def test_cannot_instantiate(self):
         with self.assertRaises(TypeError):
             Backend(MagicMock())  # type: ignore[abstract]
+
+
+# =========================================================================
+# Backend layerwise protocol registry
+# =========================================================================
+class TestLayerwiseProtocolRegistry(unittest.TestCase):
+    """``get_layerwise_protocol`` is the generic layers' only knowledge of
+    layerwise support: it resolves the backend module carrying the layerwise
+    protocol functions (registered under the normalized backend name), or
+    None when the entry carries no protocol marker."""
+
+    def test_get_layerwise_protocol_resolves_module(self):
+        protocol = get_layerwise_protocol("memcache")
+        self.assertIsNotNone(protocol)
+        for func_name in ("make_full_key", "make_partial_key", "make_hit_check_keys", "extract_layout_config"):
+            with self.subTest(func=func_name):
+                self.assertTrue(callable(getattr(protocol, func_name, None)))
+
+    def test_get_layerwise_protocol_normalizes_name(self):
+        for backend_name in ("MEMCACHE", " Memcache "):
+            with self.subTest(backend=backend_name):
+                self.assertIsNotNone(get_layerwise_protocol(backend_name))
+
+    def test_get_layerwise_protocol_returns_none_without_protocol(self):
+        for backend_name in ("mooncake", "yuanrong", "nonexistent"):
+            with self.subTest(backend=backend_name):
+                self.assertIsNone(get_layerwise_protocol(backend_name))
 
 
 def _make_mooncake_store_config(**overrides) -> MooncakeStoreConfig:
@@ -592,6 +629,121 @@ class TestYuanrongBackendMethods(unittest.TestCase):
         b._registered_buffers = ([100], [200])
         b._register_buffers_if_needed()
         b.store.pre_register_device_memory.assert_not_called()
+
+
+# =========================================================================
+# Memcache layerwise transfer protocol
+# =========================================================================
+_PROTOCOL_FUNCTIONS = (
+    "make_full_key",
+    "make_partial_key",
+    "make_hit_check_keys",
+    "extract_layout_config",
+)
+
+_LAYERWISE_STORE_METHODS = (
+    "batch_get_key_info",
+    "batch_alloc",
+    "batch_add_lease",
+    "batch_remove_lease",
+    "batch_write_finish",
+)
+
+
+class TestLayerwiseProtocolMemcacheExclusivity(unittest.TestCase):
+    """The memcache backend is the only layerwise protocol carrier.
+
+    Three views of the same fact must agree for every registered backend:
+    the module exposes the protocol functions, the class overrides the
+    five layerwise store calls (python's MRO: an override wins over the
+    inherited NotImplementedError stub), and the registry entry carries
+    the ``layerwise_protocol`` marker.
+    """
+
+    def _backend_entries(self):
+        import importlib
+
+        for name, entry in backend_map.items():
+            module = importlib.import_module(entry["path"])
+            yield name, entry, module, getattr(module, entry["name"])
+
+    def test_protocol_functions_store_overrides_and_registry_marker_agree(self):
+        for name, entry, module, backend_class in self._backend_entries():
+            with self.subTest(backend=name):
+                exposes_protocol = all(callable(getattr(module, func, None)) for func in _PROTOCOL_FUNCTIONS)
+                owns_overrides = all(
+                    any(method in vars(cls) for cls in backend_class.__mro__ if cls is not Backend)
+                    for method in _LAYERWISE_STORE_METHODS
+                )
+                self.assertEqual(exposes_protocol, name == "memcache")
+                self.assertEqual(owns_overrides, name == "memcache")
+                self.assertEqual(exposes_protocol, bool(entry.get("layerwise_protocol")))
+                self.assertEqual(owns_overrides, exposes_protocol)
+
+
+class TestExtractLayoutConfig(unittest.TestCase):
+    """The protocol owns the layerwise opt-in check of the layout layer."""
+
+    def test_returns_config_when_opted_in(self):
+        extra_config = {"use_layerwise": True, "layerwise_num_shared_buffers": 2}
+        self.assertIs(extract_layout_config(extra_config), extra_config)
+
+    def test_returns_none_when_not_opted_in(self):
+        self.assertIsNone(extract_layout_config({}))
+        self.assertIsNone(extract_layout_config({"use_layerwise": False}))
+
+
+class TestLayerwiseKeyFormats(unittest.TestCase):
+    """Byte-for-byte snapshots of the layerwise key formats.
+
+    These strings are wire formats shared with deployed clusters: a single
+    character of drift turns hits into misses after an upgrade. The
+    expectations are transcribed from the pre-refactor pool_worker /
+    pool_scheduler implementations.
+    """
+
+    def test_full_key_single_group_keeps_pr_11585_format(self):
+        self.assertEqual(
+            make_full_key("model", 0, "hash0", 3, 1),
+            "model@hash0@3",
+        )
+
+    def test_full_key_multi_group_includes_group_id(self):
+        self.assertEqual(
+            make_full_key("model", 2, "hash0", 3, 4),
+            "model@2@hash0@3",
+        )
+
+    def test_partial_key_format(self):
+        self.assertEqual(
+            make_partial_key("model", "r1", 0, 1, 20, 3),
+            "model@partial@r1@0@1@20@3",
+        )
+
+    def test_hit_check_keys_single_group_one_key_per_rank(self):
+        self.assertEqual(
+            make_hit_check_keys("model", 0, "hash0", 4, 1),
+            ["model@hash0@0", "model@hash0@1", "model@hash0@2", "model@hash0@3"],
+        )
+
+    def test_hit_check_keys_multi_group_one_key_per_rank(self):
+        self.assertEqual(
+            make_hit_check_keys("model", 1, "hash0", 2, 3),
+            ["model@1@hash0@0", "model@1@hash0@1"],
+        )
+
+    def test_hit_check_keys_empty_when_no_ranks(self):
+        self.assertEqual(make_hit_check_keys("model", 0, "hash0", 0, 1), [])
+
+    def test_full_key_and_hit_check_key_share_rank_format(self):
+        """The hit-check key of rank r must equal that rank's full key."""
+        for num_groups in (1, 2):
+            for rank in range(3):
+                with self.subTest(num_groups=num_groups, rank=rank):
+                    self.assertEqual(
+                        make_hit_check_keys("model", 0, "hash0", 3, num_groups)[rank],
+                        make_full_key("model", 0, "hash0", rank, num_groups),
+                    )
 
 
 # =========================================================================

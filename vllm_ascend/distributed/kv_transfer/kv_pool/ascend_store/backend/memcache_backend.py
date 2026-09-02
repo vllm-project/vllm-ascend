@@ -38,6 +38,79 @@ class MmcDirect(Enum):
     COPY_H2G = 3
 
 
+# =========================================================================
+# Layerwise transfer protocol
+# =========================================================================
+# The generic layers (worker / scheduler / layout) resolve these functions
+# through backend/__init__.py:get_layerwise_protocol -- a module-convention
+# lookup, they never import this module by name. The key strings are wire
+# formats shared with deployed clusters: a single character of drift turns
+# hits into misses after an upgrade.
+# tests/ut/distributed/ascend_store/test_backend.py locks the key formats
+# with snapshot assertions.
+
+
+def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the connector's extra config when it opts into the layerwise
+    transfer, None otherwise.
+
+    Called by the generic layout layer through the backend registry; the
+    protocol itself owns the opt-in check so the layout layer never spells
+    out the gate.
+    """
+    if extra_config.get("use_layerwise", False):
+        return extra_config
+    return None
+
+
+def make_full_key(
+    model_name: str,
+    group_id: int,
+    block_hash_hex: str,
+    head_or_tp_rank: int,
+    num_groups: int,
+) -> str:
+    """Full-block key for the layerwise transfer.
+
+    Single-group models use the PR #11585 format (model@hash@rank) for
+    backward compatibility. Multi-group models include group_id
+    (model@group_id@hash@rank) to distinguish groups.
+    """
+    if num_groups > 1:
+        return f"{model_name}@{group_id}@{block_hash_hex}@{head_or_tp_rank}"
+    else:
+        return f"{model_name}@{block_hash_hex}@{head_or_tp_rank}"
+
+
+def make_partial_key(
+    model_name: str,
+    req_id: str,
+    group_id: int,
+    block_index: int,
+    end_token: int,
+    head_or_tp_rank: int,
+) -> str:
+    return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}@{head_or_tp_rank}"
+
+
+def make_hit_check_keys(
+    model_name: str,
+    group_id: int,
+    block_hash_hex: str,
+    num_ranks: int,
+    num_groups: int,
+) -> list[str]:
+    """All-rank keys for scheduler-side hit check.
+
+    Returns one key per head_or_tp_rank (ranks in the same put_step
+    group share one key for MLA).
+    """
+    if num_groups > 1:
+        return [f"{model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(num_ranks)]
+    else:
+        return [f"{model_name}@{block_hash_hex}@{h}" for h in range(num_ranks)]
+
+
 class MemcacheBackend(Backend):
     def __init__(
         self,

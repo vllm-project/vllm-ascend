@@ -450,24 +450,24 @@ _backend_pkg = _make_pkg(
 )
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
 
-# Mirror the real backend/__init__.py entry points. The scheduler/worker resolve
-# the backend class dynamically via ``importlib.import_module(path)``; tests that
-# exercise those paths patch ``<module>.importlib`` locally (see
-# test_pool_scheduler.py / test_pool_worker.py) so the backend resolves to a
-# MagicMock. Do NOT register the backends in sys.modules or globally wrap
-# import_module here: test_backend.py imports the real backend classes and also
-# relies on ``mock.patch`` (which itself calls importlib.import_module) resolving
+# Execute the real backend/__init__.py inside the stub package so that
+# backend_map always stays in sync with the source of truth. The stub
+# package shadows the real package for these tests; without this, any
+# ``from ...backend import backend_map`` in the real modules would fail
+# with ImportError under the stub. (Submodules such as
+# backend.memcache_backend resolve through the stub package's __path__ and
+# need no special casing.)
+# The scheduler/worker resolve the backend class dynamically via
+# ``importlib.import_module(path)``; tests that exercise those paths patch
+# ``<module>.importlib`` locally (see test_pool_scheduler.py /
+# test_pool_worker.py) so the backend resolves to a MagicMock. Do NOT
+# register the backends in sys.modules or globally wrap import_module here:
+# test_backend.py imports the real backend classes and also relies on
+# ``mock.patch`` (which itself calls importlib.import_module) resolving
 # those real modules.
-_backend_module_paths = {
-    "mooncake": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
-    "memcache": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
-    "yuanrong": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend",
-}
-_backend_pkg.backend_map = {  # type: ignore[attr-defined]
-    "mooncake": {"name": "MooncakeBackend", "path": _backend_module_paths["mooncake"]},
-    "memcache": {"name": "MemcacheBackend", "path": _backend_module_paths["memcache"]},
-    "yuanrong": {"name": "YuanrongBackend", "path": _backend_module_paths["yuanrong"]},
-}
+_backend_init_path = os.path.join(_backend_pkg.__path__[0], "__init__.py")  # type: ignore[attr-defined]
+with open(_backend_init_path, encoding="utf-8") as _backend_init_file:
+    exec(compile(_backend_init_file.read(), _backend_init_path, "exec"), vars(_backend_pkg))  # type: ignore[arg-type]
 
 if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
     _ascend_utils = MagicMock()
