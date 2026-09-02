@@ -51,6 +51,7 @@
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
+#include "attention/vector_paged_attention/vector_paged_attention_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
@@ -2703,5 +2704,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_msa_index_score", torch::kPrivateUse1,
              &vllm_ascend::npu_msa_index_score);
+
+    ops.def(
+        "npu_vector_paged_attention("
+        "Tensor query, Tensor key_cache, Tensor value_cache, "
+        "Tensor block_table, Tensor seq_lens, *, "
+        "int num_kv_heads, float scale) -> Tensor"
+    );
+    ops.impl("npu_vector_paged_attention", torch::kPrivateUse1,
+             &vllm_ascend::npu_vector_paged_attention);
 }
 #endif
