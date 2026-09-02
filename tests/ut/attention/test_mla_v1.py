@@ -196,6 +196,7 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     impl.kv_lora_rank = 2
     impl.qk_rope_head_dim = 1
     impl.fa_quant_layer = False
+    impl.support_fp8_attention = False
     kv = torch.arange(9, dtype=torch.float32).view(3, 3)
     cos = torch.tensor([[1.0], [2.0], [1.0]])
     sin = torch.tensor([[3.0], [4.0], [0.0]])
@@ -212,10 +213,6 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
         patch(
             "vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache",
             side_effect=fake_kv_cache,
-        ),
-        patch(
-            "vllm_ascend.attention.mla_v1.get_ascend_device_type",
-            return_value=None,
         ),
     ):
         k_pe, k_nope = impl.exec_kv_prefill(
