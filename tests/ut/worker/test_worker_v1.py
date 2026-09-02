@@ -954,6 +954,41 @@ class TestNPUWorker(TestBase):
             self.assertEqual(result, expected_result)
             worker._apply_kv_offload_decode_memory_constraints.assert_called_once_with(expected_result)
 
+    @patch("vllm_ascend.worker.worker.maybe_apply_startup_plan")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.memory_profiling")
+    def test_determine_available_memory_applies_startup_plan_before_fast_path(
+        self,
+        mock_memory_profiling,
+        mock_get_ascend_config,
+        mock_apply_startup_plan,
+    ):
+        """A startup-plan hit must select the existing KV-cache fast path."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        planned_kv_cache_memory = 4 << 30
+        mock_get_ascend_config.return_value.sparse_kv_offload_config.enabled = False
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.vllm_config = MagicMock(kv_transfer_config=None)
+            worker.cache_config = MagicMock()
+            worker.cache_config.kv_cache_memory_bytes = None
+            worker.init_snapshot = MagicMock(free_memory=8 << 30)
+            worker.model_runner = MagicMock()
+
+            def apply_plan(target_worker):
+                target_worker.cache_config.kv_cache_memory_bytes = planned_kv_cache_memory
+
+            mock_apply_startup_plan.side_effect = apply_plan
+
+            result = worker.determine_available_memory()
+
+            mock_apply_startup_plan.assert_called_once_with(worker)
+            mock_memory_profiling.assert_not_called()
+            worker.model_runner.profile_run.assert_called_once()
+            self.assertEqual(result, planned_kv_cache_memory)
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("vllm_ascend.worker.worker.torch.npu.reset_peak_memory_stats")
@@ -1515,6 +1550,58 @@ class TestNPUWorker(TestBase):
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
             mock_kernel_warmup.assert_called_once_with(worker)
+
+    def test_compile_or_warm_up_model_saves_startup_plan_after_graph_capture(self):
+        """The persisted budget must include the measured NPU graph memory."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        requested_memory = 10 << 30
+        model_memory = 2 << 30
+        peak_activation_memory = 1 << 30
+        non_torch_memory = 512 << 20
+        npugraph_memory = 256 << 20
+        redundancy_buffer = 150 << 20
+        expected_kv_cache_memory = (
+            requested_memory
+            - (model_memory + peak_activation_memory + non_torch_memory + npugraph_memory)
+            - redundancy_buffer
+        )
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+            patch("vllm_ascend.worker.worker.maybe_save_startup_plan") as mock_save_startup_plan,
+            patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_ascend_config,
+            patch("vllm_ascend.worker.worker.get_current_hardware_profile") as mock_get_hardware_profile,
+            patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb"),
+            patch("vllm_ascend.worker.worker.set_random_seed"),
+            patch("vllm_ascend.worker.worker.torch.npu.memory_reserved", return_value=0),
+            patch("vllm_ascend.worker.worker.torch.npu.memory_allocated", return_value=0),
+        ):
+            mock_get_ascend_config.return_value.enable_cpu_binding = False
+            mock_get_hardware_profile.return_value.supports.return_value = False
+
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.model_runner.model_memory_usage = model_memory
+            worker.model_runner.capture_model.return_value = npugraph_memory
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.compile_sizes = []
+            worker.vllm_config.compilation_config.cudagraph_capture_sizes = []
+            worker.vllm_config.compilation_config.get_compile_ranges.return_value = []
+            worker.model_config = MagicMock(enforce_eager=False, seed=1234)
+            worker.cache_config = MagicMock(kv_cache_memory_bytes=None, gpu_memory_utilization=0.9)
+            worker.init_snapshot = MagicMock(free_memory=12 << 30, total_memory=16 << 30)
+            worker.requested_memory = requested_memory
+            worker.available_kv_cache_memory_bytes = requested_memory - model_memory
+            worker.peak_activation_memory = peak_activation_memory
+            worker.non_torch_memory = non_torch_memory
+
+            worker.compile_or_warm_up_model()
+
+            mock_kernel_warmup.assert_called_once_with(worker)
+            worker.model_runner.capture_model.assert_called_once()
+            mock_save_startup_plan.assert_called_once_with(worker, expected_kv_cache_memory)
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
