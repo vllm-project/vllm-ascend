@@ -439,10 +439,13 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
 
 def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
     specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=4)
+    for name, spec in list(specs.items()):
+        if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
+            specs[name] = replace(spec, page_size_padded=122112)
 
     unified = _unify_kv_cache_spec_page_size(specs)
 
-    assert unified is specs
+    assert unified is not specs
     assert {spec.block_size for spec in unified.values()} == {384}
     assert {
         spec.page_size_bytes

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
+from dataclasses import replace
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
@@ -217,14 +218,33 @@ def _get_kv_cache_groups_uniform_page_size(
 def _unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
-    """Keep K3's deliberately non-rectangular target/draft page layout."""
-    if any(
-        isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
-        for spec in kv_cache_spec.values()
-    ):
-        groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(kv_cache_spec)
-        if groups is not None:
-            return kv_cache_spec
+    """Align each replicated draft lane, preserving non-rectangular pages."""
+    replicated_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
+    }
+    if replicated_specs:
+        base_page_sizes = {
+            spec.page_size_bytes
+            for name, spec in kv_cache_spec.items()
+            if name not in replicated_specs
+        }
+        if len(base_page_sizes) == 1:
+            base_page_size = next(iter(base_page_sizes))
+            aligned_specs = {
+                name: (
+                    replace(spec, page_size_padded=base_page_size)
+                    if name in replicated_specs
+                    else spec
+                )
+                for name, spec in kv_cache_spec.items()
+            }
+            if (
+                _get_kimi_k3_dspark_mixed_kv_cache_groups(aligned_specs)
+                is not None
+            ):
+                return aligned_specs
     return _orig_unify_kv_cache_spec_page_size(kv_cache_spec)
 
 
