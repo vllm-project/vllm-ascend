@@ -109,7 +109,11 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    allocate_kv_cache,
+    select_common_block_size,
+)
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -3994,10 +3998,32 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        if kv_cache_config.kv_cache_tensors and hasattr(
+            kv_cache_config.kv_cache_tensors[0], "layers"
+        ):
+            # Current vLLM describes every layer as a strided view into one
+            # standardized backing allocation. Reuse the core allocator so
+            # layer/block strides and offsets remain authoritative instead of
+            # interpreting the removed legacy ``shared_by`` field.
+            kernel_block_sizes = [
+                int(size[0] if isinstance(size, (list, tuple)) else size)
+                for size in self.kernel_block_sizes
+            ]
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                kernel_block_sizes,
+            )
+        else:
+            # Compatibility path for release lines that still expose the
+            # legacy shared-allocation descriptor.
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(
+                kv_cache_config
+            )
+            kv_caches = self._reshape_kv_cache_tensors(
+                kv_cache_config, kv_cache_raw_tensors
+            )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -4026,6 +4052,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.compilation_config.static_forward_context,
                 self.kv_caches,
                 num_attn_module,
+                kv_cache_groups=kv_cache_config.kv_cache_groups,
             )
 
         return kv_caches

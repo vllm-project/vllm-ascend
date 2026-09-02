@@ -285,6 +285,53 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
+    def test_initialize_uses_standardized_strided_kv_layout(self):
+        runner = self._build_runner()
+        runner.cache_config = MagicMock()
+        runner.cache_config.get_resolved_kv_cache_layout.return_value = "LBNHC"
+        runner.kernel_block_sizes = [[16]]
+        runner.shared_kv_cache_layers = {}
+        runner.model_config.hf_text_config.model_type = "glm4"
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
+        runner.kv_caches = []
+
+        kv_cache_tensor = SimpleNamespace(
+            size=128,
+            layers=["model.layers.0.self_attn"],
+            layer_stride=128,
+            block_stride=64,
+            offset=0,
+        )
+        kv_cache_config = SimpleNamespace(
+            kv_cache_tensors=[kv_cache_tensor],
+            kv_cache_groups=[SimpleNamespace(layer_names=kv_cache_tensor.layers)],
+        )
+        allocated = {kv_cache_tensor.layers[0]: torch.empty(1)}
+
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1.allocate_kv_cache",
+                return_value=allocated,
+            ) as allocate,
+            patch("vllm.v1.worker.utils.bind_kv_cache") as bind,
+        ):
+            result = runner.initialize_kv_cache_tensors(kv_cache_config)
+
+        self.assertIs(result, allocated)
+        allocate.assert_called_once_with(
+            kv_cache_config,
+            runner.device,
+            "LBNHC",
+            [16],
+        )
+        bind.assert_called_once_with(
+            allocated,
+            runner.compilation_config.static_forward_context,
+            runner.kv_caches,
+            1,
+            kv_cache_groups=kv_cache_config.kv_cache_groups,
+        )
+
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         runner.sparse_kv_offload_enabled = False
