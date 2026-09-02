@@ -39,6 +39,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
     _get_kimi_k3_replicated_dspark_kv_cache_config,
     _get_kv_cache_config_deepseek_v4,
+    _unify_kv_cache_spec_page_size,
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
@@ -434,6 +435,20 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
     assert sum(tensor.size for tensor in config.kv_cache_tensors) == (
         bytes_per_block * expected_num_blocks
     )
+
+
+def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
+    specs = _make_kimi_k3_dspark_kv_cache_specs(draft_replication_size=4)
+
+    unified = _unify_kv_cache_spec_page_size(specs)
+
+    assert unified is specs
+    assert {spec.block_size for spec in unified.values()} == {384}
+    assert {
+        spec.page_size_bytes
+        for spec in unified.values()
+        if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
+    } == {4 * 488448}
 
 
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
