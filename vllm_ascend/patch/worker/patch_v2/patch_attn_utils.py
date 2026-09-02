@@ -72,6 +72,15 @@ def _allocate_kv_cache_for_ascend(*args, **kwargs):
             kv_cache[..., :k_dim],
             kv_cache[..., k_dim : k_dim + v_dim],
         )
+    logger.warning(
+        "Ascend MRV2 KV cache allocation result: %s",
+        {
+            layer_name: tuple(item.shape for item in kv_cache)
+            if isinstance(kv_cache, tuple)
+            else tuple(kv_cache.shape)
+            for layer_name, kv_cache in list(kv_caches.items())[:1]
+        },
+    )
     return kv_caches
 
 
