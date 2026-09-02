@@ -615,8 +615,6 @@ jobs:
 
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
-    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
@@ -634,6 +632,7 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
 
   # Summary gate job — use this single, stable name as the required status check
