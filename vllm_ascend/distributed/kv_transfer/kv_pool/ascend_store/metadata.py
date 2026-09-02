@@ -115,7 +115,7 @@ class PoolKey:
     def to_string(self):
         return (
             f"{self.key_metadata.model_name}"
-            f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
+            f"@pcp:{self.key_metadata.pcp_rank}@dcp:{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
             f"@pp_rank:{self.key_metadata.pp_rank}"
             f"@group:{self.key_metadata.kv_cache_group_id}"
@@ -162,7 +162,7 @@ class LayerPoolKey(PoolKey):
     def to_string(self):
         return (
             f"{self.key_metadata.model_name}"
-            f"@pcp{self.key_metadata.pcp_rank}@dcp{self.key_metadata.dcp_rank}"
+            f"@pcp:{self.key_metadata.pcp_rank}@dcp:{self.key_metadata.dcp_rank}"
             f"@head_or_tp_rank:{self.key_metadata.head_or_tp_rank}"
             f"@group:{self.key_metadata.kv_cache_group_id}"
             f"@cache_role:{self.key_metadata.cache_role}"
@@ -327,7 +327,7 @@ class ChunkedTokenDatabase:
             group_metadata = self.metadata[kv_cache_group_id]
             prefix = (
                 f"{group_metadata.model_name}"
-                f"@pcp{group_metadata.pcp_rank}@dcp{group_metadata.dcp_rank}"
+                f"@pcp:{group_metadata.pcp_rank}@dcp:{group_metadata.dcp_rank}"
                 f"@head_or_tp_rank:{group_metadata.head_or_tp_rank}"
                 f"@pp_rank:{group_metadata.pp_rank}"
                 f"@group:{kv_cache_group_id}"
