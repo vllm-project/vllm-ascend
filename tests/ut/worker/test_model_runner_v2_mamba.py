@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -65,8 +66,117 @@ def _group(spec: MambaSpec):
 
 def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
-    assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
+    # preprocess_state is overridden on Ascend to defer the align pre-copy
+    # behind layerwise KV pool loads; postprocess stays upstream.
+    assert AscendMambaHybridModelState.preprocess_state is not MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+
+
+def _make_defer_state(kv_cache_config):
+    """Build an AscendMambaHybridModelState without running __init__."""
+    state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    state.model = SimpleNamespace(get_mamba_state_copy_func=lambda: (MagicMock(), MagicMock()))
+    state._align_mode = True
+    state._mamba_group_ids = [0]
+    state._mamba_spec = _mamba_spec()
+    state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32)
+    state._mamba_src_col_gpu = torch.full((4,), -1, dtype=torch.int32)
+    state._mamba_src_off_gpu = torch.zeros(4, dtype=torch.int32)
+    state._mamba_ctx = None
+    state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
+    state._layerwise_mamba_copy = None
+    state._layer_state_ranges = None
+    state._layer_state_ranges = state._get_layer_state_ranges(kv_cache_config)
+    return state
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.preprocess_mamba_align_fused_kernel")
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.get_kv_transfer_group")
+@patch(
+    "vllm_ascend.worker.v2.model_states.mamba_hybrid.has_kv_transfer_group",
+    return_value=True,
+)
+def test_layerwise_connector_defers_mamba_pre_copy(mock_has_group, mock_get_group, mock_decision_kernel):
+    connector = SimpleNamespace(
+        prepare_mamba_state_copy=MagicMock(return_value=True),
+        finish_mamba_state_copy=MagicMock(),
+    )
+    mock_get_group.return_value = connector
+    spec = _mamba_spec()
+    kv_cache_config = _kv_cache_config(spec)
+    state = _make_defer_state(kv_cache_config)
+    ctx = MagicMock()
+    state._ensure_align_ctx = MagicMock(return_value=ctx)
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=torch.arange(2, dtype=torch.int32),
+        query_start_loc=torch.zeros(3, dtype=torch.int32),
+    )
+    num_computed = torch.zeros(4, dtype=torch.int32)
+
+    state.preprocess_state(input_batch, (), kv_cache_config, num_computed)
+
+    # Decision kernel still runs; the bulk pre-copy launch is skipped.
+    mock_decision_kernel.__getitem__.assert_called_once()
+    ctx.run_fused_precopy.assert_not_called()
+    connector.prepare_mamba_state_copy.assert_called_once_with(state)
+    assert state._layerwise_mamba_copy is not None
+    assert state._layerwise_mamba_copy.pending_layers == {"linear_attn"}
+
+    # Next step's preprocess validates every deferred layer executed.
+    with patch("vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel"):
+        state.do_mamba_copy_for_layer("linear_attn")
+    state.preprocess_state(input_batch, (), kv_cache_config, num_computed)
+    connector.finish_mamba_state_copy.assert_called_once()
+
+
+@patch("vllm.v1.worker.mamba_utils.precopy_mamba_align_fused_kernel")
+def test_do_mamba_copy_for_layer_launches_one_sliced_kernel(mock_precopy_kernel):
+    spec = _mamba_spec()
+    kv_cache_config = _kv_cache_config(spec)
+    state = _make_defer_state(kv_cache_config)
+    ctx = MagicMock()
+    state._layerwise_mamba_copy = SimpleNamespace(
+        ctx=ctx,
+        num_reqs=2,
+        idx_mapping=torch.arange(2, dtype=torch.int32),
+        pending_layers={"linear_attn"},
+    )
+
+    # Non-mamba layers and repeats are no-ops.
+    state.do_mamba_copy_for_layer("layers.0.self_attn")
+    mock_precopy_kernel.__getitem__.assert_not_called()
+    state.do_mamba_copy_for_layer("linear_attn")
+    state.do_mamba_copy_for_layer("linear_attn")
+    mock_precopy_kernel.__getitem__.assert_called_once_with((2, 2))
+
+    # The kernel sees one layer's (layer, state-type) metadata rows per
+    # request row: grid == (num_reqs, num_state_types).
+    launch = mock_precopy_kernel.__getitem__.return_value
+    launch.assert_called_once()
+    _, kwargs = launch.call_args
+    assert kwargs["COPY_BLOCK_SIZE"] == 1024
+    assert kwargs["HAS_IDX_MAPPING"] is True
+    assert state._layerwise_mamba_copy.pending_layers == set()
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.get_kv_transfer_group")
+def test_deferred_copy_missing_layer_raises(mock_get_group):
+    mock_get_group.return_value = SimpleNamespace(
+        finish_mamba_state_copy=MagicMock(),
+    )
+    spec = _mamba_spec()
+    kv_cache_config = _kv_cache_config(spec)
+    state = _make_defer_state(kv_cache_config)
+    state._layerwise_mamba_copy = SimpleNamespace(
+        ctx=MagicMock(),
+        num_reqs=1,
+        idx_mapping=torch.arange(1, dtype=torch.int32),
+        pending_layers={"linear_attn"},
+    )
+
+    with pytest.raises(RuntimeError, match="linear_attn"):
+        state._finish_previous_layerwise_mamba_copy()
 
 
 def test_prepare_inputs_propagates_padded_request_count():
