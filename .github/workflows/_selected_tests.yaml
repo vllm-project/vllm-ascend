@@ -2,26 +2,34 @@ name: Selected Tests
 on:
   workflow_call:
     inputs:
-      vllm:
-        description: vllm version string
-        required: true
-        type: string
-      ref:
-        description: PR head commit sha
-        required: true
-        type: string
       base_ref:
-        description: target base branch name (e.g. releases/v0.23.0)
-        required: true
+        required: false
         type: string
       base_sha:
-        description: base commit sha for rebase, REQUIRED for NPU runs
-        required: true
+        required: false
+        type: string
+      ref:
+        required: false
         type: string
       test_groups:
-        description: test groups json string
-        required: true
+        required: false
         type: string
+      vllm:
+        required: false
+        type: boolean
+      # ========== 新增下面3个，把参数加回来 ==========
+      upload_timing:
+        required: false
+        type: boolean
+        default: false
+      timeout-minutes:
+        required: false
+        type: number
+        default: 60
+      enable-coverage:
+        required: false
+        type: boolean
+        default: false
     secrets:
       OBS_ACCESS_KEY_PRECISION:
         required: false
@@ -62,7 +70,7 @@ jobs:
           TEST_GROUPS: ${{ inputs.test_groups }}
 
   run_shards:
-    name: test-shard-${{ matrix.npu_type }}
+    name: test-shard-${{ matrix.entry.npu_type }}
     needs: dispatch
     strategy:
       fail-fast: false
