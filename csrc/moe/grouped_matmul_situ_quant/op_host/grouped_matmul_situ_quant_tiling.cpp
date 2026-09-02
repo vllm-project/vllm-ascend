@@ -26,12 +26,26 @@ ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
     const auto *xShape = context->GetInputShape(INPUT_X_INDEX);
     const auto *weightShape = context->GetInputShape(INPUT_WEIGHT_INDEX);
     if (xShape == nullptr || weightShape == nullptr) {
+        OP_LOGE(context->GetNodeName(),
+                "[gmsq_tiling] FAIL: null shape ptr (x=%p weight=%p)",
+                static_cast<const void *>(xShape), static_cast<const void *>(weightShape));
         return ge::GRAPH_FAILED;
     }
 
     const auto &xOriginShape = xShape->GetOriginShape();
     const auto &weightOriginShape = weightShape->GetOriginShape();
+    OP_LOGI(context->GetNodeName(),
+            "[gmsq_tiling] enter: xDim=%zu xDims=[%ld,%ld] wDim=%zu wDim0=%ld wShapeSize=%ld",
+            xOriginShape.GetDimNum(),
+            xOriginShape.GetDimNum() > 0 ? xOriginShape.GetDim(0) : -1,
+            xOriginShape.GetDimNum() > 1 ? xOriginShape.GetDim(1) : -1,
+            weightOriginShape.GetDimNum(),
+            weightOriginShape.GetDimNum() > 0 ? weightOriginShape.GetDim(0) : -1,
+            weightOriginShape.GetShapeSize());
     if (xOriginShape.GetDimNum() != 2 || weightOriginShape.GetDimNum() < 1) {
+        OP_LOGE(context->GetNodeName(),
+                "[gmsq_tiling] FAIL: xDim=%zu (want 2), wDim=%zu (want >=1)",
+                xOriginShape.GetDimNum(), weightOriginShape.GetDimNum());
         return ge::GRAPH_FAILED;
     }
 
@@ -39,21 +53,31 @@ ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
     const int64_t expertCount = weightOriginShape.GetDim(0);
     const int64_t packedWeightElements = weightOriginShape.GetShapeSize();
     if (k <= 0 || expertCount <= 0 || k % 64 != 0) {
+        OP_LOGE(context->GetNodeName(),
+                "[gmsq_tiling] FAIL: k=%ld E=%ld (k%%64=%ld)", k, expertCount, k % 64);
         return ge::GRAPH_FAILED;
     }
 
     const int64_t packedElementsPerColumn = expertCount * (k / 2);
     if (packedElementsPerColumn <= 0 || packedWeightElements % packedElementsPerColumn != 0) {
+        OP_LOGE(context->GetNodeName(),
+                "[gmsq_tiling] FAIL: weight packed=%ld perCol=%ld rem=%ld",
+                packedWeightElements, packedElementsPerColumn,
+                packedWeightElements % packedElementsPerColumn);
         return ge::GRAPH_FAILED;
     }
     const int64_t n = packedWeightElements / packedElementsPerColumn;
     const int64_t n2 = n / 2;
     if (n <= 0 || n % 2 != 0 || n2 % MAIN_BLOCK_N2 != 0) {
+        OP_LOGE(context->GetNodeName(),
+                "[gmsq_tiling] FAIL: n=%ld n%%2=%ld n2=%ld n2%%%u=%ld", n, n % 64, n2,
+                MAIN_BLOCK_N2, n2 % MAIN_BLOCK_N2);
         return ge::GRAPH_FAILED;
     }
 
     const auto *attrs = context->GetAttrs();
     if (attrs == nullptr) {
+        OP_LOGE(context->GetNodeName(), "[gmsq_tiling] FAIL: attrs is null");
         return ge::GRAPH_FAILED;
     }
     const auto *groupListType = attrs->GetAttrPointer<int64_t>(ATTR_GROUP_LIST_TYPE_INDEX);
@@ -61,12 +85,20 @@ ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
     const auto *linearBeta = attrs->GetAttrPointer<float>(ATTR_LINEAR_BETA_INDEX);
     if (groupListType == nullptr || beta == nullptr || linearBeta == nullptr ||
         (*groupListType != 0 && *groupListType != 1) || *beta == 0.0f || *linearBeta == 0.0f) {
+        OP_LOGE(context->GetNodeName(),
+                "[gmsq_tiling] FAIL: attrs glt=%ld beta=%f linearBeta=%f (ptr nulls: %d/%d/%d)",
+                groupListType ? *groupListType : -999, beta ? *beta : -999.0f,
+                linearBeta ? *linearBeta : -999.0f, groupListType == nullptr, beta == nullptr,
+                linearBeta == nullptr);
         return ge::GRAPH_FAILED;
     }
 
     const auto platform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     const uint32_t coreNum = std::max<uint32_t>(1, platform.GetCoreNumAic());
 
+    // The executor's tiling buffer is a growable container (initial capacity is
+    // a small default); Append() expands it and tracks the data size, whereas
+    // writing through GetTilingData<T>() fails while capacity is still 8 bytes.
     gmm_situ::SituTilingHeader tiling = {};
     tiling.coreNum = coreNum;
     tiling.activeCount = static_cast<uint32_t>(expertCount);
@@ -84,12 +116,17 @@ ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
     tiling.invLinearBeta = 1.0f / *linearBeta;
 
     auto *rawTiling = context->GetRawTilingData();
-    if (rawTiling == nullptr || rawTiling->GetCapacity() < sizeof(tiling)) {
+    if (rawTiling == nullptr || rawTiling->Append(tiling) != ge::GRAPH_SUCCESS) {
+        OP_LOGE(context->GetNodeName(),
+                "[gmsq_tiling] FAIL: Append header failed (rawTiling=%p cap=%zu need=%zu)",
+                static_cast<void *>(rawTiling),
+                rawTiling ? rawTiling->GetCapacity() : 0, sizeof(tiling));
         return ge::GRAPH_FAILED;
     }
-    std::memcpy(rawTiling->GetData(), &tiling, sizeof(tiling));
-    rawTiling->SetDataSize(sizeof(tiling));
 
+    OP_LOGI(context->GetNodeName(),
+            "[gmsq_tiling] OK: k=%ld E=%ld n=%ld n2=%ld glt=%ld beta=%f lBeta=%f cores=%u",
+            k, expertCount, n, n2, *groupListType, *beta, *linearBeta, coreNum);
     context->SetTilingKey(0);
     context->SetBlockDim(coreNum);
     context->GetWorkspaceSizes(1)[0] = platform.GetLibApiWorkSpaceSize();

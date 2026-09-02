@@ -131,6 +131,30 @@ def to_weight_nz_list(w_nd: torch.Tensor) -> list[torch.Tensor]:
 
 WeightType = torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]
 
+def _align_weight_scale(t: torch.Tensor) -> torch.Tensor:
+    """Restore the contiguous N-major view of an MX weight scale (zero-copy).
+
+    The loader stores scales as N-major base bytes ([E, N, kb, 2] — the order
+    the kernel addresses: ``swishNOffset = nOffset * (K/64)``) and hands the op
+    the transposed logical view (E, kb, N, 2).  ``transpose(-3, -2)`` relabels
+    that view back onto its contiguous base: same data_ptr, same byte order,
+    and aclnn accepts it as contiguous.
+
+    Materializing with ``.contiguous()`` is wrong twice over: it reorders the
+    bytes into kb-major (scrambling per-channel scales), and the resulting E8M0
+    copy dispatches an AICPU Transpose that CANN does not implement for
+    DT_FLOAT8_E8M0FN — an async aicpu exception (507018) that kills the stream
+    and is attributed to whatever op runs next.
+    """
+    t = t.transpose(-3, -2)
+    if not t.is_contiguous():
+        raise ValueError(
+            "weight_scale must be the loader's (E, kb, N, 2) transposed view of "
+            "N-major bytes, or an already-contiguous N-major (E, N, kb, 2) "
+            f"tensor; got shape {tuple(t.shape)} strides {tuple(t.stride())}"
+        )
+    return t
+
 
 def _restore_mxfp_semantic_dtype(tensors: WeightType, semantic_dtype: torch.dtype) -> WeightType:
     """View byte-backed MX tensors with the dtype required by ACLNN.
@@ -183,7 +207,12 @@ def grouped_matmul_situ_quant(
                     (e.g. ``[to_weight_nz(w[ei:ei+1])[0] ...]``) — slicing a
                     stacked NZ tensor yields non-contiguous internal-format
                     views the entry-layer cast rejects.
-        weight_scale: e8m0 (E, ceil(K/64), N, 2), stacked or per-expert list.
+        weight_scale: e8m0 MX scales, stacked or per-expert list, in either the
+            loader's transposed logical view (E, ceil(K/64), N, 2) of N-major
+            bytes (non-contiguous; realigned zero-copy here) or an already
+            contiguous N-major (E, N, ceil(K/64), 2) tensor.  The kernel reads
+            N-major physical bytes — a kb-major contiguous tensor is silently
+            wrong and cannot be detected here.
         group_list: int64 (E,) **device** tensor; type1 = per-expert row
             counts, type0 = cumsum.  Device-side decode keeps the op
             graph-capturable (torch.npu.graph replay reads current values).
@@ -209,8 +238,25 @@ def grouped_matmul_situ_quant(
     # "shape '[296]' is invalid for input of size <N>".
     weight = _restore_mxfp_semantic_dtype(weight, torch.float4_e2m1fn_x2)
     weight_scale = _restore_mxfp_semantic_dtype(weight_scale, torch.float8_e8m0fnu)
+    # dynamic_scale arrives from upstream quant as raw uint8 bytes (ND); the
+    # split chain covers this with the per_token_scale_dtype kwarg, but the
+    # fused op has no such argument, so aclnn would reject DT_UINT8 (EZ1009).
+    x_scale = _restore_mxfp_semantic_dtype(x_scale, torch.float8_e8m0fnu)
 
     is_list = isinstance(weight, (list, tuple))
+    # aclnn rejects non-contiguous MX inputs (EZ1009 family), so hand it views
+    # whose metadata matches their bytes — zero-copy relabelings, never copies:
+    #  - weight: transpose back to the cast-order view — same NZ storage/bytes,
+    #    and both tiling and kernel derive geometry from numel + dim0 only;
+    #  - weight_scale: restore the contiguous N-major view (see
+    #    _align_weight_scale — .contiguous() here scrambles bytes AND crashes
+    #    the stream on an unsupported AICPU E8M0 Transpose).
+    if not is_list and not weight.is_contiguous():
+        weight = weight.transpose(1, 2)
+    if isinstance(weight_scale, (list, tuple)):
+        weight_scale = [t if t.is_contiguous() else _align_weight_scale(t) for t in weight_scale]
+    elif not weight_scale.is_contiguous():
+        weight_scale = _align_weight_scale(weight_scale)
     op = (
         torch.ops._C_ascend.grouped_matmul_situ_quant
         if weight_format == "nd"
