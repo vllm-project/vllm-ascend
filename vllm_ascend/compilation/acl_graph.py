@@ -21,6 +21,11 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from .updatable_graph import (
+    SharedSource,
+    ContextSource,
+    UpdatableGraph,
+)
 
 from ..utils import vllm_version_is, weak_ref_tensors
 
@@ -91,6 +96,7 @@ class ACLGraphWrapper:
         *,
         use_eagle: bool = False,
         enable_enpu: bool = False,
+        update_stream: torch.npu.Stream | None = None,
     ):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -114,7 +120,15 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        self.update_stream = update_stream
+        self.draft_update_attn_metadata: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
+
+    def set_update_stream(self, update_stream):
+        self.update_stream = update_stream
+
+    def set_draft_update_attn_metadata(self, update_params: list[dict[str, Any]]):
+        self.draft_update_attn_metadata = update_params
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -162,7 +176,7 @@ class ACLGraphWrapper:
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
-            aclgraph = torch.npu.NPUGraph()
+            aclgraph = UpdatableGraph()
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:
@@ -259,12 +273,35 @@ class ACLGraphWrapper:
         # we do not need to synchronize.
         # When enable_enpu is on, model_runner orders update vs replay; skip here.
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
+        if _EXTRA_CTX.is_draft_model:
+            resolved_tasks = entry.aclgraph.resolve_tasks(
+                SharedSource(self.draft_update_attn_metadata)
+            )
+        else:
+            resolved_tasks = entry.aclgraph.resolve_tasks(
+                ContextSource(forward_context.attn_metadata)
+            )
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-        if not self.enable_enpu and need_sync:
+        if self.enable_enpu or need_sync:
             torch.npu.current_stream().synchronize()
-        entry.aclgraph.replay()
+        if self.enable_enpu:
+            self._maybe_update_full_graph_params(entry.aclgraph, resolved_tasks)
+            entry.aclgraph.replay()
+        else:
+            entry.aclgraph.replay()
+            self._maybe_update_full_graph_params(entry.aclgraph, resolved_tasks)
         return entry.output
+
+    def _maybe_update_full_graph_params(
+        self,
+        graph: UpdatableGraph,
+        resolved_tasks: tuple[Any],
+    ) -> None:
+        if (
+            self.runtime_mode == CUDAGraphMode.FULL
+        ):
+            graph.update(self.update_stream, resolved_tasks)
 
 
 def weak_ref_workspaces(params):
