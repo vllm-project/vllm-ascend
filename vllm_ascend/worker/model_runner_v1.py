@@ -725,11 +725,17 @@ class NPUModelRunner(GPUModelRunner):
         """Whether this runner uses a DCP-sharded K3 target and GQA DSpark."""
         if getattr(self, "dcp_size", 1) <= 1 or not self._draft_uses_qwen3_gqa_dspark():
             return False
-        architectures = getattr(self.model_config, "architectures", ()) or ()
-        if not architectures:
-            hf_config = getattr(self.model_config, "hf_config", None)
-            architectures = getattr(hf_config, "architectures", ()) or ()
-        return any("KimiK3" in architecture for architecture in architectures)
+        hf_config = getattr(self.model_config, "hf_config", None)
+        architectures = {
+            *(getattr(self.model_config, "architectures", ()) or ()),
+            *(getattr(hf_config, "architectures", ()) or ()),
+        }
+        architecture = getattr(self.model_config, "architecture", None)
+        if architecture:
+            architectures.add(architecture)
+        return getattr(hf_config, "model_type", None) == "kimi_k3" or any(
+            "KimiK3" in architecture for architecture in architectures
+        )
 
     def _use_aclgraph(self) -> bool:
         return (

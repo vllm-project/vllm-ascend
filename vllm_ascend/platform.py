@@ -1552,20 +1552,25 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     if draft_model_config is None:
         return
 
-    target_architectures = (
-        getattr(vllm_config.model_config, "architectures", ()) or ()
-    )
-    if not target_architectures:
-        target_architectures = (
-            getattr(vllm_config.model_config.hf_config, "architectures", ())
-            or ()
-        )
-    draft_architectures = (
-        getattr(draft_model_config.hf_config, "architectures", ()) or ()
-    )
+    target_model_config = vllm_config.model_config
+    target_architectures = {
+        *(getattr(target_model_config, "architectures", ()) or ()),
+        *(getattr(target_model_config.hf_config, "architectures", ()) or ()),
+    }
+    target_architecture = getattr(target_model_config, "architecture", None)
+    if target_architecture:
+        target_architectures.add(target_architecture)
+    draft_architectures = {
+        *(getattr(draft_model_config, "architectures", ()) or ()),
+        *(getattr(draft_model_config.hf_config, "architectures", ()) or ()),
+    }
     uses_kimi_k3_gqa_dspark = (
         speculative_config.use_dspark()
-        and any("KimiK3" in arch for arch in target_architectures)
+        and (
+            getattr(target_model_config.hf_config, "model_type", None)
+            == "kimi_k3"
+            or any("KimiK3" in arch for arch in target_architectures)
+        )
         and getattr(draft_model_config.hf_config, "model_type", None) == "qwen3"
         and any(
             architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
@@ -1574,17 +1579,7 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     )
     if uses_kimi_k3_gqa_dspark:
         draft_parallel_config = speculative_config.draft_parallel_config
-        if draft_parallel_config is None:
-            raise ValueError(
-                "Kimi K3 GQA DSpark with target DCP requires a separate "
-                "draft parallel config."
-            )
-        if draft_parallel_config.decode_context_parallel_size != 1:
-            raise ValueError(
-                "Kimi K3 GQA DSpark uses a DCP-replicated draft KV cache; "
-                "the draft decode context parallel size must be 1."
-            )
-        if (
+        if draft_parallel_config is not None and (
             draft_parallel_config.tensor_parallel_size
             != parallel_config.tensor_parallel_size
         ):

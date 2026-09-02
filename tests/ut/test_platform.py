@@ -116,8 +116,12 @@ class TestNPUPlatform(TestBase):
         config = SimpleNamespace(
             parallel_config=target_parallel,
             model_config=SimpleNamespace(
-                architectures=["AscendKimiK3ForConditionalGeneration"],
-                hf_config=SimpleNamespace(architectures=[]),
+                architectures=["KimiLinearForCausalLM"],
+                architecture="KimiK3ForConditionalGeneration",
+                hf_config=SimpleNamespace(
+                    architectures=["KimiK3ForConditionalGeneration"],
+                    model_type="kimi_k3",
+                ),
             ),
             speculative_config=SimpleNamespace(
                 num_speculative_tokens_per_batch_size=None,
@@ -129,8 +133,8 @@ class TestNPUPlatform(TestBase):
 
         _validate_draft_decode_context_parallel_config(config)
 
-        draft_parallel.decode_context_parallel_size = 2
-        with pytest.raises(ValueError, match="draft decode context parallel size"):
+        draft_parallel.tensor_parallel_size = 4
+        with pytest.raises(ValueError, match="draft tensor parallel size"):
             _validate_draft_decode_context_parallel_config(config)
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
 
