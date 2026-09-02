@@ -648,4 +648,3 @@ async def test_single_node(config: SingleNodeConfig) -> None:
         await _run_benchmarks_and_spec_decode(config, server, config.server_port)
         if errors:
             raise errors[0]
-        
