@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-07-29 10:14+0000\n"
+"POT-Creation-Date: 2026-09-02 03:12+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: zh_CN <LL@li.org>\n"
@@ -354,6 +354,14 @@ msgid ""
 msgstr "不支持异构 P 节点和 D 节点，例如在 A2 上运行 P 节点、在 A3 上运行 D 节点。"
 
 #: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:105
+msgid ""
+"P nodes in PD-disaggregated deployments do not support non-default "
+"`max_num_partial_prefills` values. Keep it at the default value of `1`; "
+"other values are ignored and reset to `1`."
+msgstr ""
+"在PD分离部署中，P节点不支持非默认的`max_num_partial_prefills`值。请将其保持为默认值`1`；其他值将被忽略并重置为`1`。"
+
+#: ../../source/developer_guide/Design_Documents/disaggregated_prefill.md:107
 msgid ""
 "In non-symmetric TP configurations, only cases where the P nodes have a "
 "higher TP degree than the D nodes and the P TP count is an integer multiple "
