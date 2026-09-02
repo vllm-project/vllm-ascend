@@ -406,6 +406,32 @@ def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
         assert sum(m.value for m in drafts) > 0, "Requests bypassed speculative decoding"
 
 
+@pytest.mark.parametrize("dcp_size", [1, 2, 4, 8])
+def test_k3_gqa_dcp_replicated_draft_kv(k3_models: dict[str, str], dcp_size: int) -> None:
+    args = _engine_args(k3_models, "gqa")
+    args["decode_context_parallel_size"] = dcp_size
+    args["enforce_eager"] = True
+    args.pop("compilation_config")
+    with VllmRunner(k3_models["target"], **args) as runner:
+        llm = runner.model
+        # Exercise the first token, block boundaries, chunked prefill, and the
+        # last block-table columns while the target cache is DCP-sharded and
+        # every draft-DCP lane addresses a replicated physical cache range.
+        _generate(llm, [_prompt(length, salt=i * 137) for i, length in enumerate((1, 127, 128, 129, 769))])
+        _generate(llm, [_prompt(MAX_MODEL_LEN - OUTPUT_TOKENS, salt=911)])
+
+        prefix = _prompt(1153, salt=421)
+        assert llm.reset_prefix_cache()
+        cold = _generate(llm, [prefix])[0]
+        warm = _generate(llm, [prefix])[0]
+        assert cold.num_cached_tokens == 0
+        assert warm.num_cached_tokens > 0, "Repeated prompt did not reuse the hybrid prefix cache"
+
+        drafts = [m for m in llm.get_metrics() if m.name == "vllm:spec_decode_num_drafts"]
+        assert drafts and all(isinstance(m, Counter) for m in drafts)
+        assert sum(m.value for m in drafts) > 0, "Requests bypassed speculative decoding"
+
+
 def _serve_args(args: dict) -> list[str]:
     result = [
         "--served-model-name",
