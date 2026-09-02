@@ -80,10 +80,10 @@ def test_minimax_m3_eagle3_acceptance_tp8(
         },
         expected_acceptance_length=expected_acceptance_length,
         runner_kwargs={
-+           "tensor_parallel_size": 8,
-+           "max_model_len": 8192,
-+           "max_num_batched_tokens": 4096,
-+           "enforce_eager": True,
+            "tensor_parallel_size": 8,
+            "max_model_len": 8192,
+            "max_num_batched_tokens": 4096,
+            "enforce_eager": True,
             "additional_config": additional_config,
         },
     )
