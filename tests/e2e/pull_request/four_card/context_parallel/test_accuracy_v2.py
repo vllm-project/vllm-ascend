@@ -171,7 +171,10 @@ DSV3_2_SFA_PCP_CASE = AccuracyCase(
         "cp_kv_cache_interleave_size": 128,
         "block_size": 128,
         "quantization": "ascend",
-        "compilation_config": {"cudagraph_mode": "NONE"},
+        "compilation_config": {
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": [len(COMMON_PROMPTS)],
+        },
     },
 )
 
