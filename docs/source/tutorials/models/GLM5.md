@@ -31,7 +31,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
+If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect) guide for communication verification.
 
 ## 4 Installation
 
@@ -117,13 +117,13 @@ You can use our official docker image to run GLM-5/5.1 directly.
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-To verify the successful installation of the environment, please refer to [installation](../../installation.md).
+To verify the successful installation of the environment, please refer to [installation](../../getting_started/installation.md).
 
 ### 4.2 Source Code Installation
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -266,7 +266,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 ### 5.2 Multi-node Deployment
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 

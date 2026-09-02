@@ -29,6 +29,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
@@ -66,6 +67,11 @@ from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.pp_utils import (
+    bypass_upstream_spec_pp_guard,
+    resolve_spec_pp_support,
+    restore_pp_after_upstream_init,
+)
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
@@ -108,14 +114,19 @@ class NPUModelRunner(GPUModelRunner):
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
         parallel_config = vllm_config.parallel_config
-        if parallel_config.decode_context_parallel_size > 1:
-            raise NotImplementedError("Decode context parallelism is not supported by Ascend NPU model runner v2.")
 
+        # Eagle3/DSpark drafters are rank-local. Hide PP from the upstream
+        # initializer, then rebuild the skipped PP state.
+        spec_pp_support = resolve_spec_pp_support(vllm_config)
         with torch_cuda_wrapper():
-            super().__init__(vllm_config, device)
-        self.use_spec_pp = (
-            self.use_pp and self.speculative_config is not None and self.speculative_config.method == "mtp"
-        )
+            with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support) as pp_disabled:
+                super().__init__(vllm_config, device)
+            if pp_disabled:
+                restore_pp_after_upstream_init(self, vllm_config)
+        self.use_spec_pp = spec_pp_support is not None
+        # These draft heads consume target aux states collected across PP ranks.
+        if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
+            self.use_aux_hidden_state_outputs = True
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -414,6 +425,18 @@ class NPUModelRunner(GPUModelRunner):
             # Pad for full CUDA graph mode.
             self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
+            dcp_local_seq_lens = None
+            if self.use_dcp:
+                prepare_dcp_local_seq_lens(
+                    self.input_buffers.dcp_local_seq_lens,
+                    self.input_buffers.seq_lens,
+                    num_reqs,
+                    self.dcp_size,
+                    self.dcp_rank,
+                    self.cp_interleave,
+                )
+                dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
+
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
             logits_indices = combine_sampled_and_draft_tokens(
@@ -467,7 +490,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc_np=query_start_loc_np,
                 seq_lens=seq_lens,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
+                dcp_local_seq_lens=dcp_local_seq_lens,
                 is_prefilling_np=is_prefilling_np,
                 num_computed_tokens_np=num_computed_tokens_np,
                 prefill_len_np=prefill_len_np,
@@ -622,6 +645,18 @@ class NPUModelRunner(GPUModelRunner):
             # Pad for full CUDA graph mode.
             self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
+            dcp_local_seq_lens = None
+            if self.use_dcp:
+                prepare_dcp_local_seq_lens(
+                    self.input_buffers.dcp_local_seq_lens,
+                    self.input_buffers.seq_lens,
+                    num_reqs,
+                    self.dcp_size,
+                    self.dcp_rank,
+                    self.cp_interleave,
+                )
+                dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
+
             # Some input token ids are directly read from the last sampled tokens
             # and draft tokens. Also, get the logits indices to sample tokens from.
             logits_indices = combine_sampled_and_draft_tokens(
@@ -675,7 +710,7 @@ class NPUModelRunner(GPUModelRunner):
                 query_start_loc_np=query_start_loc_np,
                 seq_lens=seq_lens,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
+                dcp_local_seq_lens=dcp_local_seq_lens,
                 num_computed_tokens_np=num_computed_tokens_np,
                 prefill_len_np=batch_req_state.prefill_len_np,
                 num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,

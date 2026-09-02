@@ -97,9 +97,14 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
+        parallel_config = replace(
+            self.vllm_config.parallel_config,
+            pipeline_parallel_size=1,
+        )
         return replace(
             self.vllm_config,
             model_config=self.draft_model_config,
+            parallel_config=parallel_config,
         )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:

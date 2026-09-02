@@ -278,21 +278,14 @@ def copy_assets():
     """Copy logos and other non-markdown assets to zh directory."""
     import shutil
 
-    # Copy logos
-    logos_src = SOURCE_DIR / "logos"
-    logos_dst = ZH_DIR / "logos"
-    if logos_src.exists():
-        if logos_dst.exists():
-            shutil.rmtree(logos_dst)
-        shutil.copytree(logos_src, logos_dst)
-
-    # Copy assets directory (images, etc.)
-    assets_src = SOURCE_DIR / "assets"
-    assets_dst = ZH_DIR / "assets"
-    if assets_src.exists():
-        if assets_dst.exists():
-            shutil.rmtree(assets_dst)
-        shutil.copytree(assets_src, assets_dst)
+    # Copy shared top-level assets referenced by mkdocs.yml or Markdown.
+    for asset_name in ["logos", "assets", "javascripts"]:
+        src = SOURCE_DIR / asset_name
+        dst = ZH_DIR / asset_name
+        if src.exists():
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
 
     # Copy all images directories referenced by markdown files
     for img_dir in [
@@ -306,12 +299,38 @@ def copy_assets():
             shutil.copytree(img_dir, dst)
 
 
+def copy_untranslated_markdown():
+    """Keep Chinese-tree copies without PO files in sync with source."""
+    import shutil
+
+    for src in sorted(SOURCE_DIR.rglob("*.md")):
+        if src.is_relative_to(ZH_DIR):
+            continue
+        rel = src.relative_to(SOURCE_DIR)
+        po_path = (LOCALE_DIR / rel).with_suffix(".po")
+        if po_path.exists():
+            continue
+        dst = ZH_DIR / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"  Copied (no .po): {dst}")
+
+
+def _reset_output_dir() -> None:
+    """Recreate the generated tree so deleted or moved sources cannot linger."""
+    import shutil
+
+    if ZH_DIR.exists():
+        shutil.rmtree(ZH_DIR)
+    ZH_DIR.mkdir(parents=True)
+
+
 def main():
     if not LOCALE_DIR.exists():
         print(f"Locale directory not found: {LOCALE_DIR}")
         sys.exit(1)
 
-    ZH_DIR.mkdir(parents=True, exist_ok=True)
+    _reset_output_dir()
 
     # Find all .po files
     po_files = sorted(LOCALE_DIR.rglob("*.po"))
@@ -344,19 +363,9 @@ def main():
         else:
             print(f"  Source not found: {source_path}")
 
-    # Also copy any English .md that has no .po file at all, so mkdocs strict
-    # mode can find every file referenced in the nav.
-    import shutil
-
-    for src in sorted(SOURCE_DIR.rglob("*.md")):
-        if src.is_relative_to(ZH_DIR):
-            continue
-        rel = src.relative_to(SOURCE_DIR)
-        dst = ZH_DIR / rel
-        if not dst.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            print(f"  Copied (no .po): {dst}")
+    # Also copy source files without PO files. Always refresh these copies so
+    # incremental local builds cannot serve stale include content.
+    copy_untranslated_markdown()
 
     # Copy assets
     copy_assets()
