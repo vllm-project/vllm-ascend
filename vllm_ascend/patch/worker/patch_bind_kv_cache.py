@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
@@ -11,6 +13,7 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
+    kv_cache_groups: Any = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -42,9 +45,19 @@ def bind_kv_cache(
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
-    # Bind kv_caches to forward context
+    # Bind kv_caches to forward context. Newer vLLM Attention layers unpack
+    # the raw allocation into their per-layer views in this method.
+    ordered_layer_names: list[str] = []
+    for layer_index in sorted(index2name.keys()):
+        ordered_layer_names.extend(index2name[layer_index])
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        forward_context[layer_name].bind_kv_cache(kv_cache)
+
+    # Keep the upstream Mamba/recurrent-state bookkeeping in sync with the
+    # cache group layout introduced by the current vLLM worker API.
+    utils.share_replayssm_ring_trackers(
+        ordered_layer_names, forward_context, kv_cache_groups
+    )
 
 
 utils.bind_kv_cache = bind_kv_cache
