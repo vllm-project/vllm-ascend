@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file scatter_nd_update_v2.h
+ * \file scatter_nd_update.h
  * \brief Scatter Kernel (Sort)
  */
 
@@ -17,20 +17,20 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "scatter_nd_update_common.h"
 
-namespace ScatterNdUpdateV2 {
-template<typename T>
-class ScatterNdUpdateV2Kernel {
+namespace ScatterNdUpdate {
+template <typename T, bool isViewStride0 = false>
+class ScatterNdUpdateKernel {
 public:
-    __aicore__ inline ScatterNdUpdateV2Kernel() = delete;
-    __aicore__ inline ScatterNdUpdateV2Kernel(
-        GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace, const ScatterNdUpdateV2TilingData& tiling, TPipe& pipe)
+    __aicore__ inline ScatterNdUpdateKernel() = delete;
+    __aicore__ inline ScatterNdUpdateKernel(GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace,
+                                            const ScatterNdUpdateSkArch22TilingData& tiling, TPipe& pipe)
     {
         InitParams(tiling);
         InitBuffers(pipe);
         SetGmAddr(updates, output, workSpace, tiling);
     }
 
-    __aicore__ inline void InitParams(const ScatterNdUpdateV2TilingData& tiling)
+    __aicore__ inline void InitParams(const ScatterNdUpdateSkArch22TilingData& tiling)
     {
         blockIdx_ = GetBlockIdx();
         CalcBlockDistribution(blockIdx_, tiling.scatterTiling.frontNum, tiling.scatterTiling.frontRow,
@@ -50,16 +50,20 @@ public:
         scatterTileLength_ = tiling.scatterTiling.scatterTileLength;
         scatterTileTail_ = tiling.scatterTiling.scatterTileTail;
         scatterTileAlignLength_ = tiling.scatterTiling.scatterTileAlignLength;
+
+        varStride0Elements_ = tiling.viewTiling.varStride0Elements;
+        firstDimStrideRows_ = tiling.viewTiling.firstDimStrideRows;
     }
 
     __aicore__ inline void InitBuffers(TPipe& pipe)
     {
-        pipe.InitBuffer(indiceQue_, DOUBLE_BUFFER, blockLength_  * sizeof(int));
-        pipe.InitBuffer(posIdxQue_, DOUBLE_BUFFER, blockLength_  * sizeof(int));
+        pipe.InitBuffer(indiceQue_, DOUBLE_BUFFER, blockLength_ * sizeof(int));
+        pipe.InitBuffer(posIdxQue_, DOUBLE_BUFFER, blockLength_ * sizeof(int));
         pipe.InitBuffer(updateQue_, DOUBLE_BUFFER, ubLengthForUpdates_ * sizeof(T));
     }
 
-    __aicore__ inline void SetGmAddr(GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace, const ScatterNdUpdateV2TilingData& tiling)
+    __aicore__ inline void SetGmAddr(GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace,
+                                     const ScatterNdUpdateSkArch22TilingData& tiling)
     {
         sortedIndicesGm_.SetGlobalBuffer((__gm__ int*)workSpace);
         posIndicesGm_.SetGlobalBuffer((__gm__ int*)workSpace + tiling.linearIndexTiling.sortWorkspace);
@@ -81,7 +85,6 @@ public:
         }
     }
 
-
     __aicore__ inline void CopyIndicesIn(uint64_t process, bool isTail)
     {
         uint64_t copyNum = isTail ? blockRemainLength_ : blockLength_;
@@ -99,7 +102,8 @@ public:
         posIdxQue_.EnQue<int>(posIdxLocal);
     }
 
-    __aicore__ inline void CopyUpdateIn(LocalTensor<T> &updateLocal, uint64_t gmIdx, uint64_t ubIdx, uint64_t tileIdx, uint64_t tileLength)
+    __aicore__ inline void CopyUpdateIn(LocalTensor<T>& updateLocal, uint64_t gmIdx, uint64_t ubIdx, uint64_t tileIdx,
+                                        uint64_t tileLength)
     {
         uint64_t gmOffset = gmIdx * scatterLength_ + tileIdx * scatterTileLength_;
         uint64_t ubOffset = ubIdx * scatterTileAlignLength_;
@@ -110,7 +114,7 @@ public:
     }
 
     // 降序数组：二分查找边界
-    __aicore__ inline int64_t findFirstLt(LocalTensor<int> &indiceLocal, int64_t target, bool isTail)
+    __aicore__ inline int64_t findFirstLt(LocalTensor<int>& indiceLocal, int64_t target, bool isTail)
     {
         int64_t left = 0;
         int64_t right = (isTail ? blockRemainLength_ : blockLength_) - 1;
@@ -128,7 +132,7 @@ public:
         return res;
     }
 
-    __aicore__ inline int64_t findLastGe(LocalTensor<int> &indiceLocal, int64_t target, bool isTail)
+    __aicore__ inline int64_t findLastGe(LocalTensor<int>& indiceLocal, int64_t target, bool isTail)
     {
         int64_t left = 0;
         int64_t right = (isTail ? blockRemainLength_ : blockLength_) - 1;
@@ -146,7 +150,7 @@ public:
         return res;
     }
 
-    __aicore__ inline void UpdateSearchParam(LocalTensor<int> &indiceLocal, bool isTail)
+    __aicore__ inline void UpdateSearchParam(LocalTensor<int>& indiceLocal, bool isTail)
     {
         int64_t searchNum = isTail ? blockRemainLength_ : blockLength_;
         leftBound_ = findFirstLt(indiceLocal, end_, isTail);
@@ -197,16 +201,19 @@ public:
         posIdxQue_.FreeTensor<int>(posIdxLocal);
     }
 
-    __aicore__ inline void CopyOut(uint64_t inUbNum, int64_t curIdx, LocalTensor<int> &indiceLocal,
-                                    LocalTensor<int> &posIdxLocal, uint64_t tileIdx, uint64_t tileLength)
+    __aicore__ inline void CopyOut(uint64_t inUbNum, int64_t curIdx, LocalTensor<int>& indiceLocal,
+                                   LocalTensor<int>& posIdxLocal, uint64_t tileIdx, uint64_t tileLength)
     {
         LocalTensor<T> updateLocal = updateQue_.DeQue<T>();
         DataCopyExtParams outParams{1, static_cast<uint32_t>(tileLength * sizeof(T)), 0, 0, 0};
         for (int64_t i = curIdx + inUbNum - 1; i >= curIdx; --i) {
             int64_t curIdxValue = indiceLocal.GetValue(i);
-            if (curIdxValue == lastProcessedIdx_) continue;
+            if (curIdxValue == lastProcessedIdx_)
+                continue;
             lastProcessedIdx_ = curIdxValue;
-            uint64_t outOffset = curIdxValue + tileIdx * scatterTileLength_;
+            uint64_t outOffset = ResolveOutOffset<isViewStride0>(static_cast<uint64_t>(curIdxValue), scatterLength_,
+                                                                 firstDimStrideRows_, varStride0Elements_,
+                                                                 tileIdx * scatterTileLength_);
             uint64_t updateOffset = (curIdx + inUbNum - 1 - i) * scatterTileAlignLength_;
             DataCopyPad(outputGm_[outOffset], updateLocal[updateOffset], outParams);
         }
@@ -215,7 +222,6 @@ public:
     }
 
 private:
-
     GlobalTensor<int> sortedIndicesGm_;
     GlobalTensor<int> posIndicesGm_;
     GlobalTensor<T> updatesGm_;
@@ -245,5 +251,7 @@ private:
     int64_t rightBound_;
     bool isValidBound_;
     int64_t lastProcessedIdx_;
+    uint64_t varStride0Elements_;
+    uint64_t firstDimStrideRows_;
 };
-} // namespace ScatterNdUpdateV2
+} // namespace ScatterNdUpdate

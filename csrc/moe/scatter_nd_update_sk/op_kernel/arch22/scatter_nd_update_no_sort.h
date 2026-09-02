@@ -17,30 +17,30 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "scatter_nd_update_common.h"
 
-namespace ScatterNdUpdateV2 {
+namespace ScatterNdUpdate {
 
 constexpr uint64_t ALIGNED_SIZE_INDEX = 8;
 
-template<typename T>
-class ScatterNdUpdateV2KernelNoSort {
+template <typename T, bool isViewStride0 = false>
+class ScatterNdUpdateKernelNoSort {
 public:
-    __aicore__ inline ScatterNdUpdateV2KernelNoSort() = delete;
-    __aicore__ inline ScatterNdUpdateV2KernelNoSort(
-        GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace, const ScatterNdUpdateV2TilingData& tiling, TPipe& pipe)
+    __aicore__ inline ScatterNdUpdateKernelNoSort() = delete;
+    __aicore__ inline ScatterNdUpdateKernelNoSort(GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace,
+                                                  const ScatterNdUpdateSkArch22TilingData& tiling, TPipe& pipe)
     {
         InitParam(tiling);
         InitBuffers(pipe);
         SetGmAddr(updates, output, workSpace, tiling);
     }
 
-    __aicore__ inline void InitParam(const ScatterNdUpdateV2TilingData& tiling)
+    __aicore__ inline void InitParam(const ScatterNdUpdateSkArch22TilingData& tiling)
     {
         blockIdx_ = GetBlockIdx();
         CalcBlockDistribution(blockIdx_, tiling.scatterTiling.frontNum, tiling.scatterTiling.frontRow,
                               tiling.scatterTiling.tailRow, computeRow_, start_);
         end_ = start_ + computeRow_;
-        totalIndexRow_ = tiling.linearIndexTiling.blockNum * tiling.linearIndexTiling.blockLength
-                         + tiling.linearIndexTiling.blockRemainLength;
+        totalIndexRow_ = tiling.linearIndexTiling.blockNum * tiling.linearIndexTiling.blockLength +
+                         tiling.linearIndexTiling.blockRemainLength;
 
         scatterLength_ = tiling.scatterTiling.scatterLength;
         scatterAlignLength_ = tiling.scatterTiling.scatterAlignLength;
@@ -49,6 +49,9 @@ public:
         scatterTileLength_ = tiling.scatterTiling.scatterTileLength;
         scatterTileTail_ = tiling.scatterTiling.scatterTileTail;
         scatterTileAlignLength_ = tiling.scatterTiling.scatterTileAlignLength;
+
+        varStride0Elements_ = tiling.viewTiling.varStride0Elements;
+        firstDimStrideRows_ = tiling.viewTiling.firstDimStrideRows;
 
         CalcIndexTileParams();
     }
@@ -72,7 +75,8 @@ public:
         pipe.InitBuffer(updateQue_, DOUBLE_BUFFER, scatterTileLength_ * sizeof(T));
     }
 
-    __aicore__ inline void SetGmAddr(GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace, const ScatterNdUpdateV2TilingData& tiling)
+    __aicore__ inline void SetGmAddr(GM_ADDR updates, GM_ADDR output, GM_ADDR workSpace,
+                                     const ScatterNdUpdateSkArch22TilingData& tiling)
     {
         linearIndicesGm_.SetGlobalBuffer((__gm__ int*)workSpace);
         updatesGm_.SetGlobalBuffer((__gm__ T*)updates);
@@ -111,16 +115,9 @@ public:
 
             LocalTensor<T> updateLocal = updateQue_.AllocTensor<T>();
             uint64_t gmOffset = idx * scatterLength_ + tileIdx * scatterTileLength_;
-            DataCopyExtParams updateCopyParams{1, static_cast<uint32_t>(tileLength * sizeof(T)), 0, 0, 0};
-            DataCopyPadExtParams<T> padParams{true, 0, 0, 0};
-            DataCopyPad(updateLocal, updatesGm_[gmOffset], updateCopyParams, padParams);
-            PipeMte2ToS();
-
-            uint64_t outOffset = linearIndex + tileIdx * scatterTileLength_;
-            DataCopyExtParams outParams{1, static_cast<uint32_t>(tileLength * sizeof(T)), 0, 0, 0};
-            DataCopyPad(outputGm_[outOffset], updateLocal, outParams);
-            PipeMte3ToS();
-
+            DoScatterCopy<T, isViewStride0>(updateLocal, updatesGm_, outputGm_, gmOffset, tileLength, linearIndex,
+                                            tileIdx, scatterTileLength_, firstDimStrideRows_, varStride0Elements_,
+                                            scatterLength_);
             updateQue_.FreeTensor<T>(updateLocal);
         }
     }
@@ -147,6 +144,8 @@ private:
     uint64_t indexTileLength_;
     uint64_t indexTileNum_;
     uint64_t indexTileTail_;
+    uint64_t varStride0Elements_;
+    uint64_t firstDimStrideRows_;
 };
 
-} // namespace ScatterNdUpdateV2
+} // namespace ScatterNdUpdate
