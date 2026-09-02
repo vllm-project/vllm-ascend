@@ -705,7 +705,6 @@ jobs:
               echo "::error::Selected tests are required; add the ready-precise or ready-all label"
               exit 1
             fi
-  
             if [ "${TESTS_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
               exit 1
