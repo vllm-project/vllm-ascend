@@ -671,6 +671,14 @@ class AscendModelSlimConfig(QuantizationConfig):
             # MXFP C8 quantizes K dynamically, but V uses the static E8M0
             # per-channel scale stored in the ModelSlim checkpoint.
             suffix_map[".v_proj.kv_cache_scale"] = ".attn.v_cache_scale"
+            # Newer ModelSlim recipes name it v_proj.v_scale. vLLM's own
+            # cache-scale regex has already rewritten that to attn.v_scale by
+            # the time suffixes run (WeightsMapper._map_name applies regexes
+            # first), so catch it under the rewritten name or it lands on a
+            # parameter this scheme never registers and is silently dropped
+            # (the vendored-QFA bring-up served with the 127 fallback for a
+            # whole run because of this).
+            suffix_map[".attn.v_scale"] = ".attn.v_cache_scale"
         if self.enable_fa_quant:
             # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
             # mapping, we use regex mapping.

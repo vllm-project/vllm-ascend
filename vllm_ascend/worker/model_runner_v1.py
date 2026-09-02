@@ -4837,17 +4837,21 @@ class NPUModelRunner(GPUModelRunner):
                     if current_sparse_sfa_c8:
                         kv_caches[layer_name] = (k_cache,)
                     elif self._is_c8_mxfp_kv_cache(current_kv_cache_spec):
+                        # PA_BBND order (block before head): the scale caches
+                        # sit next to their K/V payloads in the layout QFA
+                        # reads, so no layer transposes anything at attention
+                        # time.
                         k_scale_cache_shape = (
                             k_shape[0],
-                            k_shape[2],
                             k_shape[1],
+                            k_shape[2],
                             k_shape[3] // MXFP_KV_SCALE_GROUP_SIZE,
                             MXFP_KV_SCALE_VALUES_PER_GROUP,
                         )
                         v_scale_cache_shape = (
                             v_shape[0],
-                            v_shape[2],
                             v_shape[1] // MXFP_KV_SCALE_GROUP_SIZE,
+                            v_shape[2],
                             v_shape[3],
                             MXFP_KV_SCALE_VALUES_PER_GROUP,
                         )

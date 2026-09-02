@@ -72,7 +72,17 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         vllm_config = get_current_vllm_config()
         target_dtype = vllm_config.model_config.dtype
-        exponent = layer.v_cache_scale.data.to(torch.float32) - 127
+        raw = layer.v_cache_scale.data
+        # A minmax calibrator emits 0 for a channel whose absmax was 0, and
+        # 2^-127 there would make the quantization reciprocal 2^127 -- any
+        # activation that is not exactly zero at inference would go to inf.
+        # Sanitize the stored bytes in place so BOTH consumers stay neutral:
+        # the reciprocal below and the raw bytes broadcast into the V-scale
+        # cache (2^-127 there would zero the channel on dequant)  -- a
+        # real-checkpoint pitfall hit during the vendored-QFA bring-up.
+        if bool((raw == 0).any()):
+            raw[raw == 0] = 127
+        exponent = raw.to(torch.float32) - 127
         # Only the reciprocal is consumed (npu_quantize needs 1/scale); the
         # forward scale itself is written into the V-scale cache as raw E8M0
         # bytes straight from v_cache_scale.

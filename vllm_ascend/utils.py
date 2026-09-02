@@ -1194,11 +1194,10 @@ def refresh_block_size(vllm_config):
 
     # Must run before the hybrid early-return below: C8-MXFP hybrid models
     # (e.g. Qwen3.5/3.6 linear-attention + full-attention mixes) still need
-    # the 512-token pages that the QFA PA path requires. This value is the
-    # final block size for dense models; for hybrid models,
-    # AscendPlatform.update_block_size_for_backend re-aligns it (upwards, in
-    # multiples of 512) with the mamba page so that
-    # unify_kv_cache_spec_page_size sees a single page size.
+    # the 512-token pages that the QFA PA path requires. Hybrid page-size
+    # unification is handled downstream: get_kv_cache_spec pads the C8
+    # attention spec's page up to the mamba page, so all specs share one
+    # page size and unify_kv_cache_spec_page_size passes.
     if is_c8_mxfp_kv_quant(vllm_config):
         if cache_config.block_size != A5_C8_MXFP_KV_CACHE_BLOCK_SIZE:
             logger.info(

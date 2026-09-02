@@ -17,12 +17,13 @@ class TestMXFPScaleCacheShapes(TestBase):
     """Shape/byte-budget formulas for the C8-MXFP E8M0 scale caches."""
 
     def test_k_scale_cache_shape_d256_bs512(self):
+        # PA_BBND: block axis before the head axis, matching the K/V caches.
         shape = mxfp_k_scale_cache_shape(num_blocks=8, block_size=512, num_kv_heads=4, head_dim=256)
-        self.assertEqual(shape, (8, 4, 512, 4, 2))
+        self.assertEqual(shape, (8, 512, 4, 4, 2))
 
     def test_v_scale_cache_shape_d256_bs512(self):
         shape = mxfp_v_scale_cache_shape(num_blocks=8, block_size=512, num_kv_heads=4, head_dim=256)
-        self.assertEqual(shape, (8, 4, 8, 256, 2))
+        self.assertEqual(shape, (8, 8, 4, 256, 2))
 
     def test_scale_page_bytes_are_equal_for_k_and_v(self):
         k_bytes = mxfp_k_scale_page_bytes(num_kv_heads=4, block_size=512, head_dim=256)
@@ -44,7 +45,7 @@ class TestScatterMXFPKScaleCache(TestBase):
         self.num_kv_heads = 2
         self.head_dim = MXFP_KV_SCALE_GROUP_SIZE
         self.key_scale_cache = torch.zeros(
-            (2, self.num_kv_heads, self.block_size, self.head_dim // MXFP_KV_SCALE_GROUP_SIZE, 2),
+            (2, self.block_size, self.num_kv_heads, self.head_dim // MXFP_KV_SCALE_GROUP_SIZE, 2),
             dtype=torch.uint8,
         )
 
@@ -55,11 +56,11 @@ class TestScatterMXFPKScaleCache(TestBase):
 
         scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
 
-        self.assertTrue(torch.all(self.key_scale_cache[0, :, 0] == 130))
-        self.assertTrue(torch.all(self.key_scale_cache[1, :, 1] == 130))
+        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 130))
+        self.assertTrue(torch.all(self.key_scale_cache[1, 1] == 130))
         # Untouched positions stay zero, including the padding remap target.
-        self.assertTrue(torch.all(self.key_scale_cache[0, :, 1] == 0))
-        self.assertTrue(torch.all(self.key_scale_cache[1, :, 0] == 0))
+        self.assertTrue(torch.all(self.key_scale_cache[0, 1] == 0))
+        self.assertTrue(torch.all(self.key_scale_cache[1, 0] == 0))
 
     def test_scatter_padding_does_not_clobber_real_slot(self):
         """A padded (-1) row must never overwrite a real token written to the
@@ -72,7 +73,7 @@ class TestScatterMXFPKScaleCache(TestBase):
 
         scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
 
-        self.assertTrue(torch.all(self.key_scale_cache[0, :, 0] == 200))
+        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 200))
 
     def test_scatter_all_padding_rows_are_no_op(self):
         key_scale = torch.full((2, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
