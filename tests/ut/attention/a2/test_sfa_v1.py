@@ -226,6 +226,63 @@ class TestAscendSFADeviceOperator(TestBase):
         self.assertEqual(call_kwargs["query"].shape, (3, 4, 10))
         self.assertEqual(call_kwargs["sparse_mode"], 0)
         self.assertTrue(call_kwargs["return_softmax_lse"])
+class TestAscendSFASnapshotRestore(TestBase):
+    def test_absorbed_weights_are_persistent_and_rebound(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.q_proj = torch.nn.Linear(2, 2, bias=False)
+        impl.W_UV = torch.randn(2, 3)
+        impl.W_UK_T = torch.randn(2, 4)
+        original_w_uv = impl.W_UV
+        original_w_uk_t = impl.W_UK_T
+        expected_w_uv = impl.W_UV.clone()
+        expected_w_uk_t = impl.W_UK_T.clone()
+
+        impl._persist_absorbed_weights()
+        state_dict = {name: tensor.clone() for name, tensor in impl.q_proj.state_dict().items()}
+
+        # Registering snapshot buffers must not copy or replace forward tensors.
+        self.assertIs(impl.W_UV, original_w_uv)
+        self.assertIs(impl.W_UK_T, original_w_uk_t)
+        self.assertIn("sfa_w_uv", state_dict)
+        self.assertIn("sfa_w_uk_t", state_dict)
+
+        impl.q_proj._buffers["sfa_w_uv"].zero_()
+        impl.q_proj._buffers["sfa_w_uk_t"].zero_()
+        impl.q_proj.load_state_dict(state_dict)
+        self.assertTrue(impl._rebind_absorbed_weight_buffers())
+        self.assertTrue(torch.equal(impl.W_UV, expected_w_uv))
+        self.assertTrue(torch.equal(impl.W_UK_T, expected_w_uk_t))
+
+    def test_missing_absorbed_weights_fail_restore(self):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.q_proj = torch.nn.Linear(2, 2, bias=False)
+        impl.layer_name = "model.layers.0.self_attn"
+
+        with self.assertRaisesRegex(RuntimeError, "absorbed weight buffers are missing"):
+            impl.reload_derived_weights_after_restore(torch.bfloat16)
+
+    def test_metadata_builder_reset_clears_reusable_length_buffers(self):
+        builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
+        builder.actual_seq_lengths_query = torch.full((4,), 7, dtype=torch.int32)
+        builder.actual_seq_lengths_key = torch.full((4,), 11, dtype=torch.int32)
+        builder.spec_actual_seq_lengths_query = [
+            torch.full((4,), 13, dtype=torch.int32),
+            torch.full((4,), 17, dtype=torch.int32),
+        ]
+        builder.spec_actual_seq_lengths_key = [
+            torch.full((4,), 19, dtype=torch.int32),
+            torch.full((4,), 23, dtype=torch.int32),
+        ]
+
+        builder.reset_runtime_cache()
+
+        buffers = [
+            builder.actual_seq_lengths_query,
+            builder.actual_seq_lengths_key,
+            *builder.spec_actual_seq_lengths_query,
+            *builder.spec_actual_seq_lengths_key,
+        ]
+        self.assertTrue(all(torch.count_nonzero(buffer) == 0 for buffer in buffers))
 
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):

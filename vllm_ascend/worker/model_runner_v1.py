@@ -18,7 +18,10 @@
 #
 
 import logging
+import ctypes
+import gc
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -3703,7 +3706,7 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
-
+    
     def update_eplb_heat_collection_status(self, num_tokens_padded: int):
         if self.eplb_heat_collection_stage == "prefill":
             # collect eplb heat for prefill requests.
@@ -3714,6 +3717,703 @@ class NPUModelRunner(GPUModelRunner):
         else:
             # collect eplb heat for all requests.
             self.eplb_heat_collection_status =  True
+
+    def _get_drafter_model(self):
+        """[snapshot] Return the drafter/spec-decode ``nn.Module`` if the active
+        speculative method carries a torch model (e.g. MTP / EAGLE), else None.
+        n-gram / suffix / medusa-less proposers have no restorable model and are
+        skipped. The drafter is NOT part of ``self.get_model()``, so it must be
+        dumped/restored/reloaded explicitly or its non-persistent derived
+        weights (rope cos/sin, gate ``weight_fp32``, MLA ``W_UV``...) stay stale
+        after resume and quietly destroy draft acceptance."""
+        drafter = getattr(self, "drafter", None)
+        if drafter is None:
+            return None
+        model = None
+        get_model_fn = getattr(drafter, "get_model", None)
+        if callable(get_model_fn):
+            try:
+                model = get_model_fn()
+            except Exception:  # noqa: BLE001
+                model = None
+        if model is None:
+            model = getattr(drafter, "model", None)
+        return model if isinstance(model, nn.Module) else None
+
+    def _dump_one_model(self, model: nn.Module, model_save_path: str) -> None:
+        if os.path.exists(model_save_path):
+            logger.info("model save path %s exists, skip dump model", model_save_path)
+            return
+        logger.info("[dump model] start dump model to %s (type=%s)", model_save_path, type(model))
+        start = time.time()
+        import psutil  # type: ignore[import-untyped]
+        process = psutil.Process(os.getpid())
+        logger.info("start dump_model() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
+        torch.save(model.state_dict(), model_save_path)
+        gc.collect()
+        logger.info("after gc.collect() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
+        torch.npu.empty_cache()
+        logger.info("after torch.npu.empty_cache() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            result = libc.malloc_trim(0)
+            if result == 1:
+                print("exec malloc_trim(0) success")
+            else:
+                print("exec malloc_trim(0) fail")
+        except Exception as e:
+            print(f"exec malloc_trim(0) with error: {e}")
+
+        logger.info("after dump_model() cpu memory use: %.2f MB", process.memory_info().rss / 1024**2)
+        elapse = time.time() - start
+        logger.info("[dump model] save model ckpt to %s, elapse %.4f s", model_save_path, elapse)
+
+    def dump_model(self, path="/mnt") -> None:
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        model_name = self.vllm_config.model_config.model.rstrip('/').rsplit('/', 1)[-1]
+        model_dir = os.path.join(path, "snapshot_weight", f"{model_name}_dp{self.dp_size}_tp{tp_size}")
+        os.makedirs(model_dir, exist_ok=True)
+        rank_in_group = get_tp_group().rank_in_group
+        # The drafter (MTP/EAGLE) owns its own copy of the non-persistent derived
+        # weights, so it must be serialized to a file that is DISTINCT from the
+        # target model's ckpt.
+        self._dump_one_model(
+            self.get_model(),
+            os.path.join(model_dir, f"model_ckpt.{self.dp_rank}tp{rank_in_group}.pth"),
+        )
+        drafter_model = self._get_drafter_model()
+        if drafter_model is not None:
+            self._dump_one_model(
+                drafter_model,
+                os.path.join(model_dir, f"model_ckpt_drafter.{self.dp_rank}tp{rank_in_group}.pth"),
+            )
+
+    def _restore_one_model(self, model: nn.Module, model_save_path: str, label: str) -> None:
+        if not os.path.exists(model_save_path):
+            logger.warning("[restore model] [%s] ckpt %s not found, skip", label, model_save_path)
+            return
+        start = time.time()
+        sd = torch.load(model_save_path, map_location="cpu", mmap=True)
+        logger.info(
+            "[restore model] [%s] load model to cpu from %s, elapse %ss, the num of items is %s",
+            label,
+            model_save_path,
+            time.time() - start,
+            len(sd.items()),
+        )
+        cnt = 0
+        param_dict = dict(model.named_parameters())
+        buffer_dict = dict(model.named_buffers())
+        for name, cpu_tensor in sd.items():
+            if name in param_dict:
+                param_dict[name].data.copy_(cpu_tensor)
+                cnt += 1
+            if name in buffer_dict:
+                buffer_dict[name].data.copy_(cpu_tensor)
+                cnt += 1
+        unmatched_ckpt_keys = [n for n in sd if n not in param_dict and n not in buffer_dict]
+        model_keys = list(param_dict) + list(buffer_dict)
+        uncovered_model_keys = [n for n in model_keys if n not in sd]
+        logger.info("[restore model] [%s] replace success %s / %s", label, cnt, len(sd.items()))
+        if unmatched_ckpt_keys:
+            logger.warning(
+                "[restore model] [%s] unmatched ckpt keys (%d): %s",
+                label,
+                len(unmatched_ckpt_keys),
+                unmatched_ckpt_keys,
+            )
+        if uncovered_model_keys:
+            logger.warning(
+                "[restore model] [%s] model keys not in ckpt (%d): %s",
+                label,
+                len(uncovered_model_keys),
+                uncovered_model_keys[:50] + (["..."] if len(uncovered_model_keys) > 50 else []),
+            )
+        logger.info(
+            "[restore model] [%s] restore model ckpt from %s, elapse %.4f s",
+            label,
+            model_save_path,
+            time.time() - start,
+        )
+
+        # [snapshot] Re-apply NZ format after copy_. Values match cold start
+        # but FRACTAL_NZ layout tags are lost; MoE NZ kernels otherwise drift.
+        self._recast_quant_nz_weights_after_restore(model=model, label=label)
+
+        # [snapshot] Restore/re-derive decode-path state produced by
+        # ``process_weights_after_loading``. MLA can rebuild absorbed weights
+        # from persistent parameters; SFA rebinds absorbed/MLAPO buffers because
+        # its source ``kv_b_proj`` is disposed. Remaining cheap derived tensors
+        # are rebuilt from restored sources. Graph mode recaptures after this
+        # step; enforce-eager has no captured tensor addresses to preserve.
+        self._reload_non_persistent_derived_weights(model=model, label=label)
+
+    def restore_model(self, path="/mnt") -> None:
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        model_name = self.vllm_config.model_config.model.rstrip('/').rsplit('/', 1)[-1]
+        model_dir = os.path.join(
+            path,
+            "snapshot_weight",
+            f"{model_name}_dp{self.dp_size}_tp{tp_size}",
+        )
+        rank_in_group = get_tp_group().rank_in_group
+        self._restore_one_model(
+            self.get_model(),
+            os.path.join(model_dir, f"model_ckpt.{self.dp_rank}tp{rank_in_group}.pth"),
+            "model",
+        )
+        # The drafter (MTP/EAGLE) has its own ckpt (see dump_model) and its own
+        # non-persistent derived weights; restore + reload it too, otherwise its
+        # drafts degrade after resume and speculative acceptance collapses.
+        drafter_model = self._get_drafter_model()
+        if drafter_model is not None:
+            self._restore_one_model(
+                drafter_model,
+                os.path.join(model_dir, f"model_ckpt_drafter.{self.dp_rank}tp{rank_in_group}.pth"),
+                "drafter",
+            )
+        # Rebuild non-persistent state that lives OUTSIDE any nn.Module (class /
+        # module-level device tensors), which the per-model reload above cannot
+        # reach via ``named_modules()``.
+        self._reload_global_non_persistent_state()
+        # Snapshot restore invalidates low-level NPU event handles created before
+        # suspend. MTP/spec-decode paths synchronize these events on the first
+        # post-resume request; stale handles cause aclrtSynchronizeEvent failures.
+        self._reset_resume_npu_event_handles()
+        # Clear per-builder runtime metadata cache (MLA/DSA/etc.) so the first
+        # post-resume forward cannot read stale host/device tensors.
+        self._reset_resume_attention_builder_runtime_states()
+        # SFA keeps sparse-index and reshape metadata outside ``state_dict``.
+        # Restore their cold-start sentinels before the first post-resume build.
+        self._reset_resume_sfa_runtime_buffers()
+        # Re-zero block-table device rows that are never re-copied from CPU
+        # (row >= num_reqs). After restore they hold garbage which the MTP
+        # drafter's look-ahead slot computation can read, producing an
+        # out-of-range KV slot that crashes npu_kv_rmsnorm_rope_cache.
+        self._reset_resume_block_table_device_buffers()
+
+    def _reset_resume_npu_event_handles(self) -> None:
+        # Async seq-lens copy event used by MTP/spec decode metadata path.
+        self._seq_lens_cpu_event = None
+        self._seq_lens_cpu_event_pending = False
+
+        # ``sampling_done_event`` is recreated lazily every sampling step
+        # (see ``self.sampling_done_event = torch.npu.Event()`` in the sample
+        # path), so clearing it here is safe.
+        self.sampling_done_event = None
+
+        # ``valid_sampled_token_count_event`` and ``num_accepted_tokens_event``
+        # are created EXACTLY ONCE at init (base gpu_model_runner: guarded by
+        # ``num_spec_tokens`` / ``use_async_scheduling``) and are NEVER
+        # recreated afterwards. They must therefore be REPLACED with a fresh
+        # handle here, not set to None.
+        #
+        # Root cause of the post-resume "MTP acceptance == 0%" (and garbled
+        # output) regression: a previous version of this reset set these to
+        # None. But ``_copy_valid_sampled_token_count`` early-returns when
+        # ``valid_sampled_token_count_event is None`` -- and the assignment
+        # ``self.input_batch.prev_sampled_token_ids = next_token_ids...`` lives
+        # AFTER that guard. So a None event silently skips setting
+        # ``prev_sampled_token_ids`` on every post-resume step. With it None,
+        # ``_prepare_input_ids`` takes the non-async early return and NEVER
+        # scatters the sampled seed token or the draft tokens into
+        # ``input_ids.gpu``; those positions keep their -1/0 placeholders.
+        # The rejection sampler then verifies against -1 drafts every step ->
+        # acceptance collapses to 0%, and the (also unscattered) seed corrupts
+        # the main-model input. Recreating a live event restores the
+        # cold-start invariant so ``prev_sampled_token_ids`` is set again.
+        if getattr(self, "valid_sampled_token_count_event", None) is not None:
+            self.valid_sampled_token_count_event = torch.npu.Event()
+        if getattr(self, "num_accepted_tokens_event", None) is not None:
+            self.num_accepted_tokens_event = torch.npu.Event()
+
+        # Draft/spec events may be asserted as non-None in async scheduling
+        # paths; recreate fresh handles when attributes exist.
+        if hasattr(self, "draft_token_ids_event"):
+            self.draft_token_ids_event = torch.npu.Event()
+        if hasattr(self, "_num_valid_draft_tokens_event"):
+            self._num_valid_draft_tokens_event = torch.npu.Event()
+
+        # [snapshot] Recreate the async-scheduling copy STREAMS.
+        #
+        # Root cause of the post-resume "MTP acceptance == 0%" regression:
+        # ``aclrtSnapShotProcessRestore`` invalidates low-level NPU stream
+        # handles exactly like it does event handles. With async scheduling +
+        # spec decode, the drafter's proposed tokens are copied GPU->CPU on
+        # ``draft_token_ids_copy_stream`` (ordered by ``draft_token_ids_event``)
+        # and read back next step via ``take_draft_token_ids``. If the stream
+        # handle is stale, the first post-resume copy is enqueued on a dead
+        # stream and never lands, so ``draft_token_ids_cpu`` keeps its stale /
+        # placeholder (-1) content. The scheduler then verifies against -1
+        # drafts every step -> the rejection sampler rejects everything ->
+        # acceptance collapses to 0% (msProbe dumps show the drafter FORWARD is
+        # bit-identical pre/post, but the draft tokens reaching the rejection
+        # sampler are all -1 after resume). Recreating the streams restores the
+        # cold-start invariant so the async draft copy lands correctly.
+        for stream_attr in (
+            "draft_token_ids_copy_stream",
+            "valid_sampled_token_count_copy_stream",
+        ):
+            if getattr(self, stream_attr, None) is not None:
+                try:
+                    setattr(self, stream_attr, torch.npu.Stream())
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[restore model] failed to recreate %s: %s: %s",
+                        stream_attr, type(exc).__name__, exc,
+                    )
+
+        # ``transfer_event`` orders the sampled-token GPU->CPU copy; a stale
+        # handle here can also stall/mis-order the async post-sample path.
+        if getattr(self, "transfer_event", None) is not None:
+            self.transfer_event = torch.npu.Event()
+
+        # Re-allocate the pinned draft-token host buffer. After restore its
+        # page-locked (device-registered) mapping can be stale, so a
+        # ``non_blocking`` copy into it may silently not land, leaving stale /
+        # placeholder drafts. A fresh allocation restores a clean registration.
+        if getattr(self, "draft_token_ids_cpu", None) is not None:
+            try:
+                self.draft_token_ids_cpu = torch.empty(
+                    (self.max_num_reqs, self.num_spec_tokens),
+                    dtype=torch.int64,
+                    device="cpu",
+                    pin_memory=self.pin_memory,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[restore model] failed to re-alloc draft_token_ids_cpu: %s: %s",
+                    type(exc).__name__, exc,
+                )
+
+        # Drop any cross-step spec-decode carry-over captured at snapshot time.
+        # The snapshot is taken while idle, but resetting defensively guarantees
+        # the first post-resume step cannot inject stale (pre-snapshot) drafts
+        # via ``take_draft_token_ids`` / ``update_async_spec_token_ids``.
+        if hasattr(self, "_draft_token_req_ids"):
+            self._draft_token_req_ids = None
+        if hasattr(self, "_draft_token_ids"):
+            self._draft_token_ids = None
+        input_batch = getattr(self, "input_batch", None)
+        if input_batch is not None and hasattr(input_batch, "prev_req_id_to_index"):
+            input_batch.prev_req_id_to_index = None
+
+    def _reset_resume_attention_builder_runtime_states(self) -> None:
+        """Best-effort reset for attention metadata builders.
+
+        Some builders keep runtime tensors (e.g. chunked prefill metadata) as
+        object fields and reuse them across iterations. After snapshot restore
+        these buffers may hold stale device context and trigger ACL sync errors.
+        """
+        total = 0
+        reset = 0
+        failed: list[str] = []
+        seen_ids: set[int] = set()
+
+        attn_groups = getattr(self, "attn_groups", None)
+        if not attn_groups:
+            logger.info("[restore model] attention builder runtime reset skipped: no attn_groups")
+            return
+
+        for kv_groups in attn_groups:
+            for attn_group in kv_groups:
+                builders: list[object] = []
+                explicit_builders = getattr(attn_group, "attn_metadata_builders", None)
+                if isinstance(explicit_builders, list):
+                    builders.extend(explicit_builders)
+                get_builder = getattr(attn_group, "get_metadata_builder", None)
+                if callable(get_builder):
+                    try:
+                        builder0 = get_builder(0)
+                        builders.append(builder0)
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(f"get_builder:{type(exc).__name__}:{exc}")
+
+                for builder in builders:
+                    if builder is None:
+                        continue
+                    bid = id(builder)
+                    if bid in seen_ids:
+                        continue
+                    seen_ids.add(bid)
+                    total += 1
+                    reset_fn = getattr(builder, "reset_runtime_cache", None)
+                    if not callable(reset_fn):
+                        continue
+                    try:
+                        reset_fn()
+                        reset += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(
+                            f"{type(builder).__name__}:{type(exc).__name__}:{exc}"
+                        )
+
+        logger.info(
+            "[restore model] attention builder runtime reset: total=%d reset=%d%s",
+            total,
+            reset,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
+
+    def _reset_resume_sfa_runtime_buffers(self) -> None:
+        """[snapshot] Clear reusable SFA index/reshape metadata after restore.
+
+        ``topk_indices_buffer`` is allocated with ``torch.empty`` on the model
+        and shared by indexer-bearing and ``skip_topk`` layers (and, for MTP, by
+        the target and draft models). It is intentionally not a persistent
+        model buffer. Filling it with the invalid-index sentinel prevents a
+        skip layer from consuming snapshot-time indices before the preceding
+        indexer layer refreshes the active rows.
+
+        The C8 reshape metadata buffers are runner-owned staged buffers. Clear
+        both CPU and device storage so ``store_kv_block_metadata`` starts from
+        the same state as a cold process. Main/indexer KV caches are deliberately
+        not cleared here: they are paged state owned by the cache manager and
+        may contain valid restored prefix data.
+        """
+
+        from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+        attn_backend = getattr(self, "attn_backend", None)
+        if not isinstance(attn_backend, type) or not issubclass(
+            attn_backend, AscendSFABackend
+        ):
+            logger.info(
+                "[restore model] SFA runtime buffer reset skipped: backend=%s",
+                getattr(attn_backend, "__name__", type(attn_backend).__name__),
+            )
+            return
+
+        reset_topk = 0
+        reset_group_tensors = 0
+        failed: list[str] = []
+        seen_tensors: set[int] = set()
+
+        def reset_tensor(tensor: object, value: int, where: str) -> bool:
+            if not isinstance(tensor, torch.Tensor):
+                return False
+            tensor_id = id(tensor)
+            if tensor_id in seen_tensors:
+                return False
+            seen_tensors.add(tensor_id)
+            try:
+                tensor.fill_(value)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{where}:{type(exc).__name__}:{exc}")
+                return False
+
+        for attr_name in (
+            "group_len",
+            "group_key_idx",
+            "group_key_cache_idx",
+        ):
+            staged = getattr(self, attr_name, None)
+            for storage_name in ("gpu", "cpu"):
+                if reset_tensor(
+                    getattr(staged, storage_name, None),
+                    0,
+                    f"{attr_name}.{storage_name}",
+                ):
+                    reset_group_tensors += 1
+
+        roots = [self.get_model(), self._get_drafter_model()]
+        seen_objects: set[int] = set()
+        for root in roots:
+            if root is None:
+                continue
+            objects: list[tuple[str, object]] = [("", root)]
+            objects.extend(root.named_modules())
+            for name, obj in objects:
+                for suffix, candidate in (
+                    ("", obj),
+                    (".impl", getattr(obj, "impl", None)),
+                ):
+                    if candidate is None or id(candidate) in seen_objects:
+                        continue
+                    seen_objects.add(id(candidate))
+                    if reset_tensor(
+                        getattr(candidate, "topk_indices_buffer", None),
+                        -1,
+                        f"{name or '<root>'}{suffix}.topk_indices_buffer",
+                    ):
+                        reset_topk += 1
+
+        logger.info(
+            "[restore model] reset SFA runtime buffers: topk=%d group_tensors=%d%s",
+            reset_topk,
+            reset_group_tensors,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
+
+    def _reset_resume_block_table_device_buffers(self) -> None:
+        """[snapshot] Re-establish the cold-start zero invariant for block-table
+        device tensors after snapshot restore.
+
+        ``BlockTable.commit_block_table`` only copies the first ``num_reqs``
+        rows from CPU to the GPU tensor each step; rows ``>= num_reqs`` are never
+        touched after allocation. On a cold start they stay ``torch.zeros`` (a
+        read there yields block 0, harmless), but after
+        ``aclrtSnapShotProcessRestore`` they hold restored device garbage. The
+        MTP drafter's look-ahead slot computation
+        (``compute_new_slot_mapping``: ``block_table_tensor.view(-1)`` indexed by
+        position) can read those stale rows and produce a garbage block id ->
+        out-of-range slot -> ``npu_kv_rmsnorm_rope_cache`` crashes with an MTE
+        "DDR address out of range". The main model never hits this because its
+        decode only reads already-committed rows.
+
+        Zeroing the GPU tensor is safe: every active row is re-committed from the
+        CPU source of truth before the next forward, so this restores exactly the
+        cold-start device state.
+
+        The CPU source is zeroed too. Upstream #10901 added a
+        ``commit_block_table(num_reqs_padded)`` inside ``_dummy_run`` that copies
+        the first ``num_reqs_padded`` CPU rows -> GPU right before ACL graph
+        (re)capture. After restore the CPU buffer still holds the pre-snapshot
+        request's block ids, so that copy re-dirties the GPU tensor we just
+        zeroed and feeds those (out-of-cold-start-range) blocks into the FULL
+        graph paged-attention capture (run with the max-workspace seq len),
+        crashing with ``AclrtSynchronizeDeviceWithTimeout`` / MTE "invalid GM
+        address". Zeroing CPU keeps the commit a zero no-op until real requests
+        re-populate it via ``_prepare_inputs``, exactly matching the cold start.
+        """
+        input_batch = getattr(self, "input_batch", None)
+        mgbt = getattr(input_batch, "block_table", None) if input_batch is not None else None
+        tables = getattr(mgbt, "block_tables", None)
+        if not tables:
+            logger.info("[restore model] block-table device reset skipped: no block tables")
+            return
+        zeroed = 0
+        failed: list[str] = []
+        for idx, bt in enumerate(tables):
+            buf = getattr(bt, "block_table", None)
+            gpu = getattr(buf, "gpu", None)
+            if gpu is None:
+                continue
+            try:
+                gpu.zero_()
+                cpu = getattr(buf, "cpu", None)
+                if cpu is not None:
+                    cpu.zero_()
+                zeroed += 1
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"group{idx}:{type(exc).__name__}:{exc}")
+        logger.info(
+            "[restore model] zeroed %d block-table device tensor(s) to restore cold-start invariant%s",
+            zeroed,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
+
+    def _reload_global_non_persistent_state(self) -> None:
+        """[snapshot] Rebuild process/class-level device tensors that are not part
+        of any ``nn.Module`` state and are therefore neither serialized nor
+        repaired by the per-model reload path. Currently the DSA/SFA lightning-indexer
+        ``hadamard`` rotation matrices and MLA RoPE global cos/sin aliases:
+        after suspend/resume their device memory is zeroed / stale. Each rebuild
+        is best-effort so an unused backend never breaks restore."""
+        hf_config = self.model_config.hf_config
+        device = self.device
+        rebuilt: list[str] = []
+        try:
+            from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
+            if AscendDSAMetadataBuilder.reload_hadamard_after_restore(hf_config, device):
+                rebuilt.append("dsa.hadamard")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[restore model] DSA hadamard rebuild skipped: %s", exc)
+        try:
+            from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
+            reload_cp = getattr(AscendDSACPMetadataBuilder, "reload_hadamard_after_restore", None)
+            if callable(reload_cp) and reload_cp(hf_config, device):
+                rebuilt.append("dsa_cp.hadamard")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[restore model] DSA-CP hadamard rebuild skipped: %s", exc)
+        try:
+            from vllm_ascend.attention.sfa_v1 import AscendSFAImpl
+            if AscendSFAImpl.reload_hadamard_after_restore(device):
+                rebuilt.append("sfa.hadamard")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[restore model] SFA hadamard rebuild skipped: %s", exc)
+        try:
+            from vllm_ascend.ops.rotary_embedding import reload_cos_and_sin_after_restore
+            if reload_cos_and_sin_after_restore(self.get_model()):
+                rebuilt.append("mla_rope.cos_sin")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[restore model] MLA RoPE global rebind skipped: %s", exc)
+        logger.info(
+            "[restore model] rebuilt global non-persistent state: %s",
+            rebuilt if rebuilt else "none",
+        )
+
+    def _recast_quant_nz_weights_after_restore(self, model=None, label: str = "model") -> None:
+        """[snapshot] Rebuild Ascend NZ format tags after weight ``copy_``.
+
+        ``torch.save`` + CPU ``copy_`` restores numerical values but does not
+        preserve ``ACL_FORMAT_FRACTAL_NZ``. Quantized MoE / Linear paths that
+        feed ``grouped_matmul_swiglu_quant_weight_nz`` then silently misread
+        storage. Snapshot ckpt already holds the *runtime* (post-transpose)
+        layout from ``process_weights_after_loading`` — only format-cast.
+        """
+        if model is None:
+            model = self.get_model()
+        try:
+            import torch_npu
+            from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[restore model] [%s] NZ recast skipped (import): %s", label, exc
+            )
+            return
+
+        casted = 0
+        failed: list[str] = []
+
+        def _nd_then_nz(t: torch.Tensor) -> torch.Tensor:
+            # Normalize to ND first so a broken NZ tag + ND payload is repaired,
+            # then pack to NZ for the runtime kernels.
+            nd = torch_npu.npu_format_cast(t, 2).contiguous()
+            return torch_npu.npu_format_cast(nd, ACL_FORMAT_FRACTAL_NZ)
+
+        for name, module in model.named_modules():
+            for attr in ("w13_weight", "w2_weight"):
+                w = getattr(module, attr, None)
+                if w is None or not hasattr(w, "data"):
+                    continue
+                data = w.data
+                if not getattr(data, "is_npu", False):
+                    continue
+                try:
+                    w.data = _nd_then_nz(data)
+                    casted += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(f"{name}.{attr}:{type(exc).__name__}:{exc}")
+
+            for list_attr in ("w13_weight_list", "w2_weight_list"):
+                wl = getattr(module, list_attr, None)
+                if not isinstance(wl, list):
+                    continue
+                for i, w in enumerate(wl):
+                    if w is None or not getattr(w, "is_npu", False):
+                        continue
+                    try:
+                        wl[i] = _nd_then_nz(w)
+                        casted += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed.append(f"{name}.{list_attr}[{i}]:{type(exc).__name__}:{exc}")
+
+            # Shared-expert / dense W8A8 Linear: maybe_trans_nz at load time.
+            weight = getattr(module, "weight", None)
+            if (
+                weight is not None
+                and hasattr(weight, "data")
+                and getattr(weight.data, "is_npu", False)
+                and weight.data.dtype == torch.int8
+                and hasattr(module, "weight_scale")
+            ):
+                try:
+                    weight.data = maybe_trans_nz(
+                        torch_npu.npu_format_cast(weight.data, 2).contiguous()
+                    )
+                    casted += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(f"{name}.weight:{type(exc).__name__}:{exc}")
+
+        logger.info(
+            "[restore model] [%s] recast quant NZ weights: casted=%d%s",
+            label,
+            casted,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
+
+    def _reload_non_persistent_derived_weights(self, model=None, label: str = "model") -> None:
+        if model is None:
+            model = self.get_model()
+        act_dtype = self.model_config.dtype
+        reloaded = 0
+        failed: list[str] = []
+        # Minimal regression guard: the resume bug manifested as MLA/SFA decode
+        # weights and scales collapsing to zero. After restore/recompute they
+        # must be non-zero; track the worst norm and any degenerate tensors.
+        min_norm = float("inf")
+        min_norm_where = ""
+        zero_norm_modules: list[str] = []
+        # NOTE: MLA implementations are stored on attention modules as
+        # ``module.impl`` (plain Python object, not nn.Module), so scanning
+        # ``named_modules()`` alone misses them. Include both module itself and
+        # its impl target to ensure reload is actually applied.
+        reload_targets: list[tuple[str, object]] = []
+        for name, module in model.named_modules():
+            reload_targets.append((name, module))
+            impl = getattr(module, "impl", None)
+            if impl is not None:
+                reload_targets.append((f"{name}.impl", impl))
+
+        seen_ids: set[int] = set()
+        for name, target in reload_targets:
+            target_id = id(target)
+            if target_id in seen_ids:
+                continue
+            seen_ids.add(target_id)
+
+            reload_fn = getattr(target, "reload_derived_weights_after_restore", None)
+            if not callable(reload_fn):
+                continue
+            try:
+                reload_fn(act_dtype)
+                reloaded += 1
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"{name}:{type(exc).__name__}:{exc}")
+                continue
+            get_sanity_tensors = getattr(
+                target,
+                "get_derived_weight_sanity_tensors",
+                None,
+            )
+            if not callable(get_sanity_tensors):
+                continue
+            try:
+                sanity_tensors = get_sanity_tensors()
+            except Exception as exc:  # noqa: BLE001
+                failed.append(
+                    "%s.get_derived_weight_sanity_tensors:%s:%s"
+                    % (name, type(exc).__name__, exc)
+                )
+                continue
+            for attr, tensor in sanity_tensors.items():
+                try:
+                    norm = float(tensor.detach().float().norm().item())
+                except Exception:  # noqa: BLE001
+                    continue
+                if norm < min_norm:
+                    min_norm = norm
+                    min_norm_where = f"{name}.{attr}"
+                if norm == 0.0:
+                    zero_norm_modules.append(f"{name}.{attr}")
+        logger.info(
+            "[restore model] [%s] reloaded non-persistent derived weights for %d modules%s",
+            label,
+            reloaded,
+            "" if not failed else f", failed={failed[: min(8, len(failed))]}",
+        )
+        if reloaded == 0:
+            logger.warning(
+                "[restore model] [%s] no non-persistent derived-weight reload targets found; "
+                "attention decode may still use stale derived weights",
+                label,
+            )
+        if reloaded and min_norm != float("inf"):
+            if zero_norm_modules:
+                logger.error(
+                    "[restore model] REGRESSION: %d derived weight tensors are still "
+                    "zero after restore, attention decode will be broken. preview=%s",
+                    len(zero_norm_modules),
+                    zero_norm_modules[: min(8, len(zero_norm_modules))],
+                )
+            else:
+                logger.info(
+                    "[restore model] derived-weight sanity ok: min_norm=%.6f at %s",
+                    min_norm,
+                    min_norm_where,
+                )
 
     def load_model(self) -> None:
         load_model_start_time = time.perf_counter()
