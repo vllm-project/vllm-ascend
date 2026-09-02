@@ -41,6 +41,9 @@ from vllm_ascend.core.kv_cache_interface import (
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_unify_kv_cache_spec_page_size = (
+    vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size
+)
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
 _orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
 if vllm_version_is("0.28.0"):
@@ -251,6 +254,20 @@ def _get_kv_cache_groups_uniform_page_size(
     if kimi_k3_groups is not None:
         return kimi_k3_groups
     return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+
+
+def _unify_kv_cache_spec_page_size(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> dict[str, KVCacheSpec]:
+    """Keep K3's deliberately non-rectangular target/draft page layout."""
+    if any(
+        isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
+        for spec in kv_cache_spec.values()
+    ):
+        groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(kv_cache_spec)
+        if groups is not None:
+            return kv_cache_spec
+    return _orig_unify_kv_cache_spec_page_size(kv_cache_spec)
 
 
 def _kv_cache_config_has_mamba_layers(self: KVCacheConfig) -> bool:
@@ -758,6 +775,7 @@ if vllm_version_is("0.28.0"):
 else:
     assert _orig_get_packed_kv_cache_groups is not None
     vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
+vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size = _unify_kv_cache_spec_page_size
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to
 # _get_kv_cache_config_packed. The v0.28.0 planner still consumes shared_by;
