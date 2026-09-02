@@ -139,7 +139,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 800
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 880
-  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 380
+  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 590
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210

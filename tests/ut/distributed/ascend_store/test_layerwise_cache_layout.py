@@ -15,8 +15,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     apply_layerwise_kv_cache_plan,
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
+    get_layerwise_reuse_config,
 )
 
 
@@ -167,7 +167,7 @@ def test_prefetch_count_can_be_overridden():
     assert layout.num_prefetch_layers == 3
 
 
-def test_gva_config_is_scoped_to_memcache_layerwise_connector():
+def test_reuse_config_is_scoped_to_layerwise_protocol_connector():
     ascend_store_config = {
         "backend": "memcache",
         "use_layerwise": True,
@@ -192,9 +192,14 @@ def test_gva_config_is_scoped_to_memcache_layerwise_connector():
         kv_connector="AscendStoreConnector",
         kv_connector_extra_config={"backend": "mooncake", "use_layerwise": True},
     )
+    not_opted_in = SimpleNamespace(
+        kv_connector="AscendStoreConnector",
+        kv_connector_extra_config={"backend": "memcache"},
+    )
 
-    assert get_gva_layerwise_config(multi_config) is ascend_store_config
-    assert get_gva_layerwise_config(unsupported) is None
+    assert get_layerwise_reuse_config(multi_config) is ascend_store_config
+    assert get_layerwise_reuse_config(unsupported) is None
+    assert get_layerwise_reuse_config(not_opted_in) is None
 
 
 def test_incompatible_cache_specs_use_separate_slots():

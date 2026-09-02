@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Model Runner V2 SFA DCP accuracy guard.
+"""Model Runner V2 SFA DCP and PCP accuracy guards.
 
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py`.
 """
@@ -64,6 +64,12 @@ DSV3_2_DCP_GOLDENS = (
         "The president of United States is平行于我 charm与技术oi",
     ],
 )
+
+DSV3_2_PCP_GOLDEN = [
+    "The capital of France isoint054 Rund compasses",
+    "Hello, my name is Tom, I am" + "ERIC slicpacelike\u6302",
+    "The president of United States isoint054 Rund959arki",
+]
 
 MODEL = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
 
@@ -140,6 +146,29 @@ FULL_FEATURE_MODEL_CASES = AccuracyCase(
     },
 )
 
+PCP_MODEL_CASE = AccuracyCase(
+    name="dsv3_2_sfa_pcp_mrv2_full_decode_only",
+    model=MODEL,
+    prompts=COMMON_PROMPTS,
+    expected_outputs=DSV3_2_PCP_GOLDEN,
+    max_tokens=5,
+    runner_kwargs={
+        "max_model_len": 1024,
+        "max_num_seqs": MAX_NUM_SEQS,
+        "max_num_batched_tokens": 1024,
+        "tensor_parallel_size": 2,
+        "prefill_context_parallel_size": 2,
+        "enable_expert_parallel": True,
+        "enable_chunked_prefill": True,
+        "enable_prefix_caching": True,
+        "gpu_memory_utilization": 0.8,
+        "cp_kv_cache_interleave_size": 128,
+        "block_size": 128,
+        "quantization": "ascend",
+        "compilation_config": FULL_DECODE_GRAPH,
+    },
+)
+
 
 @pytest.mark.skip("The use case is unstable and temporarily taken offline.")
 @patch.dict(
@@ -155,3 +184,29 @@ FULL_FEATURE_MODEL_CASES = AccuracyCase(
 def test_dsv3_2_sfa_dcp_tp2_dcp2_model_runner_v2_accuracy() -> None:
     """Guard MRV2 accuracy."""
     _run_accuracy_case(FULL_FEATURE_MODEL_CASES)
+
+
+@pytest.mark.e2e_model(MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="sfa_pcp",
+    parallel="TP,EP,PCP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W8A8",
+    graph_mode="full_decode_only",
+)
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_BATCH_INVARIANT": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dsv3_2_sfa_pcp_model_runner_v2_graph_accuracy() -> None:
+    """Guard MRV2 SFA PCP full-decode-only graph accuracy."""
+    _run_accuracy_case(PCP_MODEL_CASE)
