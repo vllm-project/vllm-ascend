@@ -39,9 +39,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         pytest.param(
             2.68,
             3,
-            {
-                "ascend_compilation_config": {"enable_npugraph_ex": False}
-            },
+            {"ascend_compilation_config": {"enable_npugraph_ex": False}},
             id="eagle3-minimax-m3-w8a8",
         ),
     ],
@@ -82,10 +80,10 @@ def test_minimax_m3_eagle3_acceptance_tp8(
         },
         expected_acceptance_length=expected_acceptance_length,
         runner_kwargs={
-            "tensor_parallel_size": 8,     
-            "max_model_len": 8192,     
-            "max_num_batched_tokens": 4096, 
-            "enforce_eager": True, 
++           "tensor_parallel_size": 8,
++           "max_model_len": 8192,
++           "max_num_batched_tokens": 4096,
++           "enforce_eager": True,
             "additional_config": additional_config,
         },
     )
