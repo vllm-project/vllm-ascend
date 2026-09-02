@@ -2415,9 +2415,13 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             # must NOT be passed with a TND layout_q (the checker rejects
             # it); the op infers it from cu_seqlens_q.
             _, metadata_op = _get_qfa_ops()
+            # NOTE: torch_npu.float8_e8m0fnu is the integer dtype ID (293) on
+            # this torch_npu build, not a torch.dtype; tensor.view() would
+            # parse it as a target shape. Bitcast with the stock torch dtype
+            # instead (itemsize 1 -> 1, shape preserved).
             v_descale_stub = torch.zeros(
                 1, 1, 1, 1, 2, dtype=torch.uint8, device=cu_seqlens_q.device
-            ).view(torch_npu.float8_e8m0fnu)
+            ).view(torch.float8_e8m0fnu)
             metadata = metadata_op(
                 self.num_heads,
                 self.num_kv_heads,
@@ -2468,14 +2472,16 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         key, value, key_scale, value_scale = kv_cache
         # The scale caches are stored as raw uint8 (index_put_ on float8
         # either errors or falls back to AICPU); QFA's checker wants E8M0, so
-        # bitcast at the call boundary. Same for the q scale when the quant
-        # helper returns it as uint8 bytes.
-        if key_scale.dtype != torch_npu.float8_e8m0fnu:
-            key_scale = key_scale.view(torch_npu.float8_e8m0fnu)
-        if value_scale.dtype != torch_npu.float8_e8m0fnu:
-            value_scale = value_scale.view(torch_npu.float8_e8m0fnu)
-        if query_scale.dtype != torch_npu.float8_e8m0fnu:
-            query_scale = query_scale.view(torch_npu.float8_e8m0fnu)
+        # bitcast at the call boundary (torch.float8_e8m0fnu -- the torch
+        # dtype; torch_npu.float8_e8m0fnu is the integer ID 293 on this
+        # build and would be parsed as a view *shape*). Same for the q scale
+        # when the quant helper returns it as uint8 bytes.
+        if key_scale.dtype != torch.float8_e8m0fnu:
+            key_scale = key_scale.view(torch.float8_e8m0fnu)
+        if value_scale.dtype != torch.float8_e8m0fnu:
+            value_scale = value_scale.view(torch.float8_e8m0fnu)
+        if query_scale.dtype != torch.float8_e8m0fnu:
+            query_scale = query_scale.view(torch.float8_e8m0fnu)
         main_op, _ = _get_qfa_ops()
         # cann_ops_transformer delivery signature (verified on-device):
         # q/k/v/q_descale/k_descale/v_descale/quant_mode positional, p_scale
