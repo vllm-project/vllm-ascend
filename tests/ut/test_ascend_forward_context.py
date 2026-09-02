@@ -103,7 +103,7 @@ def _patch_select_moe_comm_method_deps(
 def test_forward_context_exposes_device_metadata_executor(monkeypatch):
     forward_context = SimpleNamespace(dp_metadata=None)
     moe_comm_method = ModuleType("vllm_ascend.ops.fused_moe.moe_comm_method")
-    moe_comm_method.get_moe_comm_method = lambda comm_type: None
+    moe_comm_method.__dict__["get_moe_comm_method"] = lambda comm_type: None
 
     @contextmanager
     def fake_set_forward_context(**kwargs):

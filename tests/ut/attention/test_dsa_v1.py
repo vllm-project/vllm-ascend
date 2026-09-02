@@ -755,7 +755,11 @@ def test_indexer_waits_for_qli_consumer(with_prefill: bool):
         decode=None if with_prefill else metadata_value,
         prefill=metadata_value if with_prefill else None,
     )
-    calls = []
+    calls: list[object] = []
+
+    def run_indexer(**kwargs: Any):
+        calls.append("indexer")
+        return torch.zeros(1), None
 
     with (
         patch.object(
@@ -781,7 +785,7 @@ def test_indexer_waits_for_qli_consumer(with_prefill: bool):
             torch.ops._C_ascend,
             "npu_vllm_quant_lightning_indexer",
             create=True,
-            side_effect=lambda **kwargs: (calls.append("indexer") or torch.zeros(1), None),
+            side_effect=run_indexer,
         ),
     ):
         impl._indexer_qli(
@@ -867,10 +871,19 @@ def test_consumers_wait_for_their_metadata(compressor_ratio: int, phase: str):
     else:
         attn_metadata = [wrap(compressor), wrap(compressor_state), wrap(swa)]
 
-    events = []
+    events: list[object] = []
+
+    def run_attention(*args: Any, **kwargs: Any):
+        events.append("attention")
+        return (torch.ones(1),)
+
+    def run_indexer(**kwargs: Any):
+        events.append("indexer")
+        return torch.ones(1), None
+
     stream = MagicMock()
     stream.record_event.return_value = object()
-    attn_op = MagicMock(side_effect=lambda *args, **kwargs: (events.append("attention") or torch.ones(1),))
+    attn_op = MagicMock(side_effect=run_attention)
 
     with (
         patch.object(
@@ -908,7 +921,7 @@ def test_consumers_wait_for_their_metadata(compressor_ratio: int, phase: str):
             torch.ops._C_ascend,
             "npu_vllm_quant_lightning_indexer",
             create=True,
-            side_effect=lambda **kwargs: (events.append("indexer") or torch.ones(1), None),
+            side_effect=run_indexer,
         ),
     ):
         getattr(impl, f"_forward_{phase}")("layer", torch.ones((1, 1)), tuple(), attn_metadata)
@@ -970,21 +983,27 @@ def test_dsa_cp_defers_device_metadata(
             "sl_cpu": builder.seq_lens,
         }
     }
-    events = []
+    events: list[str] = []
 
     def build_local() -> None:
         events.append("local")
         builder.start_pos_prefill.fill_(1)
+
+    def build_sas(**_: Any):
+        events.append("sas")
+        return builder.req_sas_metadata
+
+    def build_qli(**_: Any):
+        events.append("qli")
+        return builder.req_qli_metadata if compressor_ratio == 4 else None
 
     build_local_metadata = MagicMock(side_effect=build_local) if enabled else None
     builder._ensure_device_local_metadata = MagicMock(
         return_value=(0, 3, 3, 3, query_start_loc, builder.seq_lens, build_local_metadata)
     )
     builder._get_cmp_seqlens_for_metadata = MagicMock(return_value=None)
-    builder._build_sas_metadata = MagicMock(side_effect=lambda **_: events.append("sas") or builder.req_sas_metadata)
-    builder._build_qli_metadata = MagicMock(
-        side_effect=lambda **_: events.append("qli") or (builder.req_qli_metadata if compressor_ratio == 4 else None)
-    )
+    builder._build_sas_metadata = MagicMock(side_effect=build_sas)
+    builder._build_qli_metadata = MagicMock(side_effect=build_qli)
     common_metadata = SimpleNamespace(
         num_reqs=2,
         query_start_loc=query_start_loc,
@@ -1019,6 +1038,7 @@ def test_dsa_cp_defers_device_metadata(
     assert (metadata.qli_metadata is builder.req_qli_metadata) is (compressor_ratio == 4)
     assert (metadata.compressor_metadata is not None) is (builder.compressor_metadata_buffers is not None)
     if enabled:
+        assert build_local_metadata is not None
         build_local_metadata.assert_not_called()
         builder._build_sas_metadata.assert_not_called()
         builder._build_qli_metadata.assert_not_called()
@@ -1151,7 +1171,7 @@ def test_dsa_cp_full_graph_compressor_uses_stable_bucket_extent():
 
 
 def test_dsa_cp_device_local_metadata_is_deferred_and_reused():
-    cache = {}
+    cache: dict[Any, Any] = {}
 
     def make_builder():
         builder = AscendDSACPMetadataBuilder.__new__(AscendDSACPMetadataBuilder)
@@ -1241,7 +1261,11 @@ def test_dsa_cp_legacy_compressor_waits_for_local_metadata():
         device_local_metadata_group_id=23,
     )
     result = (torch.ones(1), torch.zeros(1), torch.zeros(1, dtype=torch.int32))
-    events = []
+    events: list[object] = []
+
+    def compute_compressor(*_: Any):
+        events.append("compressor")
+        return result
 
     with (
         patch(
@@ -1250,7 +1274,7 @@ def test_dsa_cp_legacy_compressor_waits_for_local_metadata():
         ),
         patch(
             "vllm_ascend.attention.context_parallel.dsa_cp.get_or_compute_compressor_metadata",
-            side_effect=lambda *_: events.append("compressor") or result,
+            side_effect=compute_compressor,
         ),
     ):
         assert impl._compute_compressor_metadata(metadata) is result
@@ -1335,7 +1359,11 @@ def test_dsa_cp_indexer_waits_before_qli_consumer():
     indexer_metadata.req_metadata.qli_metadata = qli_metadata
     indexer_metadata.hadamard = torch.eye(2)
     attn_metadata = [None, None, None, indexer_metadata, None]
-    events = []
+    events: list[object] = []
+
+    def run_indexer(**kwargs: Any):
+        events.append("indexer")
+        return torch.zeros((1, 1, 1)), None
 
     with (
         patch.object(
@@ -1352,7 +1380,7 @@ def test_dsa_cp_indexer_waits_before_qli_consumer():
             torch.ops._C_ascend,
             "npu_vllm_quant_lightning_indexer",
             create=True,
-            side_effect=lambda **kwargs: (events.append("indexer") or torch.zeros((1, 1, 1)), None),
+            side_effect=run_indexer,
         ),
         patch("vllm_ascend.attention.context_parallel.dsa_cp.rotate_activation", side_effect=lambda value, _: value),
         patch(
@@ -1420,7 +1448,7 @@ def test_dsa_cp_attention_waits_before_memcache_fence(compress_ratio: int):
     else:
         attn_metadata = [compressor_metadata, compressor_metadata, swa_metadata]
         expected_sas = compressor_sas
-    events = []
+    events: list[object] = []
 
     def run_attention(*args, **kwargs):
         assert kwargs["metadata"] is expected_sas
