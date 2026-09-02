@@ -126,22 +126,25 @@ class AscendDSparkProposer(AscendDflashProposer):
         runner = getattr(self, "runner", None)
         if spec_config is None or runner is None or runner.dcp_size <= 1:
             return False
-        target_architectures = (
-            getattr(config.model_config, "architectures", ()) or ()
-        )
-        if not target_architectures:
-            target_architectures = (
-                getattr(
-                    config.model_config.hf_config,
-                    "architectures",
-                    (),
-                )
-                or ()
-            )
+        target_model_config = config.model_config
+        target_architectures = {
+            *(getattr(target_model_config, "architectures", ()) or ()),
+            *(getattr(target_model_config.hf_config, "architectures", ()) or ()),
+        }
+        target_architecture = getattr(target_model_config, "architecture", None)
+        if target_architecture:
+            target_architectures.add(target_architecture)
         draft_hf_config = spec_config.draft_model_config.hf_config
-        draft_architectures = getattr(draft_hf_config, "architectures", ()) or ()
+        draft_architectures = {
+            *(getattr(spec_config.draft_model_config, "architectures", ()) or ()),
+            *(getattr(draft_hf_config, "architectures", ()) or ()),
+        }
         return (
-            any("KimiK3" in architecture for architecture in target_architectures)
+            (
+                getattr(target_model_config.hf_config, "model_type", None)
+                == "kimi_k3"
+                or any("KimiK3" in architecture for architecture in target_architectures)
+            )
             and getattr(draft_hf_config, "model_type", None) == "qwen3"
             and any(
                 architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
@@ -160,6 +163,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             parallel_config=replace(
                 spec_config.draft_parallel_config,
                 rank=self.vllm_config.parallel_config.rank,
+                decode_context_parallel_size=1,
             ),
         )
 
