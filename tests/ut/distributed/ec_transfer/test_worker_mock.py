@@ -61,15 +61,22 @@ class FakeEvent:
 
 
 class FakeNPU:
-    def __init__(self):
+    def __init__(self, order=None):
         self.events = []
         self.enable_timing = []
+        self.order = order
+        self.synchronize_calls = 0
 
     def Event(self, *, enable_timing=False):
         event = FakeEvent()
         self.events.append(event)
         self.enable_timing.append(enable_timing)
         return event
+
+    def synchronize(self):
+        self.synchronize_calls += 1
+        if self.order is not None:
+            self.order.append("npu_synchronize")
 
 
 class FakePlatform:
@@ -301,6 +308,7 @@ def test_upstream_completion_recycles_npu_transfer_resources():
 def test_shutdown_waits_for_transfer_then_unregisters_and_cleans_up(monkeypatch):
     worker = make_worker()
     order = []
+    monkeypatch.setattr(worker_mod.torch, "npu", FakeNPU(order), raising=False)
     worker._dtype = torch.float32
     worker._is_save_rank = True
     worker._save_bufs = None
@@ -333,12 +341,19 @@ def test_shutdown_waits_for_transfer_then_unregisters_and_cleans_up(monkeypatch)
 
     worker.shutdown()
 
-    assert order == ["event_synchronize", "unregister", "cleanup"]
+    assert order == [
+        "event_synchronize",
+        "npu_synchronize",
+        "unregister",
+        "cleanup",
+    ]
     assert worker._mmap_pinned is False
 
 
 def test_unregister_failure_preserves_registration_for_retry(monkeypatch):
     worker = make_worker()
+    fake_npu = FakeNPU()
+    monkeypatch.setattr(worker_mod.torch, "npu", fake_npu, raising=False)
     calls = 0
 
     def fail_once(blocks):
@@ -356,4 +371,5 @@ def test_unregister_failure_preserves_registration_for_retry(monkeypatch):
     assert worker._mmap_pinned is True
     worker._shutdown_transfer_backend()
     assert calls == 2
+    assert fake_npu.synchronize_calls == 2
     assert worker._mmap_pinned is False

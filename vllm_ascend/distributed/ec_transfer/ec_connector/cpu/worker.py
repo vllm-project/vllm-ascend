@@ -113,5 +113,6 @@ class AscendECCPUWorker(ECCPUWorker):
     def _shutdown_transfer_backend(self) -> None:
         if not self._mmap_pinned:
             return
+        torch.npu.synchronize()
         _unregister_pinned_host_mmap(self._region.blocks)
         self._mmap_pinned = False
