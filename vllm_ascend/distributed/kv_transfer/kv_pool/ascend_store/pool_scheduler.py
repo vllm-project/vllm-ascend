@@ -160,26 +160,20 @@ class KVPoolScheduler:
         )
         self.tp_mismatch = tp_mismatch_info.enabled
 
-        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
-        self.backend_name = backend_name.lower()
-        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
-        backend = backend_map.get(self.backend_name)
+        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake").lower()
+        self.use_gva_layerwise = self.use_layerwise and backend_name == "memcache"
+        backend = backend_map.get(backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
-        backend_path = backend.get("path")
-        backend_class_name = backend.get("name")
-        assert backend_path is not None and backend_class_name is not None
-        backend_module = importlib.import_module(backend_path)
-        backend_class = getattr(backend_module, backend_class_name)
+        backend_module = importlib.import_module(backend["path"])
+        backend_class = getattr(backend_module, backend["name"])
         self.store_scheduler = backend_class.create_scheduler_client(vllm_config.parallel_config)
 
         model_config = vllm_config.model_config
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = (vllm_config.parallel_config.rank // self.tp_size) % self.pp_size
-        self.use_mla = False
-        if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
-            self.use_mla = True
+        self.use_mla = getattr(model_config, "use_mla", False) is True
         if self.use_mla:
             self.num_kv_head = 1
         else:
@@ -282,7 +276,7 @@ class KVPoolScheduler:
             include_layers=include_layers,
         )
         query_keys = [key for block_keys in query_keys_by_block for key in block_keys]
-        exists_states = self.store_scheduler.batch_is_exist(query_keys)
+        exists_states = self.store_scheduler.exists(query_keys)
         if len(exists_states) != len(query_keys):
             raise RuntimeError(
                 "KV pool exists check returned unexpected number of "

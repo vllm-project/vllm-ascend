@@ -585,7 +585,7 @@ class TestKVPoolSchedulerGetStoreLookupHitTokens(unittest.TestCase):
         for hash_count, exists, computed_tokens, expected in cases:
             with self.subTest(hash_count=hash_count, exists=exists, computed_tokens=computed_tokens):
                 scheduler = self._make_scheduler()
-                scheduler.store_scheduler.batch_is_exist.return_value = exists
+                scheduler.store_scheduler.exists.return_value = exists
                 request = MagicMock()
                 request.block_hashes = [b"\xaa"] * hash_count
                 result = scheduler._get_store_lookup_hit_tokens(request, 64, computed_tokens)
