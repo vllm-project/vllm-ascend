@@ -416,7 +416,31 @@ def rope_forward_triton(
     positions: torch.Tensor = None,
     rope_dim: int = -1,
     is_neox_style: bool = True,
+    out_dtype: torch.dtype | None = None,
+    q_out: torch.Tensor | None = None,
+    k_out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply RoPE and optionally write fixed-scale E4M3 outputs."""
+    if out_dtype is not None:
+        if out_dtype != torch.float8_e4m3fn:
+            raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
+        if cos_sin_cache is None or positions is None:
+            raise ValueError("FP8 RoPE output requires cos_sin_cache and positions")
+        if rope_dim == -1:
+            raise ValueError("FP8 RoPE output requires rope_dim")
+        return _rope_forward_triton_fp8(
+            q,
+            k,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            rope_dim=rope_dim,
+            is_neox_style=is_neox_style,
+            q_out=q_out,
+            k_out=k_out,
+        )
+    if q_out is not None or k_out is not None:
+        raise ValueError("q_out and k_out require an FP8 output dtype")
+
     if not q.is_contiguous():
         q = q.contiguous()
     if not k.is_contiguous():
@@ -585,7 +609,7 @@ def rope_forward_triton_siso(
     return qk
 
 
-def rope_forward_triton_fp8(
+def _rope_forward_triton_fp8(
     q: torch.Tensor,
     k: torch.Tensor,
     cos_sin_cache: torch.Tensor,

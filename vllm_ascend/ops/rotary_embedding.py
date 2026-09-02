@@ -39,7 +39,7 @@ from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 
-    from vllm_ascend.ops.triton.rope import rope_forward_triton, rope_forward_triton_fp8
+    from vllm_ascend.ops.triton.rope import rope_forward_triton
 
 # Currently, rope ops used on npu requires detached cos && sin as inputs.
 # However, RotaryEmbedding in vllm use cos_sin_cache as a whole variable.
@@ -244,13 +244,14 @@ class AscendRotaryEmbedding(RotaryEmbedding):
                     raise ValueError(
                         f"Cannot infer the FP8 RoPE head size from query_width={query_width}, key_width={key_width}"
                     )
-            query_fp8, key_fp8 = rope_forward_triton_fp8(
+            query_fp8, key_fp8 = rope_forward_triton(
                 query.view(num_tokens, -1, head_size),
                 key.view(num_tokens, -1, head_size),
                 cos_sin_cache=self.cos_sin_cache,
                 positions=positions,
                 rope_dim=min(self.rotary_dim, head_size),
                 is_neox_style=is_neox_style,
+                out_dtype=torch.float8_e4m3fn,
             )
             return query_fp8.view(query_shape), key_fp8.view(key_shape)
         if out_dtype is not None:

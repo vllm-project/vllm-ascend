@@ -5,7 +5,6 @@ import torch
 
 from vllm_ascend.ops.triton.rope import (
     rope_forward_triton,
-    rope_forward_triton_fp8,
     rope_forward_triton_siso,
 )
 
@@ -266,12 +265,13 @@ def test_rotary_embedding_triton_kernel_fp8(
         positions,
         rotary_dim,
     )
-    actual_query, actual_key = rope_forward_triton_fp8(
+    actual_query, actual_key = rope_forward_triton(
         query,
         key,
         cos_sin_cache=cos_sin_cache,
         positions=positions,
         rope_dim=rotary_dim,
+        out_dtype=torch.float8_e4m3fn,
     )
 
     assert actual_query.dtype == torch.float8_e4m3fn
