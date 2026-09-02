@@ -214,8 +214,11 @@ class AscendPCPManager(PCPManager):
         graph_num_tokens = global_batch.num_tokens_after_padding
         is_decode_only = not bool(global_batch.is_prefilling_np.any())
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
-        # Keep the request-shaped metadata at that same fixed graph extent.
-        graph_num_reqs = graph_num_tokens if is_decode_only else global_batch.num_reqs_after_padding
+        # Other graph modes may pad tokens without padding request metadata.
+        is_full_decode_graph = (
+            is_decode_only and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        )
+        graph_num_reqs = graph_num_tokens if is_full_decode_graph else global_batch.num_reqs_after_padding
         # On newer vLLM, the base PCP manager may already honor
         # ``padded_num_tokens`` while leaving request-shaped metadata at the
         # actual request count. Pad when either extent is still short so the
@@ -273,22 +276,21 @@ class AscendPCPManager(PCPManager):
                 is_padding=input_buffers.is_padding[:graph_num_tokens],
             )
 
-        local_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
+        actual_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         if local_batch.num_reqs_after_padding > local_batch.num_reqs:
-            padded_seq_lens_np = np.zeros(
-                local_batch.num_reqs_after_padding,
-                dtype=local_seq_lens_np.dtype,
-            )
-            padded_seq_lens_np[: local_batch.num_reqs] = local_seq_lens_np
-            local_seq_lens_np = padded_seq_lens_np
-
-        local_batch.seq_lens_np = local_seq_lens_np
+            assert self._input_buffers is not None
+            seq_lens_np = self._input_buffers.seq_lens_np
+            seq_lens_np[: local_batch.num_reqs] = actual_seq_lens_np
+            seq_lens_np[local_batch.num_reqs : local_batch.num_reqs_after_padding] = 0
+            local_batch.seq_lens_np = seq_lens_np[: local_batch.num_reqs_after_padding]
+        else:
+            local_batch.seq_lens_np = actual_seq_lens_np
         num_valid_tokens = local_batch.num_scheduled_tokens
         if local_batch.num_draft_tokens_per_req is not None:
             num_valid_tokens = num_valid_tokens - local_batch.num_draft_tokens_per_req
         local_batch.attn_state = build_attn_state(
             self.vllm_config,
-            local_batch.seq_lens_np,
+            actual_seq_lens_np,
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,
             num_valid_tokens,
