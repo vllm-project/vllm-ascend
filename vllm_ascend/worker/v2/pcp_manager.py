@@ -21,6 +21,7 @@ from dataclasses import dataclass, replace
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -43,6 +44,7 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+    kv_cache_config: KVCacheConfig | None = None
 
     @staticmethod
     def validate_config(
@@ -132,6 +134,7 @@ class AscendPCPManager(PCPManager):
             num_valid_tokens = num_valid_tokens - local_batch.num_draft_tokens_per_req
         local_batch.attn_state = build_attn_state(
             self.vllm_config,
+            self.kv_cache_config,
             local_batch.seq_lens_np,
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,

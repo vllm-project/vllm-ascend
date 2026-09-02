@@ -309,7 +309,7 @@ def build_attn_metadata(
 
 def build_attn_state(
     vllm_config: VllmConfig,
-    kv_cache_config: KVCacheConfig,
+    kv_cache_config: KVCacheConfig | None,
     seq_lens_np: np.ndarray,
     num_reqs,
     num_scheduled_tokens,
@@ -317,7 +317,7 @@ def build_attn_state(
 ):
     """Build attention state for npu's attention backend."""
     if vllm_config.model_config.runner_type == "pooling":
-        if isinstance(
+        if kv_cache_config is not None and isinstance(
             kv_cache_config.kv_cache_groups[0].kv_cache_spec,
             EncoderOnlyAttentionSpec,
         ):
