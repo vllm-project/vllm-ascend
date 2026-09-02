@@ -363,7 +363,11 @@ class AscendLogitsProcessor(LogitsProcessor):
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
+        # Keep the upstream LogitsProcessor signature.  Ascend's custom
+        # lm-head paths own their gather behavior, so preserve the existing
+        # path while accepting the newer upstream argument.
         if lmhead_tp_enable():
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:
