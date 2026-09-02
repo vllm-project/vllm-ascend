@@ -443,10 +443,10 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
 
 
 class TestDSparkInitValidation:
-    """``AscendDSparkProposer.__init__`` rejects probabilistic draft sampling
-    (unsupported on the v1 model runner) and, for the greedy path, allocates
-    the DSpark-specific draft/seed buffers and overrides the DFlash
-    query-token / cudagraph defaults."""
+    """``AscendDSparkProposer.__init__`` accepts probabilistic draft sampling
+    (supported via the per-step probability collection in
+    ``llm_base_proposer``), allocates the DSpark-specific draft/seed buffers
+    and overrides the DFlash query-token / cudagraph defaults."""
 
     @staticmethod
     def _make_vllm_config(
@@ -494,7 +494,7 @@ class TestDSparkInitValidation:
 
         monkeypatch.setattr(AscendDflashProposer, "__init__", _stub)
 
-    def test_probabilistic_rejected(self, monkeypatch):
+    def test_probabilistic_accepted(self, monkeypatch):
         device = torch.device("cpu")
         self._stub_dflash_init(
             monkeypatch,
@@ -510,8 +510,11 @@ class TestDSparkInitValidation:
             max_num_tokens=256,
             draft_sample_method="probabilistic",
         )
-        with pytest.raises(ValueError, match="probabilistic"):
-            AscendDSparkProposer(vllm_config, device)
+        # Probabilistic draft sampling is supported (per-step probabilities
+        # are collected in llm_base_proposer); init must not raise.
+        proposer = AscendDSparkProposer(vllm_config, device)
+        assert proposer._dspark_draft_buffer.shape == (16, 6)
+        assert proposer._dspark_seed_buffer.shape == (16,)
 
     def test_greedy_allocates_dspark_buffers(self, monkeypatch):
         device = torch.device("cpu")

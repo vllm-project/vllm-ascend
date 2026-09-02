@@ -1518,6 +1518,11 @@ class NPUModelRunner(GPUModelRunner):
     ) -> list[list[int]] | None:
         self._log_propose_draft_token_ids_entry(spec_decode_metadata, num_scheduled_tokens)
 
+        # Reset cached draft probs from the previous step so that stale data
+        # is never used when the drafter does not produce fresh probabilities.
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
+
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
@@ -1708,9 +1713,7 @@ class NPUModelRunner(GPUModelRunner):
                     else None
                 ),
             )
-            if get_pp_group().world_size > 1 and hasattr(
-                self.drafter, "take_last_draft_probs"
-            ):
+            if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
                 if draft_probs is not None:
                     self._draft_probs = draft_probs
@@ -2468,11 +2471,7 @@ class NPUModelRunner(GPUModelRunner):
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
-        draft_probs = (
-            self._get_spec_decode_draft_probs(spec_decode_metadata)
-            if get_pp_group().world_size > 1
-            else None
-        )
+        draft_probs = self._get_spec_decode_draft_probs(spec_decode_metadata)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             draft_probs,
