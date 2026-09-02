@@ -301,7 +301,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
         device=torch.device("cpu"),
     )
     base_batch = InputBatch.make_dummy(
-        num_reqs=3,
+        num_reqs=4,
         num_tokens=4,
         input_buffers=input_buffers,
         max_query_len=1,
