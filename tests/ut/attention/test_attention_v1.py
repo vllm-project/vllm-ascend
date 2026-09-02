@@ -2,6 +2,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
@@ -446,6 +448,40 @@ class TestAscendAttentionBackendImpl(TestBase):
             attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name="producer_layer",
         )
+
+    def test_backend_packs_standardized_cache_as_dense_kv_planes(self):
+        spec = FullAttentionSpec(
+            block_size=128,
+            num_kv_heads=8,
+            head_size=64,
+            dtype=torch.float16,
+        )
+
+        packed = AscendAttentionBackend.customize_spec(spec)
+
+        self.assertEqual(
+            AscendAttentionBackend.supported_kv_cache_layouts(),
+            (KVCacheLayout.LHBNC,),
+        )
+        self.assertEqual(packed.num_head_slots, 2)
+        self.assertEqual(packed.state_content_bytes, 8 * 64 * 2)
+        self.assertEqual(packed.page_size_bytes, spec.page_size_bytes)
+
+    def test_unpack_standardized_kv_cache_returns_dense_kernel_views(self):
+        physical = torch.arange(
+            2 * 2 * 4 * 8 * 64,
+            dtype=torch.float32,
+        ).view(2, 2, 4, 8 * 64)
+        standardized = physical.permute(1, 0, 2, 3)
+
+        key_cache, value_cache = self.impl._unpack_kv_cache(standardized)
+
+        self.assertEqual(key_cache.shape, (2, 4, 8, 64))
+        self.assertEqual(value_cache.shape, (2, 4, 8, 64))
+        self.assertTrue(torch.equal(key_cache, physical[0].view(2, 4, 8, 64)))
+        self.assertTrue(torch.equal(value_cache, physical[1].view(2, 4, 8, 64)))
+        self.assertTrue(key_cache.is_contiguous())
+        self.assertTrue(value_cache.is_contiguous())
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
