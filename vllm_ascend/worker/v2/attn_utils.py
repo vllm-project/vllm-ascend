@@ -590,13 +590,52 @@ def _allocate_kv_cache(
     has_attention = any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
     use_hybrid_layout = has_mamba and has_attention
 
+    # The restored DeepSeek-V4 planner on main computes capacity for one
+    # shared-tuple backing and emits every KVCacheTensor as a view into it.
+    # Validate all descriptors before allocating so an unsupported geometry
+    # cannot partially materialize and then fall back to duplicate buffers.
+    dsv4_backing: torch.Tensor | None = None
+    if is_dsv4_model and not vllm_version_is("0.27.1"):
+        tensor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
+        if len(tensor_sizes) != 1:
+            raise ValueError("DeepSeek-V4 KV cache descriptors must share one backing allocation.")
+        backing_size = tensor_sizes.pop()
+        dsv4_regions: list[tuple[str, int, int]] = []
+        for descriptor in kv_cache_config.kv_cache_tensors:
+            for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
+                spec = layer_kv_cache_spec[layer_name]
+                if descriptor.block_stride != spec.page_size_bytes:
+                    raise ValueError(
+                        "DeepSeek-V4 requires contiguous per-layer pages, "
+                        f"but {layer_name} has block_stride="
+                        f"{descriptor.block_stride} and page_size="
+                        f"{spec.page_size_bytes}."
+                    )
+                layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+                start = descriptor.offset + layer_idx * descriptor.layer_stride
+                if start < 0 or start + layer_size > backing_size:
+                    raise ValueError(
+                        f"DeepSeek-V4 KV cache view for {layer_name} exceeds the shared backing allocation."
+                    )
+                dsv4_regions.append((layer_name, start, layer_size))
+
+        if not dsv4_regions:
+            raise ValueError("DeepSeek-V4 KV cache config has no materializable layers.")
+        dsv4_backing = _allocate_int8_cache_tensor(
+            backing_size,
+            alignment,
+            device,
+        )
+        for layer_name, start, layer_size in dsv4_regions:
+            kv_cache_raw_tensors[layer_name] = dsv4_backing[start : start + layer_size]
+
     # vLLM #51718 changed every KVCacheTensor to describe a view into one
     # common backing allocation. Hybrid groups overlay that backing from byte
     # zero because a block ID belongs to only one group at a time. Allocate it
     # once here; allocating tensor.size for every descriptor duplicates the
     # full cache pool and can OOM before the second tensor is initialized.
     hybrid_backing: torch.Tensor | None = None
-    if use_hybrid_layout and not vllm_version_is("0.27.1"):
+    if use_hybrid_layout and not is_dsv4_model and not vllm_version_is("0.27.1"):
         tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
         if len(tensor_sizes) != 1:
             raise ValueError("Hybrid KV cache tensors must share one backing allocation.")
@@ -614,6 +653,9 @@ def _allocate_kv_cache(
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
         if not shared_names:
+            continue
+
+        if dsv4_backing is not None:
             continue
 
         if is_dsv4_model:

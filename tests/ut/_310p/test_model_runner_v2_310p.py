@@ -74,6 +74,10 @@ def test_310p_hybrid_model_state_keeps_ascend_hybrid_behavior() -> None:
     assert issubclass(Ascend310PMambaHybridModelState, AscendMambaHybridModelState)
 
 
+def test_310p_v2_does_not_advertise_shared_kv_backing() -> None:
+    assert NPUModelRunner310V2.supports_standardized_shared_kv_backing is False
+
+
 def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     state.num_accepted_tokens_gpu = torch.zeros(4, dtype=torch.int32)
@@ -157,7 +161,7 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
 
     class FakeMambaSpec:
         block_size = 1
-        page_size_bytes = 64
+        page_size_bytes = 80
         shapes = [(4, 8), (2, 4)]
         dtypes = [torch.float16, torch.float16]
 
@@ -170,7 +174,7 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
         # focused 310P fixture stays valid on main and v0.27.1.
         kv_cache_tensors=[
             SimpleNamespace(
-                size=128,
+                size=160,
                 shared_by=[layer_name],
                 layers=[layer_name],
             )
@@ -191,6 +195,58 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     assert states[0].shape == (2, 4, 8)
     assert states[1].shape == (2, 2, 4)
     assert states[0].dtype == torch.float16
+    assert states[0].untyped_storage().nbytes() == 160
+
+
+@pytest.mark.skipif(
+    model_runner_module.vllm_version_is("0.27.1"),
+    reason="vLLM #51718 only changed main descriptors",
+)
+def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
+    class FakeMambaSpec:
+        block_size = 1
+        page_size_bytes = 80
+        shapes = [(4, 8), (2, 4)]
+        dtypes = [torch.float16, torch.float16]
+
+    spec = FakeMambaSpec()
+    layer_names = [
+        "model.layers.1.linear_attn",
+        "model.layers.3.linear_attn",
+    ]
+    kv_cache_config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                layer_names=layer_names,
+            )
+        ],
+        # Deliberately model a full standardized backing much larger than one
+        # layer. The 310P private allocator must not use this as layer bytes.
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=4096,
+                layers=layer_names,
+            )
+        ],
+    )
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.kernel_block_sizes = [1]
+    runner.attn_groups = [[SimpleNamespace(backend=object, layer_names=layer_names)]]
+
+    with patch.object(model_runner_module, "MambaSpec", FakeMambaSpec):
+        caches = runner._allocate_kv_cache_tensors(kv_cache_config, {})
+
+    first_states = caches[layer_names[0]]
+    second_states = caches[layer_names[1]]
+    assert first_states[0].shape[0] == kv_cache_config.num_blocks
+    assert second_states[0].shape[0] == kv_cache_config.num_blocks
+    assert first_states[0].untyped_storage().data_ptr() != second_states[0].untyped_storage().data_ptr()
+    assert first_states[0].untyped_storage().nbytes() == 160
+    assert second_states[0].untyped_storage().nbytes() == 160
 
 
 def test_runner_installs_310p_request_state() -> None:
@@ -344,7 +400,7 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     class FakeAttentionSpec:
         block_size = 128
         storage_block_size = 128
-        page_size_bytes = 4096
+        page_size_bytes = 128 * 2 * (128 + 128) * 2
         num_kv_heads = 2
         head_size = 128
         head_size_v = 128
@@ -393,6 +449,93 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     assert k_cache.data_ptr() != v_cache.data_ptr()
     assert len(allocations) == 2
     assert all(allocation[3] == model_runner_module.ACL_FORMAT_FRACTAL_NZ for allocation in allocations)
+
+
+@pytest.mark.skipif(
+    model_runner_module.vllm_version_is("0.27.1"),
+    reason="vLLM #51718 only changed main descriptors",
+)
+def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
+    class FakeAttentionSpec:
+        block_size = 128
+        storage_block_size = 128
+        page_size_bytes = 4096
+        num_kv_heads = 2
+        head_size = 128
+        head_size_v = 128
+        dtype = torch.float16
+
+    class FakeBackend:
+        @staticmethod
+        def get_kv_cache_shape(
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+            cache_type,
+        ):
+            del cache_type
+            return (
+                2,
+                num_blocks,
+                num_kv_heads * head_size // 16,
+                block_size,
+                16,
+            )
+
+    spec = FakeAttentionSpec()
+    layer_names = [
+        "model.layers.0.self_attn",
+        "model.layers.2.self_attn",
+    ]
+    kv_cache_config = SimpleNamespace(
+        num_blocks=2,
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                layer_names=layer_names,
+            )
+        ],
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=spec.page_size_bytes * 100,
+                layers=layer_names,
+            )
+        ],
+    )
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.device = torch.device("cpu")
+    runner.cache_config = SimpleNamespace(cache_dtype="auto")
+    runner.kernel_block_sizes = [64]
+    runner.attn_groups = [[SimpleNamespace(backend=FakeBackend, layer_names=layer_names)]]
+    allocations = []
+
+    def empty_with_format(*, size, dtype, device, acl_format):
+        allocations.append((size, dtype, device, acl_format))
+        return torch.zeros(size, dtype=dtype, device=device)
+
+    with (
+        patch.object(model_runner_module, "AttentionSpec", FakeAttentionSpec),
+        patch.object(
+            model_runner_module,
+            "AscendAttentionBackend310",
+            FakeBackend,
+        ),
+        patch.object(
+            model_runner_module.torch_npu,
+            "empty_with_format",
+            empty_with_format,
+            create=True,
+        ),
+    ):
+        caches = runner._allocate_kv_cache_tensors(kv_cache_config, {})
+
+    assert len(allocations) == 4
+    assert caches[layer_names[0]][0].shape[0] == (kv_cache_config.num_blocks * 2)
+    assert caches[layer_names[0]][0].data_ptr() != caches[layer_names[1]][0].data_ptr()
+    for layer_name in layer_names:
+        k_cache, v_cache = caches[layer_name]
+        assert (k_cache.nbytes + v_cache.nbytes) == kv_cache_config.num_blocks * spec.page_size_bytes
 
 
 def test_model_state_uses_greedy_sampler() -> None:
