@@ -495,8 +495,8 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     slot_mappings_by_layer = object()
     attn_metadata = object()
     block_tables = MagicMock()
-    block_tables.get_dummy_block_tables.return_value = input_block_tables
     pcp_manager = MagicMock()
+    pcp_manager.get_dummy_block_tables.return_value = input_block_tables
     pcp_manager.get_dummy_slot_mappings.return_value = slot_mappings
     model_state = MagicMock()
     model_state.prepare_attn.return_value = attn_metadata
@@ -532,7 +532,8 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     make_dummy.assert_called_once_with(2, 8, input_buffers, max_query_len=4)
     pcp_manager.partition_batch.assert_not_called()
     pcp_manager.prepare_attn.assert_not_called()
-    block_tables.get_dummy_block_tables.assert_called_once_with(2)
+    block_tables.get_dummy_block_tables.assert_not_called()
+    pcp_manager.get_dummy_block_tables.assert_called_once_with(2)
     pcp_manager.get_dummy_slot_mappings.assert_called_once_with(8)
     model_state.prepare_attn.assert_called_once_with(
         input_batch,
@@ -545,6 +546,23 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
     )
     assert state.attn_metadata is attn_metadata
     assert state.slot_mappings is slot_mappings_by_layer
+
+
+def test_main_pcp_capture_block_tables_keep_runtime_storage() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    local_block_tables = (
+        torch.full((4, 8), 7, dtype=torch.int32),
+        torch.full((4, 4), 9, dtype=torch.int32),
+    )
+    manager._local_block_tables = local_block_tables
+
+    dummy_block_tables = manager.get_dummy_block_tables(2)
+
+    assert len(dummy_block_tables) == len(local_block_tables)
+    for dummy, runtime_table in zip(dummy_block_tables, local_block_tables):
+        assert dummy.data_ptr() == runtime_table.data_ptr()
+        assert torch.count_nonzero(dummy) == 0
+        assert torch.count_nonzero(runtime_table[2:]) > 0
 
 
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
