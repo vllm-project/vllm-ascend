@@ -1,3 +1,4 @@
+from dataclasses import fields as dataclass_fields
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -34,6 +35,19 @@ from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0) -> KVCacheTensor:
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if any(field.name == "shared_by" for field in dataclass_fields(KVCacheTensor)):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=page_size,
+        block_stride=page_size,
+        offset=0,
+    )
 
 
 @pytest.mark.parametrize(
@@ -448,6 +462,9 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
 
 def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     """HiddenStateCacheSpec must stay on a single-tensor allocate/reshape path."""
+    from vllm.model_executor.models.extract_hidden_states import (
+        CacheOnlyAttentionBackend,
+    )
     from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
 
     layer_name = "draft.cache_only_layers.36"
@@ -465,14 +482,9 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     page_bytes = spec.page_size_bytes
     tensor_size = num_blocks * page_bytes
 
-    class FakeBackend:
-        @staticmethod
-        def get_kv_cache_shape(num_blocks_, block_size_, num_kv_heads_, head_size_, cache_dtype_str="auto"):
-            return (num_blocks_, block_size_, num_kv_heads_, head_size_)
-
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
-        kv_cache_tensors=[KVCacheTensor(size=tensor_size, shared_by=[layer_name])],
+        kv_cache_tensors=[_make_kv_cache_tensor(tensor_size, [layer_name], page_bytes)],
         kv_cache_groups=[
             KVCacheGroupSpec(
                 layer_names=[layer_name],
@@ -500,7 +512,7 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
 
     attn_groups = [
         AttentionGroup(
-            backend=FakeBackend,
+            backend=CacheOnlyAttentionBackend,
             layer_names=[layer_name],
             kv_cache_spec=spec,
             kv_cache_group_id=0,
@@ -517,7 +529,12 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     )
     cache = reshaped[layer_name]
     assert isinstance(cache, torch.Tensor)
-    assert cache.shape == (num_blocks, block_size, num_kv_heads, head_size)
+    if hasattr(CacheOnlyAttentionBackend, "get_kv_cache_shape"):
+        assert cache.shape == (num_blocks, block_size, num_kv_heads, head_size)
+    else:
+        # vLLM #51718 dropped that method and standardized every layer on
+        # [B, H, N, C], the order basic_cache writes as kv_cache[block, :, pos].
+        assert cache.shape == (num_blocks, num_kv_heads, block_size, head_size)
     assert cache.dtype == dtype
 
 

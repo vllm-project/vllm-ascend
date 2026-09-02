@@ -46,3 +46,11 @@ to get specific plans.
     HiddenStateCacheSpec on a single-tensor allocate/reshape path.
     `use_aux_hidden_state_outputs` is enabled by upstream
     `GPUModelRunner.__init__`.
+
+    The allocate/reshape path detects the two upstream KV cache layouts
+    instead of branching on the vLLM version, because vllm-ascend can be
+    pinned to a main commit on either side of vLLM #51718: before it,
+    `KVCacheTensor.shared_by` aliases per-descriptor bytes and
+    `CacheOnlyAttentionBackend` publishes `[B, N, H, C]`; after it,
+    `KVCacheTensor.layers` carves one shared backing and every layer is
+    `[B, H, N, C]`.
