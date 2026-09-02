@@ -161,6 +161,26 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         self.assertEqual(hit_length, 0)
 
+    def test_hit_length_only_does_not_materialize_masks(self):
+        coord = AscendStoreCoordinator(
+            [KVCacheGroupSpec(["layer.0"], _full_spec(128))],
+            scheduler_block_size=128,
+            hash_block_size=128,
+            group_block_sizes=[128],
+            group_cache_families=["c1"],
+        )
+
+        with patch.object(coord, "_find_hit_blocks", return_value=(([],), 128)) as find_hit_blocks:
+            hit_length = coord.find_longest_cache_hit_length(
+                _hashes(1),
+                128,
+                ExternalCachedBlockPool(128),
+                apply_eagle=False,
+            )
+
+        self.assertEqual(hit_length, 128)
+        self.assertFalse(find_hit_blocks.call_args.kwargs["apply_eagle"])
+
     def test_store_mask_uses_manager_reachability(self):
         coord = AscendStoreCoordinator(
             [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=256))],

@@ -144,6 +144,20 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0][0], 16)
 
+    def test_process_token_hashes_skips_key_construction(self):
+        hashes = ["a", "b", "c"]
+
+        result = list(self.db.process_token_hashes(48, hashes, mask_num=16))
+
+        self.assertEqual(result, [(16, 32, "b"), (32, 48, "c")])
+
+    def test_process_tokens_with_unaligned_mask_starts_at_next_chunk(self):
+        hashes = ["a", "b", "c"]
+
+        result = list(self.db.process_tokens(48, hashes, mask_num=17))
+
+        self.assertEqual([(start, end) for start, end, _ in result], [(32, 48)])
+
     def test_process_tokens_with_tail_clipped_block_ids_maps_tail_chunks(self):
         db = ChunkedTokenDatabase([self.meta], block_size=[128], partitions=None)
         hashes = [bytes([idx % 251]) * 32 for idx in range(128)]
@@ -266,6 +280,67 @@ class TestChunkedTokenDatabase(unittest.TestCase):
         self.assertEqual(addr[1], 2000 + 99 * 320)
         self.assertEqual(size[0], 160)
         self.assertEqual(size[1], 320)
+
+    def test_prepare_values_matches_scalar_results(self):
+        starts = [0, 16]
+        ends = [16, 24]
+        block_ids = [5, 9]
+
+        addrs, sizes = self.db.prepare_values(starts, ends, block_ids)
+        expected = [
+            self.db.prepare_value(start, end, [], block_id=block_id)[:2]
+            for start, end, block_id in zip(starts, ends, block_ids, strict=True)
+        ]
+
+        self.assertEqual(addrs, [addr for addr, _ in expected])
+        self.assertEqual(sizes, [size for _, size in expected])
+
+    def test_prepare_values_matches_dsv4_compressed_groups(self):
+        metadata = [KeyMetadata("dsv4", 0, 0, 0, 0, kv_cache_group_id=group_id) for group_id in range(3)]
+        db = ChunkedTokenDatabase(metadata, [128, 128, 128], None, hash_block_size=128)
+        db.set_group_buffers(
+            {0: [1000, 2000], 1: [3000], 2: [4000, 5000]},
+            {0: [256, 512], 1: [1024], 2: [2048, 4096]},
+            {0: [300, 600], 1: [1200], 2: [2400, 4800]},
+            group_cache_families={0: "c1", 1: "c4", 2: "c128"},
+        )
+        hashes = [f"h{index}" for index in range(1024)]
+        expected_chunks = [1024, 256, 8]
+
+        for group_id, chunk_count in enumerate(expected_chunks):
+            block_ids = list(range(chunk_count))
+            chunks = list(
+                db.process_token_key_strings_with_block_ids(
+                    128 * 1024,
+                    hashes,
+                    block_ids,
+                    kv_cache_group_id=group_id,
+                )
+            )
+            starts = [chunk[0] for chunk in chunks]
+            ends = [chunk[1] for chunk in chunks]
+            resolved_block_ids = [chunk[4] for chunk in chunks]
+            addrs, sizes = db.prepare_values(
+                starts,
+                ends,
+                resolved_block_ids,
+                kv_cache_group_id=group_id,
+            )
+            scalar = [
+                db.prepare_value(start, end, [], kv_cache_group_id=group_id, block_id=block_id)[:2]
+                for start, end, block_id in zip(starts, ends, resolved_block_ids, strict=True)
+            ]
+
+            self.assertEqual(len(chunks), chunk_count)
+            self.assertEqual(addrs, [addr for addr, _ in scalar])
+            self.assertEqual(sizes, [size for _, size in scalar])
+
+    def test_prepare_values_empty(self):
+        self.assertEqual(self.db.prepare_values([], [], []), ([], []))
+
+    def test_prepare_values_rejects_mismatched_inputs(self):
+        with self.assertRaisesRegex(ValueError, "must have the same length"):
+            self.db.prepare_values([0], [16], [])
 
     def test_prepare_value_layer(self):
         addr, size, block_id = self.db.prepare_value_layer(0, 16, [5, 6], layer_id=0)
