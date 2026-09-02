@@ -516,23 +516,6 @@ class NPUModelRunner(GPUModelRunner):
             idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
             num_reqs = len(req_ids)
 
-            num_valid_tokens = num_scheduled_tokens_np
-            if scheduler_output.scheduled_spec_decode_tokens:
-                num_valid_tokens = np.array(
-                    [
-                        num_toks - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                        for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
-                    ],
-                    dtype=np.int32,
-                )
-            attn_state = build_attn_state(
-                self.vllm_config,
-                self.input_buffers.seq_lens_np,
-                num_reqs,
-                num_scheduled_tokens_np,
-                num_valid_tokens,
-            )
-
             # Get the number of draft tokens for each request.
             draft_tokens = scheduler_output.scheduled_spec_decode_tokens
             num_draft_tokens_per_req = None
@@ -559,7 +542,39 @@ class NPUModelRunner(GPUModelRunner):
                 np.cumsum(num_logits, out=cu_num_logits_np[1:])
                 cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
+            # Draft compaction changes only the speculative suffix. Preserve
+            # the original target-token count for Ascend phase classification;
+            # it is the number of scheduled tokens minus the scheduler's full
+            # draft suffix, not the compacted draft budget.
+            num_valid_tokens = num_scheduled_tokens_np
+            if draft_tokens:
+                num_valid_tokens = np.array(
+                    [
+                        num_toks - len(draft_tokens.get(i, []))
+                        for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
+                    ],
+                    dtype=np.int32,
+                )
+
             num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+            adaptive_verification = (
+                self.adaptive_verification
+                if num_draft_tokens_per_req is not None
+                else None
+            )
+            if adaptive_verification is not None:
+                # The scheduler stores the original, evenly distributed draft
+                # budget. Compact it before building Ascend attention state so
+                # the CPU-side phase classification sees the same target/draft
+                # split as the V2 input batch.
+                num_scheduled_tokens_np, cu_num_logits_np = (
+                    adaptive_verification.compact_batch(
+                        num_draft_tokens_per_req,
+                        num_scheduled_tokens_np,
+                        cu_num_logits_np,
+                    )
+                )
+
             # Get query_start_loc.
             # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
             # See _pad_query_start_loc_for_fia.
@@ -585,6 +600,18 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc = self.input_buffers.query_start_loc
             async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
+            if adaptive_verification is not None:
+                # Reallocate the compacted draft prefix on device. This keeps
+                # the target logits and query layout consistent with the
+                # adaptive verification budget selected in gather_batch_req_state.
+                cu_num_logits, query_start_loc, total_num_draft_tokens = (
+                    adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
+                )
+                total_num_logits = (
+                    num_reqs * self.model_state.num_new_sampled_tokens_per_step
+                    + total_num_draft_tokens
+                )
+
             if draft_tokens:
                 expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                     idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
@@ -593,6 +620,14 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
             query_start_loc = query_start_loc[: num_reqs_padded + 1]
             self.eplb.set_batch_phase(batch_req_state.has_prefill)
+
+            attn_state = build_attn_state(
+                self.vllm_config,
+                self.input_buffers.seq_lens_np,
+                num_reqs,
+                num_scheduled_tokens_np,
+                num_valid_tokens,
+            )
 
             # Get prefill tokens if any.
             if batch_req_state.has_prefill:
