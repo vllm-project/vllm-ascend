@@ -11,7 +11,7 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
 
-MAX_HCCL_REGISTER_REGIONS = 256
+MAX_HCCL_REGISTER_REGIONS = 512  # HY4 needs 354 regions, so it should >= 354
 REGISTER_MERGE_GAP_BYTES = 4096
 
 

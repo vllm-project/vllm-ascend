@@ -432,6 +432,20 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.num_heads = num_heads
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        # Per-head learnable attention sink. When set, the SFA output is
+        # rescaled by ``rL / (rL + exp(sink - rM))`` to mirror the GPU
+        # ``flash_mla_sparse_fwd`` kernel's behavior. The NPU op does not
+        # support sinks natively, so the rescale is applied in Python after
+        # the op returns. Sinks must be float32 (matches the GPU contract).
+        self.learnable_sink_param: torch.Tensor | None = kwargs.get("learnable_sink_param")
+
+        # gated_mla (HYV4's per-head sigmoid gate on the pre-o_proj attention
+        # output). The NPU MLA wrapper bakes o_proj into its forward, so the
+        # gate has to be applied inside the impl between ``_v_up_proj`` and
+        # ``o_proj``. The wrapper discards the gate kwarg, so the NPU model
+        # patch in ``vllm_ascend.models.hy_v4`` attaches it directly.
+        self.gated_mla_linear_gate: torch.nn.Module | None = kwargs.get("gated_mla_linear_gate")
+        self.gated_mla_gating_type: str = kwargs.get("gated_mla_gating_type", "headwise")
 
         # MLA Args
         self.q_lora_rank = kwargs["q_lora_rank"]
@@ -499,10 +513,20 @@ class AscendSFAImpl(MLAAttentionImpl):
             self.wk_weights_proj = None
             self.k_norm = None
         self.is_rope_neox_style = True
+        # HYV4's indexer checkpoint (PTM layout) stores q_pe/k_pe in the LAST
+        # rope_dim dims of the index head and applies interleaved RoPE
+        # (is_neox_style=False), exactly like its main attention path. See the
+        # GPU reference: vllm/models/hy_v4/nvidia/attention.py
+        # (Indexer.prepare_inputs). DSV3.2 (head_dim == rope_dim) and GLM keep
+        # the legacy first-dims convention.
+        self.indexer_pe_last = False
         self.use_torch_npu_lightning_indexer = False
         if self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]:
             self.is_rope_neox_style = False
             self.use_torch_npu_lightning_indexer = True
+        elif self.vllm_config.model_config.hf_config.model_type in ["hy_v4"]:
+            self.is_rope_neox_style = False
+            self.indexer_pe_last = True
 
         # Sparse C8 has two independent meanings in SFA:
         # - SFA packed KV cache for npu_kv_quant_sparse_flash_attention.
@@ -1133,22 +1157,44 @@ class AscendSFAImpl(MLAAttentionImpl):
         if HAS_TRITON:
             cos = cos.view(-1, self.qk_rope_head_dim)
             sin = sin.view(-1, self.qk_rope_head_dim)
-            k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
+            if self.indexer_pe_last:
+                # HYV4: rope only the LAST rope_dim dims (pe) and keep the
+                # checkpoint's [nope, pe] physical layout so the K cache
+                # matches the GPU reference.
+                k_li_nope, k_li_pe = torch.split(
+                    k_li, [self.head_dim - self.qk_rope_head_dim, self.qk_rope_head_dim], dim=-1
+                )
+                k_li_pe = rope_forward_triton_siso(
+                    k_li_pe, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+                )
+                k_li = torch.cat([k_li_nope, k_li_pe], dim=-1)
+            else:
+                k_li = rope_forward_triton_siso(
+                    k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+                )
         else:
-            k_li_pe, k_li_nope = torch.split(
-                k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
+            if self.indexer_pe_last:
+                k_li_nope, k_li_pe = torch.split(
+                    k_li, [self.head_dim - self.qk_rope_head_dim, self.qk_rope_head_dim], dim=-1
+                )
+            else:
+                k_li_pe, k_li_nope = torch.split(
+                    k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
+                )
 
             cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
             sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
-            k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
-            k_li_pe = k_li_pe.squeeze(2)
+            if self.is_rope_neox_style:
+                k_li_pe = k_li_pe.unsqueeze(2)
+                k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
+                k_li_pe = k_li_pe.squeeze(2)
+            else:
+                # Interleaved RoPE via the same op used by the main
+                # attention path (rope_single -> npu_interleave_rope).
+                k_li_pe = self.rope_single(k_li_pe, cos, sin)
 
-            k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
+            k_li = torch.cat([k_li_nope, k_li_pe], dim=-1)  # [b*s,128]
 
         if self.enable_sparse_li_c8:
             k_li = k_li @ AscendSFAImpl.k_hadamard
@@ -1209,18 +1255,40 @@ class AscendSFAImpl(MLAAttentionImpl):
             q_li, _ = self.wq_b(q_c)
         q_li = q_li.view(-1, self.n_head, self.head_dim)
         if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
+            if self.indexer_pe_last:
+                # HYV4: rope only the LAST rope_dim dims (pe) and keep the
+                # checkpoint's [nope, pe] physical layout so it matches the
+                # roped K cache layout.
+                q_li_nope, q_li_pe = torch.split(
+                    q_li, [self.head_dim - self.qk_rope_head_dim, self.qk_rope_head_dim], dim=-1
+                )
+                q_li_pe = rope_forward_triton_siso(
+                    q_li_pe, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+                )
+                q_li = torch.cat([q_li_nope, q_li_pe], dim=-1)
+            else:
+                q_li = rope_forward_triton_siso(
+                    q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
+                )
         else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
+            if self.indexer_pe_last:
+                q_li_nope, q_li_pe = torch.split(
+                    q_li, [self.head_dim - self.qk_rope_head_dim, self.qk_rope_head_dim], dim=-1
+                )
+            else:
+                q_li_pe, q_li_nope = torch.split(
+                    q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
+                )
 
-            q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-            q_li_pe = q_li_pe.squeeze(2)
-            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
+            if self.is_rope_neox_style:
+                q_li_pe = q_li_pe.unsqueeze(2)
+                q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
+                q_li_pe = q_li_pe.squeeze(2)
+            else:
+                # Interleaved RoPE via the same op used by the main
+                # attention path (rope_single -> npu_interleave_rope).
+                q_li_pe = self.rope_single(q_li_pe, cos, sin)
+            q_li = torch.cat([q_li_nope, q_li_pe], dim=-1)
 
         q_li_scale = None
         q_li_shape_ori = None
@@ -1246,7 +1314,18 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:
         if self.topk_indices_buffer is None:
-            raise RuntimeError("IndexCache requires topk_indices_buffer when skip_topk is enabled.")
+            from vllm.logger import logger as _vllm_logger
+
+            _vllm_logger.warning(
+                "HYV4 NPU SFA: no topk_indices_buffer; returning empty indices, "
+                "layer_name=%s num_tokens=%s skip_topk=%s",
+                self.layer_name,
+                num_tokens,
+                self.skip_topk,
+            )
+            hf_config = self.vllm_config.model_config.hf_config
+            topk_tokens = int(getattr(hf_config, "index_topk", 2048))
+            return torch.empty(num_tokens, 1, topk_tokens, dtype=torch.int32, device="npu")
         topk_indices = self.topk_indices_buffer[:num_tokens]
         if topk_indices.dim() == 2:
             topk_indices = topk_indices.unsqueeze(1)
@@ -1278,6 +1357,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         actual_seq_lengths_query,
         actual_seq_lengths_key,
         block_table=None,
+        return_sink_stats: bool = False,
     ):
         return DeviceOperator.execute_sparse_flash_attention_process(
             self,
@@ -1289,7 +1369,54 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_query,
             actual_seq_lengths_key,
             block_table=block_table,
+            return_sink_stats=return_sink_stats,
         )
+
+    def _apply_learnable_sink_rescale(
+        self,
+        attn_output: torch.Tensor,
+        softmax_max: torch.Tensor,
+        softmax_sum: torch.Tensor,
+        sink: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply learnable-sink rescale to the SFA output.
+
+        Mirrors the GPU ``flash_mla_sparse_fwd`` kernel's per-head sink handling:
+        given the unnormalized O = attn_output * rL produced by the NPU op,
+        the new output is O * rL / (rL + exp(sink - rM)) so the softmax
+        denominator is augmented with the per-head ``exp(sink_h)`` term.
+
+        Args:
+            attn_output: ``[num_tokens, num_local_heads, kv_lora_rank]``, the
+                op's already-normalized output (O / rL).
+            softmax_max: ``softmax_max`` returned by the op. Shape is
+                ``[1, num_tokens, num_local_heads]`` for TND layout with
+                ``num_kv_heads=1``.
+            softmax_sum: ``softmax_sum`` returned by the op, same shape as
+                ``softmax_max``. This is rL in the formula above.
+            sink: ``[num_local_heads]``, float32. The per-head learnable
+                attention sink logit.
+
+        Returns:
+            The rescaled attention output, same shape/dtype as ``attn_output``.
+        """
+        # The op returns softmax_max/sum with shape [1, num_tokens, num_local_heads]
+        # for TND layout and num_kv_heads=1; squeeze the leading singleton.
+        rM = softmax_max.squeeze(0).to(torch.float32)  # [num_tokens, num_local_heads]
+        rL = softmax_sum.squeeze(0).to(torch.float32)  # [num_tokens, num_local_heads]
+
+        # Guard against rows that had no valid KV (rL == 0); without this
+        # the exp/div would propagate NaNs into the output.
+        valid = rL > 0
+        safe_rL = torch.where(valid, rL, torch.ones_like(rL))
+        # [1, num_local_heads] broadcasts over the token dimension.
+        sink_b = sink.view(1, -1).to(torch.float32)
+        denom = safe_rL + torch.exp(sink_b - rM)
+        # scale is the rescale factor in fp32, masked to 0 for empty rows.
+        scale = torch.where(valid, safe_rL / denom, torch.zeros_like(safe_rL))
+        # Broadcast over the kv_lora_rank dimension.
+        scale = scale.unsqueeze(-1).to(attn_output.dtype)
+        return attn_output * scale
 
     def _record_query_gather_context(
         self,
@@ -1680,17 +1807,60 @@ class AscendSFAImpl(MLAAttentionImpl):
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
 
-        attn_output = self._execute_sparse_flash_attention_process(
-            ql_nope,
-            q_pe,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-        )
+        # When a learnable sink is bound to this layer, we need rL/rM from the
+        # op so we can rescale the output. The NPU SFA op has a single
+        # ``return_softmax_lse`` flag that toggles both LSE export and the
+        # softmax max/sum tensors, so we route through ``return_sink_stats``
+        # in that case. Without sinks the op runs in its fast default mode.
+        if self.learnable_sink_param is not None:
+            attn_output, softmax_max, softmax_sum = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+                return_sink_stats=True,
+            )
+            attn_output = self._apply_learnable_sink_rescale(
+                attn_output,
+                softmax_max,
+                softmax_sum,
+                self.learnable_sink_param,
+            )
+        else:
+            attn_output = self._execute_sparse_flash_attention_process(
+                ql_nope,
+                q_pe,
+                kv_cache,
+                topk_indices,
+                attn_metadata,
+                actual_seq_lengths_query,
+                actual_seq_lengths_key,
+            )
 
         attn_output = self._v_up_proj(attn_output)
+
+        # gated_mla: per-head sigmoid gate on the pre-o_proj attention
+        # output. Mirrors ``HYV4MLAAttention._indexer_and_attn`` on GPU.
+        # Applied here (not in the wrapper) because the NPU wrapper bakes
+        # ``o_proj`` into its forward and the gate is per-head on the
+        # pre-projection tensor. ``attn_output`` is the post-v_up_proj
+        # tensor of shape ``[N, local_num_heads * v_head_dim]`` (heads
+        # are TP-sharded), and the gate was built with the same TP
+        # sharding (ColumnParallelLinear over ``num_heads``), so its
+        # output has ``[N, local_num_heads]`` for the headwise case.
+        if self.gated_mla_linear_gate is not None:
+            gate_score = self.gated_mla_linear_gate(hidden_states)[0]
+            if self.gated_mla_gating_type == "headwise":
+                # gate_score: [N, local_num_heads, 1]
+                gate_score = gate_score.unsqueeze(-1)
+                attn_output = attn_output.reshape(*attn_output.shape[:-1], self.local_num_heads, self.v_head_dim)
+                attn_output = attn_output * torch.sigmoid(gate_score)
+                attn_output = attn_output.reshape(*attn_output.shape[:-2], -1)
+            else:
+                attn_output = attn_output * torch.sigmoid(gate_score)
 
         output = self._finalize_o_proj(
             attn_output,

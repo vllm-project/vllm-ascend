@@ -34,6 +34,12 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
                 "target_layer_ids": dflash_config["target_layer_ids"],
             }
         )
+
+    if hf_config.model_type == "hy_v4":
+        hf_config.model_type = "hy_v4_mtp"
+        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+        hf_config.update({"n_predict": n_predict, "architectures": ["HYV4MTPModel"]})
+
     return hf_config
 
 
