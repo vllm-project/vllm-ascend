@@ -289,6 +289,18 @@ a3-560t:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: qwen_3_6_27b_w8a8_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: qwen_3_6_27b_w8a8_A3.yaml
+      - name: Qwq_32b_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Qwq_32b_A3.yaml
+      - name: Qwen3_32b_W8A8_wl_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
+      - name: Deepseek_R1_W8A8_Reasoning_output_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
       - name: MiniMax-M3-BF16-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MiniMax-M3-BF16-A3.yaml
