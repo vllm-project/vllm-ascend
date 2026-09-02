@@ -36,6 +36,8 @@ For ImageNet val zero-shot Top-1 evaluation, prepare:
 
 ## 4 Installation
 
+> **Hardware support:** SigLIP2 in this tutorial is validated on **Atlas 300I DUO** only. Use the `-310p` Docker image and the installation steps below; other platforms are not covered in this guide.
+
 ### 4.1 Docker Image Installation
 
 You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
