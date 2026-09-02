@@ -67,15 +67,19 @@ on:
         required: false
       OBS_SECRET_ACCESS_KEY_PRECISION:
         required: false
+
+
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
 defaults:
   run:
     shell: bash -el {0}
+
 permissions:
   contents: read
   pull-requests: write
+
 jobs:
   selected-tests:
     name: ${{ matrix.group.partition_name }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
@@ -103,6 +107,7 @@ jobs:
       - name: Check NPU availability
         run: |
           npu-smi info
+
       - name: Install packages
         run: |
           sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
@@ -112,23 +117,27 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uv
+  
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
           path: ./vllm-empty
+   
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
+  
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
           submodules: recursive
+  
       - name: Rebase on ${{ inputs.base_ref }} snapshot
         env:
           BASE_REF: ${{ inputs.base_ref }}
@@ -147,6 +156,7 @@ jobs:
           git rebase "$BASE_SHA"
           git submodule sync --recursive
           git submodule update --init --recursive
+  
       - name: Get csrc hash
         id: get_csrc_hash
         run: |
@@ -163,6 +173,7 @@ jobs:
           fi
           CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
+  
       - name: Get architecture
         id: get_arch
         run: |
@@ -172,6 +183,7 @@ jobs:
             aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
             *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
           esac
+ 
       - name: Restore vllm-ascend csrc cache
         id: cache-csrc
         uses: runs-on/cache/restore@v5
@@ -186,6 +198,7 @@ jobs:
           # existing NPU build while CPU cache production proves stable.
           # Restore fail-on-cache-miss to true after the transition period.
           fail-on-cache-miss: false
+
       - name: Install Mooncake wheel
         run: |
           set -euxo pipefail
@@ -199,6 +212,7 @@ jobs:
             -i https://mirrors.aliyun.com/pypi/simple/ \
             mooncake-transfer-engine-npu==0.3.11.post1
           pip show mooncake-transfer-engine-npu || true
+
       - name: Install vllm-project/vllm-ascend with device
         env:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
@@ -216,6 +230,7 @@ jobs:
             echo "csrc cache miss: compile kernels on the NPU runner"
             uv pip install -e . --no-build-isolation
           fi
+
       - name: Verify required AscendC custom ops are registered (310p)
         if: ${{ matrix.group.npu_type == '310p' }}
         run: |
@@ -231,10 +246,12 @@ jobs:
           print("AscendC chunk-gdr ops registered:",
                 [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if hasattr(ops, n)])
           PY
+
       - name: Uninstall Triton for 310P tests
         if: ${{ matrix.group.npu_type == '310p' }}
         run: |
           pip uninstall -y triton-ascend triton
+
       - name: Run selected tests with device
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
@@ -255,6 +272,7 @@ jobs:
             "with-device" \
             ${TIMING_FLAG} \
             ${{ matrix.group.tests }}
+
       - name: Upload timing data
         if: ${{ inputs.upload_timing }}
         continue-on-error: true
@@ -264,6 +282,7 @@ jobs:
           path: ${{ runner.temp }}/selected-tests-*/test_timing_data.json
           if-no-files-found: ignore
           retention-days: 7
+
       - name: Upload coverage data
         if: ${{ !cancelled() && inputs.enable-coverage }}
         continue-on-error: true
@@ -276,6 +295,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
+
       - name: Upload selected test logs
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -300,12 +320,14 @@ jobs:
           uses: actions/checkout@v7
           with:
             ref: ${{ inputs.ref || github.ref }}
+
         - name: Download all coverage artifacts
           uses: actions/download-artifact@v8
           with:
             path: all-coverage
             pattern: selected-test-coverage-*
             merge-multiple: true
+
         - name: Check full coverage data completeness
           id: coverage-completeness
           env:
@@ -314,6 +336,7 @@ jobs:
             python3 .github/workflows/scripts/assemble_coverage.py check \
               --test-groups-json "${SELECTED_TEST_GROUPS}" \
               --current-root all-coverage
+
         - name: Download previous coverage data from OBS
           if: steps.coverage-completeness.outputs.has_missing == 'true'
           run: |
@@ -329,6 +352,7 @@ jobs:
             else
               echo "::warning::No previous coverage data found on OBS (first run?). Backfill will be skipped."
             fi
+ 
         - name: Backfill missing coverage data
           if: steps.coverage-completeness.outputs.has_missing == 'true'
           env:
@@ -338,6 +362,7 @@ jobs:
               --test-groups-json "${SELECTED_TEST_GROUPS}" \
               --current-root all-coverage \
               --previous-root previous-coverage
+
         - name: Debug - List downloaded coverage files
           run: |
             echo "=== all-coverage top level ==="
@@ -349,6 +374,7 @@ jobs:
             find all-coverage -type d -name covdata 2>/dev/null | head -10
             echo "=== sample files ==="
             find all-coverage -path '*/covdata/*' -type f 2>/dev/null | head -10
+
         - name: Assemble and compress coverage files
           run: |
             set -euo pipefail
@@ -400,6 +426,7 @@ jobs:
               echo "TASK_DATE=${TASK_DATE}"
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
+
         - name: Upload coverage to OBS
           run: |
             pip install esdk-obs-python --quiet
@@ -425,6 +452,7 @@ jobs:
                 else:
                     raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
             EOF
+
         - name: Prune extra tests already present in coverage
           id: prune-extra
           continue-on-error: true
@@ -459,6 +487,7 @@ jobs:
               cat extra_recommended_tests.yaml
             fi
             exit 0
+
         - name: Upload pruned extra_recommended_tests.yaml to OBS
           if: ${{ success() && steps.prune-extra.outputs.pruned == 'true' }}
           continue-on-error: true
