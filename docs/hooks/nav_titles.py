@@ -116,6 +116,7 @@ TITLES = {
     "tutorials/models/Dots3-Note.md": {"en": "Dots3 Note", "zh": "Dots3 Note"},
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x(4.5/4.6/4.7)", "zh": "GLM-4.x(4.5/4.6/4.7)"},
     "tutorials/models/GLM5.2.md": {"en": "GLM-5.2", "zh": "GLM-5.2"},
+    "tutorials/models/GLM5.3.md": {"en": "GLM-5.3 (Experimental)", "zh": "GLM-5.3 (Experimental)"},
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
@@ -223,8 +224,8 @@ TITLES = {
     "user_guide/feature_guide/rl.md": {"en": "vLLM-Ascend for RL", "zh": "vLLM-Ascend 强化学习"},
     "user_guide/index.md": {"en": "Overview", "zh": "概览"},
     "user_guide/release_notes.md": {"en": "Release Notes", "zh": "发布说明"},
-    "user_guide/support_matrix/feature_matrix.md": {"en": "Feature Matrix", "zh": "功能矩阵"},
-    "user_guide/support_matrix/supported_features.md": {"en": "Supported Features", "zh": "支持的功能"},
+    "user_guide/support_matrix/feature_matrix.md": {"en": "Feature Matrix", "zh": "特性矩阵"},
+    "user_guide/support_matrix/supported_features.md": {"en": "Supported Features", "zh": "支持的特性"},
     "user_guide/support_matrix/supported_models.md": {"en": "Supported Models", "zh": "支持的模型"},
 }
 

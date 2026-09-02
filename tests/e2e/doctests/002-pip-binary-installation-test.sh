@@ -82,7 +82,7 @@ function install_binary_test() {
 
     # Verify the installation
     _info "====> Run offline example test"
-    pip install modelscope
+    pip install "modelscope<1.38"
     cd ${SCRIPT_DIR}/../../examples && python3 ./offline_inference_npu.py
     cd -
 

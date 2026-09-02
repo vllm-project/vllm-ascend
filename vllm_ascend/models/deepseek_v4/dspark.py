@@ -24,7 +24,7 @@ from vllm.distributed import (
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -44,6 +44,7 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.utils import enable_dsa_cp
 
 
 def _apply_dsv4_rope(
@@ -154,13 +155,14 @@ class DeepseekV4DSparkModel(nn.Module):
             if _model_quant_cfg is not None and _model_quant_cfg.get("quant_method") == "fp8"
             else None
         )
-        self.main_proj = ReplicatedLinear(
+        self.main_proj = ColumnParallelLinear(
             config.hidden_size * len(self.target_layer_ids),
             config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=_main_proj_qconfig,
             prefix=maybe_prefix(prefix, f"layers.{self.mtp_start_layer_idx}.main_proj"),
+            gather_output=True,
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         first_layer.main_proj = self.main_proj
@@ -315,7 +317,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
 
         # check if quant config exist
-        from vllm_ascend.models.llama_eagle3 import get_rotation_path
+        from vllm_ascend.utils import get_rotation_path
 
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
 
@@ -489,9 +491,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 break
             else:
                 if "attn_sink" in name:
-                    narrow = loaded_weight[head_start:head_end]
+                    if enable_dsa_cp():
+                        narrow = loaded_weight
+                    else:
+                        narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
-                        params_dict[name][: narrow.shape[0]].copy_(narrow)
+                        params_dict[name].copy_(narrow)
                     loaded_params.add(name)
                     continue
                 param = params_dict[name]
