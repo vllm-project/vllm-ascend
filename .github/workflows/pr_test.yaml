@@ -524,7 +524,8 @@ jobs:
       - name: Fetch main branch latest commit hash remotely
         id: fetch_main_sha
         run: |
-          git ls-remote --heads https://github.com/vllm-project/vllm-ascend.git main | awk '{print $1}' >> "$GITHUB_OUTPUT"
+          MAIN_SHA=$(git ls-remote --heads https://github.com/vllm-project/vllm-ascend.git main | awk '{print $1}')
+          echo "sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
 
   run-selected-tests:
     needs:
