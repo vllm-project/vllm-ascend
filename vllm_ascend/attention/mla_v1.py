@@ -172,6 +172,7 @@ class AscendMLADecodeMetadata:
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
+    cp_seq_len_tensor: torch.Tensor = None
     dcp_mtp_attn_mask: torch.Tensor = None
 
 

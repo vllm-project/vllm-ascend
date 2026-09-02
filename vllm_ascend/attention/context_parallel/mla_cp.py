@@ -37,8 +37,13 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.context_parallel.common_cp import (
     AscendPCPMetadata,
     CPChunkedContextMetadata,
+    _mask_empty_kv_shards,
     _npu_attention_update,
     _process_attn_out_lse,
+)
+from vllm_ascend.attention.context_parallel.fia_mla_heads import (
+    pad_fia_mla_query_heads,
+    trim_fia_mla_query_heads,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, notify_kv_cache_written
 from vllm_ascend.compilation.acl_graph import (
@@ -52,7 +57,6 @@ from vllm_ascend.utils import weak_ref_tensors
 MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
 
 M = TypeVar("M", bound=AscendMLAMetadata)
-
 
 class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
     """
@@ -79,6 +83,14 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
             self.block_size, self.cp_virtual_block_size
+        )
+        # Keep a stable device address for ACL graph replay. The FIA API still
+        # consumes Python sequence lengths, while the empty-shard mask must use
+        # a device tensor without creating an H2D copy inside graph capture.
+        self.cp_seq_len_tensor = torch.zeros(
+            vllm_config.scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device=device,
         )
 
     def build(
@@ -250,6 +262,11 @@ class AscendMlaCPMetadataBuilder(AscendMLAMetadataBuilder):
         cp_seq_len = num_computed_tokens_of_cp_dcp_array[:, self.pcp_rank, self.dcp_rank]
         cp_seq_len = torch.tensor(cp_seq_len, dtype=torch.int32)
         decode_metadata.cp_seq_len = cp_seq_len.tolist()
+        mask_num_rows = max(self.num_decodes, self.graph_pad_size)
+        cp_seq_len_tensor = self.cp_seq_len_tensor[:mask_num_rows]
+        cp_seq_len_tensor.zero_()
+        cp_seq_len_tensor[: self.num_decodes].copy_(cp_seq_len, non_blocking=True)
+        decode_metadata.cp_seq_len_tensor = cp_seq_len_tensor
 
         actual_seq_lengths_q = torch.arange(self.num_decodes) + 1
         decode_metadata.actual_seq_lengths_q = actual_seq_lengths_q
@@ -659,6 +676,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
             sparse_mode = 0
             spec_attn_mask = None
 
+        original_num_heads = num_heads
+        q_nope, q_pe, num_heads = pad_fia_mla_query_heads(q_nope, q_pe, input_layout, num_heads)
+
         common_kwargs = {
             "query_rope": q_pe,
             "key_rope": k_pe,
@@ -743,6 +763,14 @@ class AscendMlaCPImpl(AscendMLAImpl):
                 k_nope,
                 **common_kwargs,
             )
+        if num_heads != original_num_heads:
+            attn_output, softmax_lse = trim_fia_mla_query_heads(
+                attn_output,
+                softmax_lse,
+                input_layout,
+                original_num_heads,
+            )
+
         if input_layout == "BSND":
             attn_output = attn_output.view(-1, attn_output.shape[2], attn_output.shape[3])
             softmax_lse = softmax_lse.transpose(1, 2).reshape(-1, softmax_lse.shape[1], 1)
@@ -753,6 +781,12 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
             attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
+
+        attn_output, softmax_lse = _mask_empty_kv_shards(
+            attn_output,
+            softmax_lse,
+            decode_meta.cp_seq_len_tensor,
+        )
 
         # Update out&lse
         attn_out_lse = _process_attn_out_lse(attn_output, softmax_lse)
