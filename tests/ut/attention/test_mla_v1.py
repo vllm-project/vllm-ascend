@@ -1935,7 +1935,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertTrue(torch.equal(prefix_out, out))
         self.assertTrue(torch.equal(prefix_lse, lse))
 
-    @patch("vllm_ascend.device.device_op.enable_custom_op", new=lambda: True)
     @patch.object(torch.ops._C_ascend, "gather_pa_kv_cache", create=True)
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
@@ -1984,7 +1983,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
 
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
-    @patch("vllm_ascend.device.device_op.enable_custom_op", new=lambda: True)
     @patch.object(torch.ops._C_ascend, "gather_pa_kv_cache", create=True)
     @patch("torch_npu.npu_attention_update")
     @patch("torch_npu.npu_fused_infer_attention_score")
