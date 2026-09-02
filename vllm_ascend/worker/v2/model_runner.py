@@ -123,6 +123,7 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import (
+    communicator_switch,
     prepare_v41_dummy_ring_state,
     prepare_v41_source_rope,
     torch_cuda_wrapper,
@@ -499,6 +500,21 @@ class NPUModelRunner(GPUModelRunner):
         for layer_name in manager.offload_layer_names:
             layer = self.compilation_config.static_forward_context[layer_name]
             layer.impl.bind_copy_sfa_kv_cache(manager, layer_name)
+
+    @torch.inference_mode()
+    def capture_model(self) -> int:
+        """Capture decoder and multimodal encoder graphs on Ascend."""
+        if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
+            encoder_runner = getattr(self.model_state, "encoder_runner", None)
+            encoder_manager = getattr(encoder_runner, "cudagraph_manager", None)
+            if encoder_manager is not None and self.update_stream is not None:
+                encoder_manager.update_stream = self.update_stream
+
+        # EncoderRunner uses vLLM's generic graph_capture(), whose communicator
+        # type check expects the CUDA symbol. Temporarily bind that symbol to
+        # NPUCommunicator, as is already done for decoder ACL graph capture.
+        with torch_cuda_wrapper(), communicator_switch():
+            return super().capture_model()
 
     # runtime_guard_step must stay INNER (below @torch.inference_mode()) so the
     # wave sync keeps running inside the inference-mode context.

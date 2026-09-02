@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config import CompilationConfig, VllmConfig
+from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+from vllm.v1.worker.gpu.model_states import interface
 
 from vllm_ascend.worker import encoder_acl_graph
 from vllm_ascend.worker.encoder_acl_graph import (
@@ -96,10 +98,11 @@ def test_update_encoder_graph_params_cu_seqlens():
         MagicMock(),
         MagicMock(),
     )
-    params.handles[2048] = [1]
-    params.events[2048] = [MagicMock()]
-    params.attn_params[2048] = [packed]
-    params.workspaces[2048] = MagicMock()
+    key = ("default", 2048)
+    params.handles[key] = [1]
+    params.events[key] = [MagicMock()]
+    params.attn_params[key] = [packed]
+    params.workspaces[key] = MagicMock()
 
     ctx = get_encoder_forward_context()
     ctx.cu_seqlens_cpu = torch.tensor([0, 4, 8], dtype=torch.int32)
@@ -136,11 +139,10 @@ def _make_manager():
     vllm_config.parallel_config.tensor_parallel_size = 1
 
     model = MagicMock()
-    model.get_encoder_cudagraph_config.return_value = MagicMock(
+    model.get_encoder_cudagraph_config.return_value = EncoderCudaGraphConfig(
         modalities=["image"],
         buffer_keys=["cu_seqlens"],
         out_hidden_size=64,
-        enable_dual_path_graph=False,
         padding_logics={},
         max_frames_per_video=1,
     )
@@ -151,13 +153,42 @@ def _make_manager():
 def test_capture_graph_params():
     mgr, _ = _make_manager()
     mgr.token_budgets = [2048]
+    mgr.path_token_budgets = {"default": [2048]}
+
+    assert not mgr.is_captured()
 
     with patch("vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager.capture", return_value=None):
         mgr.capture()
 
     params = get_encoder_graph_params()
     assert params is not None
-    assert 2048 in params.events
+    assert ("default", 2048) in params.events
+    assert mgr.is_captured()
+
+    mgr.clear()
+    assert not mgr.is_captured()
+    assert get_encoder_graph_params() is None
+
+
+def test_dual_path_graph_params_are_isolated():
+    set_encoder_graph_params({"global": [128, 256], "local": [0, 128]})
+
+    params = get_encoder_graph_params()
+    assert params is not None
+    assert set(params.handles) == {
+        ("global", 128),
+        ("global", 256),
+        ("local", 128),
+    }
+    assert params.handles[("global", 128)] is not params.handles[("local", 128)]
+
+
+def test_mrv2_model_state_uses_ascend_encoder_graph_manager():
+    # Importing the MRV2 patch replaces the binding used inside ModelState,
+    # rather than only the source encoder_cudagraph module.
+    from vllm_ascend.patch.worker.patch_v2 import patch_model_state  # noqa: F401
+
+    assert interface.EncoderCudaGraphManager is EncoderAclGraphManager
 
 
 def test_capture_budget_graph_npu():
