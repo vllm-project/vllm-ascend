@@ -179,14 +179,8 @@ jobs:
             echo "============================"
           done
           
-  run-all-cpu-ut:
+  run-selected-tests-cpu:
     needs: pre-commit
-    if: >-
-      ${{
-        !cancelled() &&
-        needs.pre-commit.result == 'success' &&
-        (contains(github.event.pull_request.labels.*.name, 'ready-precise') || contains(github.event.pull_request.labels.*.name, 'ready-all'))
-      }}
     strategy:
       fail-fast: false
       matrix:
