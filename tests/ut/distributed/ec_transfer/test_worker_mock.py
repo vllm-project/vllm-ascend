@@ -307,7 +307,7 @@ def test_upstream_completion_recycles_npu_transfer_resources():
 
 def test_shutdown_waits_for_transfer_then_unregisters_and_cleans_up(monkeypatch):
     worker = make_worker()
-    order = []
+    order: list[str] = []
     monkeypatch.setattr(worker_mod.torch, "npu", FakeNPU(order), raising=False)
     worker._dtype = torch.float32
     worker._is_save_rank = True
