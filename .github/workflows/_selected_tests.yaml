@@ -1,5 +1,4 @@
 name: Selected Tests
-
 on:
   workflow_call:
     inputs:
@@ -26,13 +25,12 @@ on:
     outputs:
       coverage_artifact_name:
         value: ${{ jobs.dispatch.outputs.coverage_artifact_name }}
-
 jobs:
   dispatch:
-    name: dispatch‑groups
-    runs-on: ubuntu‑latest
+    name: dispatch-groups
+    runs-on: ubuntu-latest
     outputs:
-      coverage_artifact_name: npu‑coverage‑report
+      coverage_artifact_name: npu-coverage-report
       matrix_json: ${{ steps.gen_matrix.outputs.matrix_json }}
     steps:
       - name: Generate matrix from test_groups
@@ -51,17 +49,16 @@ jobs:
                   "test_paths": g["test_paths"]
               })
           out = json.dumps(matrix_entries)
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf‑8") as f:
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
               f.write(f"matrix_json={out}\n")
           PY
         env:
           TEST_GROUPS: ${{ inputs.test_groups }}
-
   run_shards:
-    name: test‑shard‑${{ matrix.npu_type }}
+    name: test-shard-${{ matrix.npu_type }}
     needs: dispatch
     strategy:
-      fail‑fast: false
+      fail-fast: false
       matrix:
         entry: ${{ fromJson(needs.dispatch.outputs.matrix_json) }}
     runs-on: ${{ matrix.entry.runner_label }}
@@ -70,50 +67,43 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
-          fetch‑depth: 0
-
+          fetch-depth: 0
       - name: Rebase to base_sha (NPU mandatory)
         run: |
           set -euo pipefail
-          git config user.name "ci‑runner"
+          git config user.name "ci-runner"
           git config user.email "ci@runner.local"
           git rebase "${BASE_SHA}"
         env:
           BASE_SHA: ${{ inputs.base_sha }}
-
       - name: Setup CANN & build environment
         run: |
           set -euo pipefail
-          echo "ASCEND_TOOLKIT_PATH=/usr/local/Ascend/ascend‑toolkit" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/usr/local/Ascend/ascend‑toolkit/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-
+          echo "ASCEND_TOOLKIT_PATH=/usr/local/Ascend/ascend-toolkit" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
       - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ccache
-          key: ccache‑${{ inputs.base_sha }}‑${{ matrix.entry.npu_type }}
-
+          key: ccache-${{ inputs.base_sha }}-${{ matrix.entry.npu_type }}
       - name: Install python dependencies
         run: |
           set -euo pipefail
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pytest‑cov
-
-      - name: Show npu‑smi device status
+          python3 -m pip install pytest pytest-cov
+      - name: Show npu-smi device status
         run: |
-          npu‑smi info || true
-
+          npu-smi info || true
       - name: Run pytest with coverage
         run: |
           set -euo pipefail
           TEST_PATHS="${{ join(matrix.entry.test_paths, ' ') }}"
           echo "test paths: ${TEST_PATHS}"
-          python3 -m pytest -v --cov=./ --cov‑report=xml:coverage.xml ${TEST_PATHS}
-
+          python3 -m pytest -v --cov=./ --cov-report=xml:coverage.xml ${TEST_PATHS}
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: npu‑coverage‑report‑${{ matrix.entry.npu_type }}
+          name: npu-coverage-report-${{ matrix.entry.npu_type }}
           path: coverage.xml
-          retention‑days: 7
+          retention-days: 7
