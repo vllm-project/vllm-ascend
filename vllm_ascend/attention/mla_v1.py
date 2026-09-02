@@ -1118,6 +1118,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.num_heads * self.v_head_dim,
         )
 
+    def _can_use_q_proj_transpose_batchmatmul(self) -> bool:
+        return hasattr(torch_npu, "npu_transpose_batchmatmul")
+
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
         q_nope, q_pe = (
@@ -1125,6 +1128,18 @@ class AscendMLAImpl(MLAAttentionImpl):
             .view(-1, self.num_heads, self.qk_head_dim)
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
+
+        if self._can_use_q_proj_transpose_batchmatmul():
+            # Multiply (B, N, P) x (N, P, L) -> (B, N, L), with both
+            # transposes fused into the batch matmul. The contiguous output
+            # avoids materializing the (N, B, L) -> (B, N, L) view later.
+            ql_nope = torch_npu.npu_transpose_batchmatmul(
+                q_nope,
+                self.W_UK_T,
+                perm_x1=(1, 0, 2),
+                perm_y=(1, 0, 2),
+            )
+            return ql_nope, q_pe
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
@@ -1196,8 +1211,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         elif self.fa_quant_layer:
             self._process_weights_for_fused_fa_quant()
         else:
-            # if mlapo, W_UK_T can't trans nz
-            self.W_UK_T = maybe_trans_nz(self.W_UK_T)
+            # TransposeBatchMatMul accepts only ND weights. Keep W_UK_T in ND
+            # when the fused q projection path is available; otherwise retain
+            # the existing NZ conversion policy for torch.bmm.
+            if not self._can_use_q_proj_transpose_batchmatmul():
+                self.W_UK_T = maybe_trans_nz(self.W_UK_T)
 
     def _process_weights_for_fused_fa_quant(self):
         if get_ascend_device_type() == AscendDeviceType.A5:
@@ -1735,7 +1753,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             # output. It is set to NTD to avoid the need for a transpose
             # operation after attention.
             input_layout = "TND_NTD"
-            # TODO: If the driver is upgraded later, the contiguous function can be deleted.
+            # The fused q projection already returns contiguous TND. Keep this
+            # for environments without the fused operator, which use the
+            # non-contiguous bmm fallback.
             # Input shape: [num_tokens, num_heads, dim]
             q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
