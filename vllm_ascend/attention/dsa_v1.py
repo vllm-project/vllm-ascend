@@ -1,5 +1,4 @@
 import math
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -242,7 +241,6 @@ class AscendDSAReqMetadata:
     ori_win_left: int | None = None
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
-    cu_seqlens_ori_kv: torch.Tensor | None = None
 
 
 @dataclass
@@ -307,11 +305,17 @@ def build_dspark_swa_indices(
     seq_lens: torch.Tensor,
     num_decode_tokens: int | None = None,
     index_width: int | None = None,
+    buffer: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
     Each token in a draft block sees the trailing context window plus the
-    whole current draft block. Invalid/paddedrows get lens=0 and -1 slots.
+    whole current draft block. Invalid/padded rows get lens=0 and -1 slots.
+
+    When ``buffer`` is given, the per-token slots are copied into its leading
+    rows and the returned tensor is a slice view of ``buffer``. This keeps the
+    address stable across async ACL-graph replays, where the DSA operator
+    captures ``ori_sparse_indices``'s data pointer at capture time.
     """
     if index_width is None:
         index_width = _aligned_dspark_index_width(window_size, num_speculative_tokens)
@@ -346,7 +350,19 @@ def build_dspark_swa_indices(
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
     per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
 
-    return per_token_slots, per_token_lens
+    if buffer is None:
+        return per_token_slots, per_token_lens
+
+    # Copy the freshly built indices into the caller-provided buffer and hand
+    # back a zero-copy view of it: ACL graph capture freezes tensor addresses,
+    # so the DSA operator must read from the stable buffer at replay instead of
+    # a freshly allocated tensor.
+    num_rows = per_token_slots.shape[0]
+    assert num_rows <= buffer.shape[0], (
+        f"dspark_swa_indices needs {num_rows} rows but `buffer` only has {buffer.shape[0]}"
+    )
+    buffer[:num_rows].copy_(per_token_slots)
+    return buffer[:num_rows], per_token_lens
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
@@ -375,6 +391,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
+        self.dspark_swa_indices_buffer: torch.Tensor | None = None
         if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
             vllm_config
         ):
@@ -395,6 +412,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
                 for _ in range(spec_token_num)
             ]
+            # Shared static buffer for dspark_swa_indices, so its address
+            # stays stable across async ACL-graph replays.
+            _dspark_index_width = _aligned_dspark_index_width(
+                self.model_config.hf_config.sliding_window, spec_token_num
+            )
+            max_dspark_rows = max(
+                scheduler_config.max_num_batched_tokens,
+                scheduler_config.max_num_seqs * (self.speculative_config.num_speculative_tokens + 1),
+            )
+            self.dspark_swa_indices_buffer = torch.zeros(
+                (max_dspark_rows, 1, _dspark_index_width),
+                dtype=torch.int32,
+                device=self.device,
+            )
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -724,10 +755,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
         max_seqlen_kv = torch.max(seq_lens_cpu[:num_reqs]).item()
         has_prefill = self.num_prefills > 0
-        # The SAS metadata operator needs the per-request query token counts to
-        # partition FA/FD work correctly when a batch mixes decode requests
-        # (query length != KV length) with prefill requests.
-        self.seqused_q = seq_lens_q.to(torch.int32)
 
         self.start_pos_prefill.fill_(0)
         self.start_pos_prefill[:num_reqs] = seq_lens - seq_lens_q
@@ -759,8 +786,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc[: self.num_decodes + 1],
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
+                buffer=self.dspark_swa_indices_buffer,
             )
-            dspark_swa_indices = dspark_swa_indices[: self.num_decode_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
         if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
             cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
@@ -773,17 +800,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         elif has_prefill:
-            if self.num_decodes > 0:
-                # Mixed decode + prefill: decode requests carry historical KV
-                # (sequence length exceeds the current query length), so the
-                # original-KV boundaries must be the cumulative sequence
-                # lengths rather than query_start_loc, which only accounts for
-                # the current query tokens.
-                cu_seqlens_ori_kv = torch.cat(
-                    [self._zero_i32, torch.cumsum(seq_lens[:num_reqs], dim=0).to(torch.int32)]
-                )
-            else:
-                cu_seqlens_ori_kv = query_start_loc
+            cu_seqlens_ori_kv = query_start_loc
 
         sas_metadata = self._build_sas_metadata(
             metadata_cache=self.common_ratio_to_sas_metadata,
@@ -832,7 +849,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
-            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
         )
 
     def build_for_drafting(
@@ -896,7 +912,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         seq_lens = self.seq_lens[:num_reqs]
         seq_lens_q = query_start_loc[1:] - query_start_loc[:-1]
         max_seqlen_q = torch.max(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).item()
-        self.seqused_q = seq_lens_q.to(torch.int32)
         if common_attn_metadata._seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu
         elif common_attn_metadata.seq_lens_cpu is not None:
@@ -919,21 +934,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc,
                 seq_lens,
                 self.num_actual_tokens,
+                buffer=self.dspark_swa_indices_buffer,
             )
-            dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
-        if has_prefill:
-            # Mixed decode + prefill: decode requests carry historical KV, so
-            # the original-KV boundaries must be the cumulative sequence
-            # lengths rather than query_start_loc (see build_req_metadata).
-            cu_seqlens_ori_kv = (
-                torch.cat([self._zero_i32, torch.cumsum(seq_lens[:num_reqs], dim=0).to(torch.int32)])
-                if self.num_decodes > 0
-                else query_start_loc
-            )
-        else:
-            cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+        cu_seqlens_ori_kv = (
+            query_start_loc
+            if has_prefill
+            else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
                 None,
                 "draft_cu_seqlens_ori_kv",
                 seq_lens,
@@ -941,6 +949,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self._zero_i32,
                 self.cu_seqlens_ori_kv,
             )
+        )
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
@@ -999,7 +1008,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
-            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
         )
 
     def build_for_graph_capture(
