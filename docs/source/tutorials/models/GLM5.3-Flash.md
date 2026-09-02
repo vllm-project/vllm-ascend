@@ -30,7 +30,7 @@ It is recommended to download the model weight to the shared directory of multip
     Start the docker image on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -57,10 +57,8 @@ It is recommended to download the model weight to the shared directory of multip
     -v /usr/local/sbin:/usr/local/sbin \
     -v /usr/local/dcmi:/usr/local/dcmi \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
     -v /usr/bin/urma_admin:/usr/bin/urma_admin \
     -v /lib/route.conf:/lib/route.conf \
-    -v /usr/lib64:/usr/lib64 \
     -itd $IMAGE bash
     ```
 
