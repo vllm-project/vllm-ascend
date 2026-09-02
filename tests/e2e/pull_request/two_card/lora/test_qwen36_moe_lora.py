@@ -18,17 +18,11 @@ LORA_3D_ID = 2
 LORA_2D_EXPECTED_OUTPUT = [
     "A red stop sign stands prominently in the foreground.",
     (
-        "Cherry blossoms in full bloom frame the Tokyo Skytree, "
-        "creating a picturesque scene of pink flowers against a clear blue sky."
+        "A vibrant display of pink cherry blossoms frames the Tokyo Skytree, "
+        "creating a picturesque blend of nature and modern architecture against "
+        "a clear blue sky."
     ),
 ]
-# The 2D cherry-blossom prompt has two validated greedy continuations
-# across Ascend MoE execution paths.
-LORA_2D_CHERRY_BLOSSOM_ALTERNATIVE_OUTPUT = (
-    "A vibrant display of pink cherry blossoms frames the Tokyo Skytree, "
-    "creating a picturesque blend of nature and modern architecture against "
-    "a clear blue sky."
-)
 LORA_3D_EXPECTED_OUTPUT = [
     (
         "A red STOP sign stands prominently in the foreground, "
@@ -134,10 +128,7 @@ def _run_mixed_2d_3d_lora_test(
             assert text, "Empty output from single-adapter LoRA generation"
 
         assert outputs_2d_alone[0] == LORA_2D_EXPECTED_OUTPUT[0]
-        assert outputs_2d_alone[1] in (
-            LORA_2D_EXPECTED_OUTPUT[1],
-            LORA_2D_CHERRY_BLOSSOM_ALTERNATIVE_OUTPUT,
-        )
+        assert outputs_2d_alone[1] == LORA_2D_EXPECTED_OUTPUT[1]
         assert outputs_3d_alone[0] == LORA_3D_EXPECTED_OUTPUT[0]
         assert outputs_3d_alone[1] == LORA_3D_EXPECTED_OUTPUT[1]
 
