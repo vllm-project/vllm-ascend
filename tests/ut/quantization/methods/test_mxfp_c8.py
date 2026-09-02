@@ -106,6 +106,18 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
         self.assertEqual(layer.v_cache_scale.dtype, torch.uint8)
         self.assertTrue(torch.equal(layer.v_cache_scale, torch.full((8,), 127, dtype=torch.uint8)))
 
+    def test_weight_loader_accepts_column_vector_checkpoint_layout(self):
+        """ModelSlim exports v_scale as [hidden, 1]; the parameter is 1-D.
+        The loader must squeeze the trailing size-1 dims before comparing."""
+        from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import _quant_weight_loader
+
+        param = torch.full((512,), 127, dtype=torch.uint8)
+        column_vector_weight = torch.full((512, 1), 119, dtype=torch.uint8)
+
+        _quant_weight_loader(param, column_vector_weight)
+
+        self.assertTrue(torch.equal(param, torch.full((512,), 119, dtype=torch.uint8)))
+
     def test_installs_c8_backend_with_512_token_blocks(self):
         from vllm_ascend.attention.attention_v1 import (
             AscendAttentionBackend,

@@ -9,14 +9,21 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
     if param.numel() == 1 and loaded_weight.numel() == 1:
         param.data.fill_(loaded_weight.item())
     else:
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
-        shard_size = loaded_weight.shape[0] // tp_size
-        loaded_weight = loaded_weight.narrow(0, shard_size * tp_rank, shard_size)
+        # ModelSlim exports the per-channel V cache scale as a column vector
+        # ([hidden, 1]) while the registered parameter is 1-D; squeeze the
+        # trailing size-1 dims so the shapes match before TP narrow/copy.
+        if loaded_weight.dim() > param.dim():
+            loaded_weight = loaded_weight.reshape(param.shape)
+        if loaded_weight.shape != param.shape:
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+            shard_size = loaded_weight.shape[0] // tp_size
+            loaded_weight = loaded_weight.narrow(0, shard_size * tp_rank, shard_size)
         assert param.size() == loaded_weight.size(), (
             "[vllm-ascend/MXFP8_PER_CHANNEL] Attempted to load weight "
             f"({loaded_weight.size()}) into parameter ({param.size()}) "
-            f"when TP size is {tp_size} and TP rank is {tp_rank}."
+            f"when TP size is {get_tensor_model_parallel_world_size()} and TP rank is "
+            f"{get_tensor_model_parallel_rank()}."
         )
 
         param.data.copy_(loaded_weight)
