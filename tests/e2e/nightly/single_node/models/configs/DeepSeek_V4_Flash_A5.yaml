@@ -47,7 +47,7 @@ _benchmarks_per1: &benchmarks_acc
     temperature: 1.0
     ignore_eos: false
     top_p: 1.0
-    chat_template_kwargs: {"thinking":True}
+    thinking: True
 _benchmarks_per2: &benchmarks_per
   perf:
     case_type: performance
