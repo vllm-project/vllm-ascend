@@ -234,6 +234,23 @@
 #       Remove this patch once the supported vLLM version contains the upstream
 #       GLM47 inline zero-argument streaming parser fix.
 #
+# ** 7c. File: platform/patch_deepseek_v3_reasoning_usage_accounting.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.reasoning.deepseek_v3_reasoning_parser.DeepSeekV3ReasoningParser`
+#    Why:
+#       DeepSeek-V3/V4, GLM, and Holo2 share a reasoning wrapper that does not
+#       delegate token counting. Their chat templates may also place the opening
+#       `<think>` token in the prompt, leaving only `</think>` in generated ids.
+#    How:
+#       Delegate explicit spans to the wrapped parser and count the implicit
+#       leading reasoning span when the generated opening token is absent.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/41077
+#       https://github.com/vllm-project/vllm/pull/49743
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains the upstream
+#       reasoning-token counting fix.
+#
 # ** 10a. File: platform/patch_kv_cache_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes`
