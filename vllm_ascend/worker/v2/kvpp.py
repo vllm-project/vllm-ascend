@@ -181,11 +181,14 @@ class KVPPRuntime:
     def prepare_forward(
         self,
         block_tables: tuple[torch.Tensor, ...],
-        seq_lens: Any,
+        num_computed_tokens: Any,
     ) -> None:
         if self.scheduler is None:
             return
-        self.scheduler.schedule_forward(block_tables[self.managed_cache_group_index], seq_lens)
+        self.scheduler.schedule_forward(
+            block_tables[self.managed_cache_group_index],
+            num_computed_tokens,
+        )
 
     def complete_forward(self) -> None:
         if self.scheduler is None:
@@ -195,27 +198,28 @@ class KVPPRuntime:
 
 def select_active_pages(
     block_table: torch.Tensor,
-    seq_lens: Any,
+    num_computed_tokens: Any,
     tokens_per_block: int,
     num_physical_blocks: int,
 ) -> KVPPActivePages:
-    """Return fixed-shape device pages read by the current batch.
+    """Return fixed-shape device pages containing computed KV cache.
 
     The original block table is read only. Invalid columns and duplicate page
     IDs become masked slots instead of being compacted through the host.
     """
-    if isinstance(seq_lens, torch.Tensor) and seq_lens.device.type != "cpu":
-        raise ValueError("KVPP sequence lengths must stay on the host.")
-    sequence_lengths_host = torch.as_tensor(seq_lens, dtype=torch.int64, device="cpu").flatten()
-    sequence_lengths_device = sequence_lengths_host.to(device=block_table.device)
-    active_block_table = block_table[: sequence_lengths_device.shape[0]].to(dtype=torch.int64)
+    computed_token_counts = torch.as_tensor(
+        num_computed_tokens,
+        dtype=torch.int64,
+        device=block_table.device,
+    ).flatten()
+    active_block_table = block_table[: computed_token_counts.shape[0]].to(dtype=torch.int64)
     block_columns = torch.arange(
         active_block_table.shape[1],
         dtype=torch.int64,
         device=block_table.device,
     )
     pages_per_request = torch.div(
-        sequence_lengths_device + tokens_per_block - 1,
+        computed_token_counts + tokens_per_block - 1,
         tokens_per_block,
         rounding_mode="floor",
     )
@@ -287,13 +291,13 @@ class KVPPScheduler:
     def schedule_forward(
         self,
         block_table: torch.Tensor,
-        seq_lens: Any,
+        num_computed_tokens: Any,
     ) -> None:
         if self._active_pages is not None:
             raise RuntimeError("KVPP cannot schedule a new forward while the previous forward is active.")
         self._active_pages = select_active_pages(
             block_table,
-            seq_lens,
+            num_computed_tokens,
             self.tokens_per_block,
             self.num_physical_blocks,
         )

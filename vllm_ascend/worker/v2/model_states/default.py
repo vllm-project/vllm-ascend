@@ -70,7 +70,7 @@ class AscendModelState(DefaultModelState):
         if self.kvpp_runtime is not None:
             self.kvpp_runtime.prepare_forward(
                 block_tables,
-                input_batch.seq_lens_np[:num_actual_reqs],
+                input_batch.num_computed_tokens_np[:num_actual_reqs],
             )
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)

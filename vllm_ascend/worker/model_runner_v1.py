@@ -2336,7 +2336,7 @@ class NPUModelRunner(GPUModelRunner):
         self.kvpp.prepare_forward(
             self.input_batch,
             num_reqs,
-            self.optimistic_seq_lens_cpu[:num_reqs],
+            self.num_computed_tokens[:num_reqs],
         )
 
         if self.dynamic_eplb:
@@ -3662,7 +3662,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.kvpp.prepare_forward(
                     self.input_batch,
                     num_reqs,
-                    self.optimistic_seq_lens_cpu[:num_reqs],
+                    self.num_computed_tokens[:num_reqs],
                 )
 
             with set_ascend_forward_context(

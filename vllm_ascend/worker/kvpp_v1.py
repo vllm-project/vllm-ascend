@@ -48,7 +48,7 @@ class KVPPV1Runtime:
         self,
         input_batch: Any,
         num_reqs: int,
-        seq_lens: Any,
+        num_computed_tokens: Any,
     ) -> None:
         runtime = self._kvpp_runtime
         if runtime.scheduler is None:
@@ -56,7 +56,7 @@ class KVPPV1Runtime:
         block_table = input_batch.block_table[runtime.managed_cache_group_index]
         runtime.scheduler.schedule_forward(
             block_table.get_device_tensor(num_reqs),
-            seq_lens,
+            num_computed_tokens,
         )
 
     def complete_forward(self) -> None:

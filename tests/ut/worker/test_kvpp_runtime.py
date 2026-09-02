@@ -70,6 +70,16 @@ def test_kvpp_07_active_pages_are_fixed_shape_deduplicated_and_masked():
     assert torch.equal(table, original)
 
 
+def test_kvpp_first_chunk_has_no_computed_pages():
+    table = torch.tensor([[7, 2, 1, 0]], dtype=torch.int32)
+
+    pages = select_active_pages(table, [0], tokens_per_block=4, num_physical_blocks=10)
+
+    assert pages.physical_page_ids.tolist() == [10, 10, 10, 10]
+    assert pages.valid_page_mask.tolist() == [False, False, False, False]
+    assert pages.staging_page_indices.tolist() == [-1, -1, -1, -1]
+
+
 def test_kvpp_08_prefetch_starts_when_scheduled_and_advances_on_wait():
     scheduler = _scheduler()
     _begin(scheduler)
