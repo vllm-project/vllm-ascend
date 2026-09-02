@@ -66,12 +66,10 @@ class TestPoolKey(unittest.TestCase):
     def test_to_string(self):
         k = PoolKey(self.meta, "hash1")
         s = k.to_string()
-        self.assertIn("llama", s)
-        self.assertIn("@pcp2", s)
-        self.assertIn("@dcp3", s)
-        self.assertIn("@head_or_tp_rank:1", s)
-        self.assertIn("@pp_rank:0", s)
-        self.assertIn("hash1", s)
+        self.assertEqual(
+            s,
+            "llama@pcp:2@dcp:3@head_or_tp_rank:1@pp_rank:0@group:0@cache_role:kv@cache_family:default@hash1",
+        )
 
     def test_pp_ranks_use_distinct_keys(self):
         other_pp_meta = KeyMetadata("llama", 1, 2, 3, 1)
@@ -103,6 +101,7 @@ class TestLayerPoolKey(unittest.TestCase):
         meta = KeyMetadata("model", 0, 0, 0, 0)
         k = LayerPoolKey(meta, "h1", 5)
         s = k.to_string()
+        self.assertIn("@pcp:0@dcp:0", s)
         self.assertIn("@layer_id:5", s)
         self.assertIn("model", s)
         self.assertTrue(s.endswith("@h1"))
