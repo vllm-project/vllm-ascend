@@ -14,9 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
 name: E2E
-
 on:
   pull_request:
     types:
@@ -28,18 +26,15 @@ on:
       - 'main'
       - '*-dev'
       - 'releases/v*'
-
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
 defaults:
   run:
     shell: bash -el {0}
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   pre-commit:
     runs-on: linux-amd64-cpu-8-hk
@@ -57,29 +52,22 @@ jobs:
               echo "::error::Failed to fetch PR title from GitHub API"
               exit 1
             }
-
           if [ -z "$PR_TITLE" ]; then
             echo "::error::PR title cannot be empty"
             exit 1
           fi
-
           echo "Checking PR title: $PR_TITLE"
-
           VALID_PREFIXES='\[(BugFix|Performance|Test|CI|Feature|Doc|Misc|Community|Refactor)\]'
-
           if ! echo "$PR_TITLE" | grep -iqE "$VALID_PREFIXES"; then
             echo "::error::PR title must contain one of the following prefixes: [BugFix], [Performance], [Test], [CI], [Feature], [Doc], [Misc], [Community], [Refactor]"
             echo "::error::Example: '[Feature] Add new optimization pass' or 'Add new feature [Feature]'"
             exit 1
           fi
-
           echo "✓ PR title prefix is valid"
-
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
       - name: Read verified vLLM refs
         id: vllm
         run: |
@@ -89,24 +77,20 @@ jobs:
             exit 1
           }
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
-
       - name: cp problem matchers
         run: |
           cp .github/workflows/matchers/actionlint.json "$RUNNER_TEMP/actionlint.json"
           cp .github/workflows/matchers/markdownlint.json "$RUNNER_TEMP/markdownlint.json"
           cp .github/workflows/matchers/mypy.json "$RUNNER_TEMP/mypy.json"
-
       - run: echo "::add-matcher::$RUNNER_TEMP/actionlint.json"
       - run: echo "::add-matcher::$RUNNER_TEMP/markdownlint.json"
       - run: echo "::add-matcher::$RUNNER_TEMP/mypy.json"
-
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
           ref: ${{ steps.vllm.outputs.main_commit }}
-
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -115,7 +99,6 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
-
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
         env:
@@ -129,19 +112,16 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uc-manager
           uv pip install -r requirements-dev.txt
-
       - name: Install and run Gitleaks Secret Scan
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           chmod +x .github/workflows/scripts/gitleaks.sh
           .github/workflows/scripts/gitleaks.sh
-
       - name: Get pre-commit config hash
         id: get_hash
         run: |
           PRE_COMMIT_HASH=$(sha256sum .pre-commit-config.yaml | awk '{print $1}')
           echo "PRE_COMMIT_HASH=$PRE_COMMIT_HASH" >> $GITHUB_OUTPUT
-
       - name: Restore pre-commit cache
         uses: runs-on/cache/restore@v5
         env:
@@ -153,7 +133,6 @@ jobs:
         with:
           path: /tmp/pre-commit-cache
           key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
-
       - name: Run pre-commit
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
@@ -167,7 +146,6 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
-
       - name: Run mypy
         run: |
           PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
@@ -178,7 +156,7 @@ jobs:
             tools/mypy.sh 1 "$python_version"
             echo "============================"
           done
-          
+
   run-selected-tests-cpu:
     needs: pre-commit
     strategy:
@@ -260,7 +238,6 @@ jobs:
           sparse-checkout: |
             .github/workflows/scripts
           sparse-checkout-cone-mode: false
-
       - name: Download test case map and coverage package
         run: |
           set -euo pipefail
@@ -284,7 +261,6 @@ jobs:
           test -d vllm-ascend/covstub
           echo "Extracted vllm-ascend/covstub"
           find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
-
       - name: Recommend tests for current PR
         run: |
           set -euo pipefail
@@ -301,7 +277,6 @@ jobs:
             --github-pr "${PR_SPEC}" \
             --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
-
       - name: Merge extra tests from YAML
         run: |
           set -euo pipefail
@@ -322,7 +297,6 @@ jobs:
             echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skipped"
             rm -f extra_recommended_tests.obs.yaml
           fi
-
       - name: Export coverage paths output
         id: export-paths
         if: ${{ !cancelled() }}
@@ -370,7 +344,6 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
-
       - name: Resolve source snapshot
         id: source-snapshot
         env:
@@ -385,7 +358,6 @@ jobs:
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
           git fetch origin "$BASE_REF"
           BASE_SHA=$(git rev-parse FETCH_HEAD)
-
           # The workflow graph was loaded when the event was created. If its
           # cache control files changed on the base branch since then, pairing
           # the old graph with the new helpers could produce incompatible keys.
@@ -399,10 +371,8 @@ jobs:
             echo "::error::Trigger a new PR workflow run."
             exit 1
           fi
-
           git rebase "$BASE_SHA"
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
-
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -433,12 +403,10 @@ jobs:
               - 'tests/e2e/*.sh'
               - 'tools/**'
               - 'CMakeLists.txt'
-
       - name: Validate test coverage config
         run: |
           pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
-
       - name: Decide test selection mode
         id: decide
         env:
@@ -461,7 +429,6 @@ jobs:
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "Selection mode: ${MODE}"
-
       - name: Select tests from coverage recommendations
         id: scope-rec
         if: steps.decide.outputs.mode == 'recommended'
@@ -476,7 +443,6 @@ jobs:
           cat "$LIST_FILE"
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file "$LIST_FILE"
-
       - name: Select all tests
         id: scope-all
         if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
@@ -484,7 +450,6 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
           python3 .github/workflows/scripts/select_tests.py --all-tests
-
       - name: Set no-tests output when no tests selected
         id: noop
         if: >-
@@ -497,7 +462,6 @@ jobs:
             echo "matched_modules="
             echo "csrc_cache_target_ids=[]"
           } >> "$GITHUB_OUTPUT"
-
       - name: Select A5 tests
         id: scope-a5
         if: steps.filter.outputs.src == 'true'
@@ -507,7 +471,6 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --curated a5 \
             --runner-label-override linux-aarch64-a5-4
-
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
         if: steps.filter.outputs.src != 'true'
@@ -516,7 +479,6 @@ jobs:
             echo "has_tests=false"
             echo "test_groups=[]"
           } >> "$GITHUB_OUTPUT"
-
       - name: Add upstream test cache target
         id: cache-targets
         env:
@@ -525,7 +487,6 @@ jobs:
           python3 - <<'PY'
           import json
           import os
-
           target_ids = json.loads(os.environ["SELECTED_TARGET_IDS"])
           target_ids = sorted(set(target_ids) | {"a2-arm64-ubuntu"})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -613,6 +574,7 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
+    secrets: inherit
 
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
@@ -651,40 +613,33 @@ jobs:
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
           set -euo pipefail
-
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
-
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
           echo "select-tests: ${SELECT_TESTS_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
-
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
             echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
             exit 1
           fi
-
           if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
             echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})"
             exit 1
           fi
-
           # Even after successful test selection, only explicit true/false
           # values are valid. A missing output must not mean no tests.
           if [ "${HAS_TESTS}" != "true" ] && [ "${HAS_TESTS}" != "false" ]; then
             echo "::error::Invalid or missing has_tests output: '${HAS_TESTS}'"
             exit 1
           fi
-
           if [ "${HAS_TESTS_A5}" != "true" ] && [ "${HAS_TESTS_A5}" != "false" ]; then
             echo "::error::Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
             exit 1
           fi
-
           if [ "${HAS_TESTS}" = "true" ]; then
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
@@ -697,7 +652,6 @@ jobs:
               exit 1
             fi
           fi
-
           if [ "${HAS_TESTS_A5}" = "true" ]; then
             TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
             echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
@@ -708,6 +662,4 @@ jobs:
               exit 1
             fi
           fi
-
           echo "=== CI Gate: PASSED ==="
-
