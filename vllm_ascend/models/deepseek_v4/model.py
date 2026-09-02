@@ -808,7 +808,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_dim, dtype=torch.float32))
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
-        self.hc_norm = RMSNorm(hc_dim, eps=config.rms_norm_eps, has_weight=False)
+        self.hc_norm = RMSNorm(hc_dim, eps=config.rms_norm_eps, has_weight=False, dtype=torch.float32)
 
         # Pre-hc_head residual stream buffer for the speculative draft
         # (MTP / DSpark / DFlash). Only needed when the decoder consumes
@@ -836,8 +836,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         shape, dtype = x.size(), x.dtype
         x = x.flatten(1).float()
-        x_norm = self.hc_norm(x.to(torch.bfloat16))
-        x_norm = x_norm.to(hc_fn.dtype)
+        x_norm = self.hc_norm(x)
         mixes = torch.nn.functional.linear(x_norm, hc_fn)
         pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.hc_eps
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
