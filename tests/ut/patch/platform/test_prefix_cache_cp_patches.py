@@ -518,7 +518,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert isinstance(full_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(spec.page_size_bytes for spec in full_spec.kv_cache_specs.values())
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        kv_cache_utils_patch._get_max_layers_per_page_size(group.kv_cache_spec)
         for group in kv_cache_config.kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )

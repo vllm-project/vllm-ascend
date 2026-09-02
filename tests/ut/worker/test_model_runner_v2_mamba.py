@@ -1,4 +1,5 @@
 import ast
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -94,6 +95,11 @@ def test_mamba_model_state_inherits_upstream_state_management():
 
 def test_mrv2_advertises_standardized_shared_kv_backing():
     assert NPUModelRunner.supports_standardized_shared_kv_backing is True
+
+
+def test_prepare_inputs_tracks_upstream_max_seq_len_contract():
+    source = inspect.getsource(NPUModelRunner.prepare_inputs)
+    assert ("max_seq_len_np" in source) is vllm_version_is("0.27.1")
 
 
 def test_prepare_inputs_propagates_padded_request_count():

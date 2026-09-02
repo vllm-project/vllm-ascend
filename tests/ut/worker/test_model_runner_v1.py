@@ -134,6 +134,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.speculative_config = object()
         runner.model_config = SimpleNamespace(is_hybrid=True)
         runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+        runner._mamba_state_copy_funcs = None
         runner.num_accepted_tokens = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
         runner.prev_positions = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
         batch_counts = torch.ones(12, dtype=torch.int32)
