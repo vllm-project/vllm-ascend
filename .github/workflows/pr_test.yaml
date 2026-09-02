@@ -569,7 +569,7 @@ jobs:
   filter-test-groups:
     needs: [select-tests]
     if: ${{ !cancelled() && needs.select-tests.result == 'success' }}
-    runs-on: linux-amd64-cpu-8h
+    runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend/lint-base:latest
     outputs:
@@ -578,20 +578,13 @@ jobs:
     steps:
       - name: Filter test groups split cpu / npu
         id: filter
-        env:
-          RAW_GROUPS: ${{ needs.select-tests.outputs.test_groups }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          raw = json.loads(os.environ["RAW_GROUPS"])
-          npu_list = [g for g in raw if g.get("npu_type") != "cpu"]
-          cpu_list = [g for g in raw if g.get("npu_type") == "cpu"]
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf‑8") as f:
-              f.write(f"npu_test_groups={json.dumps(npu_list)}\n")
-              f.write(f"cpu_test_groups={json.dumps(cpu_list)}\n")
-          PY
+          RAW=${{ needs.select-tests.outputs.test_groups }}
+          NPU_GROUPS=$(echo "${RAW}" | jq -c '[ .[] | select(.npu_type != "cpu") ]')
+          CPU_GROUPS=$(echo "${RAW}" | jq -c '[ .[] | select(.npu_type == "cpu") ]')
+          echo "npu_test_groups=${NPU_GROUPS}" >> "${GITHUB_OUTPUT}"
+          echo "cpu_test_groups=${CPU_GROUPS}" >> "${GITHUB_OUTPUT}"
 
   run-selected-npu-tests:
     needs:
