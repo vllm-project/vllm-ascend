@@ -301,7 +301,7 @@ jobs:
             --github-pr "${PR_SPEC}" \
             --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
-  
+
       - name: Merge extra tests from YAML
         run: |
           set -euo pipefail
@@ -385,6 +385,7 @@ jobs:
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
           git fetch origin "$BASE_REF"
           BASE_SHA=$(git rev-parse FETCH_HEAD)
+
           # The workflow graph was loaded when the event was created. If its
           # cache control files changed on the base branch since then, pairing
           # the old graph with the new helpers could produce incompatible keys.
@@ -398,8 +399,10 @@ jobs:
             echo "::error::Trigger a new PR workflow run."
             exit 1
           fi
+
           git rebase "$BASE_SHA"
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -430,7 +433,7 @@ jobs:
               - 'tests/e2e/*.sh'
               - 'tools/**'
               - 'CMakeLists.txt'
-    
+
       - name: Validate test coverage config
         run: |
           pip install pyyaml
@@ -473,7 +476,7 @@ jobs:
           cat "$LIST_FILE"
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file "$LIST_FILE"
-  
+
       - name: Select all tests
         id: scope-all
         if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
@@ -494,6 +497,7 @@ jobs:
             echo "matched_modules="
             echo "csrc_cache_target_ids=[]"
           } >> "$GITHUB_OUTPUT"
+
       - name: Select A5 tests
         id: scope-a5
         if: steps.filter.outputs.src == 'true'
@@ -503,7 +507,7 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --curated a5 \
             --runner-label-override linux-aarch64-a5-4
-  
+
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
         if: steps.filter.outputs.src != 'true'
@@ -521,6 +525,7 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+
           target_ids = json.loads(os.environ["SELECTED_TARGET_IDS"])
           target_ids = sorted(set(target_ids) | {"a2-arm64-ubuntu"})
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -590,7 +595,6 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      # 替换：使用远程实时main sha，绕过pr事件缓存的旧base_sha
       base_sha: ${{ needs.get_latest_real_base_sha.outputs.real_base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
     secrets: inherit
@@ -660,33 +664,40 @@ jobs:
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
         run: |
           set -euo pipefail
+
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
+
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
           echo "select-tests: ${SELECT_TESTS_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
+
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
             echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
             exit 1
           fi
+
           if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
             echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})"
             exit 1
           fi
+
           # Even after successful test selection, only explicit true/false
           # values are valid. A missing output must not mean no tests.
           if [ "${HAS_TESTS}" != "true" ] && [ "${HAS_TESTS}" != "false" ]; then
             echo "::error::Invalid or missing has_tests output: '${HAS_TESTS}'"
             exit 1
           fi
+
           if [ "${HAS_TESTS_A5}" != "true" ] && [ "${HAS_TESTS_A5}" != "false" ]; then
             echo "::error::Invalid or missing has_tests_a5 output: '${HAS_TESTS_A5}'"
             exit 1
           fi
+
           if [ "${HAS_TESTS}" = "true" ]; then
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
@@ -694,11 +705,13 @@ jobs:
               echo "::error::Selected tests are required; add the ready-precise or ready-all label"
               exit 1
             fi
+  
             if [ "${TESTS_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
               exit 1
             fi
           fi
+
           if [ "${HAS_TESTS_A5}" = "true" ]; then
             TESTS_A5_RESULT="${{ needs.run-selected-tests-a5.result }}"
             echo "run-selected-tests-a5: ${TESTS_A5_RESULT}"
@@ -709,4 +722,6 @@ jobs:
               exit 1
             fi
           fi
+
           echo "=== CI Gate: PASSED ==="
+
