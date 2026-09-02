@@ -289,6 +289,19 @@ a3-560t:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: MiniMax-M3-BF16-A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MiniMax-M3-BF16-A3.yaml
+      - name: Deepseek_R1_W8A8_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Deepseek_R1_W8A8_A3.yaml
+      - name: MiniMax-M3-W8A8-A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MiniMax-M3-W8A8-A3.yaml
+      - name: Minimax_m2.7_w8a8_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Minimax_m2.7_w8a8_A3.yaml
+
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
@@ -344,6 +357,9 @@ a3-560t:
         os: linux-aarch64-a3-4-cn12-001
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
       # YAML-driven tests
+      - name: Qwen3.8-27B-w8a8-A3
+        os: linux-aarch64-a3-2-cn12-001
+        config_file_path: Qwen3.8-27B-w8a8-A3.yaml
       - name: Qwen3_32b_w8a8_ml_A3
         os: linux-aarch64-a3-4-cn12-001
         config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
