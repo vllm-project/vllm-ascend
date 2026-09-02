@@ -667,6 +667,18 @@ class AscendModelSlimConfig(QuantizationConfig):
                     ".v_proj.kv_cache_offset": ".attn.v_cache_offset",
                 }
             )
+        if self.enable_mxfp_c8_quant:
+            # MXFP C8 quantizes K dynamically, but V uses the static E8M0
+            # per-channel scale stored in the ModelSlim checkpoint.
+            suffix_map[".v_proj.kv_cache_scale"] = ".attn.v_cache_scale"
+            # Newer ModelSlim recipes name it v_proj.v_scale. vLLM's own
+            # cache-scale regex has already rewritten that to attn.v_scale by
+            # the time suffixes run (WeightsMapper._map_name applies regexes
+            # first), so catch it under the rewritten name or it lands on a
+            # parameter this scheme never registers and is silently dropped
+            # (the vendored-QFA bring-up served with the 127 fallback for a
+            # whole run because of this).
+            suffix_map[".attn.v_scale"] = ".attn.v_cache_scale"
         if self.enable_fa_quant:
             # Some models (e.g., Kimi-K2.6) have a nested module and call AutoWeightsLoader twice, to avoid double
             # mapping, we use regex mapping.
@@ -806,6 +818,15 @@ class AscendModelSlimConfig(QuantizationConfig):
 
             logger.debug("Select AscendKVCacheMethod(C8) for %s (layer=%s)", prefix, "AttentionLayerBase[C8]")
             return AscendKVCacheMethod(AscendC8KVCacheAttentionMethod(self.quant_description, prefix))
+        elif (
+            isinstance(layer, AttentionLayerBase)
+            and self.enable_mxfp_c8_quant
+            and self._is_c8_mxfp_kv_layer(layer)
+        ):
+            from ..methods.kv_cache.mxfp_c8 import AscendC8MXFPKVCacheAttentionMethod
+
+            logger.debug("Select AscendKVCacheMethod(C8-MXFP) for %s (layer=%s)", prefix, "AttentionLayerBase[C8-MXFP]")
+            return AscendKVCacheMethod(AscendC8MXFPKVCacheAttentionMethod(self.quant_description, prefix))
         elif is_fused_moe_layer(layer):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 # Delayed import to avoid circular import
@@ -901,7 +922,21 @@ class AscendModelSlimConfig(QuantizationConfig):
                 return True
         return False
 
+    @staticmethod
+    def _is_c8_mxfp_kv_layer(layer: torch.nn.Module) -> bool:
+        """C8-MXFP only applies to standard full-attention ``Attention``
+        layers. Other AttentionLayerBase subclasses (GDN/Mamba, encoder
+        attention, ...) must not get the MXFP KV-cache method: they have no
+        ``num_kv_heads``/``head_size_v`` and install the QFA backend on the
+        wrong layer type."""
+        from vllm.model_executor.layers.attention import Attention
+
+        return isinstance(layer, Attention)
+
     def get_kv_quant_dtype(self, layer_name, cache_dtype, model_config):
+        # Note: C8-MXFP models never reach this hook — its only caller in
+        # model_runner_v1 is gated by enable_fa_quant(), and the C8-MXFP
+        # cache dtype comes from the rebuilt fp8 spec in get_kv_cache_spec.
         if self.enable_fa_quant and self.is_fa_quant_layer(layer_name):
             ori_dtype = model_config.dtype
             quant_dtype = (
@@ -1105,6 +1140,9 @@ class AscendModelSlimConfig(QuantizationConfig):
         self.enable_indexer_quant = indexer_quant_type != ""
         self.indexer_quant_layers = []
         kv_quant_type = self.quant_description.get("kv_cache_type", "")
+        self.enable_mxfp_c8_quant = kv_quant_type == "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"
+        if self.enable_mxfp_c8_quant:
+            logger.info_once("[quantization] Enable C8 MXFP8 quantization!")
         self.enable_c8_quant = kv_quant_type == "C8"
         self.c8_quant_layers = []
         if self.enable_fa_quant or self.enable_indexer_quant or self.enable_c8_quant:
