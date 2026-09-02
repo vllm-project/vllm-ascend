@@ -97,3 +97,24 @@ def test_full_decode_only_keeps_graph_descriptor_request_count():
 
     assert num_reqs_padded == 4
     np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))
+
+
+def test_dynamic_k_uses_dummy_row_when_compacted_batch_is_uneven():
+    runner = _make_runner()
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    runner.decode_query_len = 6
+    # The graph bucket has 8 * 6 = 48 rows, but adaptive K compacted the
+    # request boundaries to 46 rows.  It must take the mixed-batch path.
+    query_start_loc_np = np.array([0, 6, 12, 18, 24, 30, 36, 41, 46, 46], dtype=np.int32)
+
+    actual, num_reqs_padded = runner._pad_query_start_loc_for_fia(
+        num_tokens_padded=48,
+        num_reqs_padded=8,
+        num_reqs=8,
+        query_start_loc_np=query_start_loc_np,
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        batch_desc_num_reqs=8,
+    )
+
+    assert num_reqs_padded == 9
+    np.testing.assert_array_equal(actual[:10], np.array([0, 6, 12, 18, 24, 30, 36, 41, 46, 48], dtype=np.int32))

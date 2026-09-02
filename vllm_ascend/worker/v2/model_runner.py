@@ -612,6 +612,17 @@ class NPUModelRunner(GPUModelRunner):
                     + total_num_draft_tokens
                 )
 
+                if num_reqs_padded > num_reqs:
+                    # reallocate_drafts() updates the real request boundaries and
+                    # fills the remaining entries with the compacted token count.
+                    # FIA, however, consumes the FULL-graph padded boundary as the
+                    # last TND sequence length. Restore only the padding suffix;
+                    # the dynamic per-request boundaries must remain untouched.
+                    async_copy_to_gpu(
+                        query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1],
+                        out=query_start_loc[num_reqs + 1 : num_reqs_padded + 1],
+                    )
+
             if draft_tokens:
                 expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                     idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
@@ -934,7 +945,17 @@ class NPUModelRunner(GPUModelRunner):
         ):
             runtime_query_len = num_tokens_padded // num_reqs_padded
 
-        if num_tokens_padded == num_reqs_padded * runtime_query_len:
+        # A dynamic-K batch can have the same total size as a uniform graph
+        # bucket while its request boundaries are uneven (e.g. 46 tokens in an
+        # 8-request, 6-token graph).  Use the actual boundary to distinguish
+        # that case; otherwise the TND metadata ends at the compacted count
+        # instead of the graph's padded token count.
+        is_uniform_batch = (
+            num_tokens_padded == num_reqs_padded * runtime_query_len
+            and query_start_loc_np[num_reqs] == num_reqs * runtime_query_len
+        )
+
+        if is_uniform_batch:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
