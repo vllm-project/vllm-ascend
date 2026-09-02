@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import inspect
 from contextlib import contextmanager
 
 import numpy as np
@@ -241,24 +242,18 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
         )
 
-        if vllm_version_is("0.27.1"):
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-            )
-        else:
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-                valid_dummy_state_slots=valid_dummy_state_slots,
-            )
+        execute_kwargs = {
+            "intermediate_tensors": intermediate_tensors,
+            "dummy_run": dummy_run,
+            "skip_attn_for_dummy_run": skip_attn_for_dummy_run,
+            "is_profile": is_profile,
+            "context_len": context_len,
+        }
+        if "valid_dummy_state_slots" in inspect.signature(
+            super().execute_model
+        ).parameters:
+            execute_kwargs["valid_dummy_state_slots"] = valid_dummy_state_slots
+        output = super().execute_model(scheduler_output, **execute_kwargs)
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
