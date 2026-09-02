@@ -40,6 +40,7 @@ jobs:
             revert
             weekly
             wait-feedback
+            exempt
           permission: none
           issue-type: both
           dispatch-type: repository
@@ -84,5 +85,10 @@ jobs:
                 "command": "wait-feedback",
                 "permission": "none",
                 "issue_type": "issue"
+              },
+              {
+                "command": "exempt",
+                "permission": "none",
+                "issue_type": "pull-request"
               }
             ]

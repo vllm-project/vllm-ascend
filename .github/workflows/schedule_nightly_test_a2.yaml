@@ -65,17 +65,22 @@ on:
         required: false
         default: '{"cann_version":"2026.08.03","base_image_date":"auto"}'
         type: string
-      bisect_good_commit:
-        description: 'explicit good commit for bisect (overrides good_table lookup)'
       bisect_args_json:
         description: 'JSON object containing optional bisect parameters'
         required: false
         default: '{}'
         type: string
+      enable_core_suite:
+        description: 'Enable core suite gate for nightly status reporting'
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
   pull-requests: read
   issues: read
+  statuses: write
+  actions: read
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -442,3 +447,20 @@ jobs:
           pattern: nightly-test-benchmark-results-*
           compression-level: 0
           delete-merged: true
+
+  report-core-suite-status:
+    name: Report core suite status
+    needs: [parse-trigger, single-node-tests, multi-node-tests, single-node-accuracy-tests, single-node-accuracy-tests-pr-only]
+    if: >-
+      always() &&
+      inputs.enable_core_suite &&
+      needs.parse-trigger.result == 'success'
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.vllm_ascend_branch }}
+      - uses: ./.github/actions/report-core-suite-status
+        with:
+          vllm_ascend_branch: ${{ inputs.vllm_ascend_branch }}

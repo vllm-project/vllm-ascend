@@ -153,7 +153,7 @@ concurrency:
 
 jobs:
   e2e:
-    name: ${{ inputs.config_file_path }}
+    name: ${{ inputs.name || inputs.config_file_path }}
     timeout-minutes: ${{ inputs.request_id != '' && 240 || fromJSON(inputs.testcase_timeout) }}
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}

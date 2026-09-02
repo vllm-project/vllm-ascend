@@ -1,0 +1,44 @@
+name: Report core suite status
+description: |-
+  Determine core suite test status from nightly run logs and
+  report it to the branch and open PRs (nightly/core-suite commit status).
+
+inputs:
+  vllm_ascend_branch:
+    description: Branch to report status to.
+    required: true
+    type: string
+  ref:
+    description: Git ref to checkout for core_suite.yaml (defaults to vllm_ascend_branch).
+    required: false
+    default: ''
+    type: string
+
+outputs:
+  state:
+    description: Overall state (success or failure).
+    value: ${{ steps.report.outputs.state }}
+  description:
+    description: Status description.
+    value: ${{ steps.report.outputs.description }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout core suite config
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ inputs.ref || inputs.vllm_ascend_branch }}
+        sparse-checkout: .github/workflows/configs/core_suite.yaml
+        sparse-checkout-cone-mode: false
+        fetch-depth: 1
+
+    - name: Determine and report core suite status
+      id: report
+      uses: actions/github-script@v9
+      with:
+        script: |
+          const report = require('${{ github.action_path }}/report.js');
+          const result = await report({ github, context, core, branch: '${{ inputs.vllm_ascend_branch }}' });
+          core.setOutput('state', result.state);
+          core.setOutput('description', result.description);

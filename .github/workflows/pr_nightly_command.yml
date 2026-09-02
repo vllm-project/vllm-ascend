@@ -370,6 +370,7 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
+            -f enable_core_suite=false \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f bisect_args_json="$BISECT_ARGS_JSON"
@@ -413,6 +414,7 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
+            -f enable_core_suite=false \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f bisect_args_json="$BISECT_ARGS_JSON"
@@ -456,6 +458,7 @@ jobs:
             -f vllm_ascend_branch='${{ needs.authorize.outputs.branch }}' \
             -f request_id="$REQUEST_ID" \
             -f skip_build_image=true \
+            -f enable_core_suite=false \
             -f vllm_ascend_ref='${{ needs.authorize.outputs.vllm_ascend_ref }}' \
             -f aop_enabled='${{ needs.authorize.outputs.aop_enabled }}' \
             -f bisect_args_json="$BISECT_ARGS_JSON"

@@ -1,0 +1,154 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Maintains the `nightly/core-suite` commit status on PR head commits.
+#
+# Branch protection requires `nightly/core-suite` to pass on every PR.
+# The status is normally written by the nightly `report-core-suite-status`
+# job (propagation) or by `reset_core_suite_status` / `/exempt`. This workflow
+# covers two gaps that propagation cannot reach:
+#
+#   1. Newly opened (or re-pushed) PRs whose head commit has no
+#      `nightly/core-suite` status yet -> fall back to the base branch HEAD.
+#   2. Non-source PRs (no vllm_ascend/ csrc/ or root py/build files changed)
+#      -> auto-exempt by writing a success status.
+#
+# pull_request_target is required because GITHUB_TOKEN is read-only and repo
+# secrets are unavailable for fork PRs under the plain `pull_request` event.
+# This workflow only calls the GitHub API - it never checks out or executes
+# PR code, so it is safe to run with write permissions.
+name: Check Trunk Health
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  check-trunk-health:
+    name: Check trunk health
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Maintain nightly/core-suite status on PR head
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const payload = context.payload.pull_request;
+            const prNumber = payload.number;
+            const prHeadSha = payload.head.sha;
+            const baseBranch = payload.base.ref;
+
+            const SOURCE_PATTERNS = [
+              'vllm_ascend/',
+              'csrc/',
+              'pyproject.toml',
+              'setup.py',
+              'setup.cfg',
+              'requirements.txt',
+              'requirements-dev.txt',
+              'CMakeLists.txt',
+            ];
+
+            const writeStatus = async (state, description) => {
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: prHeadSha,
+                context: 'nightly/core-suite',
+                state,
+                description,
+              });
+              core.info(`Wrote nightly/core-suite=${state} on ${prHeadSha}: ${description}`);
+            };
+
+            // 1. List changed files of the PR.
+            let changedFiles = [];
+            let page = 1;
+            while (true) {
+              try {
+                const resp = await github.rest.pulls.listFiles({
+                  owner, repo, pull_number: prNumber, per_page: 100, page,
+                });
+                changedFiles = changedFiles.concat(resp.data.map(f => f.filename));
+                if (resp.data.length < 100) break;
+                page++;
+              } catch (e) {
+                core.warning(`Failed to list changed files (page ${page}): ${e.message}`);
+                break;
+              }
+            }
+            core.info(`Changed files: ${JSON.stringify(changedFiles)}`);
+
+            // 2. Non-source PR -> auto-exempt (no comment, to avoid noise).
+            const isSourcePR = changedFiles.some(f => SOURCE_PATTERNS.some(p => f.startsWith(p)));
+            if (!isSourcePR) {
+              await writeStatus('success', 'Auto-exempted: non-source PR');
+              return;
+            }
+
+            // 3. Source PR: reuse the status already present on the PR head
+            //    (written by nightly propagation / reset / /exempt).
+            try {
+              const existing = await github.rest.repos.listCommitStatusesForRef({
+                owner, repo, ref: prHeadSha,
+              });
+              const coreStatus = existing.data.find(s => s.context === 'nightly/core-suite');
+              if (coreStatus) {
+                core.info(`Reusing existing status on PR head: ${coreStatus.state}`);
+                return;
+              }
+            } catch (e) {
+              core.warning(`Failed to read PR head statuses: ${e.message}`);
+            }
+
+            // 4. No status on PR head -> fall back to the base branch HEAD.
+            let baseSha;
+            try {
+              const refData = await github.rest.git.getRef({
+                owner, repo, ref: `heads/${baseBranch}`,
+              });
+              baseSha = refData.data.object.sha;
+            } catch (e) {
+              core.warning(`Failed to resolve ${baseBranch} HEAD: ${e.message}`);
+              return;
+            }
+
+            try {
+              const branchStatuses = await github.rest.repos.listCommitStatusesForRef({
+                owner, repo, ref: baseSha,
+              });
+              const branchStatus = branchStatuses.data.find(s => s.context === 'nightly/core-suite');
+              if (branchStatus) {
+                const state = branchStatus.state === 'failure' ? 'failure' : 'success';
+                const description = branchStatus.state === 'failure'
+                  ? `Trunk ${baseBranch} core suite failed`
+                  : `Trunk ${baseBranch} core suite passed`;
+                await writeStatus(state, description);
+              } else {
+                // No nightly signal on the base branch -> no gate signal.
+                core.info(`No nightly/core-suite status found on ${baseBranch} HEAD; leaving PR status unset.`);
+              }
+            } catch (e) {
+              core.warning(`Failed to read ${baseBranch} HEAD statuses: ${e.message}`);
+            }

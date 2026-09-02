@@ -1,0 +1,139 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Handles the /exempt slash command.
+#
+# Writes a `nightly/core-suite` success status to a single PR head commit so
+# that branch protection allows the PR to merge even when the trunk core suite
+# is failing. This is an emergency per-PR bypass: it does NOT change the branch
+# HEAD health signal, and it does NOT propagate to other PRs.
+#
+# Because the status is bound to the PR head SHA, a new push to the PR
+# automatically invalidates the exemption.
+#
+# Authorization is restricted to maintain/admin only (NOT triage), otherwise
+# the L1 circuit breaker would lose its meaning.
+name: Handle /exempt Command
+
+on:
+  repository_dispatch:
+    types: [exempt-command]
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  exempt:
+    name: Exempt PR from core-suite gate
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend/act-environments-ubuntu:act-22.04
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -sL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt-get update -y
+          sudo apt-get install gh -y
+
+      - name: Check user authorization (maintain/admin only)
+        id: auth
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          ACTOR: ${{ github.event.client_payload.github.payload.comment.user.login }}
+          REPO: ${{ github.event.client_payload.github.payload.repository.full_name }}
+        run: |
+          ROLE_NAME=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.role_name' 2>/dev/null || true)
+          case "$ROLE_NAME" in
+            maintain|admin)
+              echo "User $ACTOR has $ROLE_NAME role, authorized."
+              echo "authorized=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::User $ACTOR does not have maintain/admin permission and cannot trigger /exempt."
+              echo "authorized=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Post unauthorized comment
+        if: steps.auth.outputs.authorized == 'false'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: exempt command failed: you do not have permission. Only users with maintain/admin permission can trigger /exempt.
+          reactions: confused
+
+      - name: Fail if unauthorized
+        if: steps.auth.outputs.authorized == 'false'
+        run: exit 1
+
+      - name: Write success status to PR head
+        id: exempt
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const repo = context.payload.client_payload.github.payload.repository.full_name;
+            const prNumber = context.payload.client_payload.github.payload.issue.number;
+            const actor = context.payload.client_payload.github.payload.comment.user.login;
+            const reason = (context.payload.client_payload.slash_command.args.all || '').trim();
+
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            const prHeadSha = pr.data.head.sha;
+            const timestamp = new Date().toISOString();
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: prHeadSha,
+              context: 'nightly/core-suite',
+              state: 'success',
+              description: `Exempted by ${actor}${reason ? ` (${reason})` : ''}`,
+            });
+
+            core.info(`Wrote nightly/core-suite=success on ${prHeadSha} for PR #${prNumber}`);
+            core.setOutput('pr_head_sha', prHeadSha);
+            core.setOutput('actor', actor);
+            core.setOutput('reason', reason);
+            core.setOutput('timestamp', timestamp);
+
+      - name: Post exemption audit comment
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          repository: ${{ github.event.client_payload.github.payload.repository.full_name }}
+          comment-id: ${{ github.event.client_payload.github.payload.comment.id }}
+          body: |
+            [Bot]: :white_check_mark: `nightly/core-suite` exempted for PR head `${{ steps.exempt.outputs.pr_head_sha }}`.
+            - Operator: @${{ steps.exempt.outputs.actor }}
+            - Time: ${{ steps.exempt.outputs.timestamp }}
+            - Reason: ${{ steps.exempt.outputs.reason || '(not provided)' }}
+          reactions: rocket

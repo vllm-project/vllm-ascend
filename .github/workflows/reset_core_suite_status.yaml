@@ -1,0 +1,112 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# Manually sets the branch-level `nightly/core-suite` health signal.
+#
+# Intended for maintainers who fixed a broken trunk and do not want to wait
+# for the next scheduled nightly run, or who need to force a failure when a
+# nightly false-reports success.
+#
+# The status is written to the branch HEAD AND propagated to every open PR
+# targeting that branch, so PRs are updated immediately without requiring a
+# re-push (see the propagation mechanism in report-core-suite-status).
+name: Reset Core Suite Status
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to set the core suite status on'
+        required: true
+        default: 'main'
+        type: string
+      state:
+        description: 'Target status state'
+        required: true
+        default: 'success'
+        type: choice
+        options:
+          - success
+          - failure
+      reason:
+        description: 'Reason for the manual status change'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  reset:
+    name: Reset core suite status
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - name: Set branch HEAD and propagate to open PRs
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const branch = '${{ inputs.branch }}';
+            const state = '${{ inputs.state }}';
+            const reason = '${{ inputs.reason }}';
+            const actor = context.actor;
+            const description = `Manual reset by ${actor}: ${reason}`;
+
+            const refData = await github.rest.git.getRef({
+              owner, repo, ref: `heads/${branch}`,
+            });
+            const branchHeadSha = refData.data.object.sha;
+
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: branchHeadSha,
+              context: 'nightly/core-suite',
+              state,
+              description,
+            });
+            core.info(`Wrote nightly/core-suite=${state} on ${branch} HEAD ${branchHeadSha}`);
+
+            // Propagate to all open PRs targeting this branch.
+            let page = 1;
+            let propagated = 0;
+            let failed = 0;
+            while (true) {
+              const prs = await github.rest.pulls.list({
+                owner, repo, state: 'open', base: branch, per_page: 100, page,
+              });
+              if (prs.data.length === 0) break;
+              for (const pr of prs.data) {
+                try {
+                  await github.rest.repos.createCommitStatus({
+                    owner, repo, sha: pr.head.sha,
+                    context: 'nightly/core-suite',
+                    state,
+                    description,
+                  });
+                  propagated++;
+                } catch (e) {
+                  core.warning(`Failed to propagate to PR #${pr.number}: ${e.message}`);
+                  failed++;
+                }
+              }
+              if (prs.data.length < 100) break;
+              page++;
+            }
+            core.info(`Propagated to ${propagated} open PRs (${failed} failed)`);
+            core.setOutput('branch_head_sha', branchHeadSha);
+            core.setOutput('propagated', String(propagated));
