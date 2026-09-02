@@ -28,6 +28,9 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -561,6 +564,119 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     raw_caches[mamba_names[1]].storage_offset(),
                     base_offset + layer_size,
                 )
+
+    @unittest.skipIf(
+        vllm_version_is("0.27.1"),
+        "vLLM #51718 only changed the main planner",
+    )
+    @patch(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        side_effect=lambda _config, num_blocks: num_blocks,
+    )
+    def test_dsv4_main_materializes_real_planner_geometry_once(
+        self,
+        _mock_override,
+    ):
+        small_name = "model.layers.0.self_attn.attn"
+        large_name = "model.layers.1.self_attn.attn"
+        aliased_large_name = "model.layers.2.self_attn.attn"
+        mtp_name = "model.mtp.layers.0.self_attn.attn"
+        small_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.float16,
+            model_version="deepseek_v4",
+            **_ratio_kwargs(1),
+        )
+        large_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+            model_version="deepseek_v4",
+            **_ratio_kwargs(1),
+        )
+        full_group_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                small_name: small_spec,
+                large_name: large_spec,
+                mtp_name: large_spec,
+            }
+        )
+        alias_group_spec = UniformTypeKVCacheSpecs.from_specs({aliased_large_name: large_spec})
+        self.assertIsNotNone(full_group_spec)
+        self.assertIsNotNone(alias_group_spec)
+        assert full_group_spec is not None
+        assert alias_group_spec is not None
+        groups = [
+            KVCacheGroupSpec(
+                layer_names=[small_name, large_name, mtp_name],
+                kv_cache_spec=full_group_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=[aliased_large_name],
+                kv_cache_spec=alias_group_spec,
+            ),
+        ]
+        num_blocks = 3
+        tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
+        available_memory = tuple_stride * 2
+        planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
+            SimpleNamespace(),
+            groups,
+            available_memory,
+        )
+        self.assertEqual(planned_num_blocks, num_blocks)
+        kv_cache_config = KVCacheConfig(
+            num_blocks=planned_num_blocks,
+            kv_cache_tensors=descriptors,
+            kv_cache_groups=groups,
+        )
+
+        runner = self._build_runner()
+        runner.use_compress = True
+        runner._allocate_int8_cache_tensor = MagicMock(
+            side_effect=lambda numel, _alignment: torch.zeros(
+                numel,
+                dtype=torch.int8,
+            )
+        )
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        runner._allocate_int8_cache_tensor.assert_called_once_with(
+            available_memory,
+            2 * 1024 * 1024,
+        )
+        storage_ptrs = {raw.untyped_storage().data_ptr() for raw in raw_caches.values()}
+        self.assertEqual(len(storage_ptrs), 1)
+        descriptors_by_layer = {
+            layer_name: descriptor for descriptor in descriptors for layer_name in descriptor.layers
+        }
+        base_offset = min(raw.storage_offset() - descriptors_by_layer[name].offset for name, raw in raw_caches.items())
+        for layer_name, raw in raw_caches.items():
+            descriptor = descriptors_by_layer[layer_name]
+            self.assertEqual(
+                raw.storage_offset(),
+                base_offset + descriptor.offset,
+            )
+            spec = small_spec if layer_name == small_name else large_spec
+            self.assertEqual(
+                raw.numel(),
+                num_blocks * spec.page_size_bytes,
+            )
+        self.assertEqual(
+            raw_caches[large_name].storage_offset(),
+            raw_caches[aliased_large_name].storage_offset(),
+        )
+        self.assertNotEqual(
+            raw_caches[small_name].storage_offset(),
+            raw_caches[large_name].storage_offset(),
+        )
+        self.assertEqual(
+            raw_caches[mtp_name].storage_offset(),
+            base_offset + tuple_stride + small_spec.page_size_bytes * num_blocks,
+        )
 
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
