@@ -1109,7 +1109,8 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
-    a non-zero global_bs and must NOT receive mc2_mask.
+    a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
+    uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
@@ -1135,8 +1136,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if not is_kv_consumer:
         return False
 
-    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ascend_forward_context import select_moe_comm_method, use_cann_megamoe
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+    if use_cann_megamoe(vllm_config):
+        return False
 
     def needs_mc2(n: int) -> bool:
         return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}

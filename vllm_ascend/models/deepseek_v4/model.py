@@ -88,6 +88,14 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
 )
+from vllm_ascend.worker.v2.pp_utils import (
+    PPTransportDataType,
+    add_pp_transport_tensors,
+    get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_utils import (
+    make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
+)
 
 
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
@@ -798,7 +806,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 }
             )
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(
+            self,
+            make_empty_intermediate_tensors,
+        )
 
         self.norm_eps = config.rms_norm_eps
         self.hc_eps = config.hc_eps
@@ -849,7 +860,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if get_pp_group().is_first_rank:
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
@@ -859,6 +871,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = None
+        aux_hidden_states = get_pp_transport_tensors(
+            intermediate_tensors,
+            PPTransportDataType.AUX_HIDDEN_STATES,
+        )
 
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling_config = None
@@ -872,9 +888,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             llama_4_scaling = None
 
-        if get_pp_group().is_first_rank:
+        if pp_group.is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
-        aux_hidden_states: list[torch.Tensor] = []
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
@@ -891,11 +906,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             num_tokens = hidden_states.shape[0]
             self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
+        if not pp_group.is_last_rank:
+            intermediate_tensors = IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
                 }
+            )
+            return add_pp_transport_tensors(
+                intermediate_tensors,
+                PPTransportDataType.AUX_HIDDEN_STATES,
+                aux_hidden_states,
             )
 
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)

@@ -44,6 +44,7 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
+from vllm_ascend.utils import enable_dsa_cp
 
 
 def _apply_dsv4_rope(
@@ -490,9 +491,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 break
             else:
                 if "attn_sink" in name:
-                    narrow = loaded_weight[head_start:head_end]
+                    if enable_dsa_cp():
+                        narrow = loaded_weight
+                    else:
+                        narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
-                        params_dict[name][: narrow.shape[0]].copy_(narrow)
+                        params_dict[name].copy_(narrow)
                     loaded_params.add(name)
                     continue
                 param = params_dict[name]

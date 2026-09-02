@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 import torch_npu
+import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
@@ -1442,9 +1443,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 # ChunkedPrefill mixing prefill+decode: split into a per-phase
                 # FIA call each (A5 only).
+                # NOTE: Batch-invariant execution also requires prefill and
+                # decode to be processed separately, regardless of the device
+                # generation or attention state. Outside batch-invariant mode,
+                # preserve the existing A5 behavior for performance optimization.
                 if (
-                    get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
-                    and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+                    (
+                        envs_vllm.VLLM_BATCH_INVARIANT
+                        or (
+                            get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
+                            and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+                        )
+                    )
                     and attn_metadata.num_decodes > 0
                     and attn_metadata.num_prefills > 0
                 ):

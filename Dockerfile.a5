@@ -17,8 +17,7 @@
 
 ARG CANN_QUAY_URL="quay.io/ascend/cann"
 ARG CANN_VERSION="9.1.0"
-ARG BASE_OS="ubuntu22.04"
-FROM ${CANN_QUAY_URL}:${CANN_VERSION}-950-${BASE_OS}-py3.12
+FROM ${CANN_QUAY_URL}:${CANN_VERSION}-950-ubuntu22.04-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
@@ -49,7 +48,7 @@ RUN if [ -n "$APTMIRROR" ]; then \
 # Install modelscope (for fast download) and ray (for multinode)
 RUN pip config set global.index-url ${PIP_INDEX_URL} && \
     if [ -n "$PIP_TRUSTED_HOST" ]; then pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi && \
-    python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
+    python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
 
 # Install vLLM
