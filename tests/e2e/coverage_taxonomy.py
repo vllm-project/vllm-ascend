@@ -44,7 +44,6 @@ ALLOWED_VALUES: dict[str, set[str]] = {
         "fully_sharded_lora",
         "spec_decode",
         "mtp",
-        "dspark",
         "eagle3",
         "sfa_dsa",
         "sfa_pcp",

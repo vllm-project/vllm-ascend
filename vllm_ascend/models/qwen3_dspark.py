@@ -8,12 +8,12 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
 
-from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
-from vllm_ascend.utils import (
+from vllm_ascend.models.llama_eagle3 import (
     get_rotation_matrix,
     get_rotation_path,
-    vllm_version_is,
+    load_quarot_target_layer,
 )
+from vllm_ascend.utils import vllm_version_is
 
 TARGET_EMBED_WEIGHT_NAMES = (
     "language_model.model.embed_tokens.weight",
