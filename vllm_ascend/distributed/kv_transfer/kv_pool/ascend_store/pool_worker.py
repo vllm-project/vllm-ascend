@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
+    block_hash_to_str,
     TransferChunkWithBlockId,
     get_block_hashes,
     get_cache_family_granularity,
@@ -646,6 +647,7 @@ class KVPoolWorker:
         group_block_strides: list[int] = []
         group_tensors: list[torch.Tensor] = []
         group_block_size_scales: list[int] = []
+        physical_layers = set()
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
             if phys >= self.num_layers:
@@ -665,7 +667,7 @@ class KVPoolWorker:
         self.group_block_stride[group_id] = group_block_strides
         self.group_kv_cache_tensors[group_id] = group_tensors
         self.group_block_size_scales[group_id] = group_block_size_scales
-        self.group_num_layers[group_id] = len(layer_names)
+        self.group_num_layers[group_id] = len(physical_layers)
 
     def _create_c128_staging_buffers(self) -> tuple[list[int], list[int]]:
         """Create one reusable full-page staging value for every C128 tensor."""
@@ -1408,16 +1410,8 @@ class KVPoolWorker:
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
         self.current_layer = 0
-        self.layerwise_retrievers: list[Any] = []
-        if self.use_layerwise:
-            self.next_layer_to_submit = 0
-            reset_attention_compute_start_gate()
+        self.layerwise_retrievers = []
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
-        if len(metadata.requests) == 0:
-            return
-        if self.use_layerwise:
-            self.process_layer_data(metadata.requests)
-            return
         for request in metadata.requests:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:  # load =0
@@ -1433,10 +1427,10 @@ class KVPoolWorker:
             if (load_spec.kvpool_cached_tokens % self.cache_transfer_granularity != 0) and (
                 load_spec.kvpool_cached_tokens == token_len - 1
             ):
-                token_len = load_spec.kvpool_cached_tokens + 1
+                token_len = request.load_spec.kvpool_cached_tokens + 1
             else:
-                token_len = load_spec.kvpool_cached_tokens
-            load_spec.token_len = token_len
+                token_len = request.load_spec.kvpool_cached_tokens
+            request.load_spec.token_len = token_len
             logger.debug(
                 "KV pool worker prepare get req=%s token_len_chunk=%d get_token_len=%d "
                 "vllm_cached=%d kvpool_cached=%d groups=%s load_async=%s",
@@ -1448,7 +1442,11 @@ class KVPoolWorker:
                 load_group_ids,
                 self.load_async,
             )
-            if self.load_async:
+            if self.use_layerwise:
+                layerwise_retriever = self.retrieve_layer(request)
+                next(layerwise_retriever)  # first layer load
+                self.layerwise_retrievers.append(layerwise_retriever)
+            elif self.load_async:
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                     request,
                 )
@@ -1476,29 +1474,12 @@ class KVPoolWorker:
                 if c128_load_plan:
                     self._load_c128_sync_chunks(request, c128_load_plan)
                 logger.debug(
-                    "[KVPOOL] save_alloc req=%s tp_rank=%d batch_alloc keys=%d "
-                    "save_blocks=[%d,%d) new_keys=%d last_block_new=%s",
+                    "KV pool worker backend get returned request=%s token_len=%d groups=%s keys=%d",
                     request.req_id,
                     token_len,
                     load_group_ids,
                     len(key_list) + c128_page_count,
                 )
-
-                # Pad block_gvas to match block_ids length (fill 0 for blocks before save_start)
-                full_gvas = [0] * len(block_ids_by_group)
-                for i, gva in enumerate(block_gvas):
-                    if save_start_block + i < len(full_gvas):
-                        full_gvas[save_start_block + i] = gva
-
-                all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))
-                all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
-
-            if all_group_gvas:
-                request.save_keys = all_group_save_keys
-                request.block_gvas_by_group_np = all_group_gvas
-                request.block_ids_by_group_np = all_group_block_ids
-                request.block_gvas_np = all_group_gvas[0]
-                request.gva_block_offset = 0
 
     def _prepare_load_gvas(self, requests: list[ReqMeta]) -> None:
         """Fetch per-rank GVA and acquire read lease for the load path.
@@ -1536,7 +1517,10 @@ class KVPoolWorker:
                     if (request.block_ids_by_group_np is not None and group_id < len(request.block_ids_by_group_np))
                     else request.block_ids_np
                 )
-                full_len = len(block_ids_by_group) if block_ids_by_group is not None else 0
+                if block_ids_by_group is None:
+                    all_group_load_gvas.append(np.zeros(0, dtype=np.int64))
+                    continue
+                full_len = len(block_ids_by_group)
 
                 if load_start_block >= full_blocks:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
@@ -1551,14 +1535,69 @@ class KVPoolWorker:
                     continue
 
                 key_infos = self.m_store.batch_get_key_info(keys)
-                lease_results = self.m_store.batch_add_lease(keys, LAYERWISE_READ_LEASE_TTL_MS)
                 gvas = []
-                for ki in key_infos:
+                valid_keys_for_lease = []
+                valid_block_ids = []
+                invalid_block_ids: list[int] = []
+                for idx, (ki, key) in enumerate(zip(key_infos, keys)):
                     sizes = ki.size()
-                    gvas.append(ki.gva_list()[0] if sizes and sizes > 0 else 0)
-                all_group_load_keys.extend(keys)
+                    gva = ki.gva_list()[0] if sizes and sizes > 0 else 0
+                    gvas.append(gva)
+                    if gva > 0:
+                        valid_keys_for_lease.append(key)
+                        block_idx = load_start_block + idx
+                        if block_idx < len(block_ids_by_group):
+                            valid_block_ids.append(int(block_ids_by_group[block_idx]))
+                    else:
+                        block_idx = load_start_block + idx
+                        if block_idx < len(block_ids_by_group):
+                            invalid_block_ids.append(int(block_ids_by_group[block_idx]))
+                        logger.warning(
+                            "load_gvas: req=%s group=%d got invalid gva=%d (size=%d), block_id=%s load failed",
+                            request.req_id,
+                            group_id,
+                            gva,
+                            sizes if sizes else 0,
+                            int(block_ids_by_group[block_idx]) if block_idx < len(block_ids_by_group) else "N/A",
+                        )
 
-                logger.info(
+                # Only call batch_add_lease for keys with valid size
+                if valid_keys_for_lease:
+                    lease_results = self.m_store.batch_add_lease(valid_keys_for_lease, LAYERWISE_READ_LEASE_TTL_MS)
+                    # Report lease failures as invalid blocks
+                    for i, lease_res in enumerate(lease_results):
+                        if lease_res != 0 and i < len(valid_block_ids):
+                            invalid_block_ids.append(valid_block_ids[i])
+                            logger.warning(
+                                "load_gvas: req=%s group=%d lease failed result=%d, block_id=%d load failed",
+                                request.req_id,
+                                group_id,
+                                lease_res,
+                                valid_block_ids[i],
+                            )
+                else:
+                    lease_results = []
+
+                # Report invalid blocks to scheduler for recompute.
+                # Single-group models can safely report individual block IDs.
+                # Multi-group (hybrid) models must not report partial group
+                # failures, as the scheduler cannot handle inconsistent KV
+                # cache state across groups (see PR #9701 for rationale).
+                if invalid_block_ids:
+                    if len(request.block_ids_by_group) == 1:
+                        with self._invalid_block_ids_lock:
+                            self._invalid_block_ids.update(invalid_block_ids)
+                    else:
+                        logger.error(
+                            "KV load failed for hybrid request %s. "
+                            "Skip invalid-block fallback to avoid scheduler crash. "
+                            "failed_blocks=%s",
+                            request.req_id,
+                            invalid_block_ids,
+                        )
+                all_group_load_keys.extend(valid_keys_for_lease)
+
+                logger.debug(
                     "load_gvas: req=%s group=%d eff_bs=%d load_blocks=[%d,%d) keys=%d valid_gvas=%d lease_fail=%d",
                     request.req_id,
                     group_id,

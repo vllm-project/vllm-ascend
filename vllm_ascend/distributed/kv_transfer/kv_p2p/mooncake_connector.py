@@ -69,7 +69,7 @@ from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_world_size,
 )
 from vllm_ascend.models.deepseek_v4_dspark import get_dspark_num_layers
-from vllm_ascend.utils import enable_custom_op, is_dspark_config
+from vllm_ascend.utils import enable_custom_op, is_dspark_config, enable_sfa_dcp_replicated_indexer
 
 # isort: off
 if TYPE_CHECKING:

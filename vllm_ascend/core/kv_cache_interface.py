@@ -71,7 +71,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        if self.cache_sparse_c8:
+        if self.cache_sparse_sfa_c8:
             assert self.sparse_head_dim is not None
             assert len(self.sparse_head_dim) == 3
             num_heads_per_page = self.block_size * self.num_kv_heads
@@ -241,6 +241,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         assert len(model_version_set) == 1, (
             "All attention layers in the same KV cache group must use the same model version."
         )
+        sfa_dcp_replicated_indexer_size_set = set(spec.sfa_dcp_replicated_indexer_size for spec in specs)
+        assert len(sfa_dcp_replicated_indexer_size_set) == 1, (
+            "All attention layers in the same KV cache group must use the same SFA DCP replicated indexer size."
+        )
         return cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
@@ -250,9 +254,10 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             sparse_head_dim=specs[0].sparse_head_dim,
             dtype=specs[0].dtype,
             cache_dtype_str=cache_dtype_str_set.pop(),
-            cache_sparse_c8=specs[0].cache_sparse_c8,
+            cache_sparse_sfa_c8=specs[0].cache_sparse_sfa_c8,
+            cache_sparse_li_c8=specs[0].cache_sparse_li_c8,
             page_size_padded=page_size_padded_set.pop(),
-            model_version=model_version_set.pop(),
+            sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size_set.pop(),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

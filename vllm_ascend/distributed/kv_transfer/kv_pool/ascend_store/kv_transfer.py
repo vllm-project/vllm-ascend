@@ -20,12 +20,16 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend im
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
+    LayerBlockRange,
     aggregate_c128_page_chunks,
+    LayerBatchReqMeta,
     LayerMultiBlockReqMeta,
+    LayerLoadTask,
     LayerTransferTask,
     ReqMeta,
     TransferChunkWithBlockId,
     get_block_hashes,
+    SharedBlockData,
 )
 # isort: on
 
@@ -900,7 +904,6 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             token_database,
             block_size,
             tp_rank,
-            tp_size,
             dcp_size,
             ready_event,
             name="KVCacheStoreRecvingThread",
