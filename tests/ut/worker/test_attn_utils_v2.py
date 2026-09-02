@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
@@ -35,6 +36,9 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
@@ -122,6 +126,118 @@ def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
     expected_shape = (num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
     assert key_cache.shape == expected_shape
     assert value_cache.shape == expected_shape
+
+
+@pytest.mark.skipif(
+    vllm_version_is("0.27.1"),
+    reason="vLLM #51718 only changed the main planner",
+)
+def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
+    small_name = "model.layers.0.self_attn.attn"
+    large_name = "model.layers.1.self_attn.attn"
+    aliased_large_name = "model.layers.2.self_attn.attn"
+    mtp_name = "model.mtp.layers.0.self_attn.attn"
+    small_spec = AscendMLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+        model_version="deepseek_v4",
+        tokens_per_state=1,
+    )
+    large_spec = AscendMLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+        model_version="deepseek_v4",
+        tokens_per_state=1,
+    )
+    full_group_spec = UniformTypeKVCacheSpecs.from_specs(
+        {
+            small_name: small_spec,
+            large_name: large_spec,
+            mtp_name: large_spec,
+        }
+    )
+    alias_group_spec = UniformTypeKVCacheSpecs.from_specs({aliased_large_name: large_spec})
+    assert full_group_spec is not None
+    assert alias_group_spec is not None
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=[small_name, large_name, mtp_name],
+            kv_cache_spec=full_group_spec,
+        ),
+        KVCacheGroupSpec(
+            layer_names=[aliased_large_name],
+            kv_cache_spec=alias_group_spec,
+        ),
+    ]
+    num_blocks = 3
+    tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
+    backing_size = tuple_stride * 2
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, value: value,
+    )
+    planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
+        SimpleNamespace(),
+        groups,
+        backing_size,
+    )
+    assert planned_num_blocks == num_blocks
+    kv_cache_config = KVCacheConfig(
+        num_blocks=planned_num_blocks,
+        kv_cache_tensors=descriptors,
+        kv_cache_groups=groups,
+    )
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(compress_ratios=[1]),
+        ),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_current_vllm_config",
+        lambda: vllm_config,
+    )
+    allocations = []
+
+    def allocate_once(numel, _alignment, _device):
+        allocations.append(numel)
+        return torch.zeros(numel, dtype=torch.int8)
+
+    monkeypatch.setattr(
+        attn_utils,
+        "_allocate_int8_cache_tensor",
+        allocate_once,
+    )
+
+    raw_caches = attn_utils._allocate_kv_cache(
+        kv_cache_config,
+        shared_layers={},
+        device=torch.device("cpu"),
+    )
+
+    assert allocations == [backing_size]
+    tensor_raw_caches: dict[str, torch.Tensor] = {}
+    for layer_name, raw in raw_caches.items():
+        assert isinstance(raw, torch.Tensor)
+        tensor_raw_caches[layer_name] = raw
+    assert len({raw.untyped_storage().data_ptr() for raw in tensor_raw_caches.values()}) == 1
+    descriptors_by_layer = {layer_name: descriptor for descriptor in descriptors for layer_name in descriptor.layers}
+    base_offset = min(
+        raw.storage_offset() - descriptors_by_layer[name].offset for name, raw in tensor_raw_caches.items()
+    )
+    for layer_name, raw in tensor_raw_caches.items():
+        descriptor = descriptors_by_layer[layer_name]
+        assert raw.storage_offset() == base_offset + descriptor.offset
+    assert tensor_raw_caches[large_name].storage_offset() == tensor_raw_caches[aliased_large_name].storage_offset()
+    assert tensor_raw_caches[small_name].storage_offset() != tensor_raw_caches[large_name].storage_offset()
+    assert tensor_raw_caches[mtp_name].storage_offset() == (
+        base_offset + tuple_stride + small_spec.page_size_bytes * num_blocks
+    )
 
 
 @pytest.mark.parametrize(

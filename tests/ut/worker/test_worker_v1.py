@@ -273,6 +273,61 @@ class TestNPUWorker(TestBase):
                 with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
                     self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
 
+    @unittest.skipIf(
+        vllm_version_is("0.27.1"),
+        "vLLM #51718 only changed the main planner",
+    )
+    def test_pure_attention_multi_group_budget_scales_for_private_layout(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.float16,
+        )
+        groups = [
+            KVCacheGroupSpec(
+                layer_names=["encoder_attn"],
+                kv_cache_spec=spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["decoder_attn"],
+                kv_cache_spec=spec,
+            ),
+        ]
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(
+                get_resolved_kv_cache_layout=lambda: SimpleNamespace(
+                    is_layer_compact=True,
+                    is_block_compact=True,
+                )
+            ),
+            kv_transfer_config=None,
+        )
+        worker.get_kv_cache_spec = MagicMock(
+            return_value={
+                "encoder_attn": spec,
+                "decoder_attn": spec,
+            }
+        )
+        worker.model_runner = SimpleNamespace(
+            supports_standardized_shared_kv_backing=True,
+            use_sparse=False,
+            use_compress=False,
+        )
+
+        with patch(
+            "vllm_ascend.worker.worker.get_kv_cache_groups",
+            return_value=groups,
+        ):
+            self.assertEqual(
+                worker._scale_kv_cache_memory_for_multi_group(12345),
+                6172,
+            )
+
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker._register_atb_extensions")
