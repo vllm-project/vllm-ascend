@@ -20,6 +20,7 @@ import torch_npu
 from torch.nn.functional import pad
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
+from vllm.logger import logger
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
@@ -124,6 +125,7 @@ def quant_apply_mlp(
     swiglu_beta: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
 ) -> torch.Tensor:
+    logger.debug(f"****before GMM***{group_list=}")
     input_hidden_dtype = hidden_states.dtype
     act_name = getattr(activation, "value", activation)
     use_gmm_swiglu_quant_fusion = _gmm_swiglu_quant_fusion_enabled(
