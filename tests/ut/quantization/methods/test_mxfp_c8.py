@@ -118,29 +118,26 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
 
         self.assertTrue(torch.equal(param, torch.full((512,), 119, dtype=torch.uint8)))
 
-    def test_weight_loader_shards_column_vector_under_tp(self):
-        """Under TP the checkpoint is full-width while the parameter is the
-        per-rank shard; the column vector must flatten first, then narrow to
-        the rank's slice (regression: reshape-before-narrow failed with
-        "shape '[256]' is invalid for input of size 512" on TP2)."""
-        from unittest.mock import patch
-
+    def test_weight_loader_uses_pre_sliced_shard_under_tp(self):
+        """Under TP, vLLM's param loader delivers the checkpoint ALREADY
+        sliced to this rank's share (channel/head split done upstream); the
+        weight loader must not narrow again (double-sharding passed on TP2
+        only because channel-even split equals per-head split when
+        num_kv_heads == tp_size, and broke on TP4). A pre-sliced shard loads
+        verbatim; a mismatched size fails loud."""
         from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import _quant_weight_loader
 
-        full_weight = torch.arange(512, dtype=torch.uint8).view(512, 1)
-        param = torch.zeros(256, dtype=torch.uint8)
+        # TP4, rank 3: upstream delivers this rank's [128] slice of the
+        # [512]-wide scale; the per-rank parameter is also [128].
+        shard = torch.arange(384, 512, dtype=torch.uint8)
+        param = torch.zeros(128, dtype=torch.uint8)
+        _quant_weight_loader(param, shard)
+        self.assertTrue(torch.equal(param, shard))
 
-        with (
-            patch("vllm_ascend.quantization.methods.kv_cache.mxfp_c8.get_tensor_model_parallel_rank", return_value=1),
-            patch(
-                "vllm_ascend.quantization.methods.kv_cache.mxfp_c8.get_tensor_model_parallel_world_size",
-                return_value=2,
-            ),
-        ):
+        # A size the upstream loader would never deliver must raise.
+        full_weight = torch.arange(512, dtype=torch.uint8)
+        with self.assertRaises(AssertionError):
             _quant_weight_loader(param, full_weight)
-
-        # rank 1 owns the second half: [256, 512)
-        self.assertTrue(torch.equal(param, torch.arange(256, 512, dtype=torch.uint8)))
 
     def test_installs_c8_backend_with_512_token_blocks(self):
         from vllm_ascend.attention.attention_v1 import (

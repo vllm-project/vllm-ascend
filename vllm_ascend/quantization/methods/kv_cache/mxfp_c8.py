@@ -10,25 +10,27 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
         param.data.fill_(loaded_weight.item())
     else:
         # ModelSlim exports the per-channel V cache scale as a column vector
-        # ([hidden, 1]) while the registered parameter is 1-D; flatten first
-        # so both the TP narrow and the final shape comparison see plain
-        # element counts (reshape to param.shape alone would fail under TP,
-        # where the checkpoint is full-width but the parameter is sharded).
+        # ([hidden, 1]) while the registered parameter is 1-D; flatten first.
+        # No TP narrow here: under tensor parallelism vLLM's param loader has
+        # already sliced the checkpoint to this rank's share (per output
+        # channels / KV heads) before calling the weight loader -- slicing
+        # again double-shards it (passed on TP1/TP2 only by coincidence:
+        # with num_kv_heads == tp_size, channel-even split equals per-head
+        # split; it breaks on TP4 where heads < tp size). Assert on numel so
+        # any future mismatch in the upstream sharding semantics fails loud
+        # instead of silently loading wrong scales.
         if loaded_weight.dim() != 1:
             loaded_weight = loaded_weight.flatten()
-        if loaded_weight.shape != param.shape:
-            tp_rank = get_tensor_model_parallel_rank()
-            tp_size = get_tensor_model_parallel_world_size()
-            shard_size = loaded_weight.shape[0] // tp_size
-            loaded_weight = loaded_weight.narrow(0, shard_size * tp_rank, shard_size)
-        assert param.size() == loaded_weight.size(), (
-            "[vllm-ascend/MXFP8_PER_CHANNEL] Attempted to load weight "
-            f"({loaded_weight.size()}) into parameter ({param.size()}) "
-            f"when TP size is {get_tensor_model_parallel_world_size()} and TP rank is "
-            f"{get_tensor_model_parallel_rank()}."
+        assert param.numel() == loaded_weight.numel(), (
+            "[vllm-ascend/MXFP8_PER_CHANNEL] V cache scale size mismatch: parameter "
+            f"has {param.numel()} elements (num_kv_heads x head_dim on this rank) but "
+            f"the loader delivered {loaded_weight.numel()} (TP size "
+            f"{get_tensor_model_parallel_world_size()}, TP rank "
+            f"{get_tensor_model_parallel_rank()}). The upstream sharding of "
+            "v_cache_scale does not match the per-head layout this scheme "
+            "registers."
         )
-
-        param.data.copy_(loaded_weight)
+        param.data.copy_(loaded_weight.view_as(param))
 
 
 class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
