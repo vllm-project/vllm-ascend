@@ -126,12 +126,17 @@ def _capturing_elastic_server(instances: list):
     return CapturingElasticServer
 
 
-def _patch_dist_barrier(monkeypatch) -> list[str]:
+def _patch_dist_barrier(
+    monkeypatch,
+    *,
+    world_size: int = 1,
+    rank: int = 0,
+) -> list[str]:
     barrier_calls: list[str] = []
     monkeypatch.setattr("torch.distributed.is_available", lambda: True)
     monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
-    monkeypatch.setattr("torch.distributed.get_world_size", lambda: 1)
-    monkeypatch.setattr("torch.distributed.get_rank", lambda: 0)
+    monkeypatch.setattr("torch.distributed.get_world_size", lambda: world_size)
+    monkeypatch.setattr("torch.distributed.get_rank", lambda: rank)
 
     def _barrier(*args, **kwargs):
         barrier_calls.append("barrier")
@@ -561,28 +566,6 @@ def test_seed_process_weights_order_depends_on_int8_cache(mock_logger, monkeypat
     assert calls == expected_calls
 
 
-@pytest.mark.parametrize("int8_cache", ["dram", "no"])
-@patch("vllm_ascend.model_loader.netloader.netloader.logger")
-def test_target_model_barrier_before_draft(mock_logger, monkeypatch, int8_cache):
-    dummy_model = _patch_loader_common(monkeypatch)
-    monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
-    _install_elastic_server(monkeypatch)
-    barrier_calls = _patch_dist_barrier(monkeypatch)
-
-    extra = {
-        "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
-        "MODEL": "dummy-model",
-        "LISTEN_PORT": 5555,
-        "INT8_CACHE": int8_cache,
-    }
-    loader = make_loader_with_config(extra)
-    vllm_config = DummyVllmConfig()
-    vllm_config.speculative_config = object()
-    loader.load_model(vllm_config, DummyModelConfig())
-
-    assert barrier_calls == ["barrier"]
-
-
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
 def test_failed_target_model_participates_in_barrier_before_error(mock_logger, monkeypatch):
     _patch_loader_common(monkeypatch)
@@ -592,7 +575,7 @@ def test_failed_target_model_participates_in_barrier_before_error(mock_logger, m
         "revert_to_default",
         lambda self, *args, **kwargs: (None, False),
     )
-    barrier_calls = _patch_dist_barrier(monkeypatch)
+    barrier_calls = _patch_dist_barrier(monkeypatch, world_size=4)
 
     extra = {
         "SOURCE": [{"device_id": 0, "sources": ["127.0.0.1:5000"]}],
@@ -602,6 +585,7 @@ def test_failed_target_model_participates_in_barrier_before_error(mock_logger, m
     }
     loader = make_loader_with_config(extra)
     vllm_config = DummyVllmConfig()
+    vllm_config.parallel_config.local_world_size = 4
     vllm_config.speculative_config = object()
 
     with pytest.raises(RuntimeError, match="NetLoader elastic loads model fails"):
@@ -632,7 +616,22 @@ def test_draft_model_does_not_wait_for_target_netloader_barrier(mock_logger, mon
 
 
 @patch("vllm_ascend.model_loader.netloader.netloader.logger")
-def test_target_model_uses_node_local_barrier(mock_logger, monkeypatch):
+@pytest.mark.parametrize(
+    "world_size,local_world_size,rank,expected_groups,expected_barrier_group",
+    [
+        (4, 4, 0, [], None),
+        (8, 4, 2, [[0, 1, 2, 3], [4, 5, 6, 7]], "pg-0"),
+    ],
+)
+def test_target_model_uses_node_local_barrier(
+    mock_logger,
+    monkeypatch,
+    world_size,
+    local_world_size,
+    rank,
+    expected_groups,
+    expected_barrier_group,
+):
     dummy_model = _patch_loader_common(monkeypatch)
     monkeypatch.setattr("vllm_ascend.model_loader.netloader.netloader.elastic_load", lambda **kwargs: dummy_model)
     _install_elastic_server(monkeypatch)
@@ -650,13 +649,13 @@ def test_target_model_uses_node_local_barrier(mock_logger, monkeypatch):
 
     monkeypatch.setattr("torch.distributed.is_available", lambda: True)
     monkeypatch.setattr("torch.distributed.is_initialized", lambda: True)
-    monkeypatch.setattr("torch.distributed.get_world_size", lambda: 8)
-    monkeypatch.setattr("torch.distributed.get_rank", lambda: 2)
+    monkeypatch.setattr("torch.distributed.get_world_size", lambda: world_size)
+    monkeypatch.setattr("torch.distributed.get_rank", lambda: rank)
     monkeypatch.setattr("torch.distributed.new_group", fake_new_group)
     monkeypatch.setattr("torch.distributed.barrier", fake_barrier)
 
     extra = {
-        "SOURCE": [{"device_id": 2, "sources": ["127.0.0.1:5000"]}],
+        "SOURCE": [{"device_id": rank, "sources": ["127.0.0.1:5000"]}],
         "MODEL": "dummy-model",
         "LISTEN_PORT": 5555,
         "INT8_CACHE": "no",
@@ -664,12 +663,12 @@ def test_target_model_uses_node_local_barrier(mock_logger, monkeypatch):
     loader = make_loader_with_config(extra)
     vllm_config = DummyVllmConfig()
     vllm_config.parallel_config = DummyParallelConfig()
-    vllm_config.parallel_config.local_world_size = 4
+    vllm_config.parallel_config.local_world_size = local_world_size
     vllm_config.speculative_config = object()
     loader.load_model(vllm_config, DummyModelConfig())
 
-    assert created_groups == [[0, 1, 2, 3], [4, 5, 6, 7]]
-    assert barrier_groups == ["pg-0"]
+    assert created_groups == expected_groups
+    assert barrier_groups == [expected_barrier_group]
 
 
 @pytest.mark.parametrize(
