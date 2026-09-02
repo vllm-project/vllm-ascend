@@ -1361,7 +1361,6 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
     const at::Tensor &q2k,
     const at::Tensor &cu_seqlens,
@@ -1423,7 +1422,7 @@ at::Tensor npu_sparse_attention_score_prefill_meta(
     return at::empty_symint(query.sym_sizes(), query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
-void npu_scatter_nd_update_v2_meta(
+void npu_scatter_nd_update_sk_meta(
     at::Tensor& var,
     const at::Tensor& indices,
     const at::Tensor& update)
@@ -2015,7 +2014,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_swiglu_group_quant", &vllm_ascend::meta::npu_swiglu_group_quant_meta);
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
-    ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
+    ops.impl("npu_scatter_nd_update_sk", &vllm_ascend::meta::npu_scatter_nd_update_sk_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
     // MLA prolog (MlaPrologV3), Ascend950-only; name aligned with torch_npu

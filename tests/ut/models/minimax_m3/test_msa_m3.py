@@ -775,7 +775,7 @@ def test_scatter_index_cache_keeps_legacy_op_off_a5(_mock_device_type: MagicMock
 
     with patch.object(
         torch.ops._C_ascend,
-        "npu_scatter_nd_update_v2",
+        "npu_scatter_nd_update_sk",
         create=True,
     ) as mock_scatter_nd_update:
         _scatter_index_cache(cache, updates, slots)

@@ -8,17 +8,17 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 /*!
- * \file scatter_nd_update_v2.h
+ * \file scatter_nd_update_sk.h
  * \brief
  */
-#ifndef OP_API_INC_LEVEL0_OP_SCATTER_ND_UPDATE_V2_OP_H_
-#define OP_API_INC_LEVEL0_OP_SCATTER_ND_UPDATE_V2_OP_H_
+#ifndef OP_API_INC_LEVEL0_OP_SCATTER_ND_UPDATE_SK_OP_H_
+#define OP_API_INC_LEVEL0_OP_SCATTER_ND_UPDATE_SK_OP_H_
 
 #include "opdev/op_executor.h"
 
 namespace l0op {
-const aclTensor* ScatterNdUpdateV2(const aclTensor* self, const aclTensor* indices, const aclTensor* updates,
-                                 const aclIntArray* strides, bool use_locking, aclOpExecutor* executor);
-}  // namespace l0op
+const aclTensor* ScatterNdUpdateSk(const aclTensor* self, const aclTensor* indices, const aclTensor* updates,
+                                   const aclIntArray* strides, bool use_locking, aclOpExecutor* executor);
+} // namespace l0op
 
-#endif  // OP_API_INC_LEVEL0_OP_SCATTER_ND_UPDATE_V2_OP_H_
+#endif // OP_API_INC_LEVEL0_OP_SCATTER_ND_UPDATE_SK_OP_H_

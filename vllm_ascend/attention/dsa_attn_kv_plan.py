@@ -122,7 +122,7 @@ class DsaAttnKvPlan:
             torch_npu.npu_scatter_nd_update_(cache, indices, updates)
             return
         if not self.uses_kv_compress_epilog:
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+            torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
             return
         torch.ops._C_ascend.kv_compress_epilog(
             kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
