@@ -22,7 +22,7 @@ on:
         description: test groups json string
         required: true
         type: string
-    secrets:    # ←新增这一块
+    secrets:
       OBS_ACCESS_KEY_PRECISION:
         required: false
       OBS_SECRET_ACCESS_KEY_PRECISION:
@@ -30,6 +30,7 @@ on:
     outputs:
       coverage_artifact_name:
         value: ${{ jobs.dispatch.outputs.coverage_artifact_name }}
+
 jobs:
   dispatch:
     name: dispatch-groups
@@ -59,6 +60,7 @@ jobs:
           PY
         env:
           TEST_GROUPS: ${{ inputs.test_groups }}
+
   run_shards:
     name: test-shard-${{ matrix.npu_type }}
     needs: dispatch
@@ -73,6 +75,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
+
       - name: Rebase to base_sha (NPU mandatory)
         run: |
           set -euo pipefail
@@ -81,31 +84,37 @@ jobs:
           git rebase "${BASE_SHA}"
         env:
           BASE_SHA: ${{ inputs.base_sha }}
+
       - name: Setup CANN & build environment
         run: |
           set -euo pipefail
           echo "ASCEND_TOOLKIT_PATH=/usr/local/Ascend/ascend-toolkit" >> $GITHUB_ENV
           echo "LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
       - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/ccache
           key: ccache-${{ inputs.base_sha }}-${{ matrix.entry.npu_type }}
+
       - name: Install python dependencies
         run: |
           set -euo pipefail
           python3 -m pip install --upgrade pip
           python3 -m pip install pytest pytest-cov
+
       - name: Show npu-smi device status
         run: |
           npu-smi info || true
+
       - name: Run pytest with coverage
         run: |
           set -euo pipefail
           TEST_PATHS="${{ join(matrix.entry.test_paths, ' ') }}"
           echo "test paths: ${TEST_PATHS}"
           python3 -m pytest -v --cov=./ --cov-report=xml:coverage.xml ${TEST_PATHS}
+
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
