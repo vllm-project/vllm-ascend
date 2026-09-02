@@ -706,7 +706,7 @@ jobs:
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a5]
+    needs: [pre-commit, select-tests, filter-test-groups, run-selected-npu-tests, run-selected-dynamic-cpu-tests, run-selected-tests-a5]
     if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
