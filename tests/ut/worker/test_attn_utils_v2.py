@@ -1,16 +1,20 @@
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -34,6 +38,52 @@ from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+def test_get_kv_cache_spec_applies_backend_packing(monkeypatch):
+    layer_name = "model.layers.0.self_attn"
+    unpacked_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    packed_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+        num_head_slots=2,
+        state_content_bytes=8 * 128 * 2,
+    )
+    attn_module = MagicMock(spec=Attention)
+    attn_module.kv_sharing_target_layer_name = None
+    attn_module.get_kv_cache_spec.return_value = unpacked_spec
+    backend = attn_module.get_attn_backend.return_value
+    backend.customize_spec.return_value = packed_spec
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {layer_name: attn_module},
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A2),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "enable_sfa_dcp_replicated_indexer",
+        lambda _config: False,
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+
+    specs = attn_utils.get_kv_cache_spec(vllm_config)
+
+    assert specs[layer_name] is packed_spec
+    backend.customize_spec.assert_called_once_with(unpacked_spec)
 
 
 @pytest.mark.parametrize(
@@ -86,19 +136,19 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
 
 
 @pytest.mark.parametrize(
-    ("device_type", "cache_dtype", "scale_dtype", "component_dims"),
+    ("device_type", "cache_dtype", "scale_dtype", "scale_bytes"),
     [
         (
             AscendDeviceType.A2,
             torch.int8,
             torch.float16,
-            (128, 1),
+            2,
         ),
         (
             AscendDeviceType.A5,
             torch.float8_e4m3fn,
             torch.float32,
-            (128, 1, 132),
+            4,
         ),
     ],
 )
@@ -107,11 +157,15 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     device_type,
     cache_dtype,
     scale_dtype,
-    component_dims,
+    scale_bytes,
 ):
     """Exercise DSV4 discovery, allocation, reshape, and binding as one flow."""
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
-    cache_config = SimpleNamespace(block_size=32, cache_dtype="auto")
+    cache_config = SimpleNamespace(
+        block_size=32,
+        cache_dtype="auto",
+        get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
+    )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
@@ -177,7 +231,9 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         kv_cache_tensors=[
             KVCacheTensor(
                 size=num_blocks * spec.page_size_bytes,
-                shared_by=[layer_name],
+                layers=[layer_name],
+                layer_stride=num_blocks * spec.page_size_bytes,
+                block_stride=spec.page_size_bytes,
             )
         ],
         kv_cache_groups=[
@@ -187,39 +243,27 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
             )
         ],
     )
-    attn_group = AttentionGroup(
-        backend=AscendDSAC4Backend,
-        layer_names=[layer_name],
-        kv_cache_spec=spec,
-        kv_cache_group_id=0,
-    )
     runner_kv_caches: list[Any] = []
 
     kv_caches = upstream_attn_utils.init_kv_cache(
         runner_kv_caches=runner_kv_caches,
         forward_context={layer_name: cache_layer},
         kv_cache_config=kv_cache_config,
-        attn_groups=[[attn_group]],
         device=torch.device("cpu"),
-        cache_dtype=cache_config.cache_dtype,
         kernel_block_sizes=[spec.block_size],
         vllm_config=vllm_config,
     )
 
     cache_components = kv_caches[layer_name]
-    assert cache_layer.kv_cache is cache_components
+    assert cache_components.shape == (num_blocks, 1, cache_config.block_size, 128)
+    assert cache_layer.kv_cache.shape == (num_blocks, cache_config.block_size, 128)
+    assert cache_layer.kv_cache.untyped_storage().data_ptr() == cache_components.untyped_storage().data_ptr()
     assert len(runner_kv_caches) == 1
     assert runner_kv_caches[0] is cache_components
-    assert [component.shape for component in cache_components] == [
-        (num_blocks, spec.storage_block_size, 1, dim) for dim in component_dims
-    ]
-    assert [component.dtype for component in cache_components] == [
-        cache_dtype,
-        scale_dtype,
-        *([cache_dtype] if device_type == AscendDeviceType.A5 else []),
-    ]
-    backing_storage = cache_components[0].untyped_storage().data_ptr()
-    assert all(component.untyped_storage().data_ptr() == backing_storage for component in cache_components)
+    assert cache_components.dtype == cache_dtype
+    assert spec.scale_dtype == scale_dtype
+    assert spec.page_size_bytes == cache_config.block_size * (128 + scale_bytes)
+    assert cache_components.untyped_storage().nbytes() == num_blocks * spec.page_size_bytes
 
 
 class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):

@@ -147,6 +147,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             )
             continue
 
+        # Keep backend-owned KV packing consistent with upstream's spec
+        # collection path. MLA specs above are rebuilt into Ascend-specific
+        # types and must not be passed through the dense attention backend.
+        if isinstance(spec, AttentionSpec) and not isinstance(attn_module, MLAAttention):
+            spec = attn_module.get_attn_backend().customize_spec(spec)
+
         kv_cache_spec[layer_name] = spec
         if isinstance(spec, AttentionSpec):
             attention_layer_names.append(layer_name)

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, call, patch
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
@@ -15,7 +15,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -28,6 +27,11 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSF
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+
+def legacy_kv_cache_tensor(size: int, shared_by: list[str]):
+    """Build the removed pre-strided descriptor for legacy-path unit tests."""
+    return SimpleNamespace(size=size, shared_by=shared_by)
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
@@ -285,6 +289,42 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_get_kv_cache_spec_applies_backend_packing(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+        layer_name = "model.layers.0.self_attn"
+        unpacked_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+        )
+        packed_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+            num_head_slots=2,
+            state_content_bytes=8 * 128 * 2,
+        )
+        attn_module = MagicMock(spec=Attention)
+        attn_module.kv_sharing_target_layer_name = None
+        attn_module.get_kv_cache_spec.return_value = unpacked_spec
+        backend = attn_module.get_attn_backend.return_value
+        backend.customize_spec.return_value = packed_spec
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        specs = runner.get_kv_cache_spec()
+
+        self.assertIs(specs[layer_name], packed_spec)
+        backend.customize_spec.assert_called_once_with(unpacked_spec)
+
     def test_initialize_uses_standardized_strided_kv_layout(self):
         runner = self._build_runner()
         runner.cache_config = MagicMock()
@@ -344,7 +384,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[KVCacheTensor(size=kv_cache_spec.page_size_bytes * 2, shared_by=["draft_attn"])],
+            kv_cache_tensors=[
+                legacy_kv_cache_tensor(
+                    size=kv_cache_spec.page_size_bytes * 2,
+                    shared_by=["draft_attn"],
+                )
+            ],
             kv_cache_groups=[KVCacheGroupSpec(layer_names=["draft_attn"], kv_cache_spec=kv_cache_spec)],
         )
 
@@ -486,7 +531,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
+                legacy_kv_cache_tensor(
                     size=indexer_spec.page_size_bytes * 2,
                     shared_by=layer_names,
                 )
@@ -516,7 +561,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[KVCacheTensor(size=kv_cache_spec.page_size_bytes * 2, shared_by=["draft_attn"])],
+            kv_cache_tensors=[
+                legacy_kv_cache_tensor(
+                    size=kv_cache_spec.page_size_bytes * 2,
+                    shared_by=["draft_attn"],
+                )
+            ],
             kv_cache_groups=[KVCacheGroupSpec(layer_names=["draft_attn"], kv_cache_spec=kv_cache_spec)],
         )
         kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
@@ -567,7 +617,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=num_physical_blocks,
             kv_cache_tensors=[
-                KVCacheTensor(
+                legacy_kv_cache_tensor(
                     size=kv_cache_spec.page_size_bytes * num_physical_blocks,
                     shared_by=[layer_name],
                 )
@@ -660,7 +710,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
+                legacy_kv_cache_tensor(
                     size=spec.page_size_bytes * 2,
                     shared_by=[layer_name],
                 )
@@ -732,11 +782,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
+                legacy_kv_cache_tensor(
                     size=main_spec.page_size_bytes * 2,
                     shared_by=[attn_layer_name],
                 ),
-                KVCacheTensor(
+                legacy_kv_cache_tensor(
                     size=indexer_spec.page_size_bytes * 2,
                     shared_by=[indexer_layer_name],
                 ),
@@ -859,11 +909,11 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 kv_cache_config = KVCacheConfig(
                     num_blocks=2,
                     kv_cache_tensors=[
-                        KVCacheTensor(
+                        legacy_kv_cache_tensor(
                             size=main_spec.page_size_bytes * 2,
                             shared_by=[attn_layer_name],
                         ),
-                        KVCacheTensor(
+                        legacy_kv_cache_tensor(
                             size=indexer_spec.page_size_bytes * 2,
                             shared_by=[indexer_layer_name],
                         ),
@@ -1027,7 +1077,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
+                legacy_kv_cache_tensor(
                     size=indexer_spec.page_size_bytes * 2,
                     shared_by=[layer_name],
                 )
