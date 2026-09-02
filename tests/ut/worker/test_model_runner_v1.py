@@ -24,7 +24,11 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -583,6 +587,52 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
+
+    def test_dcp_replicated_draft_cache_allocates_physical_lane_pages(self):
+        runner = self._build_runner()
+        base_spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=2,
+            head_size=4,
+            head_size_v=4,
+            dtype=torch.float16,
+        )
+        replication_size = 4
+        spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+            base_spec,
+            replication_size,
+        )
+        config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=spec.page_size_bytes * 2,
+                    shared_by=["draft_attn"],
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["draft_attn"],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+        raw = runner._allocate_kv_cache_tensors(config)
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                kv_cache_spec=spec,
+                backend=runner.attn_backend,
+                layer_names=["draft_attn"],
+            )
+        ]
+
+        k_cache, v_cache = runner._reshape_kv_cache_tensors(config, raw)[
+            "draft_attn"
+        ]
+
+        expected_shape = (2 * replication_size, 16, 2, 4)
+        self.assertEqual(k_cache.shape, expected_shape)
+        self.assertEqual(v_cache.shape, expected_shape)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_hybrid_mla_cache_uses_logical_kernel_block_shape(

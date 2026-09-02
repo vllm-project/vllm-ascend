@@ -15,6 +15,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.platform import (
     NPUPlatform,
     _setup_compile_backend,
+    _validate_draft_decode_context_parallel_config,
     _validate_eplb_config,
     _validate_sfa_dcp_kv_sp,
 )
@@ -95,6 +96,42 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.device_type, "npu")
         self.assertEqual(NPUPlatform.simple_compile_backend, "eager")
         self.assertEqual(NPUPlatform.ray_device_key, "NPU")
+
+    def test_kimi_k3_gqa_dspark_uses_replicated_draft_dcp_config(self):
+        target_parallel = SimpleNamespace(
+            decode_context_parallel_size=8,
+            tensor_parallel_size=8,
+        )
+        draft_parallel = SimpleNamespace(
+            decode_context_parallel_size=1,
+            tensor_parallel_size=8,
+        )
+        draft_model = SimpleNamespace(
+            use_mla=False,
+            hf_config=SimpleNamespace(
+                model_type="qwen3",
+                architectures=["Qwen3DSparkModel"],
+            ),
+        )
+        config = SimpleNamespace(
+            parallel_config=target_parallel,
+            model_config=SimpleNamespace(
+                architectures=["AscendKimiK3ForConditionalGeneration"],
+                hf_config=SimpleNamespace(architectures=[]),
+            ),
+            speculative_config=SimpleNamespace(
+                num_speculative_tokens_per_batch_size=None,
+                draft_model_config=draft_model,
+                draft_parallel_config=draft_parallel,
+                use_dspark=lambda: True,
+            ),
+        )
+
+        _validate_draft_decode_context_parallel_config(config)
+
+        draft_parallel.decode_context_parallel_size = 2
+        with pytest.raises(ValueError, match="draft decode context parallel size"):
+            _validate_draft_decode_context_parallel_config(config)
         self.assertEqual(NPUPlatform.device_control_env_var, "ASCEND_RT_VISIBLE_DEVICES")
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)

@@ -25,7 +25,10 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
+    AscendMLAAttentionSpec,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -34,6 +37,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
+    _get_kimi_k3_replicated_dspark_kv_cache_config,
     _get_kv_cache_config_deepseek_v4,
     group_and_unify_kv_cache_specs,
 )
@@ -77,6 +81,7 @@ def _make_kimi_k3_dspark_kv_cache_specs(
     draft_layer_count: int = 5,
     mamba_layer_count: int = 69,
     draft_uses_mla: bool = False,
+    draft_replication_size: int = 1,
 ) -> dict:
     target_mla_spec = AscendMLAAttentionSpec(
         block_size=block_size,
@@ -104,6 +109,13 @@ def _make_kimi_k3_dspark_kv_cache_specs(
             dtype=torch.bfloat16,
             page_size_padded=page_size,
         )
+        if draft_replication_size > 1:
+            draft_attention_spec = (
+                AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+                    draft_attention_spec,
+                    draft_replication_size,
+                )
+            )
     mamba_spec = MambaSpec(
         block_size=block_size,
         shapes=((10, 2304), (6, 128, 128)),
@@ -380,6 +392,48 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     assert [len(tensor.shared_by) for tensor in tensors] == [4] * 23 + [1] * 6
     assert all(tensor.size == page_size * expected_num_blocks for tensor in tensors)
     assert sum(tensor.size for tensor in tensors) == available_memory
+
+
+def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
+    monkeypatch,
+) -> None:
+    replication_size = 8
+    page_size = 488448
+    specs = _make_kimi_k3_dspark_kv_cache_specs(
+        page_size=page_size,
+        draft_replication_size=replication_size,
+    )
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
+    assert groups is not None
+    expected_num_blocks = 100
+    bytes_per_block = page_size * (24 + 5 * replication_size)
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, num_blocks: num_blocks,
+    )
+    config = _get_kimi_k3_replicated_dspark_kv_cache_config(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(prefix_cache_retention_interval=None)
+        ),
+        groups,
+        bytes_per_block * expected_num_blocks,
+    )
+
+    assert config is not None
+    assert config.num_blocks == expected_num_blocks
+    assert len(config.kv_cache_tensors) == 29
+    assert [len(tensor.shared_by) for tensor in config.kv_cache_tensors] == (
+        [4] * 23 + [1] * 6
+    )
+    assert [tensor.size for tensor in config.kv_cache_tensors[:24]] == [
+        page_size * expected_num_blocks
+    ] * 24
+    assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [
+        page_size * replication_size * expected_num_blocks
+    ] * 5
+    assert sum(tensor.size for tensor in config.kv_cache_tensors) == (
+        bytes_per_block * expected_num_blocks
+    )
 
 
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
