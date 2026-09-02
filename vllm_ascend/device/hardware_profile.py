@@ -20,6 +20,7 @@ class HardwareCapability(Enum):
     ATB_EXTENSIONS = auto()
     ATB_WARMUP = auto()
     BGMV_SGMV_META_REGISTRATION = auto()
+    CANN_MEGAMOE = auto()
     CHUNKED_PREFILL_PHASE_SPLIT = auto()
     CLUSTER_CPU_TOPOLOGY = auto()
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
@@ -180,6 +181,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             quantization_backend_family=QuantizationBackendFamily.STANDARD,
             capabilities=_A3_CAPABILITIES
             | {
+                HardwareCapability.CANN_MEGAMOE,
                 HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
                 HardwareCapability.NPU_TOP_K_TOP_P,
             },

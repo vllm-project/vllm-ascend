@@ -12,7 +12,11 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forwa
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
-from vllm_ascend.device.hardware_profile import MoECommPolicy, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    MoECommPolicy,
+    get_current_hardware_profile,
+)
 from vllm_ascend.utils import (
     has_layer_idx,
     is_moe_model,
@@ -58,7 +62,7 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
-        and get_ascend_device_type() == AscendDeviceType.A3
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
