@@ -667,8 +667,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     )
                     if captured_layer_name is None:
                         raise RuntimeError(
-                            "FULL_REPLAY_METADATA_KEY_MISSING: "
-                            "captured attention parameter has no layer name."
+                            "FULL_REPLAY_METADATA_KEY_MISSING: captured attention parameter has no layer name."
                         )
                     if captured_layer_name not in attn_metadata:
                         raise RuntimeError(
@@ -835,8 +834,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     )
                     if captured_layer_name is None:
                         raise RuntimeError(
-                            "FULL_REPLAY_METADATA_KEY_MISSING: "
-                            "captured attention parameter has no layer name."
+                            "FULL_REPLAY_METADATA_KEY_MISSING: captured attention parameter has no layer name."
                         )
                     if captured_layer_name not in attn_metadata:
                         raise RuntimeError(
