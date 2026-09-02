@@ -178,6 +178,73 @@ jobs:
             tools/mypy.sh 1 "$python_version"
             echo "============================"
           done
+          
+  run-all-cpu-ut:
+    needs: pre-commit
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        (contains(github.event.pull_request.labels.*.name, 'ready-precise') || contains(github.event.pull_request.labels.*.name, 'ready-all'))
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+    uses: ./.github/workflows/_selected_tests_cpu.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: |
+        [
+          {
+            "npu_type":"cpu",
+            "runner_label":"linux-amd64-cpu-8-hk",
+            "test_paths":[
+              "tests/ut/_310p",
+              "tests/ut/_fake_weight",
+              "tests/ut/_tools",
+              "tests/ut/attention",
+              "tests/ut/compilation",
+              "tests/ut/core",
+              "tests/ut/device",
+              "tests/ut/device_allocator",
+              "tests/ut/distributed",
+              "tests/ut/eplb",
+              "tests/ut/helpers",
+              "tests/ut/kv_offload",
+              "tests/ut/lora",
+              "tests/ut/model_executor",
+              "tests/ut/model_loader",
+              "tests/ut/models",
+              "tests/ut/observability",
+              "tests/ut/ops",
+              "tests/ut/patch",
+              "tests/ut/profiler",
+              "tests/ut/quantization",
+              "tests/ut/sample",
+              "tests/ut/simple_kv_offload",
+              "tests/ut/spec_decode",
+              "tests/ut/tools",
+              "tests/ut/worker",
+              "tests/ut/xlite",
+              "tests/ut/test_ascend_config.py",
+              "tests/ut/test_ascend_forward_context.py",
+              "tests/ut/test_batch_invariant.py",
+              "tests/ut/test_compressed_prefix_cache.py",
+              "tests/ut/test_cpu_binding.py",
+              "tests/ut/test_dependency_documentation.py",
+              "tests/ut/test_envs.py",
+              "tests/ut/test_logger.py",
+              "tests/ut/test_meta_registration.py",
+              "tests/ut/test_platform.py",
+              "tests/ut/test_profiling_config.py",
+              "tests/ut/test_utils.py"
+            ]
+          }
+        ]
 
   recommend-tests-from-coverage:
     name: Recommend tests from coverage
