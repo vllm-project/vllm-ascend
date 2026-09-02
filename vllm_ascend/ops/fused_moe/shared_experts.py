@@ -97,8 +97,8 @@ class AscendSharedExperts:
 
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
-            # splitting shared expert computation (gate_up projection + activation,
-            # then down projection) yields identical results to integrated
+            # splitting shared expert computation into gate_up projection,
+            # activation, and down projection yields identical results to integrated
             # computation after weight loading.
             original_process_weights = quant_method.process_weights_after_loading
 
@@ -127,8 +127,9 @@ class AscendSharedExperts:
         )  # Random input for testing, scoped to [-1, 1]
 
         integrated_out = self.layer(test_input)
-        part1_out = self.part1(test_input)
-        split_out = self.part2(test_input, part1_out)
+        shared_gate_up = self.part1(test_input)
+        shared_act = self.apply_activation(shared_gate_up)
+        split_out = self.part2(test_input, shared_act)
 
         if not torch.allclose(integrated_out, split_out):
             diff = (integrated_out - split_out).abs()
@@ -155,8 +156,10 @@ class AscendSharedExperts:
         shared_gate_up, _ = self.layer.gate_up_proj(hidden_states)  # type: ignore
         return shared_gate_up
 
-    def part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
-        shared_act = self.layer.act_fn(shared_gate_up)  # type: ignore
+    def apply_activation(self, shared_gate_up: torch.Tensor):
+        return self.layer.act_fn(shared_gate_up)  # type: ignore
+
+    def part2(self, hidden_states: torch.Tensor, shared_act: torch.Tensor):
         shared_out, _ = self.layer.down_proj(shared_act)  # type: ignore
 
         # Qwen3-Next specific gating mechanism
@@ -391,12 +394,15 @@ class AscendSharedExperts:
             else:
                 # Ensure the shared experts wait for hidden_states to be ready.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
-                # Execute the gate projection and activation concurrently with the
-                # dispatch communication.
+                # Execute the gate projection concurrently with dispatch.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
-                part1_out = self.part1(hidden_states)
+                shared_gate_up = self.part1(hidden_states)
+                # Execute activation concurrently with routed GMM2.
+                maybe_wait_event(fused_moe_evts.before_gmm2)
+                shared_act = self.apply_activation(shared_gate_up)
+                # Execute the down projection concurrently with combine.
                 maybe_wait_event(down_projection_ready)
-                shared_out = self.part2(hidden_states, part1_out)
+                shared_out = self.part2(hidden_states, shared_act)
 
         if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
             # Keep the shared-expert output collective on the auxiliary stream,
