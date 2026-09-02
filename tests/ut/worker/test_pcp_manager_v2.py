@@ -292,6 +292,77 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], result.num_scheduled_tokens)
 
 
+@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="padded_num_tokens is a vLLM main PCP contract")
+def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
+    """Keep request metadata aligned when upstream already pads tokens."""
+    input_buffers = AscendInputBuffers(
+        max_num_reqs=4,
+        max_num_tokens=4,
+        device=torch.device("cpu"),
+    )
+    base_batch = InputBatch.make_dummy(
+        num_reqs=3,
+        num_tokens=4,
+        input_buffers=input_buffers,
+        max_query_len=1,
+    )
+    local_batch = AscendInputBatch(
+        **base_batch.__dict__,
+        seq_lens_np=np.array([11, 21, 31], dtype=np.int32),
+        attn_state="local-attn-state",
+    )
+    local_batch.is_dummy = False
+    local_batch.num_reqs = 3
+    local_batch.num_reqs_after_padding = 3
+    local_batch.num_tokens = 3
+    local_batch.num_tokens_after_padding = 4
+    local_batch.num_scheduled_tokens = np.ones(3, dtype=np.int32)
+    local_batch.num_computed_tokens_np = np.array([10, 20, 30], dtype=np.int32)
+    local_batch.is_prefilling_np = np.zeros(3, dtype=np.bool_)
+    local_batch.seq_lens_cpu_upper_bound = torch.tensor([11, 21, 31], dtype=torch.int32)
+    local_batch.num_draft_tokens_per_req = None
+
+    input_buffers.input_ids[:4].copy_(torch.tensor([101, 102, 103, 99], dtype=torch.int32))
+    input_buffers.positions[:4].copy_(torch.tensor([10, 20, 30, 99], dtype=torch.int64))
+    input_buffers.is_padding[:4].fill_(False)
+    input_buffers.query_start_loc[:5].copy_(torch.tensor([0, 1, 2, 3, -1], dtype=torch.int32))
+    input_buffers.seq_lens[:4].copy_(torch.tensor([11, 21, 31, 99], dtype=torch.int32))
+
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager._input_buffers = input_buffers
+    manager.vllm_config = object()
+    local_attn_state = object()
+
+    with (
+        patch.object(
+            vllm_model_runner.pcp.PCPManager,
+            "partition_batch",
+            return_value=local_batch,
+        ) as upstream_partition,
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.build_attn_state",
+            return_value=local_attn_state,
+        ) as build_attn_state,
+    ):
+        result = manager.partition_batch(local_batch, padded_num_tokens=4)
+
+    upstream_partition.assert_called_once_with(local_batch, padded_num_tokens=4)
+    assert result.num_reqs == 3
+    assert result.num_reqs_after_padding == 4
+    assert result.num_tokens == 3
+    assert result.num_tokens_after_padding == 4
+    assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 2, 3, 3], dtype=torch.int32))
+    assert torch.equal(result.seq_lens, torch.tensor([11, 21, 31, 0], dtype=torch.int32))
+    assert torch.equal(result.seq_lens_cpu_upper_bound, torch.tensor([11, 21, 31, 0], dtype=torch.int32))
+    assert torch.equal(result.input_ids, torch.tensor([101, 102, 103, 0], dtype=torch.int32))
+    assert torch.equal(result.positions, torch.tensor([10, 20, 30, 0], dtype=torch.int64))
+    assert torch.equal(result.is_padding, torch.tensor([False, False, False, True]))
+    assert result.attn_state is local_attn_state
+    args = build_attn_state.call_args.args
+    assert args[2] == 3
+    np.testing.assert_array_equal(args[1], np.array([11, 21, 31], dtype=np.int32))
+
+
 def test_attention_context_collects_global_pcp_data():
     manager = AscendPCPManager.__new__(AscendPCPManager)
     input_batch = _make_local_pcp_batch()
