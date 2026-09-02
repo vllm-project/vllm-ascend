@@ -1,5 +1,4 @@
 from transformers import DeepseekV2Config, PretrainedConfig
-
 from vllm.config import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.transformers_utils.configs.speculators import SpeculatorsConfig

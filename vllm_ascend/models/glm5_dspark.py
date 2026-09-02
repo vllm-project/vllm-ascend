@@ -368,12 +368,20 @@ class Glm5DSparkForCausalLM(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         optional_weights = ("embed_tokens", "lm_head", "confidence_head")
         included_weights: set[str] = set()
+        includes_draft_id_mapping = False
         rotation_weight = get_rotation_matrix(self.rotation_path) if self.rotation_path is not None else None
         normalized_weights: list[tuple[str, torch.Tensor]] = []
         for name, weight in weights:
+            # t2d is only needed for training. At inference time DSpark maps
+            # sampled draft IDs back to the target vocabulary with d2t.
+            if "t2d" in name:
+                continue
+            if "d2t" in name:
+                name = name.replace("d2t", "draft_id_to_target_id")
+                includes_draft_id_mapping = True
             if name == "norm.weight":
                 name = "final_norm.weight"
-            if not name.startswith("lm_head."):
+            if "draft_id_to_target_id" not in name and not name.startswith("lm_head."):
                 name = f"model.{name}"
             if rotation_weight is not None and "context_proj.weight" in name:
                 weight = process_weight(weight, rotation_weight)
@@ -386,4 +394,7 @@ class Glm5DSparkForCausalLM(nn.Module):
             self.enable_confidence_head = False
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(normalized_weights, mapper=self.hf_to_vllm_mapper)
+        mapper = self.hf_to_vllm_mapper
+        if not includes_draft_id_mapping:
+            mapper |= WeightsMapper(orig_to_new_substr={"draft_id_to_target_id": None})
+        return loader.load_weights(normalized_weights, mapper=mapper)
