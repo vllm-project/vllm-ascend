@@ -40,6 +40,29 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
+_PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+
+
+def _get_packed_conv_weights(layer: "AscendGatedDeltaNetAttention") -> torch.Tensor:
+    """Cached ``[W, D]`` transposed conv1d weight, materialized once.
+
+    Mirrors ``kimi_kda._pack_conv_weights``: ``npu_causal_conv1d_custom`` wants
+    the ``[W, D]`` layout while ``conv1d.weight`` is ``[D, 1, W]``, so the
+    contiguous transpose is packed once and cached. Cached as a plain attribute
+    (not a registered parameter) because this layer is patched onto
+    ``QwenGatedDeltaNetAttention`` via method copy, so ``__init__`` does not run
+    here and the weight is packed lazily on first use.
+    """
+    cached = getattr(layer, _PACKED_CONV_WEIGHT_NAME, None)
+    if cached is not None:
+        return cached
+    w = layer.conv1d.weight
+    if w.is_meta:
+        return w.view(w.size(0), w.size(2)).transpose(0, 1)
+    packed = w.view(w.size(0), w.size(2)).transpose(0, 1).to(device=w.device, dtype=w.dtype).contiguous()
+    setattr(layer, _PACKED_CONV_WEIGHT_NAME, packed)
+    return packed
+
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     # Cached fused-op availability probe result, shared across all layers so the
@@ -302,7 +325,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+        conv_weights_T = _get_packed_conv_weights(self)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -316,7 +339,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
@@ -345,12 +367,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cache_indices_opt = non_spec_causal_conv1d_meta.cache_indices
                 initial_state_mode_opt = non_spec_causal_conv1d_meta.initial_state_mode
                 if get_pcp_group().world_size > 1:
-                    conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
                     assert non_spec_query_start_loc is not None
                     non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
-                    width = conv_weights.shape[1]
+                    width = self.conv_kernel_size
                     state_len = width - 1
                     num_seqs = non_spec_query_start_loc.shape[0] - 1
                     prefill_seq_offset = max(0, num_seqs - attn_metadata.num_prefills)
@@ -388,7 +409,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             -1, ...
                         ].transpose(-1, -2)
                 else:
-                    conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
                     torch.ops._C_ascend.npu_causal_conv1d_custom(
@@ -407,7 +427,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
-            conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
