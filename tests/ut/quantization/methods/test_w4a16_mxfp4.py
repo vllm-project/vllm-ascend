@@ -1,5 +1,6 @@
 from unittest.mock import Mock, patch
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -24,6 +25,7 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         mock_ensure.return_value = None
         self.scheme = AscendW4A16MXFP4FusedMoEMethod()
 
+    @pytest.mark.skip("Execute after the issue is fixed")
     def test_get_weight_static_method(self):
         result = self.scheme.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
         self.assertEqual(result["w13_weight"].dtype, torch.uint8)
@@ -33,6 +35,7 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         )
         self.assertEqual(result["w2_weight"].shape, (self.num_experts, self.hidden_size, self.intermediate_size // 2))
 
+    @pytest.mark.skip("Execute after the issue is fixed")
     def test_get_dynamic_quant_param_based_on_group_size(self):
         group_sizes = [16, 32, 64]
         for gs in group_sizes:

@@ -1,6 +1,6 @@
 import threading
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import zmq
@@ -34,6 +34,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler imp
     get_zmq_rpc_path_lookup,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 
 
 class AscendStoreKVEvents(KVConnectorKVEvents):
@@ -84,6 +87,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_role = vllm_config.kv_transfer_config.kv_role
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
+        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
+        self.backend_name = backend_name.lower()
+        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         self.consumer_is_to_put = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_put", False
         )
@@ -98,24 +104,34 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
-        self.sended_but_unfinished_reqs: set[str] = set()
+        self._current_step_has_real_forward = False
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
+            assert kv_cache_config is not None
+            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+            self.connector_scheduler = KVPoolScheduler(
+                vllm_config, self.use_layerwise, kv_cache_config, page_size_bytes=page_size_bytes
+            )
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
                 self.use_layerwise,
                 kv_cache_config,
             )
-
             assert self.connector_worker is not None
-            if vllm_config.parallel_config.rank == 0:
-                self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config, self.use_layerwise)
+            if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
+                self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
     ############################################################
     # Scheduler Side Methods
     ############################################################
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self,
+        metadata: dict[tuple[int, int], "KVConnectorHandshakeMetadata"],
+    ) -> None:
+        """Ignore P/D handshake metadata because AscendStore handles PP via pool keys."""
+        pass
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
@@ -194,6 +210,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
+        self._current_step_has_real_forward = forward_context is not None
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
             len(metadata.requests),
@@ -238,9 +255,13 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        done_sending, done_recving = self.connector_worker.get_finished(
-            finished_req_ids, self._get_connector_metadata()
-        )
+        metadata = self._get_connector_metadata()
+        if self._current_step_has_real_forward:
+            try:
+                self.connector_worker.ensure_store_initialized()
+            finally:
+                self._current_step_has_real_forward = False
+        done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids, metadata)
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -274,10 +295,8 @@ class LookupKeyServer:
         self,
         pool_worker: KVPoolWorker,
         vllm_config: "VllmConfig",
-        use_layerwise: bool,
     ):
         self.decoder = MsgpackDecoder()
-        self.decoder_tensor = MsgpackDecoder(torch.Tensor)
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -289,20 +308,20 @@ class LookupKeyServer:
 
         self.pool_worker = pool_worker
         self.running = True
-        self.use_layerwise = use_layerwise
 
         def process_request():
             while self.running:
                 all_frames = self.socket.recv_multipart(copy=False)
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 kv_group_ids = self.decoder.decode([all_frames[1]])
-                hash_frames = all_frames[2:]
-                hashes_str = self.decoder.decode(hash_frames)
+                hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
+                hashes_str = self.decoder.decode(all_frames[3:])
                 result = self.pool_worker.lookup_scheduler(
                     token_len,
                     hashes_str,
                     kv_group_ids,
-                    self.use_layerwise,
+                    use_layerwise=False,
+                    hbm_hit_tokens=hbm_hit_tokens,
                 )
                 logger.debug(
                     "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
@@ -318,4 +337,3 @@ class LookupKeyServer:
 
     def close(self):
         self.socket.close(linger=0)
-        # TODO: close the thread!

@@ -753,10 +753,21 @@ msgstr "168-191"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:221
 msgid ""
-"This avoids overlapping CPU pools even when the two workers are launched "
-"as independent single-card services."
+"Each final NPU pool must have enough CPUs for its role split: at least 5 "
+"CPUs for devices with IRQ binding, and at least 3 CPUs for Ascend 950."
+msgstr "每个最终NPU池必须有足够的CPU用于角色拆分：对于支持IRQ绑定的设备至少需要5个CPU，对于Ascend 950至少需要3个CPU。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:238
+msgid ""
+"`global_slice` is deterministic and provides CPU/NUMA isolation when the "
+"cpuset is NUMA-aligned, but it cannot guarantee NUMA-local pools when CPU"
+" numbering or cpuset layout crosses NUMA boundaries."
 msgstr ""
-"即使两个工作进程作为独立的单卡服务启动，这也能避免CPU池重叠。"
+"`global_slice`是确定性的，当cpuset与NUMA对齐时提供CPU/NUMA隔离，但当CPU编号或cpuset布局跨越NUMA边界时，无法保证NUMA本地池。"
+
+#: ../../source/developer_guide/Design_Documents/cpu_binding.md:241
+msgid "`topo_affinity` depends on usable output from `npu-smi info -t topo`."
+msgstr "`topo_affinity`依赖于`npu-smi info -t topo`的可用输出。"
 
 #: ../../source/developer_guide/Design_Documents/cpu_binding.md:223
 msgid "Logs"

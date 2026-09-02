@@ -69,5 +69,17 @@ def _load_npu_ipc_engine() -> "type[WeightTransferEngine]":
     return NPUIPCWeightTransferEngine
 
 
+if TYPE_CHECKING:
+    from vllm.distributed.weight_transfer.base import WeightTransferEngine
+
+
+def _load_npu_ipc_engine() -> "type[WeightTransferEngine]":
+    from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+        NPUIPCWeightTransferEngine,
+    )
+
+    return NPUIPCWeightTransferEngine
+
+
 WeightTransferEngineFactory._registry["nccl"] = lambda: HCCLWeightTransferEngine
 WeightTransferEngineFactory._registry["ipc"] = _load_npu_ipc_engine

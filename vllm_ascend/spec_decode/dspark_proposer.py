@@ -17,7 +17,6 @@ from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.llm_base_proposer import greedy_sample
 from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
-
 class AscendDSparkProposer(AscendDflashProposer):
     """DeepSeek V4 DSpark block proposer.
 

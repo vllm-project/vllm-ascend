@@ -27,7 +27,6 @@ from vllm_ascend.distributed.weight_transfer.packed_tensor import (
 )
 from vllm_ascend.utils import vllm_version_is
 
-
 @dataclass
 class HCCLWeightTransferInitInfo(WeightTransferInitInfo):
     """Initialization info for HCCL weight transfer backend."""

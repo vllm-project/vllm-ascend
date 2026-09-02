@@ -25,6 +25,10 @@ defaults:
   run:
     shell: bash -el {0}
 
+defaults:
+  run:
+    shell: bash -el {0}
+
 permissions:
   contents: read
   actions: write

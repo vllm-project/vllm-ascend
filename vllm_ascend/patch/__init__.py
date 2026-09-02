@@ -644,15 +644,13 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minimax_m2.MiniMaxM2MoE.forward`
 #    Why:
-#       In TP mode, MiniMax-M2 MoE needs a backend-aware reduction path to avoid
-#       unnecessary communication / maintain correctness on NPU.
+#       MiniMax-M2 routing should keep router logits in fp32 on NPU.
 #    How：
-#       Replace the forward to call `experts.maybe_all_reduce_tensor_model_parallel`
-#       when `tp_size > 1`.
+#       Replace the forward to cast hidden states to fp32 before the gate.
 #    Related PR (if no, explain why):
 #       No, model-specific behavior.
 #    Future Plan:
-#       Move this behavior upstream once a generic MoE reduce hook exists.
+#       Remove this patch once upstream behavior is sufficient for Ascend.
 #
 #   2. `vllm.model_executor.models.minimax_m2.MiniMaxM2Attention.forward`
 #    Why:
@@ -717,6 +715,36 @@
 #       patch Qwen3_5GatedDeltaNet._forward_core to use triton ops like `fused_recurrent_gated_delta_rule`.
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
+#
+# ** 17a. File: worker/patch_idex_310.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices`
+#      `vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets`
+#    Why:
+#       310P uses Ascend-friendly chunk index helpers for Qwen GDN prefill.
+#    How:
+#       Replace upstream FLA chunk index helper functions with 310P implementations.
+#
+#   2. `vllm_ascend.spec_decode.llm_base_proposer.AscendSpecDecodeBaseProposer.set_inputs_first_pass`
+#    Why:
+#       310P needs to protect the tail slot during MTP input_ids shift to avoid
+#       GatherV2 corruption from persistent drafter input buffers.
+#    How:
+#       Reuse the 310P proposer implementation for the first-pass input shift.
+#
+#   3. `vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention`
+#    Why:
+#       Qwen GDN needs 310P-specific state helpers, forward core, state dtype,
+#       and attention backend/builder wiring.
+#    How:
+#       Patch Qwen GDN methods to use Ascend GDN implementations and the 310P
+#       GDN attention backend. RC devices also route upstream GDNAttentionBackend
+#       to the 310P metadata builder.
+#    Related PR (if no, explain why):
+#       No, 310P custom operator and backend behavior are vllm-ascend specific.
+#    Future Plan:
+#       Remove this patch when upstream exposes stable hooks for 310P GDN
+#       chunk metadata, spec-decode input layout, and backend selection.
 #
 # ** 18. File: worker/patch_cudagraph.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

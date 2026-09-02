@@ -90,6 +90,32 @@ The following table records models that have been explicitly tested with RFork w
 | GLM5-W4A8 | W4A8 | A2 | Tested | RFork transfer has been validated. |
 | Kimi2.5-W4A8 | W4A8 | A2 | Tested | RFork transfer has been validated. |
 
+### Quantized Models
+
+For quantized models, RFork transfers tensors after Ascend weight post-processing instead of raw checkpoint parameters. The receiver first builds the same post-load tensor layout as the seed, then RFork copies the live NPU tensors used by inference.
+
+This path handles Ascend quantization changes such as weight transposition, NZ format conversion, packed weights, derived scale tensors, and MLA/SFA runtime tensors such as `W_UV` and `W_UK_T`. Empty tensors that were released during post-processing are not included in the transfer manifest.
+
+When validating RFork for a quantized model:
+
+- Apply the same vLLM Ascend code to both the seed instance and the receiver instance.
+- Restart the planner and all vLLM instances after changing RFork code, because existing seeds keep their old transfer metadata.
+- Use a new `model_deploy_strategy_name` after changing model arguments or RFork code, so the planner does not match a receiver with an incompatible old seed.
+- A successful RFork transfer logs `transfer weights starts` and `transfer weights time`. The fallback path logs `RFork transfer failed`.
+
+## Tested Models
+
+The following table records models that have been explicitly tested with RFork weight transfer. A model should be added here only after RFork transfer succeeds and the loaded instance passes basic inference validation.
+
+| Model | Precision / Quantization | Hardware | Validation Status | Notes |
+|-------|--------------------------|----------|-------------------|-------|
+| Qwen2.5-7B | BF16 | A2 | Tested | RFork transfer has been validated. |
+| Qwen3-32B | BF16 | A2 | Tested | RFork transfer has been validated. |
+| Qwen3-235B-A22B | BF16 | A2 | Tested | RFork transfer has been validated. |
+| DeepSeek-V4-Flash-W8A8-MTP | W8A8 | A2 | Tested | RFork transfer with MTP draft model has been validated. |
+| GLM5-W4A8 | W4A8 | A2 | Tested | RFork transfer has been validated. |
+| Kimi2.5-W4A8 | W4A8 | A2 | Tested | RFork transfer has been validated. |
+
 ---
 
 ## Example Commands & Placeholders
