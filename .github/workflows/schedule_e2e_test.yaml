@@ -277,7 +277,10 @@ jobs:
   a2-nightly-hf:
     name: A2 nightly high-freq
     needs: [setup-vars, verify-image]
-    if: always() && needs.verify-image.result == 'success'
+    if: |
+      github.event_name != 'pull_request' &&
+      needs.verify-image.result == 'success' &&
+      needs.setup-vars.outputs.a2_nightly_hf != ''
     strategy:
       fail-fast: false
       matrix:
@@ -297,7 +300,10 @@ jobs:
   a3-nightly-hf:
     name: A3 nightly high-freq
     needs: [setup-vars, verify-image]
-    if: always() && needs.verify-image.result == 'success'
+    if: |
+      github.event_name != 'pull_request' &&
+      needs.verify-image.result == 'success' &&
+      needs.setup-vars.outputs.a3_nightly_hf != ''
     strategy:
       fail-fast: false
       max-parallel: 2
