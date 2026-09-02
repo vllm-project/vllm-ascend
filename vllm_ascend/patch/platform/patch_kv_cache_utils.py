@@ -35,55 +35,11 @@ _orig_get_kv_cache_config_from_groups = (
 )
 
 
-# vLLM's new stride-aware KVCacheTensor renamed ``shared_by`` to ``layers``.
-# Ascend's allocator still owns its physical layouts, so retain the legacy
-# spelling as a narrow compatibility alias while accepting both constructors.
-if "layers" in getattr(KVCacheTensor, "__annotations__", {}):
-    _orig_kv_cache_tensor_init = KVCacheTensor.__init__
-
-    def _kv_cache_tensor_init_compat(
-        self,
-        size: int,
-        layers: list[str] | None = None,
-        layer_stride: int = 0,
-        block_stride: int = 0,
-        offset: int = 0,
-        shared_by: list[str] | None = None,
-    ) -> None:
-        if layers is None:
-            if shared_by is None:
-                raise TypeError("KVCacheTensor requires layers or shared_by")
-            layers = shared_by
-        elif shared_by is not None and layers != shared_by:
-            raise ValueError("layers and shared_by must match when both are set")
-        _orig_kv_cache_tensor_init(
-            self,
-            size=size,
-            layers=layers,
-            layer_stride=layer_stride,
-            block_stride=block_stride,
-            offset=offset,
-        )
-
-    KVCacheTensor.__init__ = _kv_cache_tensor_init_compat  # type: ignore[method-assign]
-    KVCacheTensor.shared_by = property(  # type: ignore[attr-defined]
-        lambda self: self.layers
-    )
-
-
 def _make_ascend_kv_cache_tensor(
     *,
     size: int,
     layers: list[str],
-    page_size: int,
 ) -> KVCacheTensor:
-    if "layers" in getattr(KVCacheTensor, "__annotations__", {}):
-        return KVCacheTensor(
-            size=size,
-            layers=layers,
-            layer_stride=0,
-            block_stride=page_size,
-        )
     return KVCacheTensor(size=size, shared_by=layers)
 
 
@@ -521,7 +477,6 @@ def _get_kimi_k3_replicated_dspark_kv_cache_config(
             _make_ascend_kv_cache_tensor(
                 size=page_size * num_blocks,
                 layers=layers,
-                page_size=page_size,
             )
         )
     for draft_layer in draft_layers:
@@ -530,7 +485,6 @@ def _get_kimi_k3_replicated_dspark_kv_cache_config(
             _make_ascend_kv_cache_tensor(
                 size=page_size * num_blocks,
                 layers=[draft_layer],
-                page_size=page_size,
             )
         )
 
