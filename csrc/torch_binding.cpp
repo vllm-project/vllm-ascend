@@ -1200,6 +1200,84 @@ at::Tensor npu_sparse_attn_sharedkv_metadata_npu(
     return output;
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_sparse_flash_mla_npu(
+    const at::Tensor &q, const c10::optional<at::Tensor> &ori_kv,
+    const c10::optional<at::Tensor> &cmp_kv, const c10::optional<at::Tensor> &ori_sparse_indices,
+    const c10::optional<at::Tensor> &cmp_sparse_indices, const c10::optional<at::Tensor> &ori_block_table,
+    const c10::optional<at::Tensor> &cmp_block_table, const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_ori_kv, const c10::optional<at::Tensor> &cu_seqlens_cmp_kv,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_ori_kv,
+    const c10::optional<at::Tensor> &seqused_cmp_kv, const c10::optional<at::Tensor> &cmp_residual_kv,
+    const c10::optional<at::Tensor> &ori_topk_length, const c10::optional<at::Tensor> &cmp_topk_length,
+    const c10::optional<at::Tensor> &sinks, const c10::optional<at::Tensor> &metadata,
+    double softmax_scale, int64_t cmp_ratio, int64_t ori_mask_mode, int64_t cmp_mask_mode, int64_t ori_win_left,
+    int64_t ori_win_right, c10::string_view layout_q, c10::string_view layout_kv, int64_t topk_value_mode,
+    bool return_softmax_lse)
+{
+    std::string layout_q_str = std::string(layout_q);
+    std::string layout_kv_str = std::string(layout_kv);
+    auto output = construct_output_tensor(q, layout_q_str, return_softmax_lse);
+    at::Tensor attn_out = std::get<0>(output);
+    at::Tensor softmax_lse = std::get<1>(output);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
+
+    EXEC_NPU_CMD(aclnnSparseFlashMla, q, ori_kv, cmp_kv, ori_sparse_indices, cmp_sparse_indices,
+        ori_block_table, cmp_block_table, cu_seqlens_q, cu_seqlens_ori_kv, cu_seqlens_cmp_kv, seqused_q,
+        seqused_ori_kv, seqused_cmp_kv, cmp_residual_kv, ori_topk_length, cmp_topk_length, sinks, metadata,
+        softmax_scale, cmp_ratio, ori_mask_mode, cmp_mask_mode, ori_win_left, ori_win_right, layout_q_ptr,
+        layout_kv_ptr, topk_value_mode, return_softmax_lse, attn_out, softmax_lse);
+    return std::tuple<at::Tensor, at::Tensor>(attn_out, softmax_lse);
+}
+
+at::Tensor npu_sparse_flash_mla_metadata_npu(
+    int64_t num_heads_q, int64_t num_heads_kv, int64_t head_dim,
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_ori_kv,
+    const c10::optional<at::Tensor> &cu_seqlens_cmp_kv, const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_ori_kv, const c10::optional<at::Tensor> &seqused_cmp_kv,
+    const c10::optional<at::Tensor> &cmp_residual_kv, const c10::optional<at::Tensor> &ori_topk_length,
+    const c10::optional<at::Tensor> &cmp_topk_length, int64_t batch_size, int64_t max_seqlen_q,
+    int64_t max_seqlen_ori_kv, int64_t max_seqlen_cmp_kv, int64_t ori_topk, int64_t cmp_topk,
+    int64_t cmp_ratio, int64_t ori_mask_mode, int64_t cmp_mask_mode, int64_t ori_win_left, int64_t ori_win_right,
+    c10::string_view layout_q, c10::string_view layout_kv, bool has_ori_kv, bool has_cmp_kv,
+    const c10::string_view device)
+{
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    at::Device output_device = at::Device(std::string(device));
+    const c10::optional<at::Tensor> *device_inputs[] = {
+        &cu_seqlens_q, &cu_seqlens_ori_kv, &cu_seqlens_cmp_kv, &seqused_q, &seqused_ori_kv,
+        &seqused_cmp_kv, &cmp_residual_kv, &ori_topk_length, &cmp_topk_length};
+    for (const auto *tensor_opt : device_inputs) {
+        if (tensor_opt->has_value()) {
+            output_device = tensor_opt->value().device();
+            break;
+        }
+    }
+    at::Tensor output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(output_device));
+
+    auto cu_seqlens_q_val = get_valid_tensor(cu_seqlens_q, output_device);
+    auto cu_seqlens_ori_kv_val = get_valid_tensor(cu_seqlens_ori_kv, output_device);
+    auto cu_seqlens_cmp_kv_val = get_valid_tensor(cu_seqlens_cmp_kv, output_device);
+    auto seqused_q_val = get_valid_tensor(seqused_q, output_device);
+    auto seqused_ori_kv_val = get_valid_tensor(seqused_ori_kv, output_device);
+    auto seqused_cmp_kv_val = get_valid_tensor(seqused_cmp_kv, output_device);
+    auto cmp_residual_kv_val = get_valid_tensor(cmp_residual_kv, output_device);
+    auto ori_topk_length_val = get_valid_tensor(ori_topk_length, output_device);
+    auto cmp_topk_length_val = get_valid_tensor(cmp_topk_length, output_device);
+
+    std::string layout_q_str = std::string(layout_q);
+    std::string layout_kv_str = std::string(layout_kv);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    char *layout_kv_ptr = const_cast<char *>(layout_kv_str.c_str());
+
+    EXEC_NPU_CMD(aclnnSparseFlashMlaMetadata, cu_seqlens_q_val, cu_seqlens_ori_kv_val,
+        cu_seqlens_cmp_kv_val, seqused_q_val, seqused_ori_kv_val, seqused_cmp_kv_val, cmp_residual_kv_val,
+        ori_topk_length_val, cmp_topk_length_val, num_heads_q, num_heads_kv, head_dim, batch_size, max_seqlen_q,
+        max_seqlen_ori_kv, max_seqlen_cmp_kv, ori_topk, cmp_topk, cmp_ratio, ori_mask_mode, cmp_mask_mode,
+        ori_win_left, ori_win_right, layout_q_ptr, layout_kv_ptr, has_ori_kv, has_cmp_kv, output);
+    return output;
+}
+
 at::Tensor npu_vllm_quant_lightning_indexer_metadata_npu(
     int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t query_quant_mode, int64_t key_quant_mode,
     const c10::optional<at::Tensor> &actual_seq_lengths_query, const c10::optional<at::Tensor> &actual_seq_lengths_key, int64_t batch_size,
@@ -2441,6 +2519,36 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor metadata)"
         );
     ops.impl("npu_sparse_attn_sharedkv_metadata", torch::kPrivateUse1, &vllm_ascend::npu_sparse_attn_sharedkv_metadata_npu);
+
+    ops.def(R"(npu_sparse_flash_mla(
+        Tensor q, *,
+        Tensor? ori_kv=None, Tensor? cmp_kv=None,
+        Tensor? ori_sparse_indices=None, Tensor? cmp_sparse_indices=None,
+        Tensor? ori_block_table=None, Tensor? cmp_block_table=None,
+        Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_ori_kv=None, Tensor? cu_seqlens_cmp_kv=None,
+        Tensor? seqused_q=None, Tensor? seqused_ori_kv=None, Tensor? seqused_cmp_kv=None,
+        Tensor? cmp_residual_kv=None, Tensor? ori_topk_length=None, Tensor? cmp_topk_length=None,
+        Tensor? sinks=None, Tensor? metadata=None,
+        float softmax_scale=1.0, int cmp_ratio=1, int ori_mask_mode=0, int cmp_mask_mode=0,
+        int ori_win_left=-1, int ori_win_right=-1,
+        str layout_q="BSND", str layout_kv="BSND",
+        int topk_value_mode=1, bool return_softmax_lse=False
+    ) -> (Tensor out, Tensor softmax_lse))");
+    ops.impl("npu_sparse_flash_mla", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_mla_npu);
+
+    ops.def(R"(npu_sparse_flash_mla_metadata(
+        int num_heads_q, int num_heads_kv, int head_dim,
+        Tensor? cu_seqlens_q=None, Tensor? cu_seqlens_ori_kv=None, Tensor? cu_seqlens_cmp_kv=None,
+        Tensor? seqused_q=None, Tensor? seqused_ori_kv=None, Tensor? seqused_cmp_kv=None,
+        Tensor? cmp_residual_kv=None, Tensor? ori_topk_length=None, Tensor? cmp_topk_length=None,
+        int batch_size=0, int max_seqlen_q=0, int max_seqlen_ori_kv=0, int max_seqlen_cmp_kv=0,
+        int ori_topk=0, int cmp_topk=0, int cmp_ratio=1,
+        int ori_mask_mode=0, int cmp_mask_mode=0, int ori_win_left=-1, int ori_win_right=-1,
+        str layout_q="BSND", str layout_kv="BSND",
+        bool has_ori_kv=True, bool has_cmp_kv=False, str device="npu"
+    ) -> (Tensor metadata))");
+    ops.impl("npu_sparse_flash_mla_metadata", torch::kPrivateUse1,
+             &vllm_ascend::npu_sparse_flash_mla_metadata_npu);
 
     ops.def(
         "npu_vllm_quant_lightning_indexer_metadata("

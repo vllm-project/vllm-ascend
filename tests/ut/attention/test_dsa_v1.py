@@ -34,6 +34,8 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadata,
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
+    build_dspark_swa_indices,
+    get_dspark_sparse_flash_mla_common_kwargs,
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -93,6 +95,118 @@ def _make_builder(compressor_ratio: int = 4) -> AscendDSAMetadataBuilder:
     builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     builder.num_decodes = 2
     return builder
+
+
+def test_build_dspark_swa_indices_returns_logical_positions_and_lengths():
+    indices, topk_lengths = build_dspark_swa_indices(
+        num_speculative_tokens=3,
+        window_size=4,
+        query_start_loc=torch.tensor([0, 3, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([10, 4], dtype=torch.int32),
+        num_decode_tokens=5,
+        index_width=8,
+    )
+
+    assert indices.shape == (5, 1, 8)
+    assert topk_lengths.shape == (5, 1)
+    assert indices[0, 0].tolist() == [3, 4, 5, 6, 7, 8, 9, -1]
+    assert indices[2, 0].tolist() == [3, 4, 5, 6, 7, 8, 9, -1]
+    assert indices[3, 0].tolist() == [0, 1, 2, 3, -1, -1, -1, -1]
+    assert topk_lengths[:, 0].tolist() == [7, 7, 7, 4, 4]
+
+
+def test_dspark_sparse_flash_mla_common_kwargs():
+    assert get_dspark_sparse_flash_mla_common_kwargs() == {
+        "cmp_ratio": 1,
+        "ori_mask_mode": 0,
+        "cmp_mask_mode": 3,
+        "ori_win_left": 0,
+        "ori_win_right": 0,
+        "layout_q": "TND",
+        "layout_kv": "PA_BBND",
+    }
+
+
+def test_build_dspark_swa_indices_legacy_physical_slot_fallback():
+    indices, topk_lengths = build_dspark_swa_indices(
+        num_speculative_tokens=2,
+        window_size=4,
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([6], dtype=torch.int32),
+        num_decode_tokens=2,
+        index_width=6,
+        storage_block_table=torch.tensor([[5, 2]], dtype=torch.int32),
+        storage_block_size=4,
+    )
+
+    expected = [20, 21, 22, 23, 8, 9]
+    assert indices[0, 0].tolist() == expected
+    assert indices[1, 0].tolist() == expected
+    assert topk_lengths[:, 0].tolist() == [6, 6]
+
+
+def test_build_dspark_swa_indices_rejects_narrow_index_width():
+    with pytest.raises(ValueError, match="window_size \\+ block_size"):
+        build_dspark_swa_indices(
+            num_speculative_tokens=3,
+            window_size=4,
+            query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+            seq_lens=torch.tensor([10], dtype=torch.int32),
+            index_width=6,
+        )
+
+
+def test_store_dspark_swa_inputs_reuses_static_buffers():
+    builder = _make_builder(compressor_ratio=1)
+
+    indices = torch.arange(24, dtype=torch.int32).view(3, 1, 8)
+    topk_lengths = torch.tensor([[8], [7], [6]], dtype=torch.int32)
+    stored_indices = builder._store_dspark_swa_indices(indices)
+    stored_topk_lengths = builder._store_dspark_swa_topk_lengths(topk_lengths)
+    indices_ptr = stored_indices.data_ptr()
+    topk_lengths_ptr = stored_topk_lengths.data_ptr()
+
+    next_indices = torch.full((3, 1, 8), -1, dtype=torch.int32)
+    next_topk_lengths = torch.tensor([[5], [4], [3]], dtype=torch.int32)
+    stored_indices = builder._store_dspark_swa_indices(next_indices)
+    stored_topk_lengths = builder._store_dspark_swa_topk_lengths(next_topk_lengths)
+
+    assert stored_indices.data_ptr() == indices_ptr
+    assert stored_topk_lengths.data_ptr() == topk_lengths_ptr
+    assert torch.equal(stored_indices, next_indices)
+    assert torch.equal(stored_topk_lengths, next_topk_lengths)
+
+
+def test_build_dspark_smla_metadata_uses_ori_sparse_contract():
+    builder = _make_builder(compressor_ratio=1)
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
+
+    with patch.object(
+        DeviceOperator,
+        "get_dspark_sparse_flash_mla_metadata_op",
+        return_value=metadata_op,
+    ):
+        result = builder._build_dspark_smla_metadata(
+            query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+            seq_lens=torch.tensor([10], dtype=torch.int32),
+            topk_lengths=torch.tensor([[7], [7], [7]], dtype=torch.int32),
+            index_width=128,
+            max_seqlen_q=3,
+            max_seqlen_kv=10,
+            num_reqs=1,
+        )
+
+    assert result is generated_metadata
+    call_kwargs = metadata_op.call_args.kwargs
+    assert call_kwargs["ori_topk_length"].shape == (3, 1)
+    assert call_kwargs["ori_mask_mode"] == 0
+    assert call_kwargs["cmp_mask_mode"] == 3
+    assert call_kwargs["layout_q"] == "TND"
+    assert call_kwargs["layout_kv"] == "PA_BBND"
+    assert call_kwargs["has_ori_kv"] is True
+    assert call_kwargs["has_cmp_kv"] is False
+    assert call_kwargs["seqused_ori_kv"].tolist() == [10]
 
 
 @pytest.mark.parametrize(
@@ -551,6 +665,59 @@ def test_build_req_metadata_for_drafting_uses_decode_buffer_and_cpu_lengths():
     assert metadata.qli_metadata is None
     assert metadata.cos is cos
     assert metadata.sin is sin
+
+
+def test_build_req_metadata_for_drafting_sparse_flash_skips_legacy_seqlens():
+    builder = _make_builder(compressor_ratio=1)
+    speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    builder.speculative_config = speculative_config
+    builder.vllm_config.speculative_config = speculative_config
+    builder.num_actual_tokens = 3
+    builder.num_prefills = 0
+    builder.seq_lens = torch.tensor([8, 6], dtype=torch.int32)
+    builder.block_table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+    builder.spec_slot_mapping = [torch.arange(16, dtype=torch.int32).reshape(8, 2)]
+    builder.spec_sas_metadata = [torch.zeros(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)]
+    query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=2,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        _seq_lens_cpu=torch.tensor([9, 7], dtype=torch.int32),
+        seq_lens_cpu=None,
+        seq_lens=torch.tensor([8, 6], dtype=torch.int32),
+        causal=False,
+    )
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=generated_metadata)
+
+    with (
+        patch.object(
+            DeviceOperator,
+            "get_dspark_sparse_flash_mla_op",
+            return_value=MagicMock(),
+        ),
+        patch.object(
+            DeviceOperator,
+            "get_dspark_sparse_flash_mla_metadata_op",
+            return_value=metadata_op,
+        ),
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv") as legacy_ori_seqlens,
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv") as legacy_cmp_seqlens,
+    ):
+        metadata = builder.build_req_metadata_for_drafting(
+            draft_index=1,
+            common_attn_metadata=common_attn_metadata,
+            cos=torch.ones((3, 1, 1, 2)),
+            sin=torch.zeros((3, 1, 1, 2)),
+        )
+
+    legacy_ori_seqlens.assert_not_called()
+    legacy_cmp_seqlens.assert_not_called()
+    metadata_op.assert_called_once()
+    assert metadata.cu_cmp_seqlen_list is None
+    assert metadata.dspark_swa_indices is not None
+    assert metadata.dspark_swa_topk_lengths is not None
 
 
 def _make_req_metadata() -> AscendDSAReqMetadata:
