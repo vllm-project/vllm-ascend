@@ -70,6 +70,7 @@ def make_worker(
     if num_hidden_layers is not None:
         config.model_config.hf_text_config.num_hidden_layers = num_hidden_layers
     config.model_config.get_num_layers.return_value = num_layers
+    config.model_config.get_layers_start_end_indices.return_value = (0, num_layers)
     config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
     config.parallel_config.data_parallel_rank = 0
     config.parallel_config.rank = 0
@@ -251,6 +252,8 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         cls = self._make_worker_class()
         worker = object.__new__(cls)
         worker.num_layers = 4
+        worker.base_layer_start = 0
+        worker.base_layer_end = 4
         worker.num_kv_cache_groups = 2
         worker.hf_config = SimpleNamespace(num_hidden_layers=4)
         worker.use_gva_layerwise = True
@@ -293,6 +296,169 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(worker.independent_layers, [0])
         self.assertEqual(len(worker.layer_load_tasks), 5)
         self.assertEqual(len(worker.layer_save_tasks), 5)
+
+    def test_pp_layerwise_layout_uses_local_execution_indices(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 2
+        worker.base_layer_start = 2
+        worker.base_layer_end = 4
+        worker.num_kv_cache_groups = 2
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        worker.use_gva_layerwise = True
+        worker._extra_config = {
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [],
+        }
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        )
+        main_names = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.3.self_attn.attn",
+            "model.mtp.0.self_attn.attn",
+        ]
+        indexer_names = [
+            "model.layers.2.self_attn.indexer.k_cache",
+            "model.layers.3.self_attn.indexer.k_cache",
+        ]
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=main_names, kv_cache_spec=spec),
+                SimpleNamespace(layer_names=indexer_names, kv_cache_spec=spec),
+            ]
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertEqual(worker.num_layers, 3)
+        self.assertEqual(worker.prefetch_layer_map, {1: 0, 2: 1})
+        self.assertEqual(worker.independent_layers, [])
+        self.assertEqual(
+            worker.physical_layer_to_group_layers,
+            {
+                0: [(0, 0), (1, 0)],
+                1: [(0, 1), (1, 1)],
+                2: [(0, 2)],
+            },
+        )
+
+    def test_pp_cache_group_metadata_keeps_global_physical_layers(self):
+        import torch
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 3
+        worker.num_kv_cache_groups = 2
+        worker.num_blocks = 2
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        layer_names = [
+            "model.layers.2.self_attn.attn",
+            "model.layers.3.self_attn.attn",
+            "model.mtp.0.self_attn.attn",
+        ]
+        worker.kv_caches = {layer_name: torch.zeros((2, 1), dtype=torch.uint8) for layer_name in layer_names}
+        worker.group_kv_caches_base_addr = {}
+        worker.group_block_len = {}
+        worker.group_block_stride = {}
+        worker.group_layer_cache_entry_offsets = {}
+        worker.group_num_layers = {}
+
+        worker._infer_cache_group_metadata(0, layer_names)
+
+        self.assertEqual(worker.group_num_layers[0], 3)
+        self.assertEqual(worker.group_layer_cache_entry_offsets[0], [0, 1, 2, 3])
+        self.assertEqual(len(worker.group_kv_caches_base_addr[0]), 3)
+
+    def test_concrete_no_reuse_layout_is_not_reenabled_from_model_layer_count(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 4
+        worker.base_layer_start = 0
+        worker.base_layer_end = 4
+        worker.num_kv_cache_groups = 1
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        worker.use_gva_layerwise = True
+        worker._extra_config = {
+            "layerwise_num_shared_buffers": 2,
+            "layerwise_independent_layers": [],
+        }
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        )
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[
+                        "model.layers.0.self_attn.attn",
+                        "model.layers.1.self_attn.attn",
+                    ],
+                    kv_cache_spec=spec,
+                )
+            ]
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertIsNone(worker._layerwise_reuse_layout)
+        self.assertFalse(worker.layerwise_offload)
+        self.assertEqual(worker.prefetch_layer_map, {})
+        self.assertEqual(worker.independent_layers, [])
+
+    def test_wrong_pp_base_layers_do_not_enable_reuse(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        cls = self._make_worker_class()
+        worker = object.__new__(cls)
+        worker.num_layers = 2
+        worker.base_layer_start = 2
+        worker.base_layer_end = 4
+        worker.num_kv_cache_groups = 1
+        worker.hf_config = SimpleNamespace(num_hidden_layers=4)
+        worker.use_gva_layerwise = True
+        worker._extra_config = {
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [],
+        }
+        spec = FullAttentionSpec(
+            block_size=2,
+            num_kv_heads=1,
+            head_size=8,
+            dtype=torch.float16,
+        )
+        layer_names = [
+            "model.layers.0.self_attn.attn",
+            "model.layers.2.self_attn.attn",
+            "model.layers.3.self_attn.attn",
+            "model.mtp.0.self_attn.attn",
+        ]
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=layer_names,
+                    kv_cache_spec=spec,
+                )
+            ]
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertIsNone(worker._layerwise_reuse_layout)
+        self.assertFalse(worker.layerwise_offload)
+        self.assertEqual(worker.prefetch_layer_map, {})
 
 
 class TestKVPoolWorkerInit(unittest.TestCase):
@@ -554,6 +720,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         config.model_config.hf_text_config = MagicMock(spec=[])
         config.model_config.max_model_len = 1024
         config.model_config.get_num_layers.return_value = 2
+        config.model_config.get_layers_start_end_indices.return_value = (0, 2)
         config.model_config.get_total_num_kv_heads.return_value = 1
         config.parallel_config.data_parallel_rank = 0
         config.parallel_config.rank = 0

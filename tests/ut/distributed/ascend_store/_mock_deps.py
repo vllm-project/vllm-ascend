@@ -45,13 +45,17 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch.sum = MagicMock(return_value=0)  # type: ignore[attr-defined]
     _torch.device = MagicMock()  # type: ignore[attr-defined]
     _torch.distributed = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["torch"] = _torch
+    sys.modules["torch.distributed"] = _torch.distributed  # type: ignore[attr-defined]
+else:
+    _torch = importlib.import_module("torch")
+
+if not hasattr(_torch, "npu"):
     _npu = MagicMock()
     _npu.Event = MagicMock
     _npu.current_device = MagicMock(return_value=0)
     _npu.set_device = MagicMock()
     _torch.npu = _npu  # type: ignore[attr-defined]
-    sys.modules["torch"] = _torch
-    sys.modules["torch.distributed"] = _torch.distributed  # type: ignore[attr-defined]
 
 if "torch_npu" not in sys.modules:
     sys.modules["torch_npu"] = MagicMock()
@@ -84,6 +88,7 @@ _vllm_mock_modules = [
     "vllm.utils.hashing",
     "vllm.utils.math_utils",
     "vllm.utils.network_utils",
+    "vllm.utils.torch_utils",
     "vllm.v1",
     "vllm.v1.attention",
     "vllm.v1.attention.backend",
@@ -107,6 +112,7 @@ if _MOCK_VLLM_DEPS:
 
 if _MOCK_VLLM_DEPS:
     sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
+    sys.modules["vllm.utils.torch_utils"].get_dtype_size = lambda dtype: dtype.itemsize  # type: ignore[attr-defined]
     sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
 
 _base_mod: Any = (
@@ -160,6 +166,9 @@ class _FakeKVCacheSpec:
     def __eq__(self, other):
         return type(self) is type(other) and self.__dict__ == getattr(other, "__dict__", {})
 
+    def __hash__(self):
+        return hash((type(self), tuple(sorted(self.__dict__.items()))))
+
     def copy_with_new_block_size(self, block_size):
         kwargs = self.__dict__.copy()
         kwargs["block_size"] = block_size
@@ -184,6 +193,10 @@ class _FakeFullAttentionSpec(_FakeAttentionSpec):
     pass
 
 
+class _FakeMLAAttentionSpec(_FakeAttentionSpec):
+    pass
+
+
 class _FakeSlidingWindowSpec(_FakeKVCacheSpec):
     def __init__(self, block_size=16, sliding_window=32, **kwargs):
         super().__init__(block_size=block_size, sliding_window=sliding_window, **kwargs)
@@ -193,6 +206,10 @@ class _FakeMambaSpec(_FakeKVCacheSpec):
     def __init__(self, block_size=16, **kwargs):
         super().__init__(block_size=block_size, **kwargs)
         self.num_speculative_blocks = getattr(self, "num_speculative_blocks", 0)
+
+
+class _FakeSlidingWindowMLASpec(_FakeMLAAttentionSpec):
+    pass
 
 
 class _FakeUniformTypeKVCacheSpecs(_FakeKVCacheSpec):
@@ -328,7 +345,9 @@ _kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM
 _kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
 _kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.MLAAttentionSpec = _FakeMLAAttentionSpec  # type: ignore[attr-defined]
 _kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
+_kv_interface_mod.SlidingWindowMLASpec = _FakeSlidingWindowMLASpec  # type: ignore[attr-defined]
 _kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
 _kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
 _kv_interface_mod.KVCacheGroupSpec = _FakeKVCacheGroupSpec  # type: ignore[attr-defined]
