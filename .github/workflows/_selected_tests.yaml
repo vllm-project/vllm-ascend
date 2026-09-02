@@ -219,7 +219,6 @@ jobs:
           pip show mooncake-transfer-engine-npu || true
 
       - name: Install vllm-project/vllm-ascend with device
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
         run: |
@@ -259,7 +258,6 @@ jobs:
           pip uninstall -y triton-ascend triton
 
       - name: Run selected tests with device
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
