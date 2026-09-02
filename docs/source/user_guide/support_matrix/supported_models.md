@@ -41,6 +41,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | GLM-4.x             |   ✅    |      |      |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 198k | [GLM-4.x](../../tutorials/models/GLM4.x.md) |
     | GLM-5/5.1           |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5](../../tutorials/models/GLM5.md) |
     | GLM-5.2             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 200k | [GLM-5.2](../../tutorials/models/GLM5.2.md) |
+    | GLM-5.3             |   🔵    |      |  ✅ |       A2/A3        | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | 🔵 | ✅ | ✅ | 🔵 | ✅ | ✅ | 200k | [GLM-5.3](../../tutorials/models/GLM5.3.md) |
     | Gemma4              |   🔵    |      |  ✅ |   A2/A3/Ascend950  |     | ✅ | ✅ |  |  | ✅ | ✅ |  |  | ✅ |  | ✅ | ✅ |  | [Gemma4](../../tutorials/models/Gemma4.md) |
     | Kimi-K2-Thinking    |   🔵    |      |      |       A2/A3       |      |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
     | DeepSeekOCR2        |   ✅    |      |  ✅ |       A2/A3        |     | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
@@ -144,8 +145,10 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3-VL | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | 🟡 | ✅ | ✅ | ❌ | ✅ | ✅ | 16k | [Qwen-VL-Dense](../../tutorials/models/Qwen-VL-Dense.md) |
     | Qwen3.5-Dense | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-Dense](../../tutorials/models/Qwen3.5-Dense.md) |
     | Qwen3.5-35B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3.5-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.5-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     | Qwen3.6-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
     | Qwen3.6-35B-A3B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
+    | Qwen3.8-27B | ✅ |  | ❌ | Atlas 300I DUO | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | 256k | [Qwen3.8-27B](../../tutorials/models/Qwen3.8-27B.md) |
     | PaddleOCR-VL | ✅ |  | ❌ | Atlas 300I DUO | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | 16k | [PaddleOCR-VL](../../tutorials/models/PaddleOCR-VL.md) |
     | Qwen3-ASR | ✅ |  | ❌ | Atlas 300I DUO | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | 🟡 | ❌ | ✅ | ✅ | 4096 | [Qwen3-ASR-1.7B](../../tutorials/models/Qwen3-ASR-1.7B.md) |
 

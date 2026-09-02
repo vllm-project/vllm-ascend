@@ -32,13 +32,13 @@ It is recommended to download the model weight to a shared directory across mult
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 The `Qwen3.5-397B-A17B` model is first supported in `vllm-ascend:v0.17.0rc1`. Use `v0.17.0rc1` or later for this model.For Ascend95DT, the model is supported from `vllm-ascend:v0.23.0rc1`.
 
@@ -163,7 +163,7 @@ If you want to deploy a multi-node service, set up the same environment on each 
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
+You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
@@ -332,7 +332,7 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
 
-Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
 
 Run the following script on node 1.
 

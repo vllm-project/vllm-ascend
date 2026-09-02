@@ -37,7 +37,7 @@ jobs:
         run: |
           apt-get update -y && apt-get install git jq -y
           pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
-          pip install modelscope datasets
+          pip install 'modelscope<1.38' datasets
 
       - name: Show Current Disk Usage
         run: |

@@ -85,11 +85,9 @@ class TestNPUPlatform(TestBase):
     def setUp(self):
         self._enable_sp_patch = patch("vllm_ascend.utils.enable_sp", return_value=False)
         self._enable_sp_patch.start()
+        self.addCleanup(self._enable_sp_patch.stop)
         self.platform = NPUPlatform()
         self.platform.supported_quantization[:] = ["ascend", "compressed-tensors"]
-
-    def tearDown(self):
-        self._enable_sp_patch.stop()
 
     def test_class_variables(self):
         self.assertEqual(NPUPlatform._enum, PlatformEnum.OOT)
@@ -638,7 +636,7 @@ class TestNPUPlatform(TestBase):
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
 
-    @patch("torch.npu.get_device_name")
+    @patch("vllm_ascend.platform.torch.npu.get_device_name")
     def test_get_device_name(self, mock_get_device_name):
         device_id = 0
         device_name = "Ascend910B2"
@@ -646,7 +644,7 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(self.platform.get_device_name(device_id), device_name)
         mock_get_device_name.assert_called_once_with(0)
 
-    @patch("torch.npu.get_device_properties")
+    @patch("vllm_ascend.platform.torch.npu.get_device_properties")
     def test_get_device_uuid(self, mock_get_device_properties):
         device_id = 0
         device_properties = MagicMock()
@@ -1723,20 +1721,21 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(result, "vllm_ascend.lora.punica_npu.PunicaWrapperNPU")
 
-    @patch("torch.npu.reset_peak_memory_stats")
-    @patch("torch.npu.max_memory_allocated")
+    @patch("vllm_ascend.platform.torch.npu.reset_peak_memory_stats")
+    @patch("vllm_ascend.platform.torch.npu.max_memory_allocated")
     def test_get_current_memory_usage_with_specific_device(self, mock_max_memory, mock_reset_stats):
         max_memory_allocated_result = 1024.0
         mock_max_memory.return_value = max_memory_allocated_result
-        test_device = torch.device("npu:0")
+        # Avoid constructing torch.device("npu:0") on CPU-only runners.
+        test_device = MagicMock(name="npu:0")
         result = self.platform.get_current_memory_usage(device=test_device)
 
         mock_reset_stats.assert_called_once_with(test_device)
         mock_max_memory.assert_called_once_with(test_device)
         self.assertEqual(result, max_memory_allocated_result)
 
-    @patch("torch.npu.reset_peak_memory_stats")
-    @patch("torch.npu.max_memory_allocated")
+    @patch("vllm_ascend.platform.torch.npu.reset_peak_memory_stats")
+    @patch("vllm_ascend.platform.torch.npu.max_memory_allocated")
     def test_get_current_memory_usage_with_default_device(self, mock_max_memory, mock_reset_stats):
         max_memory_allocated_result = 1024.0
         mock_max_memory.return_value = max_memory_allocated_result
@@ -1747,17 +1746,17 @@ class TestNPUPlatform(TestBase):
         mock_max_memory.assert_called_once_with(None)
         self.assertEqual(result, max_memory_allocated_result)
 
-    @patch("torch.npu.reset_peak_memory_stats", side_effect=RuntimeError("Device error"))
-    @patch("torch.npu.max_memory_allocated")
+    @patch("vllm_ascend.platform.torch.npu.reset_peak_memory_stats", side_effect=RuntimeError("Device error"))
+    @patch("vllm_ascend.platform.torch.npu.max_memory_allocated")
     def test_get_current_memory_usage_when_reset_stats_fails(self, mock_max_memory, mock_reset_stats):
         with self.assertRaises(RuntimeError):
             self.platform.get_current_memory_usage()
         mock_reset_stats.assert_called_once()
         mock_max_memory.assert_not_called()
 
-    @patch("torch.npu.reset_peak_memory_stats")
+    @patch("vllm_ascend.platform.torch.npu.reset_peak_memory_stats")
     @patch(
-        "torch.npu.max_memory_allocated",
+        "vllm_ascend.platform.torch.npu.max_memory_allocated",
         side_effect=RuntimeError("Memory query failed"),
     )
     def test_get_current_memory_usage_when_query_fails(self, mock_max_memory, mock_reset_stats):

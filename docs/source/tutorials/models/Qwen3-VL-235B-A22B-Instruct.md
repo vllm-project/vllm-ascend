@@ -26,13 +26,13 @@ It is recommended to download the model weight to a shared directory across mult
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "Ascend 950DT series"
 
@@ -193,7 +193,7 @@ Expected result: The version information for both packages is displayed, confirm
 
     If deploying a multi-node environment, set up the environment on each node.
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -355,7 +355,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --additional-config '{"enable_cpu_binding":true}'
 ```
 
-Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
 
 Run the following script on node 1.
 
