@@ -55,4 +55,8 @@ class NPUCommunicator(DeviceCommunicatorBase):
         )
         self.device = torch.npu.current_device()
         self.ca_comm = None
+        # The vLLM CUDA graph-capture path probes this optional communicator
+        # after Ascend temporarily aliases NPUCommunicator as CUDA's device
+        # communicator. Ascend does not use the CUDA PCIe IPC all-reduce.
+        self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
