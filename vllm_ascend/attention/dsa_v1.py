@@ -349,11 +349,17 @@ def build_dspark_swa_indices(
     num_decode_tokens: int | None = None,
     index_width: int | None = None,
     indices_output: torch.Tensor | None = None,
+    buffer: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
     Each token in a draft block sees the trailing context window plus the
-    whole current draft block. Invalid/paddedrows get lens=0 and -1 slots.
+    whole current draft block. Invalid/padded rows get lens=0 and -1 slots.
+
+    When ``buffer`` is given, the per-token slots are copied into its leading
+    rows and the returned tensor is a slice view of ``buffer``. This keeps the
+    address stable across async ACL-graph replays, where the DSA operator
+    captures ``ori_sparse_indices``'s data pointer at capture time.
     """
     if index_width is None:
         index_width = _aligned_dspark_index_width(window_size, num_speculative_tokens)
@@ -398,6 +404,19 @@ def build_dspark_swa_indices(
         per_token_slots = indices_output
 
     return per_token_slots, per_token_lens
+    if buffer is None:
+        return per_token_slots, per_token_lens
+
+    # Copy the freshly built indices into the caller-provided buffer and hand
+    # back a zero-copy view of it: ACL graph capture freezes tensor addresses,
+    # so the DSA operator must read from the stable buffer at replay instead of
+    # a freshly allocated tensor.
+    num_rows = per_token_slots.shape[0]
+    assert num_rows <= buffer.shape[0], (
+        f"dspark_swa_indices needs {num_rows} rows but `buffer` only has {buffer.shape[0]}"
+    )
+    buffer[:num_rows].copy_(per_token_slots)
+    return buffer[:num_rows], per_token_lens
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
@@ -522,24 +541,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 torch.bfloat16
             ),
         )
-
-    def _store_dspark_swa_indices(self, indices: torch.Tensor) -> torch.Tensor:
-        """Store DSpark SWA visible-slot indices into an address-stable buffer.
-        ACL graph capture freezes tensor addresses, so a freshly allocated
-        ``build_dspark_swa_indices`` result has a different ``data_ptr`` at
-        replay than at capture and the replayed kernel reads a stale address.
-        Copying into a static buffer (like ``sas_metadata``) keeps the address
-        identical across capture/replay.
-        """
-        if self.dspark_swa_indices_buffer is None:
-            return indices
-        num_rows = indices.shape[0]
-        assert num_rows <= self.dspark_swa_indices_buffer.shape[0], (
-            f"dspark_swa_indices needs {num_rows} rows but the static buffer "
-            f"only has {self.dspark_swa_indices_buffer.shape[0]}"
-        )
-        self.dspark_swa_indices_buffer[:num_rows].copy_(indices)
-        return self.dspark_swa_indices_buffer[:num_rows]
 
     @classmethod
     def get_cudagraph_support(
@@ -876,8 +877,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc[: self.num_decodes + 1],
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
+                buffer=self.dspark_swa_indices_buffer,
             )
-            dspark_swa_indices = self._store_dspark_swa_indices(dspark_swa_indices[: self.num_decode_tokens])
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
         if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
             cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
@@ -1088,6 +1089,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc,
                 seq_lens,
                 self.num_actual_tokens,
+                buffer=self.dspark_swa_indices_buffer,
             )
             if self._device_metadata_enabled and not has_prefill:
                 if self.dspark_swa_indices_buffer is None:
