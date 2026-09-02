@@ -322,6 +322,45 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
         assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
 
 
+@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #53896 introduced the packed-group hook")
+def test_deepseek_v4_groups_patch_the_live_packed_group_hook() -> None:
+    c128_spec = MLAAttentionSpec(
+        block_size=128 * 128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        **_ratio_kwargs(128),
+        model_version="deepseek_v4",
+    )
+    c4_spec = MLAAttentionSpec(
+        block_size=128 * 4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        **_ratio_kwargs(4),
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=512,
+    )
+    vllm_config = _make_vllm_config(enable_prefix_caching=True, dcp=1)
+    vllm_config.scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
+    vllm_config.speculative_config = None
+
+    groups = vllm_kv_cache_utils.get_kv_cache_groups(
+        vllm_config,
+        {"c128": c128_spec, "swa": swa_spec, "c4": c4_spec},
+    )
+
+    assert vllm_kv_cache_utils._get_packed_kv_cache_groups is kv_cache_utils_patch._ascend_get_packed_kv_cache_groups
+    assert [group.layer_names for group in groups[:2]] == [["c4"], ["c128"]]
+    assert groups[2].layer_names == ["swa"]
+
+
 @pytest.mark.parametrize(
     ("block_size", "page_size", "draft_uses_mla"),
     [

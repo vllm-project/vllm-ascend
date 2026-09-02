@@ -103,6 +103,7 @@ def _gumbel_sample_kernel(
     vocab_size,
     num_blocks,
     BLOCK_SIZE: tl.constexpr,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
 ):
@@ -146,6 +147,10 @@ def _gumbel_sample_kernel(
             # NOTE(Ronald1995): change pos's dtype to tl.int32, because triton-ascend's
             # compiler doesn't support uint64 of pos arg.
             pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+            # vLLM #54282 separates draft and target Gumbel streams. The salt
+            # remains in int32 range for every supported model position.
+            if IS_DRAFTING:
+                pos += 1 << 30
             gumbel_seed = tl.randint(seed, pos)
 
             # NOTE(Ronald1995): r is tl.float64 in vllm, change it to tl.float32,
@@ -171,12 +176,23 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
+    is_drafting: bool = False,
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
     use_fp64: bool = False,
+    *,
+    logits_cache: torch.Tensor | None = None,
+    logits_cache_col: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
+    # Keep the Ascend names accepted by existing callers while matching the
+    # final upstream keyword names used by MRV2 speculators.
+    if logits_cache is not None or logits_cache_col is not None:
+        if output_processed_logits is not None or output_processed_logits_col is not None:
+            raise ValueError("Use either logits_cache or output_processed_logits arguments, not both.")
+        output_processed_logits = logits_cache
+        output_processed_logits_col = logits_cache_col
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
@@ -210,6 +226,7 @@ def gumbel_sample(
         vocab_size,
         num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
+        IS_DRAFTING=is_drafting,
         APPLY_TEMPERATURE=apply_temperature,
         PER_TOKEN_COL=per_token_col,
     )

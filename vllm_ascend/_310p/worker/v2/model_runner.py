@@ -15,6 +15,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import initialize_mamba_s
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1 import kv_cache_interface
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -336,9 +337,15 @@ class NPUModelRunner310V2(NPUModelRunner):
 
         block_sizes = []
         max_num_blocks_per_group = []
+        slot_mapping_enabled = []
+        circular_buffer_spec = getattr(kv_cache_interface, "CircularBufferSpec", None)
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
+            layer_spec = next(iter(spec.kv_cache_specs.values())) if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+            slot_mapping_enabled.append(
+                circular_buffer_spec is None or not isinstance(layer_spec, circular_buffer_spec)
+            )
             max_num_blocks = cdiv(self.max_model_len, spec.block_size)
             if spec.block_size <= 128:
                 alignment = 128 // spec.block_size
@@ -365,6 +372,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+            slot_mapping_enabled=slot_mapping_enabled,
         )
         initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
 

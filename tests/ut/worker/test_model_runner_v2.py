@@ -43,7 +43,7 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
             side_effect=[10.0, 10.125],
         ),
     ):
-        output = runner.execute_model(scheduler_output)
+        output = runner.execute_model(scheduler_output, valid_dummy_state_slots=True)
 
     assert output is None
     assert runner._cpp_execution_time_ms == pytest.approx(125.0)
@@ -56,6 +56,7 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
     }
     if not is_vllm_0_27_1:
         expected_kwargs["context_len"] = 0
+        expected_kwargs["valid_dummy_state_slots"] = True
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 

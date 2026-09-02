@@ -28,6 +28,7 @@ _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
+_orig_get_packed_kv_cache_groups = getattr(vllm.v1.core.kv_cache_utils, "_get_packed_kv_cache_groups", None)
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
@@ -263,7 +264,7 @@ def _get_kv_cache_groups_uniform_groups(
     # The other uniform KV cache specs will be similarly partitioned into layer tuples.
     # Say we have 21 SWA layers, all with the same page size, then we will have "21"
     # layer tuples.
-    num_layer_tuples_per_group: list[int] = [g_spec.get_num_layer_tuples() for g_spec in grouped_specs]
+    num_layer_tuples_per_group: list[int] = [_get_max_layers_per_page_size(g_spec) for g_spec in grouped_specs]
     # Choose `num_layer_tuples` to minimize total padding across groups.
     num_layer_tuples = _approximate_gcd(num_layer_tuples_per_group, lower_bound=num_layer_tuples_per_group[0])
     # Round up to the nearest multiple of `num_layer_tuples` (i.e., padding)
@@ -324,6 +325,37 @@ def _get_kv_cache_groups_uniform_groups(
             )
 
     return [full_mla_group, full_mla_c128_group, *swa_mla_groups]
+
+
+def _get_max_layers_per_page_size(spec: UniformTypeKVCacheSpecs) -> int:
+    """Bridge the UniformTypeKVCacheSpecs helper renamed by vLLM #53896."""
+    if vllm_version_is("0.27.1"):
+        return spec.get_num_layer_tuples()
+    return spec.get_max_layers_per_page_size()
+
+
+def _ascend_get_packed_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    """Preserve Ascend's DSV4 grouping on the live packed-group hook."""
+    grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
+    if grouped_specs is None:
+        assert _orig_get_packed_kv_cache_groups is not None
+        return _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
+
+    groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
+    vllm.v1.core.kv_cache_utils._annotate_eagle_groups(
+        vllm_config,
+        kv_cache_spec,
+        groups,
+        use_deepseek_v4_fallback=True,
+    )
+    vllm.v1.core.kv_cache_utils._warn_if_unannotated_eagle_mamba(
+        vllm_config,
+        groups,
+    )
+    return groups
 
 
 def _get_deepseek_v4_cache_layout(
@@ -511,7 +543,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        _get_max_layers_per_page_size(group.kv_cache_spec)
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )
@@ -545,8 +577,12 @@ def _ascend_get_kv_cache_config_from_groups(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
-vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
-vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
+if vllm_version_is("0.27.1"):
+    vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
+    vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
+else:
+    assert _orig_get_packed_kv_cache_groups is not None
+    vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to
 # _get_kv_cache_config_packed. The v0.27.1 planner still consumes shared_by;
