@@ -202,6 +202,12 @@ msgstr ""
 "通用调优方法请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
 msgid ""
+"Please refer to the [Feature "
+"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr "详细功能描述请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
+
+msgid ""
 "The following optimizations are enabled by default and require no additional"
 " configuration:"
 msgstr "以下优化默认启用，无需额外配置："

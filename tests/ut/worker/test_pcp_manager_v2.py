@@ -77,6 +77,13 @@ def test_validate_config_allows_sparse_mla_full_decode_only():
     assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
 
 
+def test_validate_config_allows_gqa():
+    vllm_config = _make_pcp_config(CUDAGraphMode.NONE, sparse_mla=False)
+    vllm_config.model_config.use_mla = False
+
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+
+
 @pytest.mark.parametrize("cudagraph_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL])
 def test_validate_config_rejects_unsupported_sparse_mla_graph_modes(cudagraph_mode):
     vllm_config = _make_pcp_config(cudagraph_mode)

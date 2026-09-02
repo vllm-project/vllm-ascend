@@ -3560,6 +3560,13 @@ class NPUModelRunner(GPUModelRunner):
                 # rows as well so device-side metadata does not see stale block ids.
                 self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
+                # Invalidate real-request slots before attention backends derive
+                # or copy their backend-specific metadata for dummy execution.
+                if not is_graph_capturing:
+                    for kv_cache_gid in range(len(self.kv_cache_config.kv_cache_groups)):
+                        blk_table = self.input_batch.block_table[kv_cache_gid]
+                        blk_table.slot_mapping.gpu.fill_(-1)
+
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 # check how to build dummy
                 if self.use_compress:
@@ -3575,11 +3582,6 @@ class NPUModelRunner(GPUModelRunner):
                     for_cudagraph_capture=is_graph_capturing,
                     num_scheduled_tokens_np=num_scheduled_tokens,
                 )
-                if not is_graph_capturing:
-                    for kv_cache_gid in range(len(self.kv_cache_config.kv_cache_groups)):
-                        blk_table = self.input_batch.block_table[kv_cache_gid]
-                        blk_table.slot_mapping.gpu.fill_(-1)
-
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
             num_scheduled_tokens,
@@ -3633,7 +3635,13 @@ class NPUModelRunner(GPUModelRunner):
 
             need_dummy_logits = not is_profile and lmhead_tp_enable()
             max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-            dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
+            # Keep indices on the same device as hidden_states to avoid an
+            # implicit synchronous CPU-to-NPU copy during dummy-run indexing.
+            dummy_indices = torch.zeros(
+                max_num_reqs_across_dp,
+                dtype=torch.int32,
+                device=self.device,
+            )
 
             def dummy_compute_logits(hidden_states):
                 if not need_dummy_logits:

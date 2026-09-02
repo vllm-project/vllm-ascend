@@ -214,11 +214,11 @@ msgstr ""
 "| `/e2e tests/e2e/pull_request/one_card/test_foo.py::test_case` | 运行指定的测试用例 "
 "|"
 
-msgid "| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-2` |"
-msgstr "| 路径中包含 `two_card` | two_card A3 NPU | `linux-aarch64-a3-2` |"
+msgid "| `two_card` in path | two_card A3 NPU | `linux-aarch64-a3-800t-2` |"
+msgstr "| 路径中包含 `two_card` | two_card A3 NPU | `linux-aarch64-a3-800t-2` |"
 
-msgid "| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-4` |"
-msgstr "| 路径中包含 `four_card` | four_card A3 NPU | `linux-aarch64-a3-4` |"
+msgid "| `four_card` in path | four_card A3 NPU | `linux-aarch64-a3-800t-4` |"
+msgstr "| 路径中包含 `four_card` | four_card A3 NPU | `linux-aarch64-a3-800t-4` |"
 
 msgid ""
 "| `_310p` in filename under one/two_card | Ascend 310P x1 | `linux-"
