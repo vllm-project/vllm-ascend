@@ -16,7 +16,7 @@ def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=False, enable_fused_mc2=0),
     )
 
 
@@ -150,6 +150,7 @@ def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank(monkeypatc
         afc,
         "get_ascend_config",
         lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
             enable_fused_mc2=0,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
         ),
@@ -166,6 +167,7 @@ def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns(mon
         afc,
         "get_ascend_config",
         lambda: SimpleNamespace(
+            enable_prefill_mc2=False,
             enable_fused_mc2=0,
             scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
         ),
@@ -182,11 +184,11 @@ def test_set_mc2_tokens_capacity_with_cudagraph_uses_capture_size_and_aligns(mon
     assert afc.get_mc2_tokens_capacity() == 264
 
 
-def test_set_mc2_tokens_capacity_non_decode_only_uses_max_num_batched_tokens(monkeypatch):
+def test_set_mc2_tokens_capacity_prefill_mc2_uses_max_num_batched_tokens(monkeypatch):
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=0),
+        lambda: SimpleNamespace(enable_prefill_mc2=True, enable_fused_mc2=0),
     )
     vllm_config = _make_vllm_config(tensor_parallel_size=8, max_num_batched_tokens=513)
 
