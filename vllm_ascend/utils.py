@@ -117,13 +117,22 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def model_uses_kpool_indexer(model_config: Any | None) -> bool:
+    """Return True for GLM-5.3-Flash style kpool indexer models.
+
+    Those models expose ``index_topk`` like DeepSeek SFA but use a kpool
+    indexer over a hybrid MLA + KDA cache, so they must not be routed through
+    the SFA / DSA layouts.
+    """
+    return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
+
+
 def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     hf_config = getattr(model_config, "hf_config", None)
     if hf_text_config is None:
         return False
-    # GLM-5.3-Flash kpool indexer also has index_topk; it is not DeepSeek SFA.
-    if hasattr(hf_text_config, "index_kpool") or hasattr(hf_config, "index_kpool"):
+    if model_uses_kpool_indexer(model_config):
         return False
     return (
         hasattr(hf_text_config, "index_topk")
@@ -1544,9 +1553,7 @@ def enable_sfa(vllm_config) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     if hf_text_config is None:
         return False
-    # GLM-5.3-Flash kpool indexer also exposes index_topk, but it is not
-    # DeepSeek SFA (no SFA C8 / DSA layout, hybrid MLA+KDA cache).
-    if hasattr(hf_text_config, "index_kpool"):
+    if model_uses_kpool_indexer(model_config):
         return False
     return hasattr(hf_text_config, "index_topk") and not hasattr(hf_text_config, "compress_ratios")
 

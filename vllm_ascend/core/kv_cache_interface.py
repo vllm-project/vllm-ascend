@@ -46,10 +46,6 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
-    # Hybrid GLM (MLA + KDA/Mamba + kpool) pages do not evenly divide.
-    # Ascend binds KV as block-first views and indexes padded pages by
-    # runtime block stride, so unify_kv_cache_spec_page_size may pad.
-    indexes_kv_by_block_stride: bool = True
 
     @property
     def storage_block_size(self) -> int:
