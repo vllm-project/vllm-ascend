@@ -73,7 +73,6 @@ class TestRecomputeSchedulerWithoutShortRequestFirst(TestBase):
         )
         model_config.pooler_config = MagicMock()
         model_config.multimodal_config = None
-        model_config.model_arch_config = SimpleNamespace(num_experts=0)
         model_config.served_model_name = MODEL
         model_config.hf_config = MagicMock()
         model_config.hf_config.canvas_length = None

@@ -181,3 +181,35 @@ class TestUseV2ModelRunner:
 
         assert use_v2_model_runner(config) is False
         assert len(warning_calls) == 1
+
+
+class TestV2ModelRunnerValidationPatch:
+    def test_validation_is_decoupled_from_upstream(self):
+        # The Ascend V2 runner decision is fully owned by use_v2_model_runner,
+        # so the replacement validation must never raise (e.g. the upstream
+        # Triton / feature-support checks do not apply).
+        mrv2_utils._validate_v2_model_runner(object())
+        mrv2_utils._validate_v2_model_runner(SimpleNamespace())
+
+    def test_apply_config_patch_is_wired(self, monkeypatch):
+        from vllm.config.vllm import VllmConfig
+
+        original_property = VllmConfig.use_v2_model_runner
+        original_validate = VllmConfig._validate_v2_model_runner
+
+        monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", False)
+
+        mrv2_utils.apply_v2_model_runner_config_patch()
+        assert isinstance(VllmConfig.use_v2_model_runner, property)
+        assert VllmConfig.use_v2_model_runner.fget is mrv2_utils.use_v2_model_runner
+
+        # The upstream Triton check must no longer run.
+        VllmConfig._validate_v2_model_runner(object())
+
+        # Re-applying is harmless.
+        mrv2_utils.apply_v2_model_runner_config_patch()
+        VllmConfig._validate_v2_model_runner(object())
+
+        # Restore the upstream class state so later tests are unaffected.
+        monkeypatch.setattr(VllmConfig, "use_v2_model_runner", original_property)
+        monkeypatch.setattr(VllmConfig, "_validate_v2_model_runner", original_validate)

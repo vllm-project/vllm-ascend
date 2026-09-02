@@ -37,6 +37,40 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
 )
 
 
+def _validate_v2_model_runner(vllm_config: VllmConfig) -> None:
+    """No-op replacement for the upstream V2 model runner validation.
+
+    Ascend fully owns the V2 model runner enablement decision through the model
+    / feature whitelists in :func:`use_v2_model_runner`, so the upstream checks
+    -- Triton availability plus the list of features the *upstream* GPU V2
+    runner does not yet support -- are intentionally decoupled. Otherwise
+    enabling V2 on 310P (which runs the V2 runner without Triton) would fail at
+    config construction with the upstream "Model Runner V2 requires Triton."
+    error.
+    """
+
+
+def apply_v2_model_runner_config_patch() -> None:
+    """Apply the Ascend V2 model runner overrides to VllmConfig.
+
+    Installs two overrides on the ``VllmConfig`` class:
+
+    * ``use_v2_model_runner`` is driven by the Ascend whitelist default instead
+      of the upstream default decision (see :func:`use_v2_model_runner`).
+    * ``_validate_v2_model_runner`` is neutralized because the upstream checks
+      describe the upstream GPU runner and do not apply to the Ascend runner.
+
+    Must run wherever ``VllmConfig`` is (re)created -- the engine during config
+    construction and each worker process, which receive a pickled config and
+    therefore never run the upstream platform config hook. Repeated application
+    is harmless: it just re-assigns the same overrides.
+    """
+    from vllm.config.vllm import VllmConfig
+
+    VllmConfig.use_v2_model_runner = property(use_v2_model_runner)
+    VllmConfig._validate_v2_model_runner = _validate_v2_model_runner
+
+
 def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     """Model whitelist: enable V2 for default-V2 architectures and non-MoE models."""
     model_config = vllm_config.model_config
