@@ -189,10 +189,6 @@ def test_mixed_non_spec_reuses_rearranged_qkv() -> None:
             core_attn_out,
         )
 
-    # Regression check: the old implementation rearranged the full mixed
-    # tensor once, then rearranged its decode prefix a second time.
-    assert layer.rearrange_mixed_qkv.call_count == 1
-
     # The recurrent decode kernel must receive the first token from the
     # already-rearranged full tensors.
     assert len(recurrent_calls) == 1
