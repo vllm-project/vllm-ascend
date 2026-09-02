@@ -289,6 +289,24 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
 
+    def close(self) -> None:
+        """Stop local transfer workers before releasing connector resources."""
+        if getattr(self, "_closed", False):
+            return
+        worker = getattr(self, "connector_worker", None)
+        try:
+            if worker is not None:
+                worker.close_transfer_workers()
+        finally:
+            lookup_server = getattr(self, "lookup_server", None)
+            if lookup_server is not None:
+                lookup_server.close()
+            self._closed = True
+
+    def shutdown(self) -> None:
+        """Release worker-side transfer resources through the vLLM lifecycle."""
+        self.close()
+
 
 class LookupKeyServer:
     def __init__(
@@ -308,10 +326,17 @@ class LookupKeyServer:
 
         self.pool_worker = pool_worker
         self.running = True
+        self._closed = False
 
         def process_request():
             while self.running:
-                all_frames = self.socket.recv_multipart(copy=False)
+                try:
+                    all_frames = self.socket.recv_multipart(copy=False)
+                except Exception:
+                    if self.running:
+                        logger.exception("AscendStore lookup server receive loop failed")
+                    self.running = False
+                    return
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 kv_group_ids = self.decoder.decode([all_frames[1]])
                 hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
@@ -336,4 +361,15 @@ class LookupKeyServer:
         self.thread.start()
 
     def close(self):
-        self.socket.close(linger=0)
+        if self._closed:
+            return
+        self.running = False
+        try:
+            self.socket.close(linger=0)
+            if self.thread.is_alive() and threading.current_thread() is not self.thread:
+                self.thread.join(timeout=1.0)
+        finally:
+            try:
+                self.ctx.term()
+            finally:
+                self._closed = True

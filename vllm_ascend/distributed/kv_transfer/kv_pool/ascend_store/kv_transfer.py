@@ -15,6 +15,15 @@ from vllm.logger import logger
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.transfer_planner import (
+    TransferPlanner,
+    iter_token_key_strings_with_block_ids,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.transfer_supervisor import (
+    TransferSupervisor,
+    TransferTimeoutError,
+    TransferWorkerError,
+)
 
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -313,6 +322,8 @@ class KVTransferThread(threading.Thread):
         dcp_size: int = 1,
         ready_event: threading.Event | None = None,
         name: str = "KVTransferThread",
+        planner: TransferPlanner | None = None,
+        supervisor: TransferSupervisor | None = None,
     ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
@@ -330,6 +341,11 @@ class KVTransferThread(threading.Thread):
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
         self._fatal_error: BaseException | None = None
+        self.planner = planner
+        self.supervisor = supervisor
+        self._stop_sentinel = object()
+        self._stop_requested = threading.Event()
+        self._task_done_called = False
 
     def _get_block_size(self, kv_cache_group_id: int = 0) -> int:
         if isinstance(self.block_size, list):
@@ -340,6 +356,58 @@ class KVTransferThread(threading.Thread):
 
     def add_request(self, request: Any) -> None:
         self.request_queue.put(request)
+
+    def stop(self) -> None:
+        if not self._stop_requested.is_set():
+            self._stop_requested.set()
+            self.request_queue.put(self._stop_sentinel)
+
+    def _task_done(self) -> None:
+        if not self._task_done_called:
+            self._task_done_called = True
+            self.request_queue.task_done()
+
+    def _plan_token_key_strings_with_block_ids(
+        self,
+        token_len: int,
+        block_hashes,
+        block_ids: list[int],
+        mask_num: int = 0,
+        kv_cache_group_id: int = 0,
+        skip_null_blocks: bool = False,
+        chunk_filter=None,
+        shard_rank: int | None = None,
+        shard_size: int | None = None,
+    ):
+        return iter_token_key_strings_with_block_ids(
+            self.token_database,
+            self.planner,
+            token_len,
+            block_hashes,
+            block_ids,
+            mask_num,
+            kv_cache_group_id,
+            skip_null_blocks,
+            chunk_filter,
+            shard_rank,
+            shard_size,
+        )
+
+    def _wait_for_signal(self, signal: Any, description: str) -> None:
+        """Wait for an Event-like signal with supervisor failure/timeout handling."""
+        timeout_s = self.supervisor.timeout_s if self.supervisor is not None else 30.0
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if self.supervisor is not None:
+                self.supervisor.raise_if_failed()
+                if self.supervisor.stop_event.is_set():
+                    raise TransferWorkerError(f"transfer worker stopped while waiting for {description}")
+            self.raise_if_failed()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TransferTimeoutError(f"timed out waiting for {description}")
+            if signal.wait(timeout=min(0.1, remaining)):
+                return
 
     def get_and_clear_finished_requests(
         self,
@@ -364,6 +432,8 @@ class KVTransferThread(threading.Thread):
             self.finished_requests -= req_ids
 
     def raise_if_failed(self) -> None:
+        if self.supervisor is not None:
+            self.supervisor.raise_if_failed()
         if self._fatal_error is not None:
             raise RuntimeError(f"{self.name} failed during asynchronous transfer") from self._fatal_error
 
@@ -487,33 +557,61 @@ class KVTransferThread(threading.Thread):
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         self._set_os_thread_name()
-        self.m_store.set_device()
+        try:
+            self.m_store.set_device()
+        except Exception as exc:
+            self._record_fatal_error(exc)
+            self.ready_event.set()
+            return
         self.ready_event.set()
+        if self.supervisor is not None:
+            self.supervisor.worker_ready(self.name)
         while True:
             request_data = None
             try:
-                request_data = self.request_queue.get()
+                request_data = self.request_queue.get(timeout=0.1)
+                self._task_done_called = False
+                if request_data is self._stop_sentinel:
+                    self._task_done()
+                    return
+                if self.supervisor is not None and self.supervisor.stop_event.is_set():
+                    self._task_done()
+                    return
                 if request_data is None:
                     logger.warning("Received a None request. This indicates queue shutdown or invalid request.")
-                    self.request_queue.task_done()
+                    self._task_done()
                     continue
                 self._handle_request(request_data)
+            except queue.Empty:
+                if self.supervisor is not None and self.supervisor.stop_event.is_set():
+                    return
+                continue
             except Exception as e:
-                self._fatal_error = e
-                logger.error(
-                    "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
-                    self.name,
-                    type(e).__name__,
-                    e,
-                )
+                if request_data is not None:
+                    try:
+                        self._handle_request_exception(request_data)
+                    except Exception:
+                        logger.exception("Failed to finalize failed transfer request in %s", self.name)
+                self._record_fatal_error(e)
                 return
+
+    def _record_fatal_error(self, error: BaseException) -> None:
+        self._fatal_error = error
+        logger.error(
+            "Error in KVCacheTransferThread(%s). type=%s, error=%s. Check thread state and request processing.",
+            self.name,
+            type(error).__name__,
+            error,
+        )
+        if self.supervisor is not None:
+            self.supervisor.report_fatal(error, self.name)
 
     def _handle_request(self, req_meta: Any):
         pass
 
     def _handle_request_exception(self, request_data: Any):
         """Allow subclasses to complete queue/request bookkeeping on errors."""
-        pass
+        self._task_done()
 
     def lookup(
         self,
@@ -649,7 +747,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 tracked_request = req_id in self.stored_requests
             if tracked_request:
                 self.dec_stored_request(req_id)
-        self.request_queue.task_done()
+        self._task_done()
 
     def _handle_request(self, req_meta: ReqMeta):
         if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
@@ -666,7 +764,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if req_meta.event_id is not None:
                     with self.completed_events_lock:
                         self.completed_events[req_meta.event_id] = 1
-                self.request_queue.task_done()
+                self._task_done()
             return
 
         req_id = req_meta.req_id
@@ -687,7 +785,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_meta.event_id is not None:
                 with self.completed_events_lock:
                     self.completed_events[req_meta.event_id] = 1
-            self.request_queue.task_done()
+            self._task_done()
 
     def _handle_stored_request(self, req_meta: ReqMeta):
         """Store missing KV chunks for one request."""
@@ -759,7 +857,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
 
             pre_shard = self.dcp_size <= 1 and not align_state_group
-            iterator = self.token_database.process_token_key_strings_with_block_ids(
+            iterator = self._plan_token_key_strings_with_block_ids(
                 token_len,
                 req_meta.block_hashes,
                 block_ids,
@@ -929,7 +1027,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 def chunk_filter(start: int, group_id=group_id) -> bool:
                     return self.token_database.mask_allows_chunk(load_masks, group_id, start)
 
-                token_iter = self.token_database.process_token_key_strings_with_block_ids(
+                token_iter = self._plan_token_key_strings_with_block_ids(
                     token_len,
                     req_meta.block_hashes,
                     block_ids,
@@ -1009,7 +1107,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
             self.set_finished_request(req_id)
         finally:
-            self.request_queue.task_done()
+            self._task_done()
 
 
 class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
@@ -1077,7 +1175,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         self, transfer_tasks: list[LayerTransferTask]
     ):
         if len(transfer_tasks) == 0:
-            self.request_queue.task_done()
+            self._task_done()
             return
         if len(transfer_tasks) > 1:
             raise ValueError(f"Expected at most one layer transfer task, got {len(transfer_tasks)}")
@@ -1163,7 +1261,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
         logger.debug("Key-based layer save event set: layer %d", layer_id)
         self.layer_save_finished_events[layer_id].set()
         transfer_tasks.clear()
-        self.request_queue.task_done()
+        self._task_done()
 
 
 class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
@@ -1197,8 +1295,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         self.final_layer_id = num_layers - 1
 
     def _wait_for_save(self, layer_id: int) -> None:
-        while not self.layer_save_finished_events[layer_id].wait(timeout=10):
-            logger.info("Layerwise %d save wait timed out, keep waiting before load", layer_id)
+        self._wait_for_signal(self.layer_save_finished_events[layer_id], f"layer {layer_id} save")
         logger.debug("Key-based layer save event cleared: layer %d", layer_id)
         self.layer_save_finished_events[layer_id].clear()
 
@@ -1211,8 +1308,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
             self._wait_for_save(wait_for_save)
 
         if data.attention_start_gate is not None:
-            while not data.attention_start_gate.wait(timeout=10):
-                logger.info("Layerwise %d load waits for attention compute start", layer_id)
+            self._wait_for_signal(data.attention_start_gate, f"layer {layer_id} attention start")
 
         key_list = []
         addr_list = []
@@ -1264,7 +1360,7 @@ class KVCacheStoreKeyLayerRecvingThread(KVTransferThread):
         logger.debug("Key-based layer load event set: layer %d", layer_id)
         self.layer_load_finished_events[layer_id].set()
         data.transfer_tasks.clear()
-        self.request_queue.task_done()
+        self._task_done()
         self.get_event.set()
 
 
@@ -1330,7 +1426,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
         self, transfer_tasks: list[LayerTransferTask]
     ):
         if len(transfer_tasks) == 0:
-            self.request_queue.task_done()
+            self._task_done()
             return
         physical_layer = transfer_tasks[0].layer_id
         has_any_save = False
@@ -1393,13 +1489,13 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             logger.debug("Layer save event set: layer %d", physical_layer)
             self.layer_save_finished_events[physical_layer].set()
             transfer_tasks.clear()
-            self.request_queue.task_done()
+            self._task_done()
             return
         assert not self.layer_save_finished_events[physical_layer].is_set(), f"thread: {physical_layer} save failed "
         logger.debug("Layer save event set: layer %d", physical_layer)
         self.layer_save_finished_events[physical_layer].set()
         transfer_tasks.clear()
-        self.request_queue.task_done()
+        self._task_done()
 
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
@@ -1487,10 +1583,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         attention_start_gate = data.attention_start_gate
 
         if wait_for_save is not None:
-            while not self.layer_save_finished_events[wait_for_save].wait(timeout=10):
-                if self.save_failure_checker is not None:
-                    self.save_failure_checker()
-                logger.info("Layerwise %d save wait timed out, keep waiting before load", wait_for_save)
+            self._wait_for_signal(self.layer_save_finished_events[wait_for_save], f"layer {wait_for_save} save")
             if self.save_failure_checker is not None:
                 self.save_failure_checker()
             # Non-saving TP ranks have no D2H task to synchronize the event.
@@ -1506,7 +1599,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
-            self.request_queue.task_done()
+            self._task_done()
             return
 
         # Build req_meta for all tasks first; if all are None, early return.
@@ -1527,12 +1620,11 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             assert not self.layer_load_finished_events[layer_id].is_set()
             logger.debug("Layer load event set: layer %d", layer_id)
             self.layer_load_finished_events[layer_id].set()
-            self.request_queue.task_done()
+            self._task_done()
             return
 
         if attention_start_gate is not None:
-            while not attention_start_gate.wait(timeout=10):
-                logger.info("Layerwise %d load waits for attention compute start", layer_id)
+            self._wait_for_signal(attention_start_gate, f"layer {layer_id} attention start")
 
         all_load_keys: list[str] = []
         all_req_ids: set[str] = set()
@@ -1594,7 +1686,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
         # transfer_tasks aliases KVPoolWorker.layer_load_tasks[layer_id]. Do
         # not mutate the worker-owned list from this asynchronous thread. The
         # worker replaces all per-layer lists at the beginning of every step.
-        self.request_queue.task_done()
+        self._task_done()
         self.get_event.set()
 
 

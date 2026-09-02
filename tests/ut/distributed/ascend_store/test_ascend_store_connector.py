@@ -86,6 +86,17 @@ class TestAscendStoreConnector(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(metadata, original_metadata)
 
+    def test_shutdown_closes_worker_and_lookup_server_once(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_worker = MagicMock()
+        connector.lookup_server = MagicMock()
+
+        connector.shutdown()
+        connector.shutdown()
+
+        connector.connector_worker.close_transfer_workers.assert_called_once_with()
+        connector.lookup_server.close.assert_called_once_with()
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_init_scheduler_role(self, mock_scheduler_cls):
         config = self._make_vllm_config()

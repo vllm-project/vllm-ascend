@@ -48,6 +48,14 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     _circular_shift,
     record_failed_blocks,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.transfer_planner import (
+    TransferPlanner,
+    iter_token_key_strings_with_block_ids,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.transfer_supervisor import (
+    TransferSupervisor,
+    TransferTimeoutError,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     LayerwiseReuseLayout,
     build_layerwise_cache_layout,
@@ -154,6 +162,13 @@ class KVPoolWorker:
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
+        self.transfer_mode = str(extra_config.get("transfer_mode", "thread")).lower()
+        if self.transfer_mode not in {"thread", "hybrid"}:
+            logger.warning("Unknown AscendStore transfer_mode=%s; falling back to thread", self.transfer_mode)
+            self.transfer_mode = "thread"
+        self.transfer_timeout_s = max(float(extra_config.get("transfer_timeout_ms", 30000)) / 1000.0, 0.001)
+        self.transfer_start_method = str(extra_config.get("transfer_start_method", "spawn"))
+        self.use_hybrid_transfer = self.transfer_mode == "hybrid" and not use_layerwise
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
@@ -344,6 +359,10 @@ class KVPoolWorker:
         # which keys it has already allocated and reuse those GVAs instead of
         # re-allocating them on every save step.
         self._allocated_gvas: dict[str, int] = {}
+        self.transfer_supervisor = TransferSupervisor(self.transfer_timeout_s)
+        self.transfer_planner: TransferPlanner | None = None
+        self._hybrid_transfer_enabled = False
+        self._transfer_workers_closed = False
 
     def _init_layerwise_config(self) -> None:
         # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
@@ -460,9 +479,86 @@ class KVPoolWorker:
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> None:
         self.external_slot_release_waiter = waiter
 
+    def _start_transfer_thread(self, transfer_thread: KVTransferThread) -> None:
+        transfer_thread.supervisor = self.transfer_supervisor
+        if not self.use_layerwise and self._hybrid_transfer_enabled:
+            transfer_thread.planner = self.transfer_planner
+        transfer_thread.start()
+        if not transfer_thread.ready_event.wait(timeout=self.transfer_timeout_s):
+            error = TransferTimeoutError(f"transfer thread {transfer_thread.name} did not become ready")
+            self.transfer_supervisor.report_fatal(error, transfer_thread.name)
+            raise error
+        transfer_thread.raise_if_failed()
+
+    def _start_transfer_planner(self) -> None:
+        if not self.use_hybrid_transfer:
+            return
+        planner = None
+        try:
+            planner = TransferPlanner(
+                timeout_s=self.transfer_timeout_s,
+                start_method=self.transfer_start_method,
+            )
+            planner.start()
+            self.transfer_planner = planner
+            self._hybrid_transfer_enabled = True
+            logger.info("AscendStore hybrid transfer planner started")
+        except Exception as exc:
+            if planner is not None:
+                planner.shutdown()
+            logger.warning(
+                "Failed to start AscendStore hybrid planner; using thread metadata path: %s",
+                exc,
+            )
+            self.transfer_planner = None
+            self._hybrid_transfer_enabled = False
+
+    def close_transfer_workers(self) -> None:
+        if self._transfer_workers_closed:
+            return
+
+        for transfer_thread in (self.kv_send_thread, self.kv_recv_thread):
+            if transfer_thread is not None and transfer_thread.is_alive():
+                transfer_thread.stop()
+
+        # The stop sentinel is queued after already submitted work, so allow
+        # workers to drain normally before forcing event waiters to wake.
+        deadline = time.monotonic() + self.transfer_timeout_s
+        for transfer_thread in (self.kv_send_thread, self.kv_recv_thread):
+            if transfer_thread is not None and transfer_thread.is_alive():
+                transfer_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+        if any(
+            transfer_thread is not None and transfer_thread.is_alive()
+            for transfer_thread in (self.kv_send_thread, self.kv_recv_thread)
+        ):
+            self.transfer_supervisor.shutdown()
+            force_deadline = time.monotonic() + min(self.transfer_timeout_s, 1.0)
+            for transfer_thread in (self.kv_send_thread, self.kv_recv_thread):
+                if transfer_thread is not None and transfer_thread.is_alive():
+                    transfer_thread.join(timeout=max(0.0, force_deadline - time.monotonic()))
+                    if transfer_thread.is_alive():
+                        logger.warning("Transfer thread %s did not stop before shutdown", transfer_thread.name)
+
+        if self.transfer_planner is not None:
+            self.transfer_planner.shutdown()
+            self.transfer_planner = None
+        self._hybrid_transfer_enabled = False
+        self._transfer_workers_closed = True
+
+    def _wait_for_transfer_queue(self, transfer_thread: KVTransferThread, description: str) -> None:
+        deadline = time.monotonic() + self.transfer_timeout_s
+        while transfer_thread.request_queue.unfinished_tasks:
+            transfer_thread.raise_if_failed()
+            if time.monotonic() >= deadline:
+                raise TransferTimeoutError(f"timed out waiting for {description}")
+            time.sleep(0.01)
+
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
             return
+
+        self._start_transfer_planner()
 
         if self.use_layerwise:
             self.get_event = threading.Event()
@@ -488,7 +584,7 @@ class KVPoolWorker:
                     self.layerwise_max_transfer_bytes,
                     group_builders=self._build_group_layer_builders(),
                 )
-                self.kv_send_thread.start()
+                self._start_transfer_thread(self.kv_send_thread)
                 ready_event_sending.wait()
             elif can_save:
                 ready_event_sending = threading.Event()
@@ -505,7 +601,7 @@ class KVPoolWorker:
                     self.layer_save_finished_events,
                     self.sync_save_events,
                 )
-                self.kv_send_thread.start()
+                self._start_transfer_thread(self.kv_send_thread)
                 ready_event_sending.wait()
             ready_event = threading.Event()
             if self.use_gva_layerwise:
@@ -546,7 +642,7 @@ class KVPoolWorker:
                     self.layer_save_finished_events,
                     self.num_layers,
                 )
-            self.kv_recv_thread.start()
+            self._start_transfer_thread(self.kv_recv_thread)
             ready_event.wait()
         else:
             if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put:
@@ -564,7 +660,7 @@ class KVPoolWorker:
                     self.group_uses_align_state,
                     self.enable_kv_events,
                 )
-                self.kv_send_thread.start()
+                self._start_transfer_thread(self.kv_send_thread)
                 ready_event_sending.wait()
             if self.load_async:
                 ready_event = threading.Event()
@@ -579,7 +675,7 @@ class KVPoolWorker:
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
                 )
-                self.kv_recv_thread.start()
+                self._start_transfer_thread(self.kv_recv_thread)
                 ready_event.wait()
         self._transfer_threads_started = True
 
@@ -887,21 +983,24 @@ class KVPoolWorker:
                 def chunk_filter(start: int, group_id=group_id, load_masks=load_masks) -> bool:
                     return self.token_database.mask_allows_chunk(load_masks, group_id, start)
 
+                token_iter = iter_token_key_strings_with_block_ids(
+                    self.token_database,
+                    self.transfer_planner if self._hybrid_transfer_enabled else None,
+                    token_len,
+                    request.block_hashes,
+                    block_ids,
+                    mask_num,
+                    group_id,
+                    skip_null,
+                    chunk_filter,
+                )
                 for (
                     start,
                     end,
                     key,
                     _block_hash,
                     block_id,
-                ) in self.token_database.process_token_key_strings_with_block_ids(
-                    token_len,
-                    request.block_hashes,
-                    block_ids,
-                    mask_num,
-                    kv_cache_group_id=group_id,
-                    skip_null_blocks=skip_null,
-                    chunk_filter=chunk_filter,
-                ):
+                ) in token_iter:
                     addr, size, block_id = self.token_database.prepare_value(
                         start,
                         end,
@@ -1658,9 +1757,14 @@ class KVPoolWorker:
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(self.current_layer)
             return
-        while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
+        try:
+            self.transfer_supervisor.wait_for_event(
+                self.layer_load_finished_events[self.current_layer],
+                description=f"layer {self.current_layer} load",
+            )
+        except (TransferTimeoutError, RuntimeError):
             self.kv_recv_thread.raise_if_failed()
-            logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
+            raise
         self.layer_load_finished_events[self.current_layer].clear()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -1686,9 +1790,10 @@ class KVPoolWorker:
         else:
             self.layer_save_finished_events[self.current_layer].set()
         if self.current_layer == self.num_layers - 1:
-            while not self.layer_save_finished_events[self.num_layers - 1].wait(timeout=10):
-                send_thread.raise_if_failed()
-                logger.info("Layerwise %d save not done, keep waiting", self.current_layer)
+            self.transfer_supervisor.wait_for_event(
+                self.layer_save_finished_events[self.num_layers - 1],
+                description=f"layer {self.current_layer} save",
+            )
             reuse_source_layers = set(self.prefetch_layer_map.values())
             for layer_id in range(self.num_layers):
                 if layer_id in reuse_source_layers:
@@ -1716,7 +1821,7 @@ class KVPoolWorker:
             send_thread.add_request(request)
 
         if current_event is not None:
-            send_thread.request_queue.join()
+            self._wait_for_transfer_queue(send_thread, "KV save queue")
 
     def retrieve_layer(
         self,
