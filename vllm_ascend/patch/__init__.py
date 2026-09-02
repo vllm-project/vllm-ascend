@@ -1150,3 +1150,24 @@
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
 #
+# ** 35. File: platform/patch_dual_chunk_rope.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.rotary_embedding.dual_chunk_rope.DualChunkRotaryEmbedding._compute_cos_sin_cache`
+#    Why:
+#       Upstream hard-codes `self.device = torch.device(f"cuda:{idx}")` alongside
+#       the portable `torch.accelerator.current_device_index()`. On Ascend the
+#       `.to(device=self.device)` inside `_compute_cos_sin_cache` triggers CUDA
+#       lazy-init and crashes with "Torch not compiled with CUDA enabled" during
+#       model loading (e.g. llava-onevision-qwen2). `self.device` is only read
+#       inside `_compute_cos_sin_cache`.
+#    How：
+#       Wrap `_compute_cos_sin_cache` to reset `self.device` to
+#       `torch.device(current_platform.device_type, current_device_index())`
+#       (== npu on Ascend) before calling the original implementation. No init/cache
+#       body is duplicated.
+#    Related PR (if no, explain why):
+#       No. Upstream dual_chunk_rope hard-codes the "cuda" device string.
+#    Future Plan:
+#       Remove this patch once upstream uses `current_platform.device_type`
+#       (or `torch.accelerator.current_device_type()`) instead of the "cuda" literal.
+#
