@@ -16,6 +16,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -29,6 +35,10 @@ from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendStoreKVConnectorWorkerMetadata
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
+    AscendStorePromMetrics,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     get_zmq_rpc_path_lookup,
@@ -102,6 +112,12 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self._current_step_has_real_forward = False
+
+        # Both sides are declared up-front: the upstream metrics framework
+        # calls get_kv_connector_stats() on worker-role instances too, so the
+        # "other" attribute must exist (None) rather than be absent.
+        self.connector_scheduler: KVPoolScheduler | None = None
+        self.connector_worker: KVPoolWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -198,7 +214,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker Side Methods
     ############################################################
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
-        if not self.use_gva_layerwise or getattr(self, "connector_worker", None) is None:
+        if not self.use_gva_layerwise or self.connector_worker is None:
             return False
         self.connector_worker.set_external_slot_release_waiter(waiter)
         return True
@@ -229,6 +245,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_layer_load()
 
     def save_kv_layer(
@@ -240,6 +257,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             # A load-only consumer does not publish KV.
             return
+        assert self.connector_worker is not None
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
@@ -250,6 +268,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.use_layerwise:
             return
 
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -273,10 +292,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
         if not events:
             return None
-
         ascend_store_kv_events = AscendStoreKVEvents(num_workers=1)
         ascend_store_kv_events.add_events(events)
         return ascend_store_kv_events
@@ -288,6 +307,31 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return KV pool stats collected since the last call.
+
+        Worker side: per-request pool load durations. Scheduler side:
+        delayed-release gauge snapshots.
+        """
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_stats()
+        assert self.connector_worker is not None
+        return self.connector_worker.get_stats()
+
+    @classmethod
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats | None:
+        return AscendStoreKVConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return AscendStorePromMetrics(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 
 
 class LookupKeyServer:

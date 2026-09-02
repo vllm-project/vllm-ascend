@@ -57,6 +57,18 @@ if "torch_npu" not in sys.modules:
     sys.modules["torch_npu"] = MagicMock()
     sys.modules["torch_npu._inductor"] = MagicMock()
 
+if "numpy" not in sys.modules and importlib.util.find_spec("numpy") is None:
+    _numpy = types.ModuleType("numpy")
+    _numpy.ndarray = MagicMock  # type: ignore[attr-defined]
+    _numpy.zeros = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
+    _numpy.frombuffer = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
+    _numpy.dtype = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["numpy"] = _numpy
+
+for _mod in ("regex", "zmq", "msgpack"):
+    if _mod not in sys.modules and importlib.util.find_spec(_mod) is None:
+        sys.modules[_mod] = MagicMock()
+
 # ---------------------------------------------------------------------------
 # Mock vllm modules
 # ---------------------------------------------------------------------------
@@ -71,6 +83,7 @@ _vllm_mock_modules = [
     "vllm.distributed.kv_transfer.kv_connector.factory",
     "vllm.distributed.kv_transfer.kv_connector.v1",
     "vllm.distributed.kv_transfer.kv_connector.v1.base",
+    "vllm.distributed.kv_transfer.kv_connector.v1.metrics",
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
@@ -96,6 +109,8 @@ _vllm_mock_modules = [
     "vllm.v1.core.single_type_kv_cache_manager",
     "vllm.v1.kv_cache_interface",
     "vllm.v1.kv_cache_spec_registry",
+    "vllm.v1.metrics",
+    "vllm.v1.metrics.utils",
     "vllm.v1.outputs",
     "vllm.v1.request",
     "vllm.v1.serial_utils",
@@ -119,6 +134,63 @@ _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
 _base_mod.SupportsHMA = type("SupportsHMA", (), {})  # type: ignore[attr-defined]
+
+# ---------------------------------------------------------------------------
+# Mock vllm.distributed.kv_transfer.kv_connector.v1.metrics with real classes
+# so that ascend_store.metrics can subclass them under the mock environment.
+# ---------------------------------------------------------------------------
+from dataclasses import dataclass, field  # noqa: E402
+from typing import TypeVar  # noqa: E402
+
+
+@dataclass
+class _MockKVConnectorStats:
+    data: dict = field(default_factory=dict)
+
+
+class _MockKVConnectorPromMetrics:
+    def __init__(
+        self,
+        vllm_config,
+        metric_types,
+        labelnames,
+        per_engine_labelvalues,
+    ):
+        self._kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self._labelnames = labelnames
+        self.per_engine_labelvalues = per_engine_labelvalues
+        # The real framework builds metric_types as
+        # {Gauge: g, Counter: c, Histogram: h} (insertion order), so the
+        # positional lookup below matches the real keyed lookup.
+        values = (
+            list(metric_types.values())
+            if isinstance(metric_types, dict)
+            else [
+                metric_types,
+                metric_types,
+                metric_types,
+            ]
+        )
+        self._gauge_cls = values[0]
+        self._counter_cls = values[1]
+        self._histogram_cls = values[2]
+
+
+_MockPromMetric = type("PromMetric", (), {})
+_MockPromMetricT = TypeVar("_MockPromMetricT")
+
+_metrics_mod: Any = (
+    sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.metrics"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+)
+_metrics_mod.KVConnectorStats = _MockKVConnectorStats
+_metrics_mod.KVConnectorPromMetrics = _MockKVConnectorPromMetrics
+_metrics_mod.PromMetric = _MockPromMetric
+_metrics_mod.PromMetricT = _MockPromMetricT
+
+_metrics_utils_mod: Any = sys.modules["vllm.v1.metrics.utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+_metrics_utils_mod.create_metric_per_engine = lambda metric, per_engine_labelvalues: {
+    idx: metric.labels(*labelvalues) for idx, labelvalues in per_engine_labelvalues.items()
+}
 
 _events_mod: Any = sys.modules["vllm.distributed.kv_events"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]

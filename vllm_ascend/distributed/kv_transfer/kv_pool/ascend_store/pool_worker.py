@@ -76,6 +76,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_tp_mismatch_info,
     uses_hybrid_kv_cache,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -91,6 +94,27 @@ LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
 MEMCACHE_UNMATCHED_STATE = -3101
 PARTIAL_LEASE_RETRY_COUNT = 10
 PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
+
+
+class _TimedLayerLoadEvent(threading.Event):
+    """Layer-load finished event that records when it was set.
+
+    The timestamp is written by the transfer thread right before the event
+    is set, i.e. the true completion time of that layer's pool load. The
+    layerwise load-duration metric uses it as the end time so the measured
+    span is not stretched by compute-side waits that return after the load
+    already finished. ``clear()`` intentionally keeps the last set time:
+    earlier layers are cleared while the last layer is still being waited
+    for, and the metric takes the max over all layers.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_time: float | None = None
+
+    def set(self) -> None:
+        self.set_time = time.perf_counter()
+        super().set()
 
 
 class KVPoolWorker:
@@ -124,6 +148,19 @@ class KVPoolWorker:
         self._init_kv_events(vllm_config)
         self._init_state_vars()
         self._init_layerwise_config()
+        self._init_kv_stats()
+
+    def _init_kv_stats(self) -> None:
+        # KV pool observability state. ``_load_start_times`` is also read and
+        # popped by the async recving thread; plain dict get/pop are
+        # GIL-atomic so no extra lock is needed for it.
+        self._kv_stats = AscendStoreKVConnectorStats()
+        self._kv_stats_lock = threading.Lock()
+        self._load_start_times: dict[str, float] = {}
+        self._layerwise_load_keys: dict[str, int] = {}
+        # Layerwise not-overlapped time: per-step sum of the compute thread's
+        # stalls while waiting for layer loads (wait() entry -> event set).
+        self._step_not_overlapped_s = 0.0
 
     def _init_parallelism_info(self, model_config, parallel_config) -> None:
         self.local_rank = envs.LOCAL_RANK
@@ -466,7 +503,7 @@ class KVPoolWorker:
 
         if self.use_layerwise:
             self.get_event = threading.Event()
-            self.layer_load_finished_events = [threading.Event() for i in range(self.num_layers)]
+            self.layer_load_finished_events = [_TimedLayerLoadEvent() for _ in range(self.num_layers)]
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
             can_save = self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
@@ -578,6 +615,7 @@ class KVPoolWorker:
                     ready_event,
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
+                    worker=self,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -828,12 +866,14 @@ class KVPoolWorker:
             # newly prepared loads/saves and leave a reused buffer stale.
             self.layer_save_tasks = [[] for _ in range(self.num_layers)]
             self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+            self._step_not_overlapped_s = 0.0
             reset_attention_compute_start_gate()
         logger.debug("KV pool worker start_load_kv requests=%d", len(metadata.requests))
         if len(metadata.requests) == 0:
             return
         if self.use_layerwise:
             self.process_layer_data(metadata.requests)
+            self._record_layerwise_load_started()
             return
         for request in metadata.requests:
             load_spec = request.load_spec
@@ -844,6 +884,7 @@ class KVPoolWorker:
                     "no_load_spec" if load_spec is None else f"can_load={load_spec.can_load}",
                 )
                 continue
+            self._record_load_started(request.req_id)
             request.skip_null_blocks_by_group = self.group_uses_align_state
             load_group_ids = request.kv_cache_group_ids or [0]
             token_len = request.token_len_chunk
@@ -914,6 +955,9 @@ class KVPoolWorker:
                     size_list.append(size)
                     block_id_list.append(block_id)
             if not key_list:
+                # Nothing to load from the pool for this request; drop the
+                # pending start time without recording a sample.
+                self._record_load_finished(request.req_id, 0)
                 continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
             addr_list_c = _circular_shift(addr_list, self.tp_rank % len(addr_list))
@@ -928,6 +972,13 @@ class KVPoolWorker:
                 key_list_c[:3],
             )
             ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            num_failed_keys = sum(1 for r in ret if r != 0) if ret is not None else len(key_list_c)
+            self._record_load_finished(
+                request.req_id,
+                len(key_list_c),
+                num_failed_keys=num_failed_keys,
+                path="sync",
+            )
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
@@ -965,6 +1016,108 @@ class KVPoolWorker:
                 load_group_ids,
                 len(key_list_c),
             )
+
+    def _record_load_started(self, req_id: str) -> None:
+        self._load_start_times[req_id] = time.perf_counter()
+
+    def _record_load_finished(
+        self,
+        req_id: str,
+        num_keys: int,
+        num_failed_keys: int = 0,
+        path: str = "sync",
+    ) -> None:
+        start_time = self._load_start_times.pop(req_id, None)
+        if start_time is None or num_keys <= 0:
+            return
+        with self._kv_stats_lock:
+            self._kv_stats.record_load(
+                time.perf_counter() - start_time,
+                num_keys,
+                num_failed_keys=num_failed_keys,
+                path=path,
+            )
+
+    def _record_layerwise_load_started(self) -> None:
+        # Layerwise loads a request's blocks once per layer, so the recorded
+        # key count is the number of per-layer block transfers.
+        start_time = time.perf_counter()
+        for layer_tasks in self.layer_load_tasks:
+            for task in layer_tasks:
+                for block_range in task.block_ranges:
+                    req_id = block_range.request.req_id
+                    num_blocks = (block_range.end_block - block_range.start_block) + (
+                        1 if block_range.partial_block_index is not None else 0
+                    )
+                    if req_id in self._load_start_times:
+                        self._layerwise_load_keys[req_id] += num_blocks
+                    else:
+                        self._load_start_times[req_id] = start_time
+                        self._layerwise_load_keys[req_id] = num_blocks
+
+    def _latest_layer_load_finish_time(self) -> float | None:
+        """Latest layer-load completion timestamp set by the transfer threads.
+
+        Returns None when no layer recorded a completion time (e.g. plain
+        Events in tests, or the timed events never being set this step).
+        """
+        events = self.layer_load_finished_events or []
+        times = [
+            event.set_time for event in events if isinstance(event, _TimedLayerLoadEvent) and event.set_time is not None
+        ]
+        return max(times) if times else None
+
+    def _accumulate_layer_stall(self, layer_id: int, wait_enter: float) -> None:
+        """Accumulate the compute thread's stall for one layer's load.
+
+        The stall is the time the compute thread spent blocked in
+        ``wait_for_layer_load`` before the transfer thread finished that
+        layer's load. A layer whose event was already set when the wait
+        entered contributes zero (the load was fully overlapped). Plain
+        Events without ``set_time`` (tests) contribute nothing.
+        """
+        event = self.layer_load_finished_events[layer_id] if self.layer_load_finished_events else None
+        set_time = getattr(event, "set_time", None) if event is not None else None
+        if set_time is not None:
+            self._step_not_overlapped_s += max(0.0, set_time - wait_enter)
+
+    def _record_layerwise_load_finished(self) -> None:
+        # Called after the last layer's load has been waited for: all
+        # requests of this step finish together. The end time is the latest
+        # transfer-thread completion timestamp (event set time), not the
+        # compute-side wait return time, so the duration is not stretched
+        # when compute keeps running after the loads already finished.
+        if not self._load_start_times:
+            return
+        end_time = self._latest_layer_load_finish_time()
+        if end_time is None or end_time < min(self._load_start_times.values()):
+            # No usable event timestamps for this step; fall back to now.
+            end_time = time.perf_counter()
+        not_overlapped_s = self._step_not_overlapped_s
+        for req_id, num_keys in self._layerwise_load_keys.items():
+            start_time = self._load_start_times.pop(req_id, None)
+            if start_time is None or num_keys <= 0:
+                continue
+            with self._kv_stats_lock:
+                self._kv_stats.record_load(
+                    end_time - start_time,
+                    num_keys,
+                    not_overlapped_seconds=not_overlapped_s,
+                    path="layerwise",
+                )
+        self._layerwise_load_keys.clear()
+        # Drain leftovers (e.g. requests preempted mid-layerwise) so the
+        # next step starts from a clean slate.
+        self._load_start_times.clear()
+
+    def get_stats(self) -> AscendStoreKVConnectorStats | None:
+        """Return KV pool stats collected since the last call, or None."""
+        with self._kv_stats_lock:
+            if self._kv_stats.is_empty():
+                return None
+            stats = self._kv_stats
+            self._kv_stats = AscendStoreKVConnectorStats()
+            return stats
 
     def _process_save_for_layer_batch(
         self,
@@ -1653,15 +1806,22 @@ class KVPoolWorker:
         reset_attention_compute_start_gate()
         self._submit_ready_layer_loads()
         should_wait = bool(self.layer_load_tasks[self.current_layer]) or self.current_layer in self.prefetch_layer_map
+        is_last_layer = self.current_layer == self.num_layers - 1
         if not should_wait:
             self.layer_load_finished_events[self.current_layer].clear()
             if self.external_slot_release_waiter is not None:
                 self.external_slot_release_waiter(self.current_layer)
+            if is_last_layer:
+                self._record_layerwise_load_finished()
             return
+        wait_enter = time.perf_counter()
         while not self.layer_load_finished_events[self.current_layer].wait(timeout=10):
             self.kv_recv_thread.raise_if_failed()
             logger.info("Layerwise %d load not done, keep waiting", self.current_layer)
+        self._accumulate_layer_stall(self.current_layer, wait_enter)
         self.layer_load_finished_events[self.current_layer].clear()
+        if is_last_layer:
+            self._record_layerwise_load_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         with self._invalid_block_ids_lock:
@@ -1929,12 +2089,12 @@ class KVPoolWorker:
         block_ids: list[int],
         token_len: int,
         mask_num: int,
-    ) -> None:
+    ) -> tuple[int, int]:
         keys, addrs, sizes, key_block_ids = self._build_tp_mismatch_keys_and_addrs(
             block_hashes, block_ids, token_len, mask_num
         )
         if not keys:
-            return
+            return 0, 0
         offset = self.tp_rank % len(keys)
         keys_c = keys[offset:] + keys[:offset]
         addrs_c = addrs[offset:] + addrs[:offset]
@@ -1946,6 +2106,7 @@ class KVPoolWorker:
             keys_c[:3],
         )
         ret = self.m_store.get(keys_c, addrs_c, sizes_c)
+        num_failed_keys = sum(1 for r in ret if r != 0) if ret is not None else len(keys_c)
         if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(block_ids_c, ret)
             with self._invalid_block_ids_lock:
@@ -1958,6 +2119,7 @@ class KVPoolWorker:
             "KV pool worker tp_mismatch get returned keys=%d",
             len(keys_c),
         )
+        return len(keys_c), num_failed_keys
 
     def _store_kv_tp_mismatch(self, req_meta: ReqMeta) -> None:
         send_thread = self.kv_send_thread
@@ -2045,6 +2207,10 @@ class KVPoolWorker:
             self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
             if self.load_async:
                 done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
+
+        # Drop pending load timers for preempted requests to avoid leaks.
+        for req_id in meta.preempted_req_ids:
+            self._load_start_times.pop(req_id, None)
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive requests: %d, tp_rank:%d",
