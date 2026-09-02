@@ -72,7 +72,7 @@ def test_layerwise_reuse_completion_is_wired_and_provider_hooks_run_first():
         is_producer=True,
         connector_worker=object(),
         supports_layerwise_buffer_reuse=True,
-        wait_for_layer_reuse=MagicMock(),
+        wait_for_slot_release=MagicMock(),
         wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("pd-load")),
         save_kv_layer=MagicMock(side_effect=lambda *_args, **_kwargs: call_order.append("pd-save")),
         on_kv_cache_written=MagicMock(side_effect=lambda *_: call_order.append("pd-written")),
@@ -91,28 +91,28 @@ def test_layerwise_reuse_completion_is_wired_and_provider_hooks_run_first():
 
     waiter = store.set_external_slot_release_waiter.call_args.args[0]
     waiter(7)
-    provider.wait_for_layer_reuse.assert_called_once_with(7)
+    provider.wait_for_slot_release.assert_called_once_with(7)
 
     connector.wait_for_layer_load("model.layers.7.self_attn")
     connector.save_kv_layer("model.layers.7.self_attn", object(), object())
     connector.on_kv_cache_written("model.layers.7.self_attn")
     assert call_order == [
         "store-load",
+        "pd-load",
         "pd-save",
         "store-save",
         "pd-written",
         "store-written",
     ]
-    provider.wait_for_layer_load.assert_not_called()
 
 
-def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
+def test_layerwise_reuse_without_sink_does_not_invoke_slot_release_callback():
     call_order = []
     provider = SimpleNamespace(
         is_producer=True,
         connector_worker=object(),
         supports_layerwise_buffer_reuse=True,
-        wait_for_layer_reuse=MagicMock(),
+        wait_for_slot_release=MagicMock(),
         wait_for_layer_load=MagicMock(side_effect=lambda *_: call_order.append("provider")),
     )
     sibling = SimpleNamespace(
@@ -124,4 +124,5 @@ def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     connector._configure_layerwise_reuse_completion()
     connector.wait_for_layer_load("model.layers.7.self_attn")
 
-    assert call_order == ["provider", "sibling"]
+    assert call_order == ["sibling", "provider"]
+    provider.wait_for_slot_release.assert_not_called()

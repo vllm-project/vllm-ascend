@@ -155,7 +155,7 @@ TP and divisible by it.
 
 Add the following options to the Prefill launch command. `MultiConnector` lets
 `AscendStoreConnector` offload layer buffers to Memcache while
-`SfaRemoteD2HConnector` exposes the same buffers to Decode:
+`LayerwisePullConnector` exposes the same buffers to Decode:
 
 ```bash
 --enforce-eager \
@@ -165,7 +165,7 @@ Add the following options to the Prefill launch command. `MultiConnector` lets
     "kv_connector_extra_config": {
         "connectors": [
             {
-                "kv_connector": "SfaRemoteD2HConnector",
+                "kv_connector": "LayerwisePullConnector",
                 "kv_role": "kv_producer",
                 "kv_connector_extra_config": {
                     "transfer_backend": "memfabric"
@@ -219,7 +219,7 @@ Add the following options to the Decode launch command:
     }
 }' \
 --kv-transfer-config '{
-    "kv_connector": "SfaRemoteD2HConnector",
+    "kv_connector": "LayerwisePullConnector",
     "kv_role": "kv_consumer",
     "kv_port": 20050,
     "kv_connector_extra_config": {
@@ -262,7 +262,5 @@ For multi-node deployment, advertise reachable addresses instead of
 - Shared-buffer Layerwise Prefill Offload requires Memcache and eager mode.
 - Context parallelism has not been validated with Layerwise Prefill Offload.
 - Sparse Decode Offload supports DP and TP; CP and PP are not supported.
-- MemFabric is the only supported `SfaRemoteD2HConnector` transfer backend.
-- Layerwise buffer reuse cannot currently be combined with
-  `MooncakeLayerwiseConnector` because per-buffer transfer completion gating is
-  not yet implemented. Support is planned in a follow-up update.
+- `LayerwisePullConnector` supports `memfabric` and `mooncake` through
+  `kv_connector_extra_config.transfer_backend`.

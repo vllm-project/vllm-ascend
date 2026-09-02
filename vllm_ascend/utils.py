@@ -1274,28 +1274,31 @@ def is_gqa_backend(vllm_config: VllmConfig) -> bool:
 
 def uses_mooncake_connector(kv_transfer_config: Any) -> bool:
     mooncake_connector_names = {"MooncakeConnector", "MooncakeConnectorV1"}
-    return bool(_collect_kv_connector_names(kv_transfer_config) & mooncake_connector_names)
+    pending = [kv_transfer_config]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            connector = value.get("kv_connector")
+            extra_config = value.get("kv_connector_extra_config") or {}
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+            continue
+        else:
+            connector = getattr(value, "kv_connector", None)
+            extra_config = getattr(value, "kv_connector_extra_config", None) or {}
+            if isinstance(extra_config, (dict, list, tuple)):
+                pending.append(extra_config)
 
-
-def _collect_kv_connector_names(value: Any) -> set[str]:
-    connector_names: set[str] = set()
-    if isinstance(value, dict):
-        connector = value.get("kv_connector")
-        if isinstance(connector, str):
-            connector_names.add(connector)
-        for nested_value in value.values():
-            connector_names.update(_collect_kv_connector_names(nested_value))
-    elif isinstance(value, (list, tuple)):
-        for nested_value in value:
-            connector_names.update(_collect_kv_connector_names(nested_value))
-    else:
-        connector = getattr(value, "kv_connector", None)
-        if isinstance(connector, str):
-            connector_names.add(connector)
-        extra_config = getattr(value, "kv_connector_extra_config", None)
-        if isinstance(extra_config, (dict, list, tuple)):
-            connector_names.update(_collect_kv_connector_names(extra_config))
-    return connector_names
+        if connector in mooncake_connector_names:
+            return True
+        if (
+            connector == "LayerwisePullConnector"
+            and isinstance(extra_config, dict)
+            and str(extra_config.get("transfer_backend", "")).lower() == "mooncake"
+        ):
+            return True
+    return False
 
 
 def singleton(cls):

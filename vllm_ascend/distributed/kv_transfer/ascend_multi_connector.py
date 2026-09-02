@@ -29,14 +29,16 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         self._configure_layerwise_reuse_completion()
 
     def _configure_layerwise_reuse_completion(self) -> None:
-        # Producers that report when a shared physical KV slot is safe to reuse.
+        # Producers that can wait until a shared physical KV slot is safe to
+        # overwrite. AscendStore invokes the composite callback immediately
+        # before it reuses that slot.
         self._layerwise_slot_release_providers = [
             connector
             for connector in self._connectors
             if getattr(connector, "is_producer", False)
             and getattr(connector, "connector_worker", None) is not None
             and getattr(connector, "supports_layerwise_buffer_reuse", False)
-            and callable(getattr(connector, "wait_for_layer_reuse", None))
+            and callable(getattr(connector, "wait_for_slot_release", None))
         ]
         # All remaining connectors, which run after the slot-release providers.
         self._non_slot_release_connectors = [
@@ -44,29 +46,16 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             for connector in self._connectors
             if all(connector is not provider for provider in self._layerwise_slot_release_providers)
         ]
-        self._external_slot_release_sink_configured = False
         if not self._layerwise_slot_release_providers:
             return
         for connector in self._connectors:
             set_waiter = getattr(connector, "set_external_slot_release_waiter", None)
-            if callable(set_waiter) and set_waiter(self._wait_for_external_slot_release) is not False:
-                self._external_slot_release_sink_configured = True
+            if callable(set_waiter):
+                set_waiter(self._wait_for_external_slot_release)
 
     def _wait_for_external_slot_release(self, layer_idx: int) -> None:
         for provider in self._layerwise_slot_release_providers:
-            provider.wait_for_layer_reuse(layer_idx)
-
-    def wait_for_layer_load(self, layer_name: str) -> None:
-        if getattr(self, "_external_slot_release_sink_configured", False):
-            # AscendStore owns the layer-entry reuse wait after accepting the
-            # composite waiter, so provider layer-entry waits are redundant.
-            connectors = self._non_slot_release_connectors
-        else:
-            # Without a sink, preserve the original protection by waiting on
-            # providers before any sibling connector can write shared slots.
-            connectors = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
-        for connector in connectors:
-            connector.wait_for_layer_load(layer_name)
+            provider.wait_for_slot_release(layer_idx)
 
     def save_kv_layer(
         self,

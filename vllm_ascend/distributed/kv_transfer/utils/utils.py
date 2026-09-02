@@ -251,7 +251,7 @@ def get_local_remote_block_port_mappings(
                 logger.info("Warning: Head %s exists in P but not in D mapping.", head)
         pd_head_mapping[p_rank] = sorted(list(target_d_ranks))
     logger.debug(
-        "MooncakeLayerwiseConnector _get_kv_split_metadata req_id=%r "
+        "Layerwise transfer _get_kv_split_metadata req_id=%r "
         "P-side logic_block to rank mapping: %s, "
         "D-side logic_block to rank mapping: %s, "
         "P&D head_group_rank mapping: %s",
@@ -302,7 +302,7 @@ def get_transfer_mappings(
             transfer_mappings[(remote_host, remote_port)]["remote_block_ids"].append(d_block_id)
     for (host, port), block_dict in transfer_mappings.items():
         block_dict["trans_count"] = d_trans_count_mapping[(host, port)]
-    logger.debug("MooncakeLayerwiseConnector Request %s transfer tasks: %s", req_id, transfer_mappings)
+    logger.debug("Layerwise transfer request %s tasks: %s", req_id, transfer_mappings)
     return transfer_mappings
 
 

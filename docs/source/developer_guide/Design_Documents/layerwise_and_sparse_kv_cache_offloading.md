@@ -67,7 +67,7 @@ flowchart LR
 ```
 
 `AscendStoreConnector` manages Layerwise Prefill Offload through Memcache.
-`SfaRemoteD2HConnector` exposes Prefill NPU buffers and lets Decode pull main KV
+`LayerwisePullConnector` exposes Prefill NPU buffers and lets Decode pull main KV
 into Decode-owned host memory and indexer data into rank-local NPU memory
 through MemFabric. Optional LIC8 scale data follows the indexer destination.
 
@@ -269,8 +269,6 @@ treated as a terminal state, so Prefill may continue waiting.
 - Sparse Decode Offload supports DP and TP; CP and PP are not supported.
 - Joint deployment requires Prefill TP to be greater than or equal to, and
   divisible by, Decode TP.
-- MemFabric is the only supported Remote D2H transfer backend.
-- Layerwise buffer reuse cannot currently be combined with
-  `MooncakeLayerwiseConnector` because it does not provide a per-buffer transfer
-  completion gate. Support is planned in a follow-up update.
+- `LayerwisePullConnector` supports MemFabric and Mooncake with the same
+  per-buffer completion gate.
 - Connector-level data-read retry is not implemented.

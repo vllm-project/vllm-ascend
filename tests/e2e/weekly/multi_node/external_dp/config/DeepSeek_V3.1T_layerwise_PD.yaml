@@ -116,7 +116,7 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "LayerwisePullConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"transfer_backend": "mooncake","use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
   - node_index: 1
     envs:
@@ -157,7 +157,7 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "LayerwisePullConnector", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"transfer_backend": "mooncake","use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
   - node_index: 2
     envs:
@@ -200,7 +200,7 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "LayerwisePullConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"transfer_backend": "mooncake","prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
   - node_index: 3
     envs:
@@ -243,7 +243,7 @@ templates:
       - --additional-config
       - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
       - --kv-transfer-config
-      - '{"kv_connector": "MooncakeLayerwiseConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
+      - '{"kv_connector": "LayerwisePullConnector", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"transfer_backend": "mooncake","prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
 benchmarks:
   acc:

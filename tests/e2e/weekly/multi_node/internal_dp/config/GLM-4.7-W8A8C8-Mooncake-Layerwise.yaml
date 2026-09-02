@@ -39,10 +39,10 @@ deployment:
         --gpu-memory-utilization 0.9
         --additional-config '{"enable_shared_expert_dp": true}'
         --kv-transfer-config
-        '{"kv_connector": "MooncakeLayerwiseConnector",
+        '{"kv_connector": "LayerwisePullConnector",
         "kv_role": "kv_producer",
         "kv_port": "30000",
-        "kv_connector_extra_config": {
+        "kv_connector_extra_config": {"transfer_backend": "mooncake",
                   "prefill": {
                           "dp_size": 2,
                           "tp_size": 8
@@ -75,10 +75,10 @@ deployment:
         --gpu-memory-utilization 0.9
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
         --kv-transfer-config
-        '{"kv_connector": "MooncakeLayerwiseConnector",
+        '{"kv_connector": "LayerwisePullConnector",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "kv_connector_extra_config": {
+        "kv_connector_extra_config": {"transfer_backend": "mooncake",
                   "prefill": {
                           "dp_size": 2,
                           "tp_size": 8

@@ -1,14 +1,6 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-"""Scheduler side of the decode-offload SFA Remote D2H connector.
-
-D (``kv_consumer``): retain the normal vLLM main/indexer block ids allocated
-for the request. Main ids address SparseKVOffloadManager's CPU pool and indexer
-ids address rank-local HBM. The metaserver rendezvous carries only contact info
-and ``do_remote_decode``; D resolves its destinations by request id.
-
-P (``kv_producer``): build metadata for layer-wise READ_READY notifications.
-"""
+"""Scheduler side of the backend-independent layerwise pull connector."""
 
 from __future__ import annotations
 
@@ -25,12 +17,11 @@ from vllm.utils.math_utils import round_down
 from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.protocol import (
     BATCH_KV_TRANSFER_PARAMS,
-    SfaPDConsumerMetadata,
-    SfaPDProducerMetadata,
+    LayerwisePullConsumerMetadata,
+    LayerwisePullProducerMetadata,
     get_external_request_id,
-    infer_sfa_component_group_ids,
 )
 
 if TYPE_CHECKING:
@@ -66,20 +57,22 @@ class _SendReqInfo:
         self.local_transferred_tokens = transferred_tokens
 
 
-class SFAPDRD2HProducerScheduler:
-    """P-side scheduler for SFA PD (pull mode).
+class LayerwisePullProducerScheduler:
+    """P-side scheduler for layerwise pull.
 
     D's metaserver rendezvous carries ``do_remote_decode=True`` plus D's ZMQ
     endpoint. P tracks its own local block ids and emits per-step metadata for
     the pull-mode sending thread; D looks up its destination blocks by req_id.
     """
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, engine_id: str):
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None):
+        if kv_cache_config is None:
+            raise ValueError("LayerwisePullProducerScheduler requires KVCacheConfig")
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
-        self.engine_id = engine_id
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
         self._reqs_need_send_layerwise: dict[str, _SendReqInfo] = {}
+        self._reqs_finalized_layerwise: set[str] = set()
 
     @staticmethod
     def _normalize_block_ids(block_ids: Any) -> list[list[int]]:
@@ -109,7 +102,7 @@ class SFAPDRD2HProducerScheduler:
             external_request_id = get_external_request_id(request.request_id)
             params = batch_params.get(external_request_id)
             if params is None:
-                raise RuntimeError(f"SFA PD batch metadata does not contain request {external_request_id!r}")
+                raise RuntimeError(f"Layerwise pull batch metadata does not contain request {external_request_id!r}")
             # Each vLLM child request must retain only its own D-side endpoint
             # and cache state after a batched OpenAI completion is expanded.
             request.kv_transfer_params = params
@@ -125,7 +118,7 @@ class SFAPDRD2HProducerScheduler:
         self._reqs_need_send_layerwise[request.request_id] = send_req_info
 
         logger.debug(
-            "SFAPD P register remote-decode req %s: local_block_ids=%s, "
+            "Layerwise pull P registered req %s: local_block_ids=%s, "
             "remote_host=%s, remote_port=%s, remote_tp_size=%s, "
             "remote_cached_tokens=%s",
             request.request_id,
@@ -137,7 +130,9 @@ class SFAPDRD2HProducerScheduler:
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-        meta = SfaPDProducerMetadata()
+        meta = LayerwisePullProducerMetadata()
+        if not self._reqs_need_send_layerwise:
+            return meta
         cached_reqs = scheduler_output.scheduled_cached_reqs
         new_reqs = scheduler_output.scheduled_new_reqs
         scheduled_spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -147,15 +142,13 @@ class SFAPDRD2HProducerScheduler:
                 normalized = self._normalize_block_ids(new_blocks)
                 self._reqs_need_send_layerwise[req_id].extend_local_block_ids(normalized)
                 logger.debug(
-                    "SFAPD P extend remote-decode req %s: new_blocks=%s",
+                    "Layerwise pull P extended req %s: new_blocks=%s",
                     req_id,
                     normalized,
                 )
 
-        computed_tokens = dict(
-            list(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
-            + [(req.req_id, req.num_computed_tokens) for req in new_reqs]
-        )
+        computed_tokens = dict(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
+        computed_tokens.update((req.req_id, req.num_computed_tokens) for req in new_reqs)
         min_block_size = min(self.block_size)
         for req_id, scheduled_tokens in scheduler_output.num_scheduled_tokens.items():
             send_req_info = self._reqs_need_send_layerwise.get(req_id)
@@ -170,19 +163,43 @@ class SFAPDRD2HProducerScheduler:
             request = send_req_info.request
             assert request.kv_transfer_params is not None
             chunk_finish = send_req_info.local_computed_tokens >= len(request.all_token_ids)
+            chunk_block_ids = []
+            chunk_start_blocks = []
+            transferred_tokens = max(
+                int(request.kv_transfer_params.get("remote_cached_tokens") or 0),
+                int(send_req_info.local_transferred_tokens or 0),
+                0,
+            )
+            chunk_computed_tokens = max(int(send_req_info.local_computed_tokens or 0), 0)
+            for group_idx, block_size in enumerate(self.block_size):
+                all_block_ids = (
+                    send_req_info.local_block_ids[group_idx] if group_idx < len(send_req_info.local_block_ids) else []
+                )
+                start_block = transferred_tokens // block_size
+                if chunk_finish:
+                    end_block = (chunk_computed_tokens + block_size - 1) // block_size
+                else:
+                    end_block = chunk_computed_tokens // block_size
+                if end_block > len(all_block_ids):
+                    raise RuntimeError(
+                        f"Layerwise pull chunk range exceeds allocation for group {group_idx}: "
+                        f"range=[{start_block}, {end_block}), allocated={len(all_block_ids)}"
+                    )
+                end_block = max(end_block, start_block)
+                chunk_block_ids.append(all_block_ids[start_block:end_block])
+                chunk_start_blocks.append(start_block)
             meta.add_new_req(
                 request_id=req_id,
-                local_block_ids=send_req_info.local_block_ids,
+                local_block_ids=chunk_block_ids,
                 kv_transfer_params=request.kv_transfer_params,
-                token_ids=[],
                 chunk_finish=chunk_finish,
                 remote_cache_tokens=request.kv_transfer_params.get("remote_cached_tokens"),
-                prompt_len=len(request.all_token_ids),
                 local_computed_tokens=send_req_info.local_computed_tokens,
                 local_transed_tokens=send_req_info.local_transferred_tokens,
+                chunk_start_blocks=chunk_start_blocks,
             )
             logger.debug(
-                "SFAPD P add transfer task req %s: local_block_ids=%s, "
+                "Layerwise pull P added transfer task req %s: local_block_ids=%s, "
                 "local_transed_tokens=%s, local_computed_tokens=%s, "
                 "remote_cache_tokens=%s, prompt_len=%s, chunk_finish=%s, "
                 "remote_host=%s, remote_port=%s",
@@ -197,6 +214,7 @@ class SFAPDRD2HProducerScheduler:
                 request.kv_transfer_params.get("remote_port"),
             )
             if chunk_finish:
+                self._reqs_finalized_layerwise.add(req_id)
                 self._reqs_need_send_layerwise.pop(req_id)
         return meta
 
@@ -216,10 +234,21 @@ class SFAPDRD2HProducerScheduler:
         # build_connector_meta. Cancellation, preemption, and failures can
         # finish earlier, so clean it up here as well.
         self._reqs_need_send_layerwise.pop(request.request_id, None)
-        return False, None
+        final_chunk_dispatched = request.request_id in self._reqs_finalized_layerwise
+        self._reqs_finalized_layerwise.discard(request.request_id)
+        params = request.kv_transfer_params
+        delay_free_blocks = bool(
+            params and params.get("do_remote_decode") and final_chunk_dispatched and any(block_ids)
+        )
+        if delay_free_blocks:
+            logger.debug(
+                "Layerwise pull delaying source block free for request %s until Decode finishes pulling",
+                request.request_id,
+            )
+        return delay_free_blocks, None
 
 
-class SFAPDRD2HScheduler:
+class LayerwisePullConsumerScheduler:
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -229,15 +258,12 @@ class SFAPDRD2HScheduler:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.use_layerwise = use_layerwise
-        self.engine_id = vllm_config.kv_transfer_config.engine_id
-
         if kv_cache_config is None:
-            raise ValueError("SFAPDRD2HScheduler requires KVCacheConfig")
+            raise ValueError("LayerwisePullConsumerScheduler requires KVCacheConfig")
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
-        self.main_group_idx, self.indexer_group_idx = infer_sfa_component_group_ids(kv_cache_config)
 
         self.side_channel_host = get_ip()
-        # Control-plane port = kv_port + data_parallel_rank * tp_size. This MUST
+        # Reserve one PP*TP port range per global DP rank. This MUST
         # use the GLOBAL data_parallel_rank (unique across every D engine that
         # may share a host), never data_parallel_rank_local (per-host, SPMD-only):
         # the local rank restarts at 0 on each host, so single-host multi-DP
@@ -245,33 +271,35 @@ class SFAPDRD2HScheduler:
         # single-host and multi-host DP get disjoint port ranges.
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port
-            + vllm_config.parallel_config.data_parallel_rank * vllm_config.parallel_config.tensor_parallel_size
+            + vllm_config.parallel_config.data_parallel_rank
+            * vllm_config.parallel_config.pipeline_parallel_size
+            * vllm_config.parallel_config.tensor_parallel_size
         )
         # Surface the DP topology behind the port so single-host / multi-host DP
         # deployments can be verified against the formula above.
         pc = vllm_config.parallel_config
         logger.info(
-            "SFAPDRD2H D DP topology: host=%s, kv_port=%d, data_parallel_rank=%d "
-            "(local=%s), data_parallel_size=%d (local=%s), tp_size=%d, "
-            "TP control-plane ports=[%d..%d]",
+            "Layerwise pull D topology: host=%s, kv_port=%d, data_parallel_rank=%d "
+            "(local=%s), data_parallel_size=%d (local=%s), pp_size=%d, tp_size=%d, "
+            "PP/TP control-plane ports=[%d..%d]",
             self.side_channel_host,
             vllm_config.kv_transfer_config.kv_port,
             pc.data_parallel_rank,
             getattr(pc, "data_parallel_rank_local", None),
             pc.data_parallel_size,
             getattr(pc, "data_parallel_size_local", None),
+            pc.pipeline_parallel_size,
             pc.tensor_parallel_size,
             self.side_channel_port,
-            self.side_channel_port + pc.tensor_parallel_size - 1,
+            self.side_channel_port + pc.pipeline_parallel_size * pc.tensor_parallel_size - 1,
         )
 
-        # req_id -> (main_block_ids, indexer_block_ids): the per-request
-        # destination blocks this D node pulls remote KV into. main_block_ids
-        # index SparseKVOffloadManager's CPU pool; indexer_block_ids index
-        # rank-local HBM. Both are vLLM-managed block ids captured at alloc
-        # time, forwarded to the worker via build_connector_meta, and dropped
-        # when the request finishes (vLLM owns the blocks themselves).
-        self._request_trackers: dict[str, tuple[list[int], list[int]]] = {}
+        # Per-request destination block ids for every vLLM KV cache group.
+        # The worker maps components to groups from ComponentLayout metadata;
+        # the scheduler does not need to know component names or memory types.
+        self._request_trackers: dict[str, list[list[int]]] = {}
+        # The scheduler writes request.num_computed_tokens only after allocation.
+        self._local_cached_tokens: dict[str, int] = {}
         # req_ids awaiting their first build_connector_meta seed (so the worker
         # can build request_map for get_finished even while async-waiting KV).
         self._reqs_need_recv: set[str] = set()
@@ -286,11 +314,12 @@ class SFAPDRD2HScheduler:
     # D side (kv_consumer)
     # ------------------------------------------------------------------
     def get_num_new_matched_tokens(self, request: Request, num_computed_tokens: int) -> tuple[int, bool]:
-        # Pull the entire prompt KV from the remote P node into D's CPU pool
-        # (main MLA) / HBM (indexer). Async relative to engine execution.
+        # Pull the uncached prompt KV from the remote P node. The worker decides
+        # where each component lands from the local layout adapter.
         params = request.kv_transfer_params
         if params is not None and params.get("do_remote_prefill"):
             assert num_computed_tokens % min(self.block_size) == 0
+            self._local_cached_tokens[request.request_id] = num_computed_tokens
             count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
             return count, count > 0
         return 0, False
@@ -305,35 +334,30 @@ class SFAPDRD2HScheduler:
         if params is None or not params.get("do_remote_prefill"):
             return
 
-        block_ids_by_group = SFAPDRD2HProducerScheduler._normalize_block_ids(blocks.get_block_ids())
-        required_group = max(self.main_group_idx, self.indexer_group_idx)
-        if len(block_ids_by_group) <= required_group:
+        block_ids_by_group = LayerwisePullProducerScheduler._normalize_block_ids(blocks.get_block_ids())
+        expected_groups = len(self.kv_cache_config.kv_cache_groups)
+        if len(block_ids_by_group) != expected_groups:
             raise RuntimeError(
-                "SFAPD D allocation did not provide all SFA KV cache groups: "
-                f"required={required_group + 1}, got={len(block_ids_by_group)}"
+                "Layerwise pull D allocation did not provide all KV cache groups: "
+                f"expected={expected_groups}, got={len(block_ids_by_group)}"
             )
-        main_block_ids = list(block_ids_by_group[self.main_group_idx])
-        indexer_block_ids = list(block_ids_by_group[self.indexer_group_idx])
-        self._request_trackers[request.request_id] = (main_block_ids, indexer_block_ids)
+        self._request_trackers[request.request_id] = block_ids_by_group
         self._reqs_need_recv.add(request.request_id)
 
         # Notify P via the metaserver rendezvous that D is ready to pull this
         # request. D does NOT send its block ids to P — D keeps them (passed to
         # the D worker via connector_meta) and looks
-        # them up by req_id when P's READ_READY arrives. Only contact info +
-        # the do_remote_decode "go" flag go to P. (Sending block ids to P was a
-        # push-model leftover; in pull mode P only needs P's own source blocks.)
+        # them up by req_id when P's READ_READY arrives. Only contact info and
+        # the do_remote_decode flag go to P.
         kv_transfer_params = dict(
             request_id=get_external_request_id(request.request_id),
             do_remote_prefill=False,
             do_remote_decode=True,
-            remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             remote_tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
-            remote_pcp_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
-            remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
-            remote_cached_tokens=request.num_computed_tokens,
+            remote_pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
+            remote_cached_tokens=self._local_cached_tokens.pop(request.request_id),
         )
         # Allocation is complete once the rendezvous request is submitted.
         # Keep the vLLM remote-prefill state independent of the legacy proxy's
@@ -350,24 +374,21 @@ class SFAPDRD2HScheduler:
                 message=kv_transfer_params,
             )
         logger.debug(
-            "SFAPDRD2H D advertised req %s: indexer_hbm_ids=%s, "
-            "main_cpu_ids=%s, remote_host=%s, remote_port=%s, metaserver=%s",
+            "Layerwise pull D advertised req %s: block_ids=%s, remote_host=%s, remote_port=%s, metaserver=%s",
             request.request_id,
-            indexer_block_ids,
-            main_block_ids,
+            block_ids_by_group,
             self.side_channel_host,
             self.side_channel_port,
             metaserver,
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
-        meta = SfaPDConsumerMetadata()
+        meta = LayerwisePullConsumerMetadata()
         for req_id in list(self._reqs_need_recv):
             tracker = self._request_trackers.get(req_id)
             if tracker is None:
                 continue
-            main_block_ids, indexer_block_ids = tracker
-            meta.add_request(req_id, main_block_ids, indexer_block_ids)
+            meta.add_request(req_id, tracker)
         self._reqs_need_recv.clear()
         return meta
 
@@ -381,6 +402,7 @@ class SFAPDRD2HScheduler:
     ) -> tuple[bool, dict[str, Any] | None]:
         # vLLM owns the block lifecycle; the connector only drops its lookup.
         self._request_trackers.pop(request.request_id, None)
+        self._local_cached_tokens.pop(request.request_id, None)
         self._reqs_need_recv.discard(request.request_id)
         with self._metaserver_lock:
             self._cancelled_metaserver_requests.add(request.request_id)

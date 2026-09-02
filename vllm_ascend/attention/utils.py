@@ -501,6 +501,7 @@ def maybe_save_kv_layer_to_connector(
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
+# TODO(lf): Move save_kv_layer to the KV-write point and remove this hook.
 def notify_kv_cache_written(layer_name: str = ""):
     """Notify the connector that the paged KV cache for ``layer_name`` has been
     written for the current step.

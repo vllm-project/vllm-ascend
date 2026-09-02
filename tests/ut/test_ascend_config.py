@@ -338,18 +338,18 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_allows_layerwise_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
+    def test_init_ascend_config_rejects_layerwise_mooncake_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="MooncakeLayerwiseConnector",
+            kv_connector="LayerwisePullConnector",
             kv_role="kv_consumer",
+            kv_connector_extra_config={"transfer_backend": "mooncake"},
         )
         test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
         test_vllm_config.model_config = self._make_model_config()
 
-        ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertIsNotNone(ascend_config)
+        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
+            init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

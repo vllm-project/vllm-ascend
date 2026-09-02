@@ -487,10 +487,10 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --gpu-memory-utilization 0.9 \
   --enforce-eager \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
+  '{"kv_connector": "LayerwisePullConnector",
     "kv_role": "kv_producer",
     "kv_port": "23010",
-    "kv_connector_extra_config": {
+    "kv_connector_extra_config": {"transfer_backend": "mooncake",
       "prefill": {
         "dp_size": 1,
         "tp_size": 16
@@ -563,11 +563,11 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --gpu-memory-utilization 0.96 \
   --kv-transfer-config \
-  '{"kv_connector": "MooncakeLayerwiseConnector",
+  '{"kv_connector": "LayerwisePullConnector",
     "kv_buffer_device": "npu",
     "kv_role": "kv_consumer",
     "kv_port": "36010",
-    "kv_connector_extra_config": {
+    "kv_connector_extra_config": {"transfer_backend": "mooncake",
       "prefill": {
         "dp_size": 1,
         "tp_size": 16

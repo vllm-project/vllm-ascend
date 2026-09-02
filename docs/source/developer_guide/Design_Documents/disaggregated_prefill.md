@@ -17,7 +17,7 @@ This feature addresses the need to optimize the **Time Per Output Token (TPOT)**
 vLLM Ascend currently supports two types of connectors for handling KV cache management:  
 
 - **MooncakeConnector**: D nodes pull KV cache from P nodes.
-- **MooncakeLayerwiseConnector**: P nodes push KV cache to D nodes in a layered manner.  
+- **LayerwisePullConnector**: D nodes pull KV cache after each P layer becomes ready.
 
 For step-by-step deployment and configuration, refer to the following guide:  
 [PD disaggregation multi-node deployment guide](https://docs.vllm.ai/projects/ascend/en/latest/tutorials/features/pd_disaggregation_mooncake_multi_node.html)
@@ -44,13 +44,13 @@ Our design diagram is shown below, illustrating the pull and push schemes respec
 4. The Proxy calls `select_decoder` to choose a D node and forwards the request.
 5. On the D node, the scheduler marks the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, calls `kv_connector_no_forward` to pull the remote KV cache, then notifies the P node to release KV cache and proceeds with decoding to return the result.
 
-#### Mooncake Layerwise Connector
+#### Layerwise Pull Connector (Mooncake Backend)
 
 1. The request is sent to the Proxy's `_handle_completions` endpoint.
 2. The Proxy calls `select_decoder` to choose a D node and forwards the request, configuring `kv_transfer_params` with `do_remote_prefill=True` and setting the `metaserver` endpoint.
 3. On the D node, the scheduler uses `kv_transfer_params` to mark the request as `RequestStatus.WAITING_FOR_REMOTE_KVS`, pre-allocates KV cache, then calls `kv_connector_no_forward` to send a request to the metaserver and waits for the KV cache transfer to complete.
 4. The Proxy's `metaserver` endpoint receives the request, calls `select_prefiller` to choose a P node, and forwards it with `kv_transfer_params` set to `do_remote_decode=True`, `max_completion_tokens=1`, and `min_tokens=1`.
-5. During processing, the P node's scheduler pushes KV cache layer-wise; once all layers pushing is complete, it releases the request and notifies the D node to begin decoding.
+5. During processing, P publishes each ready layer and D pulls it through Mooncake. After all required layers arrive, D begins decoding.
 6. The D node performs decoding and returns the result.
 
 ### 3. Interface Design

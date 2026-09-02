@@ -300,10 +300,10 @@ Modify `run_dp_template.sh` on each node.
       --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
       --additional-config '{"enable_shared_expert_dp": true}' \
       --kv-transfer-config \
-      '{"kv_connector": "MooncakeLayerwiseConnector",
+      '{"kv_connector": "LayerwisePullConnector",
       "kv_role": "kv_producer",
       "kv_port": "36000",
-      "kv_connector_extra_config": {
+      "kv_connector_extra_config": {"transfer_backend": "mooncake",
                 "prefill": {
                         "dp_size": 2,
                         "tp_size": 8
@@ -355,10 +355,10 @@ Modify `run_dp_template.sh` on each node.
       --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
       --additional-config '{"enable_shared_expert_dp": true}' \
       --kv-transfer-config \
-      '{"kv_connector": "MooncakeLayerwiseConnector",
+      '{"kv_connector": "LayerwisePullConnector",
       "kv_role": "kv_producer",
       "kv_port": "36100",
-      "kv_connector_extra_config": {
+      "kv_connector_extra_config": {"transfer_backend": "mooncake",
                 "prefill": {
                         "dp_size": 2,
                         "tp_size": 8
@@ -410,10 +410,10 @@ Modify `run_dp_template.sh` on each node.
       --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --kv-transfer-config \
-      '{"kv_connector": "MooncakeLayerwiseConnector",
+      '{"kv_connector": "LayerwisePullConnector",
       "kv_role": "kv_consumer",
       "kv_port": "36200",
-      "kv_connector_extra_config": {
+      "kv_connector_extra_config": {"transfer_backend": "mooncake",
                 "prefill": {
                         "dp_size": 2,
                         "tp_size": 8
@@ -465,10 +465,10 @@ Modify `run_dp_template.sh` on each node.
       --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
       --kv-transfer-config \
-      '{"kv_connector": "MooncakeLayerwiseConnector",
+      '{"kv_connector": "LayerwisePullConnector",
       "kv_role": "kv_consumer",
       "kv_port": "36200",
-      "kv_connector_extra_config": {
+      "kv_connector_extra_config": {"transfer_backend": "mooncake",
 
                 "prefill": {
                         "dp_size": 2,
@@ -723,7 +723,7 @@ Run a proxy server on the same node where your prefiller service instance is dep
 
 We provide two different proxy implementations with distinct request routing behaviors:
 
-- **`load_balance_proxy_layerwise_server_example.py`**: Requests are first routed to the D nodes, which then forward to the P nodes as needed.This proxy is designed for use with the MooncakeLayerwiseConnector.[load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
+- **`load_balance_proxy_layerwise_server_example.py`**: Requests are first routed to the D nodes, which then forward to the P nodes as needed.This proxy is designed for use with the LayerwisePullConnector.[load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py)
 
 - **`load_balance_proxy_server_example.py`**: Requests are first routed to the P nodes, which then forward to the D nodes for subsequent processing.This proxy is designed for use with the MooncakeConnector.[load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 

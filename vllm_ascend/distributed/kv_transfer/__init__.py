@@ -49,12 +49,6 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
-        "MooncakeLayerwiseConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector",
-        "MooncakeLayerwiseConnector",
-    )
-
-    KVConnectorFactory.register_connector(
         "UCMConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ucm_connector.connector",
         "UCMConnectorV1",
@@ -95,7 +89,7 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
-        "SfaRemoteD2HConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector",
-        "SfaRemoteD2HConnector",
+        "LayerwisePullConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.connector",
+        "LayerwisePullConnector",
     )

@@ -1,17 +1,9 @@
 # mypy: ignore-errors
 # SPDX-License-Identifier: Apache-2.0
-"""PD-disaggregated SFA Remote D2H KV-transfer connector.
-
-This connector is dedicated to decode offload. On the Decode node
-(``kv_consumer``), remote Prefill exposes its KV and Decode pulls the bulk MLA
-KV directly into a CPU pinned offload pool; the indexer KV lands in HBM. The
-CPU pool and sparse resident-cache load path are owned by
-:class:`SparseKVOffloadManager`.
-"""
+"""Backend-independent layerwise pull KV-transfer connector."""
 
 from typing import TYPE_CHECKING, Any
 
-import regex as re
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -24,13 +16,13 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (
-    SFAPDRD2HProducerScheduler,
-    SFAPDRD2HScheduler,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.scheduler import (
+    LayerwisePullConsumerScheduler,
+    LayerwisePullProducerScheduler,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (
-    SFAPDRD2HConsumerWorker,
-    SFAPDRD2HProducerWorker,
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.worker import (
+    LayerwisePullConsumerWorker,
+    LayerwisePullProducerWorker,
 )
 
 if TYPE_CHECKING:
@@ -38,17 +30,17 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.request import Request
 
-_LAYER_IDX_RE = re.compile(r"layers\.(\d+)")
 
+class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
+    """Let Decode pull ready layer buffers exposed by Prefill.
 
-class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
-    """Decode-offload Remote D2H connector branching on role and KV role.
-
-    * SCHEDULER + producer : P-side metadata for memfabric pull notifications.
-    * SCHEDULER + consumer : D-side vLLM block-id / advertisement tracking.
+    * SCHEDULER + producer : P-side request/block metadata.
+    * SCHEDULER + consumer : D-side destination block tracking.
     * WORKER + producer    : P-side layer-wise READ_READY notifications.
-    * WORKER + consumer    : D-side manager CPU-pool + memfabric pull read +
-      indexer/main split registration.
+    * WORKER + consumer    : D-side reads through the configured backend.
+
+    Sparse KV offload is one optional destination-layout adapter. It is not a
+    connector prerequisite and does not affect the wire protocol.
     """
 
     supports_layerwise_buffer_reuse = True
@@ -65,37 +57,17 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         self.is_producer = vllm_config.kv_transfer_config.is_kv_producer
         self.is_consumer = vllm_config.kv_transfer_config.is_kv_consumer
         self.requires_full_blocks_on_update_after_alloc = role == KVConnectorRole.SCHEDULER and self.is_producer
-        # SFA path is layer-wise on both sides.
-        self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", True)
-        self.engine_id = vllm_config.kv_transfer_config.engine_id
-        # Decode offload is asymmetric: P exposes regular paged KV while D owns
-        # the SparseKVOffloadManager CPU pool.
-        from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-
-        # AscendConfig may not be initialized yet at connector construction
-        # time; init_ascend_config is idempotent (no-op if already done).
-        init_ascend_config(vllm_config)
-        decode_offload_enabled = get_ascend_config().sparse_kv_offload_config.enabled
-        if self.is_producer:
-            assert not decode_offload_enabled, (
-                "SfaRemoteD2HConnector producer (P) must run with sparse_kv_offload_config.enabled=false."
-            )
-        if self.is_consumer:
-            assert decode_offload_enabled, (
-                "SfaRemoteD2HConnector consumer (D) must run with sparse_kv_offload_config.enabled=true."
-            )
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
+        self.use_layerwise = extra_config.get("use_layerwise", True)
 
         if role == KVConnectorRole.SCHEDULER:
-            # Producer scheduler prepares P-side metadata; consumer scheduler
-            # allocates and advertises D-side CPU blocks.
             if self.is_producer:
-                self.connector_scheduler = SFAPDRD2HProducerScheduler(
+                self.connector_scheduler = LayerwisePullProducerScheduler(
                     vllm_config,
                     kv_cache_config,
-                    str(self.engine_id),
                 )
             else:
-                self.connector_scheduler = SFAPDRD2HScheduler(
+                self.connector_scheduler = LayerwisePullConsumerScheduler(
                     vllm_config,
                     self.use_layerwise,
                     kv_cache_config,
@@ -104,9 +76,9 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             self.connector_scheduler = None
             if self.is_producer:
-                self.connector_worker = SFAPDRD2HProducerWorker(vllm_config, kv_cache_config, str(self.engine_id))
+                self.connector_worker = LayerwisePullProducerWorker(vllm_config, kv_cache_config)
             else:
-                self.connector_worker = SFAPDRD2HConsumerWorker(
+                self.connector_worker = LayerwisePullConsumerWorker(
                     vllm_config,
                     self.use_layerwise,
                     kv_cache_config,
@@ -155,7 +127,7 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         if self.is_consumer:
             return self.connector_worker.get_finished(finished_req_ids)
-        return self.connector_worker.get_finished()
+        return self.connector_worker.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         assert self.connector_worker is not None
@@ -166,23 +138,8 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.start_load_kv(self._get_connector_metadata())
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """Per-layer gate called before each layer's attention computation.
-
-        D-side: no-op (SFA loads through ``SparseKVOffloadManager`` directly).
-        P-side: before this layer writes HBM, wait for D to finish every pending
-        read from the physical main/indexer storage slots touched by this layer.
-
-        The per-layer send-done events are cleared when a READ_READY_BATCH is
-        sent and set again by the pipelined MembPull send thread when READ_DONE
-        arrives. Events are initially set, so the first occupant does not block.
-        """
-        if not self.is_producer:
-            return
-        match = _LAYER_IDX_RE.search(layer_name)
-        if match is None:
-            return
-        layer_idx = int(match.group(1))
-        self.wait_for_layer_send(layer_idx)
+        """Layerwise Pull does not load KV at the attention-layer boundary."""
+        return
 
     def save_kv_layer(
         self,
@@ -192,7 +149,7 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         **kwargs,
     ) -> None:
         assert self.connector_worker is not None
-        # SFA attention calls this every forward, including profiling / graph
+        # Attention calls this every forward, including profiling / graph
         # capture where no per-step connector metadata is bound. Nothing to save
         # then; skip rather than trip _get_connector_metadata's assert.
         if not self.has_connector_metadata():
@@ -200,8 +157,7 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata, self._get_connector_metadata())
 
     def on_kv_cache_written(self, layer_name: str = "") -> None:
-        # Producer-only early dispatch of the PD pull notification at scatter
-        # time. Consumer pulls through SparseKVOffloadManager; skip there.
+        # Producer-only early dispatch of the PD pull notification at scatter.
         if not self.is_producer or self.connector_worker is None:
             return
         if not self.has_connector_metadata():
@@ -211,16 +167,9 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
             hook(layer_name, self._get_connector_metadata())
 
     def wait_for_save(self):
-        # Decode KV writes are synchronized by SparseKVOffloadManager. P-side
-        # completion is tracked by READ_DONE/storage_send_done_events.
+        # P-side completion is tracked by READ_DONE/storage_send_done_events.
         if self.is_consumer and self.connector_worker is not None:
             self.connector_worker.wait_for_save()
-
-    # Phase 3: real per-req CPU-block count for the solution-1 threshold.
-    def get_num_cpu_blocks(self, req_ids: list[str]) -> dict[str, int] | None:
-        if self.connector_worker is None:
-            return None
-        return self.connector_worker.get_num_cpu_blocks(req_ids)
 
     def shutdown(self) -> None:
         for component in (self.connector_worker, self.connector_scheduler):
@@ -231,13 +180,9 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
     def close(self) -> None:
         self.shutdown()
 
-    # P-side buffer-reuse gate: block until D has read a layer's source KV buffer,
-    # so the buffer may be reused by a later layer.
-    def wait_for_layer_send(self, layer_idx: int) -> None:
+    def wait_for_slot_release(self, layer_idx: int) -> None:
+        """Wait until Decode releases a physical slot before AscendStore reuses it."""
         worker = self.connector_worker
-        if worker is None or not hasattr(worker, "wait_for_layer_send"):
+        if worker is None or not hasattr(worker, "wait_for_slot_release"):
             return
-        worker.wait_for_layer_send(layer_idx)
-
-    def wait_for_layer_reuse(self, layer_idx: int) -> None:
-        self.wait_for_layer_send(layer_idx)
+        worker.wait_for_slot_release(layer_idx)

@@ -20,7 +20,7 @@ _VALID_MEMFABRIC_ROLES = (MEMFABRIC_ROLE_PREFILL, MEMFABRIC_ROLE_DECODE)
 
 
 class MemfabricBackend:
-    """Normalize the MemFabric API used by the SFA PD connector."""
+    """Normalize the MemFabric API used by layerwise pull."""
 
     def __init__(self, engine: Any, advertised_rpc_port: int):
         self._engine = engine
@@ -114,7 +114,8 @@ class GlobalMemfabricTE:
             )
         except ImportError as exc:
             raise ImportError(
-                "Please install memfabric_hybrid (memfabric-hybrid) to use SfaRemoteD2HConnector."
+                "Please install memfabric_hybrid (memfabric-hybrid) to use "
+                "LayerwisePullConnector with transfer_backend=memfabric."
             ) from exc
 
         # Match the MemFabric initialization sequence used by its examples.
