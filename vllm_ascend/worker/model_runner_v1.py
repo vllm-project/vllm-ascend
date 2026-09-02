@@ -2373,11 +2373,33 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            # Mamba state copy must run AFTER the KV transfer load finishes,
+            # otherwise the copy would race with in-flight layerwise loads and
+            # read half-loaded state. With a layerwise-capable connector we
+            # defer the copy: prepare_mamba_state_copy stages per-layer copy
+            # metadata here, and each layer's copy is executed right after its
+            # own KV load completes (wait_for_layer_load), overlapping the copy
+            # with the remaining layers' loads. Non-layerwise connectors keep
+            # the batched copy after all loads finish (do_mamba_copy_block).
+            mamba_copy_connector = None
             if self.cache_config.mamba_cache_mode == "align":
-                mamba_utils.do_mamba_copy_block(preprocess_bufs)
+                if has_kv_transfer_group():
+                    connector = get_kv_transfer_group()
+                    prepare_mamba_state_copy = getattr(
+                        connector,
+                        "prepare_mamba_state_copy",
+                        None,
+                    )
+                    if callable(prepare_mamba_state_copy) and prepare_mamba_state_copy(preprocess_bufs):
+                        mamba_copy_connector = connector
+                if mamba_copy_connector is None:
+                    mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            # Verify every scheduled layer executed its deferred copy.
+            if self.cache_config.mamba_cache_mode == "align" and mamba_copy_connector is not None:
+                mamba_copy_connector.finish_mamba_state_copy()
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
