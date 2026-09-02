@@ -2483,18 +2483,13 @@ class MooncakeConnectorWorker:
                 kv_cache_tensor.size,
             )
             if base_addr is None:
-                storage_keys = {tensor_storage_key(tensor) for tensor in shared_tensors}
-                if len(storage_keys) == 1:
-                    raise RuntimeError(
-                        "Unable to recover one aligned KV tensor base from hybrid cache views: "
-                        f"candidates=[], tensor_size={kv_cache_tensor.size}."
-                    )
-
                 # vLLM #51718 describes all layers in one KVCacheTensor backed
                 # by a shared allocation. Ascend's hybrid KV-transfer layout
-                # can instead materialize one aligned allocation per layer.
-                # No individual storage then spans the descriptor's total
-                # size, so register the real layer storage ranges below.
+                # can instead materialize one aligned allocation per layer,
+                # including a single-layer descriptor with one private
+                # storage. No individual storage then needs to span the
+                # descriptor's total size, so register the real layer storage
+                # ranges below.
                 private_layer_tensors.extend(shared_tensors)
                 continue
             if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
