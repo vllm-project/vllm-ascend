@@ -178,6 +178,12 @@ a3:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
@@ -294,6 +300,12 @@ a3-560t:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-R1-0528-W8A8.yaml

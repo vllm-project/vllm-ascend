@@ -574,6 +574,8 @@ class NPUPlatform(Platform):
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        max_tokens_across_pcp = num_tokens if pcp_size > 1 else 0
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
@@ -608,6 +610,7 @@ class NPUPlatform(Platform):
             "num_tokens": num_tokens,
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,
+            "max_tokens_across_pcp": max_tokens_across_pcp,
             "mc2_mask": mc2_mask,
             "is_draft_model": is_draft_model,
             "is_draft_model_prefill": is_draft_model_prefill,
