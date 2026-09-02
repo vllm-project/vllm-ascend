@@ -202,9 +202,10 @@ class DeviceInfo:
 
 
 class CpuAlloc:
-    def __init__(self, rank_id: int):
+    def __init__(self, rank_id: int, npu_id: int):
         self.rank_id = rank_id
         self.device_info: DeviceInfo = DeviceInfo()
+        self.current_npu = npu_id
         self.cpu_node: dict[int, int] = {}
         self.numa_to_cpu_map: dict[int, list[int]] = defaultdict(list)
         self.npu_cpu_pool: dict[int, list[int]] = {}
@@ -620,11 +621,10 @@ class CpuAlloc:
 
     def print_plan(self) -> None:
         logger.info("The CPU allocation plan is as follows:")
-        current_npu = self.device_info.running_npu_list[self.rank_id]
         if self._uses_cluster_cpu_topology():
-            self._print_ascend_950_plan(current_npu)
+            self._print_ascend_950_plan(self.current_npu)
             return
-        self._print_default_plan(current_npu)
+        self._print_default_plan(self.current_npu)
 
     def _print_ascend_950_plan(self, current_npu: int) -> None:
         main = " ".join(map(str, self.assign_main[current_npu]))
@@ -680,20 +680,18 @@ class CpuAlloc:
         thread_message, _ = execute_command(["ps", "-Te"])
         threads_map = self.get_threads_map(thread_message)
         main_pid = str(psutil.Process().pid)
-        current_npu = self.device_info.running_npu_list[self.rank_id]
-        self.bind(main_pid, self.assign_main[current_npu], True)
+        self.bind(main_pid, self.assign_main[self.current_npu], True)
         for thread_id in threads_map.get(main_pid, {}).get("acl_thread", []):
-            self.bind(thread_id, self.assign_acl[current_npu], False)
+            self.bind(thread_id, self.assign_acl[self.current_npu], False)
         for thread_id in threads_map.get(main_pid, {}).get("release_thread", []):
-            self.bind(thread_id, self.assign_rel[current_npu], False)
+            self.bind(thread_id, self.assign_rel[self.current_npu], False)
         # Migrate memory once for the whole process, after all threads are pinned.
-        self.bind_memory(main_pid, current_npu)
+        self.bind_memory(main_pid, self.current_npu)
 
     def bind_ascend_950_threads(self) -> None:
         main_pid = str(psutil.Process().pid)
-        current_npu = self.device_info.running_npu_list[self.rank_id]
-        self.bind(main_pid, self.assign_main[current_npu], True)
-        self.bind_memory(main_pid, current_npu)
+        self.bind(main_pid, self.assign_main[self.current_npu], True)
+        self.bind_memory(main_pid, self.current_npu)
 
     def bind_npu_irq(self) -> None:
         if not self._reserve_irq_cpus():
@@ -707,9 +705,8 @@ class CpuAlloc:
             return
 
         # Only bind IRQ for current rank's NPU to avoid multi-process overwrite.
-        current_npu = self.device_info.running_npu_list[self.rank_id]
-        if current_npu not in self.npu_cpu_pool:
-            logger.warning("[irq] NPU has no CPU pool. rank=%s, npu=%s. ", self.rank_id, current_npu)
+        if self.current_npu not in self.npu_cpu_pool:
+            logger.warning("[irq] NPU has no CPU pool. rank=%s, npu=%s. ", self.rank_id, self.current_npu)
             return
 
         if shutil.which("systemctl"):
@@ -730,7 +727,7 @@ class CpuAlloc:
                     irq = line.split(":")[0].strip()
                     sq_irqs.append(irq)
 
-        npu = current_npu
+        npu = self.current_npu
         cpus = self.npu_cpu_pool[npu]
         if len(cpus) < 2:
             logger.warning("[irq] CPU pool too small. npu=%s, cpu_count=%d, min_required=2. ", npu, len(cpus))
@@ -796,9 +793,9 @@ class CpuAlloc:
         self.bind_npu_irq()
 
 
-def bind_cpus(rank_id: int) -> None:
+def bind_cpus(rank_id: int, npu_id: int) -> None:
     if not is_arm_cpu():
         logger.info("CPU binding skipped: non-ARM CPU detected.")
         return
-    binder = CpuAlloc(rank_id)
+    binder = CpuAlloc(rank_id, npu_id=npu_id)
     binder.run_all()

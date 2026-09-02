@@ -40,13 +40,14 @@ else:
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
-        torch_npu.npu_scatter_pa_kv_cache(
-            key=key.contiguous(),
-            value=value.contiguous(),
+        # npu_scatter_pa_kv_cache (#11713) adds host-side overhead that costs
+        # ~9% end-to-end throughput on Atlas A3; see commit message for data.
+        torch_npu._npu_reshape_and_cache(
+            key=key,
+            value=value,
             key_cache=key_cache,
             value_cache=value_cache,
-            slot_mapping=slot_mapping.contiguous(),
-            cache_mode="Norm",
+            slot_indices=slot_mapping,
         )
 
     @classmethod
