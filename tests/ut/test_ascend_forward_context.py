@@ -32,6 +32,8 @@ def _make_vllm_config(
     max_cudagraph_capture_size: int = 0,
     max_num_batched_tokens: int = 0,
     hidden_size: int = 2048,
+    routed_expert_hidden_size: int | None = None,
+    routed_expert_intermediate_size: int | None = None,
     kv_connector: str | None = None,
     kv_role: str | None = None,
     recompute_scheduler_enable: bool = False,
@@ -46,6 +48,10 @@ def _make_vllm_config(
         hf_text_config_attrs["num_experts_per_tok"] = num_experts_per_tok
     hf_text_config_attrs["hidden_size"] = hidden_size
 
+    if routed_expert_hidden_size is not None:
+        hf_text_config_attrs["routed_expert_hidden_size"] = routed_expert_hidden_size
+    if routed_expert_intermediate_size is not None:
+        hf_text_config_attrs["routed_expert_intermediate_size"] = routed_expert_intermediate_size
     model_config = SimpleNamespace(
         hf_text_config=SimpleNamespace(**hf_text_config_attrs),
         get_num_experts=lambda: num_experts,
@@ -375,6 +381,11 @@ def test_select_moe_comm_method_a3_quant_w4a8(
     ("num_tokens", "ep_world_size", "expected"),
     [
         (128, 8, MoECommType.FUSED_MC2),
+        (128, 16, MoECommType.FUSED_MC2),
+        (128, 32, MoECommType.FUSED_MC2),
+        (128, 64, MoECommType.FUSED_MC2),
+        (128, 128, MoECommType.FUSED_MC2),
+        (128, 129, MoECommType.MC2),
     ],
 )
 def test_select_moe_comm_method_a3_quant_w8a8(
@@ -383,6 +394,7 @@ def test_select_moe_comm_method_a3_quant_w8a8(
     ep_world_size,
     expected,
 ):
+    monkeypatch.setattr(afc, "_CANN_OPS_TRANSFORMER_AVAILABLE", True)
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A3,
@@ -395,6 +407,29 @@ def test_select_moe_comm_method_a3_quant_w8a8(
     vllm_config = _make_vllm_config(quant_type="w8a8")
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("hidden_size", "routed_expert_hidden_size", "routed_expert_intermediate_size", "expected"),
+    [
+        (7168, 3584, 3072, True),
+        (7168, 768, 3072, False),
+        (768, None, None, False),
+    ],
+)
+def test_cann_megamoe_supported_by_config_uses_routed_hidden_size(
+    hidden_size,
+    routed_expert_hidden_size,
+    routed_expert_intermediate_size,
+    expected,
+):
+    vllm_config = _make_vllm_config(
+        hidden_size=hidden_size,
+        routed_expert_hidden_size=routed_expert_hidden_size,
+        routed_expert_intermediate_size=routed_expert_intermediate_size,
+    )
+
+    assert afc.is_megamoe_supported_by_config(vllm_config) == expected
 
 
 @pytest.mark.parametrize(
