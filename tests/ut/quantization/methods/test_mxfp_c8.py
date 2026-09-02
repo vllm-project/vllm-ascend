@@ -118,6 +118,30 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
 
         self.assertTrue(torch.equal(param, torch.full((512,), 119, dtype=torch.uint8)))
 
+    def test_weight_loader_shards_column_vector_under_tp(self):
+        """Under TP the checkpoint is full-width while the parameter is the
+        per-rank shard; the column vector must flatten first, then narrow to
+        the rank's slice (regression: reshape-before-narrow failed with
+        "shape '[256]' is invalid for input of size 512" on TP2)."""
+        from unittest.mock import patch
+
+        from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import _quant_weight_loader
+
+        full_weight = torch.arange(512, dtype=torch.uint8).view(512, 1)
+        param = torch.zeros(256, dtype=torch.uint8)
+
+        with (
+            patch("vllm_ascend.quantization.methods.kv_cache.mxfp_c8.get_tensor_model_parallel_rank", return_value=1),
+            patch(
+                "vllm_ascend.quantization.methods.kv_cache.mxfp_c8.get_tensor_model_parallel_world_size",
+                return_value=2,
+            ),
+        ):
+            _quant_weight_loader(param, full_weight)
+
+        # rank 1 owns the second half: [256, 512)
+        self.assertTrue(torch.equal(param, torch.arange(256, 512, dtype=torch.uint8)))
+
     def test_installs_c8_backend_with_512_token_blocks(self):
         from vllm_ascend.attention.attention_v1 import (
             AscendAttentionBackend,

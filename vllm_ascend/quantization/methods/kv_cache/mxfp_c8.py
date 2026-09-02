@@ -10,10 +10,12 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
         param.data.fill_(loaded_weight.item())
     else:
         # ModelSlim exports the per-channel V cache scale as a column vector
-        # ([hidden, 1]) while the registered parameter is 1-D; squeeze the
-        # trailing size-1 dims so the shapes match before TP narrow/copy.
-        if loaded_weight.dim() > param.dim():
-            loaded_weight = loaded_weight.reshape(param.shape)
+        # ([hidden, 1]) while the registered parameter is 1-D; flatten first
+        # so both the TP narrow and the final shape comparison see plain
+        # element counts (reshape to param.shape alone would fail under TP,
+        # where the checkpoint is full-width but the parameter is sharded).
+        if loaded_weight.dim() != 1:
+            loaded_weight = loaded_weight.flatten()
         if loaded_weight.shape != param.shape:
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
