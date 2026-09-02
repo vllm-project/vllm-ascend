@@ -255,6 +255,78 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
     }
 }
 
+#ifdef VLLM_ASCEND_ENABLE_MEMFABRIC_MTE
+void kvpp_mte_copy(const torch::Tensor& base_tensor,
+                   const torch::Tensor& physical_page_ids,
+                   const torch::Tensor& valid_page_mask,
+                   const torch::Tensor& staging_page_indices,
+                   int64_t page_stride_bytes,
+                   int64_t page_length_bytes,
+                   int64_t staging_region_offset_bytes,
+                   int64_t staging_base_address,
+                   bool staging_is_source,
+                   int64_t staging_group_rank,
+                   int64_t shm_id)
+{
+    TORCH_CHECK(base_tensor.is_privateuseone(),
+                "base_tensor must be an NPU tensor");
+    TORCH_CHECK(physical_page_ids.is_privateuseone() &&
+                    valid_page_mask.is_privateuseone() &&
+                    staging_page_indices.is_privateuseone(),
+                "KVPP active-page tensors must be NPU tensors");
+    TORCH_CHECK(physical_page_ids.device() == base_tensor.device() &&
+                    valid_page_mask.device() == base_tensor.device() &&
+                    staging_page_indices.device() == base_tensor.device(),
+                "KVPP active-page tensors and base_tensor must share one NPU device");
+    TORCH_CHECK(physical_page_ids.dtype() == torch::kInt64,
+                "physical_page_ids must be int64");
+    TORCH_CHECK(valid_page_mask.dtype() == torch::kBool,
+                "valid_page_mask must be bool");
+    TORCH_CHECK(staging_page_indices.dtype() == torch::kInt64,
+                "staging_page_indices must be int64");
+    TORCH_CHECK(physical_page_ids.dim() == 1 &&
+                    valid_page_mask.dim() == 1 &&
+                    staging_page_indices.dim() == 1,
+                "KVPP active-page tensors must be one-dimensional");
+    const int64_t page_descriptor_count = physical_page_ids.numel();
+    TORCH_CHECK(valid_page_mask.numel() == page_descriptor_count &&
+                    staging_page_indices.numel() == page_descriptor_count,
+                "KVPP active-page tensor lengths must match");
+    TORCH_CHECK(physical_page_ids.is_contiguous() &&
+                    valid_page_mask.is_contiguous() &&
+                    staging_page_indices.is_contiguous(),
+                "KVPP active-page tensors must be contiguous");
+    TORCH_CHECK(page_stride_bytes > 0,
+                "page_stride_bytes must be positive");
+    TORCH_CHECK(page_length_bytes > 0,
+                "page_length_bytes must be positive");
+    TORCH_CHECK(staging_region_offset_bytes >= 0,
+                "staging_region_offset_bytes must be non-negative");
+    TORCH_CHECK(staging_base_address > 0,
+                "staging_base_address must be positive");
+    TORCH_CHECK(staging_group_rank >= 0,
+                "staging_group_rank must be non-negative");
+
+    const c10_npu::OptionalNPUGuard npu_guard(base_tensor.device());
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    if (page_descriptor_count != 0) {
+        kvpp_mte_batch_copy_pages_impl(
+            stream, base_tensor.data_ptr(),
+            physical_page_ids.data_ptr<int64_t>(),
+            valid_page_mask.data_ptr<bool>(),
+            staging_page_indices.data_ptr<int64_t>(),
+            static_cast<uint64_t>(page_descriptor_count),
+            static_cast<uint64_t>(page_stride_bytes),
+            static_cast<uint64_t>(page_length_bytes),
+            static_cast<uint64_t>(staging_region_offset_bytes),
+            reinterpret_cast<void*>(staging_base_address),
+            staging_is_source,
+            static_cast<int32_t>(staging_group_rank),
+            static_cast<uint32_t>(shm_id));
+    }
+}
+#endif
+
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 // Direct kernel wrappers depend on vllm_ascend_kernels, which is skipped on
 // 310P and A5 builds.
@@ -2027,6 +2099,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                               Tensor? gk=None) -> Tensor");
     ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
 
+#ifdef VLLM_ASCEND_ENABLE_MEMFABRIC_MTE
+    ops.def(
+        "kvpp_mte_copy(Tensor base_tensor, Tensor physical_page_ids, "
+        "Tensor valid_page_mask, Tensor staging_page_indices, "
+        "int page_stride_bytes, int page_length_bytes, "
+        "int staging_region_offset_bytes, int staging_base_address, "
+        "bool staging_is_source, int staging_group_rank, int shm_id) -> ()");
+    ops.impl("kvpp_mte_copy", torch::kPrivateUse1,
+             &vllm_ascend::kvpp_mte_copy);
+#endif
+
     ops.def(
         "recurrent_kda(Tensor query, Tensor key, Tensor value, Tensor gate, Tensor beta, "
         "Tensor(a!) initial_state, Tensor cu_seqlens, Tensor ssm_state_indices, Tensor A_log, Tensor dt_bias, *, "
@@ -2057,9 +2140,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "              bool activate_left=False, "
         "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
     ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
-
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
+
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 

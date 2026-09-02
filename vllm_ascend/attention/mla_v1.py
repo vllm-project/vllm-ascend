@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar
 
 import numpy as np
 import torch
@@ -826,6 +826,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         **kwargs,
     ):
         self.vllm_config = get_current_vllm_config()
+        self.layerwise_kv_cache_hook: Any = None
         self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1897,6 +1898,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_preprocess_res = None
         if has_prefill:
             wait_for_kv_layer_from_connector(layer_name)
+        if self.layerwise_kv_cache_hook is not None and (has_decode or has_prefill):
+            # Q/KV projections above run on the compute stream while the
+            # active historical pages are pushed on KVPP's communication
+            # stream. Cache writes wait only at the first point that consumes
+            # the cache.
+            self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
         # Preprocess for decode tokens
         if has_decode:
             decode_preprocess_res = self.mla_preprocess_decode(q_c, kv_no_split, kv_cache, attn_metadata)
@@ -1974,6 +1981,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             and attn_metadata.num_decode_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
             and attn_metadata.num_prefills == 0
         ):
+            if self.layerwise_kv_cache_hook is not None:
+                self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
             decode_preprocess_res, prefill_preprocess_res = self.mla_preprocess_only_decode(
                 hidden_states, kv_cache, attn_metadata
             )
