@@ -2817,6 +2817,35 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(ptrs, [tensor.data_ptr() for tensor in layer_tensors])
         self.assertEqual(lengths, [layer_size, layer_size])
 
+    def test_registered_hybrid_buffer_supports_single_private_storage(self):
+        alignment = 2 * 1024 * 1024
+        layer_size = 2 * alignment
+        descriptor_size = 2 * layer_size
+        leading_padding = 0x17200
+        layer_name = "model.layers.0.self_attn"
+
+        raw_tensor = torch.empty(layer_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        layer_tensor = raw_tensor[aligned_offset : aligned_offset + layer_size]
+        kv_caches = {
+            layer_name: (
+                layer_tensor[leading_padding:alignment],
+                layer_tensor[alignment:],
+            )
+        }
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[make_mock_kv_cache_tensor(descriptor_size, [layer_name])]
+        )
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers(kv_caches)
+
+        self.assertEqual(layer_tensor.data_ptr() % alignment, 0)
+        self.assertNotEqual(kv_caches[layer_name][0].data_ptr() % alignment, 0)
+        self.assertEqual(ptrs, [layer_tensor.data_ptr()])
+        self.assertEqual(lengths, [layer_size])
+
     def test_device_id_selection_with_physical_devices(self):
         # Test with physical devices set
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
