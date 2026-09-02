@@ -234,7 +234,11 @@ def _unify_kv_cache_spec_page_size(
             name: (
                 FullAttentionSpec(
                     **{
-                        field.name: getattr(spec, field.name)
+                        field.name: (
+                            None
+                            if field.name == "page_size_padded"
+                            else getattr(spec, field.name)
+                        )
                         for field in fields(FullAttentionSpec)
                     }
                 )
