@@ -483,7 +483,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.2: Process non-spec-decode part in mixed non-spec batches
         if split_non_spec:
-            assert mixed_qkv_non_spec is not None
             assert g_non_spec is not None
             assert beta_non_spec is not None
             query_decode = query_non_spec[:, :num_decode_tokens]
