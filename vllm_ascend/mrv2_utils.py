@@ -111,7 +111,8 @@ def _v2_model_runner_environment_ready(vllm_config: VllmConfig) -> bool:
 
     from vllm.triton_utils import HAS_TRITON
 
-    if not is_310p() and not HAS_TRITON:
+    if is_310p() or not HAS_TRITON:
+        logger.warning_once("310p not support Model Runner V2.")
         logger.warning_once("Model Runner V2 requires Triton; using the V1 model runner instead.")
         return False
 
