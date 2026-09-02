@@ -566,14 +566,37 @@ jobs:
           MAIN_SHA=$(git ls-remote --heads https://github.com/vllm-project/vllm-ascend.git main | awk '{print $1}')
           echo "sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
 
-  run-selected-tests:
+  filter-test-groups:
+    needs: [select-tests, ensure-csrc-cache]
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      npu_test_groups: ${{ steps.filter.outputs.npu_test_groups }}
+      cpu_test_groups: ${{ steps.filter.outputs.cpu_test_groups }}
+    steps:
+      - name: Filter test groups split cpu / npu
+        id: filter
+        run: |
+          set -euo pipefail
+          RAW_GROUPS=${{ needs.select-tests.outputs.test_groups }}
+          python3 - <<'PY'
+          import json
+          raw = json.loads("""${RAW_GROUPS}""")
+          npu_list = [g for g in raw if g.get("npu_type") != "cpu"]
+          cpu_list = [g for g in raw if g.get("npu_type") == "cpu"]
+          with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
+              f.write(f"npu_test_groups={json.dumps(npu_list)}\n")
+              f.write(f"cpu_test_groups={json.dumps(cpu_list)}\n")
+          PY
+
+  run-selected-npu-tests:
     needs:
       - get_latest_real_base_sha
       - pre-commit
       - select-tests
       - ensure-csrc-cache
-    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
+      - filter-test-groups
     if: >-
       ${{
         !cancelled() &&
@@ -596,8 +619,38 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.get_latest_real_base_sha.outputs.real_base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
     secrets: inherit
+
+  run-selected-dynamic-cpu-tests:
+    needs:
+      - get_latest_real_base_sha
+      - pre-commit
+      - select-tests
+      - ensure-csrc-cache
+      - filter-test-groups
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        needs.ensure-csrc-cache.result == 'success' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        ) &&
+        needs.select-tests.outputs.has_tests == 'true'
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+    uses: ./.github/workflows/_selected_tests_cpu.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+    secrets: inherit
+
 
   run-selected-tests-upstream:
     needs:
