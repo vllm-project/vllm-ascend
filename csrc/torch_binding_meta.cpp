@@ -1,3 +1,6 @@
+#include <cctype>
+#include <string>
+
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
@@ -1903,6 +1906,48 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+// ffn_linear: y = act(x @ W1^T + b1) @ W2^T + b2（arch35 FFN 融合算子）。
+at::Tensor ffn_linear_meta(const at::Tensor &x, const at::Tensor &weight1, const at::Tensor &weight2,
+                           const c10::optional<at::Tensor> &bias1, const c10::optional<at::Tensor> &bias2,
+                           c10::string_view activation, int64_t inner_precise)
+{
+    std::string act(activation.data(), activation.length());
+    for (auto &c : act) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    const c10::SymInt xK = x.sym_size(x.dim() - 1);
+    const c10::SymInt w1d0 = weight1.sym_size(0);
+    const c10::SymInt w1d1 = weight1.sym_size(1);
+    const c10::SymInt w2d0 = weight2.sym_size(0);
+    const c10::SymInt w2d1 = weight2.sym_size(1);
+    const bool swiglu = (act == "swiglu");
+
+    const c10::SymInt hiddenW = swiglu ? w1d0 / 2 : w1d0;
+    const c10::SymInt hiddenW2 = swiglu ? w1d1 / 2 : w1d1;
+    bool isLinear;
+    if (w1d1 == xK && w1d0 != xK) {
+        isLinear = true;
+    } else if (w1d0 == xK && w1d1 != xK) {
+        isLinear = false;
+    } else if (w1d0 == xK && w1d1 == xK) {
+        // w2 消歧：仅 w2 明确指向 canonical 时取 canonical，否则（含全方阵）默认 linear
+        isLinear = !(w2d0 == hiddenW2 && w2d1 != hiddenW);
+    } else {
+        TORCH_CHECK(false, "weight1 shape does not match x K (expect [K,N] canonical or [N,K] linear)");
+        return at::Tensor();
+    }
+    if (swiglu && !isLinear) {
+        TORCH_CHECK(false, "swiglu only supports linear layout weight1 [2H,K]");
+    }
+
+    c10::SymDimVector output_shape;
+    for (int64_t i = 0; i < x.dim() - 1; ++i) {
+        output_shape.push_back(x.sym_size(i));
+    }
+    output_shape.push_back(isLinear ? w2d0 : w2d1);
+    return at::empty_symint(output_shape, x.options());
+}
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1983,6 +2028,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
     // npu_sign_bits_pack
     ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
+    // ffn_linear
+    ops.impl("ffn_linear", &vllm_ascend::meta::ffn_linear_meta);
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
