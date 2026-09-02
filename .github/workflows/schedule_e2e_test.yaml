@@ -207,19 +207,16 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
-
           if [[ "${EVENT_NAME}" == "pull_request" ]]; then
-            git fetch origin "${PR_SHA_RAW}"
-            git checkout "${PR_SHA_RAW}"
+            # PR场景：直接使用github.sha，不要再git checkout，避免文件版本错乱
             echo "vllm_ascend_ref=${PR_SHA_RAW}" >> "$GITHUB_OUTPUT"
           elif [[ "${EVENT_NAME}" == "workflow_dispatch" && -n "${WD_BRANCH_RAW}" ]]; then
             git fetch origin "${WD_BRANCH_RAW}"
-            git checkout "${WD_BRANCH_RAW}"
-            echo "vllm_ascend_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "vllm_ascend_ref=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
           else
             TARGET_BRANCH="${REF_NAME}"
             git fetch origin "${TARGET_BRANCH}"
-            echo "vllm_ascend_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "vllm_ascend_ref=$(git rev-parse FETCH_HEAD)" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup Python
@@ -240,6 +237,7 @@ jobs:
         env:
           MATRIX_FILE: ${{ env.DAILY_CONFIG }}
           MATRIX_OUTPUTS: '{"a2_nightly_hf":"daily.a2_nightly_hf","a3_nightly_hf":"daily.a3_nightly_hf"}'
+          GITHUB_OUTPUT: $GITHUB_OUTPUT
         run: |
           python3 -m pip install pyyaml -q
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
