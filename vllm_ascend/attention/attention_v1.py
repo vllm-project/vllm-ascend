@@ -1323,14 +1323,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
-                if (
-                    isinstance(kv_cache, torch.Tensor)
-                    and kv_cache.dim() > 0
-                    and kv_cache.shape[0] == 2
-                    or isinstance(kv_cache, (list, tuple))
-                    and len(kv_cache) >= 2
-                ):
-                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+                self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
 
             if self.key_cache is None:
                 raise RuntimeError(
@@ -1803,14 +1796,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # This is needed for DecodeOnly mode where key/value are None but we still
         # need access to the cache for attention computation.
         if self.key_cache is None and kv_cache is not None:
-            if (
-                isinstance(kv_cache, torch.Tensor)
-                and kv_cache.dim() > 0
-                and kv_cache.shape[0] == 2
-                or isinstance(kv_cache, (list, tuple))
-                and len(kv_cache) >= 2
-            ):
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
 
         output_padded = None
         if key is not None and value is not None:
@@ -1851,7 +1837,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
@@ -2254,9 +2240,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        if len(kv_cache) > 1:
+        if isinstance(kv_cache, torch.Tensor) or len(kv_cache) > 1:
             if self.key_cache is None:
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+                self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
             if self.kv_sharing_target_layer_name is not None:
                 # C8/NZ cache writes follow the same KV-sharing rule.
                 if self.is_kv_producer:

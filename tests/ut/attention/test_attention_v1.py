@@ -482,6 +482,14 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertTrue(torch.equal(value_cache, physical[1].view(2, 4, 8, 64)))
         self.assertTrue(key_cache.is_contiguous())
         self.assertTrue(value_cache.is_contiguous())
+        self.assertEqual(
+            key_cache.untyped_storage().data_ptr(),
+            physical.untyped_storage().data_ptr(),
+        )
+        self.assertEqual(
+            value_cache.untyped_storage().data_ptr(),
+            physical.untyped_storage().data_ptr(),
+        )
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_large_head_prefill_uses_device_operator_fallback(self, mock_get_forward_context):
