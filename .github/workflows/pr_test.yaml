@@ -567,7 +567,8 @@ jobs:
           echo "sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
 
   filter-test-groups:
-    needs: [select-tests, ensure-csrc-cache]
+    needs: [select-tests]
+    if: ${{ !cancelled() && needs.select-tests.result == 'success' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -619,6 +620,7 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.get_latest_real_base_sha.outputs.real_base_sha }}
+      test_groups: ${{ needs.filter-test-groups.outputs.npu_test_groups }}
     secrets: inherit
 
   run-selected-dynamic-cpu-tests:
@@ -649,8 +651,8 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.filter-test-groups.outputs.cpu_test_groups }}
     secrets: inherit
-
 
   run-selected-tests-upstream:
     needs:
