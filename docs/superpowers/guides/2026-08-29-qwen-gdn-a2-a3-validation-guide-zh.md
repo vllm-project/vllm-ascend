@@ -53,6 +53,10 @@
 - `/home/weights/Qwen3.6-35B-A3B` 中完整的模型配置、tokenizer 和
   safetensors 权重。
 
+注意：不同机器的权重目录可能不同。如果 `/home/weights` 不存在，可以先
+查找本机可用的权重路径，例如 `/mnt/weight/Qwen3.6-35B-A3B`，然后把
+第 10.2 节的 `MODEL_PATH` 指向该实际路径即可。
+
 本文不使用 Conda，所有安装都发生在 Docker 当前 Python 环境中。
 
 ### 3.2 加载 CANN 环境
@@ -208,12 +212,18 @@ PY
 
 ### 6.1 设置 vLLM 兼容版本
 
-当前 editable vLLM 来自主干提交。设置 vLLM-Ascend 仓库记录的兼容
-release 版本，避免开发版版本号导致 patch 选择失败：
+当前 editable vLLM 来自主干提交 `ba07e4a4`。不要设置 `VLLM_VERSION`
+环境变量，让 vLLM-Ascend 按已安装 vLLM 的真实版本号选择分支：
 
 ```bash
-export VLLM_VERSION=0.27.1
+unset VLLM_VERSION
 ```
+
+注意：不要设置 `VLLM_VERSION=0.27.1`。本指南固定的 vLLM 提交
+`ba07e4a4`（`v0.26.1rc0-1046`）在 v0.27.1 之后，其 pcp 模块已迁移到
+`vllm/v1/attention/ops/pcp`。强制 `VLLM_VERSION=0.27.1` 会让
+`attention_v1.py` 走旧路径导入，EngineCore 启动时报
+`ModuleNotFoundError: No module named 'vllm.model_executor.layers.attention.pcp'`。
 
 ### 6.2 设置 vLLM-Ascend 编译 SoC
 
@@ -590,7 +600,7 @@ pytest -s -q \
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
 export ASCEND_RT_VISIBLE_DEVICES=3
-export VLLM_VERSION=0.27.1
+unset VLLM_VERSION
 export VLLM_LOGGING_LEVEL=INFO
 
 export VLLM_ASCEND_GDN_BACKEND=fla_npu
@@ -599,6 +609,9 @@ unset VLLM_ASCEND_GDN_OP_BACKENDS
 export MODEL_PATH=/home/weights/Qwen3.6-35B-A3B
 export SERVED_MODEL_NAME=qwen36-35b-gdn
 ```
+
+如果本机权重在其他位置，例如 `/mnt/weight/Qwen3.6-35B-A3B`，直接把
+`MODEL_PATH` 改为该路径（或建立软链接），其余命令不变。
 
 如果 CANN 的实际路径带 `latest`，使用第 3.2 节中的对应 source 命令。
 
@@ -663,6 +676,14 @@ curl -s http://127.0.0.1:8000/v1/completions \
 ```
 
 ## 11. 服务日志验收
+
+注意：vLLM 默认只给 `vllm` 命名空间的 logger 配置 INFO 级别，
+`vllm_ascend` 命名空间的算子选择日志（`GDN FLA operator selected` 等）
+默认不会出现在控制台日志里。启动服务前建议额外设置
+`VLLM_LOGGING_CONFIG_PATH`，指向一个把 `vllm_ascend` logger 配置为
+INFO 的自定义日志配置（JSON，可在 vLLM 默认配置上追加一条
+`"vllm_ascend": {"handlers": ["vllm"], "level": "INFO", "propagate": false}`），
+否则下面的验收 grep 会一无所获。
 
 ```bash
 grep -E \
