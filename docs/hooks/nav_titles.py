@@ -224,8 +224,8 @@ TITLES = {
     "user_guide/feature_guide/rl.md": {"en": "vLLM-Ascend for RL", "zh": "vLLM-Ascend 强化学习"},
     "user_guide/index.md": {"en": "Overview", "zh": "概览"},
     "user_guide/release_notes.md": {"en": "Release Notes", "zh": "发布说明"},
-    "user_guide/support_matrix/feature_matrix.md": {"en": "Feature Matrix", "zh": "功能矩阵"},
-    "user_guide/support_matrix/supported_features.md": {"en": "Supported Features", "zh": "支持的功能"},
+    "user_guide/support_matrix/feature_matrix.md": {"en": "Feature Matrix", "zh": "特性矩阵"},
+    "user_guide/support_matrix/supported_features.md": {"en": "Supported Features", "zh": "支持的特性"},
     "user_guide/support_matrix/supported_models.md": {"en": "Supported Models", "zh": "支持的模型"},
 }
 

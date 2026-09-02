@@ -17,10 +17,11 @@ import json
 import os
 import subprocess
 import sys
+from importlib.util import find_spec as real_find_spec
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import KVTransferConfig, ModelConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
@@ -1189,5 +1190,27 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # only _NON_USER_INPUT_KEYS is stripped, so typos reach pydantic and are rejected.
         vc = VllmConfig()
         vc.additional_config = {"unknown_option": True}
-        with self.assertRaises(ValueError):
+        with (
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=None),
+            self.assertRaises(ValueError),
+        ):
             init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    @patch(
+        "vllm_ascend.ascend_config.importlib.util.find_spec",
+        side_effect=lambda name, *args, **kwargs: (
+            object() if name == "vllm_omni" else real_find_spec(name, *args, **kwargs)
+        ),
+    )
+    def test_omni_additional_config_warns_and_is_preserved(self, _mock_find_spec, mock_warning):
+        vllm_config = VllmConfig(model_config=ModelConfig(), additional_config={"vllm_omni_option": True})
+
+        self.assertIs(vllm_config.additional_config["vllm_omni_option"], True)
+        mock_warning.assert_any_call(
+            "The following additional_config keys are invalid for vLLM-Ascend: %s. "
+            "They may be used by vLLM-Omni or another project. "
+            "Please remove them if they are not needed for your use case.",
+            ["vllm_omni_option"],
+        )

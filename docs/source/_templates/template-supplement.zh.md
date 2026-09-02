@@ -27,9 +27,56 @@
 | **Jinja 模板转义** | `{% raw %}` ... `{% endraw %}` | 无需转义 |
 | **中文锚点生成** | 过滤中文字符<br>`## 5. 在线部署` → `#5` | 保留中文字符<br>`## 5. 在线部署` → `#5.-在线部署` |
 
-## 3 标签页
+## 3 文档导航配置
 
-### 3.1 MkDocs + Material
+### 3.1 框架差异
+
+| / | Sphinx + MyST-Parser（v0.23.0 及更早） | MkDocs + Material（main 分支） |
+|------|----------------------------------------|-------------------------------|
+| **导航定义** | 各源文件中的 `toctree` 指令 | `mkdocs.yml` 中的 `nav` 字段 |
+| **未纳入导航** | 构建警告，无法通过导航访问 | 构建警告，仍可独立访问，但导航中不显示 |
+| **导航标题来源** | `toctree` 中的 `:caption:` 或页面 H1 | `nav_titles.py` Hook 动态映射 |
+
+### 3.2 mkdocs.yml 中的 nav 配置
+
+在 `mkdocs.yml` 的 `nav` 字段中定义导航结构：
+
+```yaml
+nav:
+  - index.md
+  - installation.md
+  - tutorials/models/DeepSeek-V3.2.md
+```
+
+**注意**：nav 配置主要影响文档在导航栏中的显示
+
+### 3.3 nav_titles.py：导航标题映射
+
+（`docs/hooks/nav_titles.py`）是一个 MkDocs Hook，根据 `DOCS_LANG` 环境变量动态映射中英文标题：
+
+```python
+TITLES = {
+    "index.md": {"en": "Home", "zh": "首页"},
+    "installation.md": {"en": "Installation", "zh": "安装"},
+}
+```
+
+通过 mkdocs.yml 的 hooks 字段注册：
+
+```yaml
+hooks:
+  - docs/hooks/nav_titles.py
+```
+
+### 3.4 新文档添加检查清单
+
+- 将文档文件放入相应目录
+- 在 mkdocs.yml 的 nav 中添加文件路径（否则文档不会出现在导航栏中）
+- 在 nav_titles.py 的 TITLES 中添加标题映射（否则中文文档可能无法正常呈现）
+
+## 4 标签页
+
+### 4.1 MkDocs + Material
 
 使用 `=== "标签名"` 语法。当前 vLLM-Ascend 文档已启用 `content.tabs.link`，同名标签在不同 Tab 组之间会自动联动。
 
@@ -53,7 +100,7 @@
 
 **渲染效果**：两个并列标签页，点击切换时，页面中所有名为 "A3 series" 或 "A2 series" 的标签页会同步切换。
 
-### 3.2 Sphinx + MyST-Parser
+### 4.2 Sphinx + MyST-Parser
 
 使用 `{tab-set}` 和 `{tab-item}` 指令，声明同步组（`:sync-group:`）和同步键（`:sync:`）。
 
@@ -95,7 +142,7 @@
 | `:sync: A3` | 同步键，用于跨组匹配相同内容的标签页 |
 | `::::` / `:::::` | 闭合标签（冒号数量需与开启时匹配） |
 
-### 3.3 语法差异
+### 4.3 语法差异
 
 | Sphinx语法 | MkDocs语法 | MkDocs注意事项 |
 |----------|----------|----------|
@@ -109,9 +156,9 @@
 > - 缩进不一致会导致 MkDocs 无法识别标签页内容
 > - 标签名称中的空格、大小写需完全一致，否则跨组同步失效
 
-## 4 占位符
+## 5 占位符
 
-### 4.1 MkDocs + Material
+### 5.1 MkDocs + Material
 
 **示例：**
 
@@ -119,7 +166,7 @@
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 ```
 
-### 4.2 Sphinx + MyST-Parser
+### 5.2 Sphinx + MyST-Parser
 
 **示例：**
 
@@ -127,11 +174,11 @@ export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 ```
 
-## 5 Note / 提示框
+## 6 Note / 提示框
 
 > **适用场景**：需要突出显示重要说明、警告、注意事项等信息。
 
-### 5.1 MkDocs + Material
+### 6.1 MkDocs + Material
 
 使用 `!!! note "标题"` 语法，内容通过**缩进**控制范围，支持多种类型标识符。
 
@@ -153,7 +200,7 @@ export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 
 **关键规则**：内容必须与 `!!!` 声明行保持 **4 个空格** 缩进，且内容之间用空行分隔即可（无需额外缩进）。
 
-### 5.2 Sphinx + MyST-Parser
+### 6.2 Sphinx + MyST-Parser
 
 使用 `::{note}` 指令语法，内容通过 **冒号层级 + 缩进** 控制范围，需要显式闭合。
 
@@ -174,14 +221,14 @@ Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P 
 :::
 ```
 
-### 5.3 提示
+### 6.3 提示
 
 > - 缩进不足（少于 4 空格）会使内容跳出提示框
 > - 若提示框内包含代码块，代码块需额外缩进 4 空格（共 8 空格）
 
-## 6 Jinja 模板转义
+## 7 Jinja 模板转义
 
-### 6.1 问题背景
+### 7.1 问题背景
 
 在 vLLM-Ascend 的文档中，有时需要展示包含 Jinja 模板语法的代码示例（如 prompt 模板、RAG 评测脚本等），两种框架的处理方式不同。这些示例中本身包含 `{{ variable }}` 语法。
 MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视为模板变量进行渲染，导致原本希望展示的 Jinja 示例代码出现异常。
@@ -191,7 +238,7 @@ MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视�
 | Sphinx + MyST-Parser | 不解析，原样保留 | 无 |
 | MkDocs + Material | 解析为模板变量，尝试替换 | 渲染异常，模板代码被破坏 |
 
-### 6.2 解决方案
+### 7.2 解决方案
 
 > **适用分支**：`main`（latest 版本）及 v0.24.0 之后的所有版本
 
@@ -228,28 +275,28 @@ MkDocs 使用 Jinja2 作为模板引擎，文档正文中的 `{{ }}` 会被视�
     ```
 ```
 
-### 6.3 Sphinx（v0.23.0 及更早）：无需转义
+### 7.3 Sphinx（v0.23.0 及更早）：无需转义
 
 > **适用分支**：`v0.23.0`、`v0.18.0` 等历史版本分支
 
 Sphinx 使用 Docutils 解析 Markdown，**不包含 Jinja2 模板引擎**，因此文档正文中的 `{{ }}` 不会被特殊处理，直接原样渲染。
 
-## 7 锚点异常
+## 8 锚点异常
 
-### 7.1 问题背景
+### 8.1 问题背景
 
 该问题**仅出现在中文文档中**。
 vLLM Ascend 社区的中文文档通过 PO 文件 + gettext 工具链从英文源文件翻译生成。中文版本会继承英文源文件的锚点 ID 结构。
 在 Sphinx 框架下，英文源文件中若未显式指定锚点，中文翻译会保留中文字符生成锚点（如 `#5-在线服务部署`）。在 MkDocs 框架中，MkDocs 会自动过滤锚点中的非 ASCII 字符，导致同一中文标题生成的锚点 ID 与 Sphinx 不一致（如 `#5-在线服务部署` → `#5`）。
 
-### 7.2 锚点生成规则对比
+### 8.2 锚点生成规则对比
 
 | 框架 | 锚点生成规则 | 示例标题 | 生成的锚点 |
 |------|-------------|----------|-----------|
 | Sphinx + MyST-Parser | 保留中文字符 | `## 5. 在线服务部署` | `#5-在线服务部署` |
 | MkDocs + Material | 过滤中文字符，仅保留数字、字母和连字符 | `## 5. 在线服务部署` | `#5` |
 
-### 7.3 解决方案
+### 8.3 解决方案
 
 **方案一：手动指定锚点（推荐）**
 
@@ -278,7 +325,7 @@ vLLM Ascend 社区的中文文档通过 PO 文件 + gettext 工具链从英文�
 **示例：**
 略
 
-### 7.4 提示
+### 8.4 提示
 
 - 锚点 ID 建议仅使用 ASCII 字符（字母、数字、连字符），确保在两种框架下均能正确解析
 - 锚点 ID 在英文源文件中指定后，无需在中文文件中重复指定
