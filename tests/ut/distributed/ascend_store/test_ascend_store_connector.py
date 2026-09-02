@@ -359,6 +359,18 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
                     expected,
                 )
 
+    def test_external_slot_release_waiter_uses_worker_gva_state(self):
+        connector = self.connector_mod.AscendStoreConnector.__new__(self.connector_mod.AscendStoreConnector)
+        waiter = MagicMock()
+
+        connector.connector_worker = MagicMock(use_gva_layerwise=False)
+        self.assertFalse(connector.set_external_slot_release_waiter(waiter))
+        connector.connector_worker.set_external_slot_release_waiter.assert_not_called()
+
+        connector.connector_worker.use_gva_layerwise = True
+        self.assertTrue(connector.set_external_slot_release_waiter(waiter))
+        connector.connector_worker.set_external_slot_release_waiter.assert_called_once_with(waiter)
+
     def test_layerwise_worker_paths(self):
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
