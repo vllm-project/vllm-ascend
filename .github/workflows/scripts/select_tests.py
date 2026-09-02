@@ -390,7 +390,7 @@ def _dedup_groups(groups: dict[PartitionKey, list[str]]) -> None:
 
 
 def _load_estimated_times(meta: dict) -> dict[str, float]:
-    """Load per-file estimated times from the config meta dict.
+    """Load per-test estimated times from the config meta dict.
 
     Tests not listed default to 600s when used by _partition_tests.
     """
@@ -551,13 +551,21 @@ def _lookup_estimated_time(
 ) -> float:
     """Look up the estimated time for *test_name*, falling back to defaults.
 
-    Lookup is file-level only: strip any ``::nodeid`` suffix and try the
-    file path. Otherwise use *default*.
+    1. Try exact match (handles both file-level and ``::nodeid`` keys).
+    2. Strip any ``::nodeid`` suffix and try again.
+    3. Otherwise use *default*.
+
+    File/nodeid containment is resolved by :func:`_dedup_groups` before this
+    lookup is used. A nodeid selected on its own retains its exact estimate.
     """
-    base = _pytest_node_file_path(test_name)
-    val = estimated_times.get(base)
+    val = estimated_times.get(test_name)
     if val is not None:
         return val
+    base = _pytest_node_file_path(test_name)
+    if base != test_name:
+        val = estimated_times.get(base)
+        if val is not None:
+            return val
     return default
 
 

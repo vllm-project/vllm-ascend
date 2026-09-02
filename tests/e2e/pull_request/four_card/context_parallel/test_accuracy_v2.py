@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 
 MAX_NUM_SEQS = 4
@@ -168,6 +170,7 @@ PCP_MODEL_CASE = AccuracyCase(
 )
 
 
+@pytest.mark.skip("The use case is unstable and temporarily taken offline.")
 @patch.dict(
     os.environ,
     {

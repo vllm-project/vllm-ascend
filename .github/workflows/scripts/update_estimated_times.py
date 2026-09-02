@@ -77,8 +77,8 @@ def update_config(config_path: Path, timings: dict[str, list[int]]) -> int:
     meta = yaml.safe_load(text) or {}
     existing: dict[str, int] = meta.get("estimated_times", {}) or {}
 
-    # --- compute new entries (file-level only; drop legacy ``::nodeid`` entries) ---
-    new_entries = {k: v for k, v in existing.items() if "::" not in k}
+    # --- compute new entries (preserve existing, update from timing data) ---
+    new_entries = dict(existing)
     changed = 0
     for name in sorted(timings.keys()):
         elapsed_list = timings[name]
@@ -88,9 +88,11 @@ def update_config(config_path: Path, timings: dict[str, list[int]]) -> int:
         new_val = int(round(median * 1.1 / 10.0) * 10.0)
         if new_val <= 0:
             new_val = 10
-        # File-level granularity: bucketing and precision testing both work
-        # on files, so method-level (``::nodeid``) estimates are not written.
-        key = name.split("::", 1)[0]
+        # Preserve existing ``::nodeid`` entries if configured, else fall back to file-level
+        if "::" in name and name in existing:
+            key = name
+        else:
+            key = name.split("::", 1)[0]
         # Skip non-test entries (e.g. ``cpu-ut (115 targets)`` batch label)
         if not key.startswith("tests/"):
             continue
