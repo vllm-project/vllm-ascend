@@ -73,24 +73,22 @@ def _get_dspark_num_mtp_layers(config: PretrainedConfig) -> int:
 class DSparkMarkovHead(nn.Module):
     def __init__(self, config: PretrainedConfig, prefix: str) -> None:
         super().__init__()
-        self.markov_w1 = VocabParallelEmbedding(
-            config.vocab_size,
+        # Markov decoding runs serially for every draft position. Keep both
+        # low-rank weights replicated so each step remains communication-free.
+        self.markov_w1 = nn.Embedding(config.vocab_size, config.dspark_markov_rank)
+        self.markov_w2 = ReplicatedLinear(
             config.dspark_markov_rank,
-            prefix=f"{prefix}.markov_w1",
-        )
-        self.markov_w2 = ParallelLMHead(
             config.vocab_size,
-            config.dspark_markov_rank,
-            org_num_embeddings=config.vocab_size,
+            bias=False,
+            return_bias=False,
             prefix=f"{prefix}.markov_w2",
         )
-        self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.markov_w1(token_ids)
 
     def bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
-        return self.logits_processor(self.markov_w2, markov_embed)
+        return self.markov_w2(markov_embed)
 
 
 class DSparkConfidenceHead(nn.Module):
@@ -317,7 +315,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
 
         # check if quant config exist
-        from vllm_ascend.models.llama_eagle3 import get_rotation_path
+        from vllm_ascend.utils import get_rotation_path
 
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
 

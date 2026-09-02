@@ -17,11 +17,13 @@
 #                        most specific wins). Each entry has a ``default``
 #                        partition and an optional ``310p`` override for
 #                        files whose name contains ``_310p``.
-# - ``estimated_times:`` per-test estimated execution time in seconds, used
+# - ``estimated_times:`` per-file estimated execution time in seconds, used
 #                        for load-balanced partitioning. Updated periodically
 #                        by the schedule_e2e_test workflow. Unlisted tests
-#                        default to 600s (10 minutes). Supports ``::nodeid``
-#                        suffix for method-level granularity.
+#                        default to 600s (10 minutes). File-level only:
+#                        bucketing and precision testing both work on files,
+#                        so ``::nodeid`` (method-level) entries are not
+#                        supported.
 # - ``pinned_routes:``   applied after normal selection, skip filtering, and
 #                        containment-aware deduplication. Tests remain in
 #                        their technical directories; only selected files are
@@ -39,19 +41,36 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
 
 # === Skipped Tests ===
-# Removed from any selection after directory scanning.
-# Temporarily skipped: the precision check in test_graph_mode.py is
-# unstable; re-enable once the graph mode precision issue is fixed.
+# Removed from any selection after directory scanning, so they are never
+# scheduled to a runner. Only whole-file skips belong here: when every test
+# function in the file is unconditionally skipped, register the file instead
+# of paying for a runner slot that executes nothing. Move the file back into
+# rotation once the underlying issue is fixed, and remove it from this list.
 skip_tests:
+  # Temporarily skipped: the precision check in test_graph_mode.py is
+  # unstable; re-enable once the graph mode precision issue is fixed.
   - tests/e2e/pull_request/four_card/test_graph_mode.py
+  # Probabilistic failure, need fix (pooling classification)
+  - tests/e2e/pull_request/one_card/_310p/test_classification_310p.py
+  # Broken after CANN and triton-ascend upgrade
+  - tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py
+  # Temporarily skipped due to flaky failures, pending investigation
+  - tests/e2e/pull_request/two_card/test_qwen3_performance.py
+  # Temporarily skipped: this test is currently broken
+  - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
+  # Temporarily skipped: capture/replay metrics unstable
+  - tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py
+  # Temporarily skip this DeepSeek V4 test
+  - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
+  # Temporarily skipped: this test is currently broken
+  - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
+  # The use case is unstable and temporarily taken offline
+  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
 
 # === Estimated Times ===
-# Per-test estimated execution time in seconds.
+# Per-file estimated execution time in seconds.
 # Updated periodically by schedule_update_estimated_times workflow.
 # Unlisted tests default to 600s (10 minutes).
-# Supports ``::nodeid`` suffix for method-level granularity.
-# When both file-level and ``::nodeid`` entries exist, lookup uses
-# exact match first, then file-level fallback.
 estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 1210
@@ -117,7 +136,6 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py::test_dflash2_acceptance: 300
   tests/e2e/pull_request/two_card/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 230
@@ -139,7 +157,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 800
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 880
-  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 380
+  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 590
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
