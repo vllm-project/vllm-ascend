@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm_ascend._310p.ops.fla.l2norm import l2norm_310p
+from vllm_ascend.utils import enable_custom_op
 
 CHUNK_SIZE = 64
 
@@ -188,11 +189,25 @@ def _ceil_div(value: int, divisor: int) -> int:
 
 
 def _require_ascend_chunk_ops(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
+    custom_ops_enabled = enable_custom_op()
     ascend_ops = getattr(torch.ops, "_C_ascend", None)
-    if q.device.type != "npu" or ascend_ops is None:
+    has_fwd_h = ascend_ops is not None and hasattr(ascend_ops, "chunk_gated_delta_rule_fwd_h")
+    has_fwd_o = ascend_ops is not None and hasattr(ascend_ops, "chunk_fwd_o")
+    if not custom_ops_enabled or not has_fwd_h or not has_fwd_o:
+        missing = []
+        if not custom_ops_enabled:
+            missing.append("vllm_ascend_C (enable_custom_op returned False)")
+        if not has_fwd_h:
+            missing.append("chunk_gated_delta_rule_fwd_h")
+        if not has_fwd_o:
+            missing.append("chunk_fwd_o")
+        raise RuntimeError(
+            "Missing AscendC chunk-gdr ops on 310P: "
+            f"{', '.join(missing)}. "
+            "Rebuild with COMPILE_CUSTOM_KERNELS=1 and SOC_VERSION=ascend310p*."
+        )
+    if q.device.type != "npu":
         raise RuntimeError("310P chunk_gated_delta_rule requires NPU AscendC kernels.")
-    if not (hasattr(ascend_ops, "chunk_gated_delta_rule_fwd_h") and hasattr(ascend_ops, "chunk_fwd_o")):
-        raise RuntimeError("Missing AscendC chunk-gdr ops: chunk_gated_delta_rule_fwd_h/chunk_fwd_o.")
     if q.dtype != torch.float16 or k.dtype != q.dtype or v.dtype != q.dtype:
         raise TypeError(f"q/k/v must share float16 dtype on 310P, got {q.dtype}, {k.dtype}, {v.dtype}.")
     if v.shape[-1] < 128 or v.shape[-1] % 128 != 0:
@@ -315,6 +330,58 @@ def _prepare_chunk_indices_list(cu_seqlens: torch.Tensor, chunk_size: int) -> li
     return chunk_indices
 
 
+def _wy_build_A_and_R(
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Build strict-lower A and stacked R=[βV | γ·Kβ] (fp32, chunk layout)."""
+    batch_size, padded_tokens, _, k_dim = k.shape
+    num_v_heads = v.shape[2]
+    value_dim = v.shape[-1]
+    num_chunks = padded_tokens // chunk_size
+
+    key = _expand_qk_to_v_heads(k, num_v_heads).transpose(1, 2).contiguous().to(torch.float32)
+    value = v.transpose(1, 2).contiguous().to(torch.float32)
+    g_t = g.transpose(1, 2).contiguous().to(torch.float32)
+    beta_t = beta.transpose(1, 2).contiguous().to(torch.float32)
+
+    key = key.reshape(batch_size, num_v_heads, num_chunks, chunk_size, k_dim)
+    value = value.reshape(batch_size, num_v_heads, num_chunks, chunk_size, value_dim)
+    a = g_t.reshape(batch_size, num_v_heads, num_chunks, chunk_size).cumsum(dim=-1)
+    beta_t = beta_t.reshape(batch_size, num_v_heads, num_chunks, chunk_size)
+    gamma = a.exp()
+
+    # Λ = exp(a_i − a_j) on strict-lower only (bounded); never γ_i/γ_j.
+    lam = (a.unsqueeze(-1) - a.unsqueeze(-2)).tril(diagonal=-1).exp()
+    k_beta = key * beta_t.unsqueeze(-1)
+    gram = k_beta @ key.transpose(-1, -2)
+    a_mat = -(gram * lam).tril(diagonal=-1)
+    rhs = torch.cat([value * beta_t.unsqueeze(-1), k_beta * gamma.unsqueeze(-1)], dim=-1)
+    return a_mat, rhs, a, value_dim
+
+
+def _wy_doubling_apply(a_mat: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    """Nilpotent doubling: (I−A)⁻¹ R without forming T. log2(64)=6 rounds."""
+    p = a_mat.clone()
+    r = rhs.clone()
+    for i in range(6):
+        r = r + p @ r
+        if i < 5:
+            p = p @ p
+    return r
+
+
+def _wy_blocked_fs_apply(a_mat: torch.Tensor, rhs: torch.Tensor, block: int = 16) -> torch.Tensor:
+    """Blocked forward-substitution fallback: solve (I−A) X = R (numerically = ref)."""
+    del block  # reserved for an explicit 4×16 blocked FS; triangular solve is exact.
+    n = a_mat.shape[-1]
+    eye = torch.eye(n, dtype=a_mat.dtype, device=a_mat.device).expand(*a_mat.shape[:-2], n, n)
+    return torch.linalg.solve_triangular(eye - a_mat, rhs, upper=False)
+
+
 def _compute_kernel_inputs_from_torch_wy(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -363,6 +430,92 @@ def _compute_kernel_inputs_from_torch_wy(
     w_kernel = k_cumdecay.reshape(batch_size, num_v_heads, padded_tokens, k_dim).to(torch.float16).contiguous()
     g_kernel = g.reshape(batch_size, num_v_heads, padded_tokens).contiguous()
     return q_kernel, k_kernel, w_kernel, u_kernel, g_kernel
+
+
+def _compute_kernel_inputs_from_doubling_wy(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """WY prefix via nilpotent doubling (mirrors AscendC cube path)."""
+    batch_size, padded_tokens, _, k_dim = k.shape
+    num_v_heads = v.shape[2]
+    a_mat, rhs, a, value_dim = _wy_build_A_and_R(k, v, g, beta, chunk_size)
+    out = _wy_doubling_apply(a_mat, rhs)
+    u = out[..., :value_dim]
+    w = out[..., value_dim:]
+    q_kernel = q.transpose(1, 2).contiguous()
+    k_kernel = k.transpose(1, 2).contiguous()
+    u_kernel = u.reshape(batch_size, num_v_heads, padded_tokens, value_dim).to(torch.float16).contiguous()
+    w_kernel = w.reshape(batch_size, num_v_heads, padded_tokens, k_dim).to(torch.float16).contiguous()
+    g_kernel = a.reshape(batch_size, num_v_heads, padded_tokens).contiguous()
+    return q_kernel, k_kernel, w_kernel, u_kernel, g_kernel
+
+
+def _can_use_npu_compute_wy(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> bool:
+    if not enable_custom_op():
+        return False
+    ascend_ops = getattr(torch.ops, "_C_ascend", None)
+    if ascend_ops is None or not hasattr(ascend_ops, "chunk_gated_delta_rule_compute_wy"):
+        return False
+    if (
+        q.device.type != "npu"
+        or k.device != q.device
+        or v.device != q.device
+        or g.device != q.device
+        or beta.device != q.device
+    ):
+        return False
+    if chunk_size != CHUNK_SIZE:
+        return False
+    if q.dtype != torch.float16 or k.dtype != torch.float16 or v.dtype != torch.float16 or beta.dtype != torch.float16:
+        return False
+    if g.dtype != torch.float32:
+        return False
+    if q.ndim != 4 or k.shape != q.shape or v.ndim != 4 or g.ndim != 3 or beta.shape != g.shape:
+        return False
+    if q.shape[1] % chunk_size != 0 or v.shape[0] != q.shape[0] or v.shape[1] != q.shape[1]:
+        return False
+    if g.shape != (q.shape[0], q.shape[1], v.shape[2]):
+        return False
+    if q.shape[3] % 16 != 0 or v.shape[3] % 16 != 0:
+        return False
+    if q.shape[3] > 128 or v.shape[3] > 128:
+        return False
+    # Mirror host tiling: K/V<=128 (UB), B<=32, Hv<=64 (g/beta staging into attn scratch).
+    if q.shape[0] > 32 or v.shape[2] > 64:
+        return False
+    return v.shape[2] % q.shape[2] == 0
+
+
+def _compute_kernel_inputs_from_npu_wy(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    chunk_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if not _can_use_npu_compute_wy(q, k, v, g, beta, chunk_size):
+        return _compute_kernel_inputs_from_torch_wy(q, k, v, g, beta, chunk_size)
+    return torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        g.contiguous(),
+        beta.contiguous(),
+        chunk_size,
+    )
 
 
 def _unpad_chunk_output(
@@ -532,7 +685,7 @@ def chunk_gated_delta_rule_310(
         return empty_out, final_state
 
     scale = k.shape[-1] ** -0.5 if scale is None else scale
-    q_kernel, k_kernel, w_kernel, u_kernel, g_kernel = _compute_kernel_inputs_from_torch_wy(
+    q_kernel, k_kernel, w_kernel, u_kernel, g_kernel = _compute_kernel_inputs_from_npu_wy(
         q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE
     )
 
