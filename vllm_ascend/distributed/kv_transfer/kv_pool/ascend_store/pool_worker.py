@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib
 import math
+import queue
 import threading
 import time
 from collections.abc import Callable, Generator
+from concurrent.futures import Future
 from typing import Any
 
 import numpy as np
@@ -45,6 +47,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
+    SynchronousLoadRequest,
     _circular_shift,
     record_failed_blocks,
 )
@@ -154,6 +157,12 @@ class KVPoolWorker:
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
+        configured_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
+        self.num_load_recv_threads = (
+            configured_recv_threads if self.backend_name == "mooncake" and not self.use_layerwise else 1
+        )
+        if self.backend_name == "mooncake" and self.use_layerwise and configured_recv_threads > 1:
+            logger.warning("VLLM_MOONCAKE_LOAD_RECV_THREADS is ignored by AscendStore layerwise transfer")
         self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
@@ -336,6 +345,7 @@ class KVPoolWorker:
     def _init_state_vars(self) -> None:
         self.kv_send_thread: KVTransferThread | None = None
         self.kv_recv_thread: KVTransferThread | None = None
+        self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
         self._transfer_threads_started = False
         self.external_slot_release_waiter: Callable[[int], None] | None = None
         # Per-rank GVA cache: maps per-rank store key to its allocated GVA.
@@ -566,21 +576,35 @@ class KVPoolWorker:
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
-            if self.load_async:
-                ready_event = threading.Event()
-                self.kv_recv_thread = KVCacheStoreRecvingThread(
-                    self.m_store,
-                    self.token_database,
-                    self.grouped_block_size,
-                    self.tp_rank,
-                    self.tp_size,
-                    self.dcp_size,
-                    ready_event,
-                    invalid_block_ids=self._invalid_block_ids,
-                    invalid_block_ids_lock=self._invalid_block_ids_lock,
+            if self.load_async or self.num_load_recv_threads > 1:
+                recv_request_queue: queue.Queue[Any] = queue.Queue()
+                ready_events = []
+                for index in range(self.num_load_recv_threads):
+                    ready_event = threading.Event()
+                    recv_thread = KVCacheStoreRecvingThread(
+                        self.m_store,
+                        self.token_database,
+                        self.grouped_block_size,
+                        self.tp_rank,
+                        self.tp_size,
+                        self.dcp_size,
+                        ready_event,
+                        invalid_block_ids=self._invalid_block_ids,
+                        invalid_block_ids_lock=self._invalid_block_ids_lock,
+                        worker=self,
+                        request_queue=recv_request_queue,
+                    )
+                    recv_thread.name = f"AscendStoreRecv-{index}"
+                    recv_thread.start()
+                    self.kv_recv_threads.append(recv_thread)
+                    ready_events.append(ready_event)
+                for ready_event in ready_events:
+                    ready_event.wait()
+                self.kv_recv_thread = self.kv_recv_threads[0]
+                logger.info(
+                    "Started %d AscendStore KV-load receive thread(s)",
+                    self.num_load_recv_threads,
                 )
-                self.kv_recv_thread.start()
-                ready_event.wait()
         self._transfer_threads_started = True
 
     def _build_cache_coordinator(self, vllm_config: VllmConfig) -> AscendStoreCoordinator | None:
@@ -835,6 +859,7 @@ class KVPoolWorker:
         if self.use_layerwise:
             self.process_layer_data(metadata.requests)
             return
+        sync_load_completions: list[Future[None]] = []
         for request in metadata.requests:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:  # load =0
@@ -865,6 +890,14 @@ class KVPoolWorker:
                 load_group_ids,
                 self.load_async,
             )
+            if self.kv_recv_threads:
+                if self.load_async:
+                    self.kv_recv_threads[0].add_request(request)
+                else:
+                    completion: Future[None] = Future()
+                    self.kv_recv_threads[0].add_request(SynchronousLoadRequest(request, completion))
+                    sync_load_completions.append(completion)
+                continue
             if self.load_async:
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                     request,
@@ -965,6 +998,8 @@ class KVPoolWorker:
                 load_group_ids,
                 len(key_list_c),
             )
+        for completion in sync_load_completions:
+            completion.result()
 
     def _process_save_for_layer_batch(
         self,
@@ -2041,7 +2076,14 @@ class KVPoolWorker:
             done_sending = set()
 
         done_recving = set()
-        if self.kv_recv_thread is not None:
+        if self.kv_recv_threads:
+            for recv_thread in self.kv_recv_threads:
+                recv_thread.raise_if_failed()
+                recv_thread.discard_finished_requests(meta.preempted_req_ids)
+                if self.load_async:
+                    done_recving |= recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)
+        elif self.kv_recv_thread is not None:
+            self.kv_recv_thread.raise_if_failed()
             self.kv_recv_thread.discard_finished_requests(meta.preempted_req_ids)
             if self.load_async:
                 done_recving = self.kv_recv_thread.get_and_clear_finished_requests(meta.loading_req_ids)

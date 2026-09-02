@@ -6,6 +6,8 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import Future
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -34,6 +36,14 @@ def _circular_shift(lst: list, offset: int) -> list:
     if not lst or offset == 0:
         return lst
     return lst[offset:] + lst[:offset]
+
+
+@dataclass(frozen=True)
+class SynchronousLoadRequest:
+    """A receiver-pool request whose completion is awaited by the caller."""
+
+    request: ReqMeta
+    completion: Future[None]
 
 
 class LayerBatchBuilder:
@@ -313,6 +323,7 @@ class KVTransferThread(threading.Thread):
         dcp_size: int = 1,
         ready_event: threading.Event | None = None,
         name: str = "KVTransferThread",
+        request_queue: queue.Queue[Any] | None = None,
     ):
         super().__init__(daemon=True, name=name)
         self.m_store = m_store
@@ -324,7 +335,7 @@ class KVTransferThread(threading.Thread):
         self.token_database = token_database
         self.num_addrs_per_block = len(token_database.group_block_len[0])
         self.done_task_lock = threading.Lock()
-        self.request_queue: queue.Queue[Any] = queue.Queue()
+        self.request_queue: queue.Queue[Any] = request_queue if request_queue is not None else queue.Queue()
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.finished_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
@@ -878,6 +889,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
+        request_queue: queue.Queue[Any] | None = None,
     ):
         super().__init__(
             m_store,
@@ -888,17 +900,25 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             dcp_size,
             ready_event,
             name="KVCacheStoreRecvingThread",
+            request_queue=request_queue,
         )
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
 
-    def _handle_request(self, req_meta: ReqMeta):
+    def _handle_request(self, request_data: ReqMeta | SynchronousLoadRequest):
+        sync_completion: Future[None] | None = None
+        if isinstance(request_data, SynchronousLoadRequest):
+            req_meta = request_data.request
+            sync_completion = request_data.completion
+        else:
+            req_meta = request_data
+        load_error: Exception | None = None
         try:
             load_spec = req_meta.load_spec
             req_id = req_meta.req_id
             if load_spec is None:
-                logger.error("KV pool async recv request %s has no load spec; skip load.", req_id)
+                logger.error("KV pool recv request %s has no load spec; skip load.", req_id)
                 self.set_finished_request(req_id)
                 return
 
@@ -960,7 +980,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 block_id_list[self.tp_rank % len(block_id_list) :] + block_id_list[: self.tp_rank % len(block_id_list)]
             )
             logger.debug(
-                "KV pool async recv calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
+                "KV pool recv calls backend get request=%s token_len=%d groups=%s keys=%d sample_keys=%s",
                 req_id,
                 token_len,
                 req_meta.kv_cache_group_ids or [0],
@@ -1001,14 +1021,25 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         missing_block_ids,
                     )
             logger.debug(
-                "KV pool async recv backend get returned request=%s token_len=%d groups=%s keys=%d",
+                "KV pool recv backend get returned request=%s token_len=%d groups=%s keys=%d",
                 req_id,
                 token_len,
                 req_meta.kv_cache_group_ids or [0],
                 len(key_list_c),
             )
             self.set_finished_request(req_id)
+        except Exception as error:
+            load_error = error
+            if sync_completion is None:
+                raise
         finally:
+            if sync_completion is not None:
+                self.discard_finished_requests({req_meta.req_id})
+                if not sync_completion.done():
+                    if load_error is None:
+                        sync_completion.set_result(None)
+                    else:
+                        sync_completion.set_exception(load_error)
             self.request_queue.task_done()
 
 
