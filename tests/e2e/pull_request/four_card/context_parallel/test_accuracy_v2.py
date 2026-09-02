@@ -28,6 +28,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
+from vllm_ascend.utils import vllm_version_is
 
 MAX_NUM_SEQS = 4
 FULL_DECODE_GRAPH = {
@@ -66,7 +67,11 @@ DSV3_2_SFA_DCP_GOLDENS = (
 DSV3_2_SFA_PCP_GOLDENS = [
     "The capital of France isoint054 Rund compasses",
     "Hello, my name is Tom, I am" + "ERIC slicpacelike\u6302",
-    "The president of United States isoint054 Rund959arki",
+    (
+        "The president of United States isoint054 Rund959arki"
+        if vllm_version_is("0.27.1")
+        else "The president of United States isoint054 Rund596\u5e84\u7a3c"
+    ),
 ]
 
 DSV4_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
@@ -171,10 +176,7 @@ DSV3_2_SFA_PCP_CASE = AccuracyCase(
         "cp_kv_cache_interleave_size": 128,
         "block_size": 128,
         "quantization": "ascend",
-        "compilation_config": {
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-            "cudagraph_capture_sizes": [len(COMMON_PROMPTS)],
-        },
+        "compilation_config": FULL_DECODE_GRAPH,
     },
 )
 
