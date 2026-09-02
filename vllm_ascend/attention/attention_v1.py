@@ -2312,6 +2312,34 @@ def _build_qfa_cu_seqlens(cumulative_seq_lengths: list[int], device: torch.devic
     return torch.tensor([0, *cumulative_seq_lengths], dtype=torch.int32, device=device)
 
 
+# Resolved lazily and cached: (main_op, metadata_op). The QFA dual operators
+# are delivered through the cann_ops_transformer package shipped with the
+# CANN toolkit (confirmed final delivery form). That wrapper's call shape
+# (verified on-device): positional q/k/v/q_descale/k_descale/v_descale/
+# quant_mode, p_scale instead of quant_scale_p, an extra layout_q_descale,
+# no pa_block_size, and a required non-null v_descale placeholder on the
+# metadata call for quant_mode=1 (batch_size must not be passed with a TND
+# layout_q; the op infers it from cu_seqlens_q).
+_QFA_OPS: tuple[Any, Any] | None = None
+
+
+def _get_qfa_ops() -> tuple[Any, Any]:
+    global _QFA_OPS
+    if _QFA_OPS is None:
+        try:
+            from cann_ops_transformer.ops import quant_flash_attn as main_op
+            from cann_ops_transformer.ops import quant_flash_attn_metadata as metadata_op
+        except ImportError:
+            raise RuntimeError(
+                "C8_MXFP requires the QFA dual operators delivered in the "
+                "cann_ops_transformer package (shipped with the CANN toolkit): "
+                "cann_ops_transformer.ops.quant_flash_attn(_metadata) could not "
+                "be imported in this environment."
+            ) from None
+        _QFA_OPS = (main_op, metadata_op)
+    return _QFA_OPS
+
+
 class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     """MXFP8 KV cache backend computed by the QFA dual-operator interface.
 
@@ -2319,8 +2347,8 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     per-token-group E8M0 scales) and V statically (the checkpoint's
     per-channel E8M0 scale), scatters quantized K/V plus their scale caches
     into the paged cache, and calls
-    ``torch_npu.npu_quant_flash_attn_metadata`` + ``torch_npu.npu_quant_flash_attn``
-    directly on the paged cache.
+    ``cann_ops_transformer.ops.quant_flash_attn_metadata`` +
+    ``cann_ops_transformer.ops.quant_flash_attn`` directly on the paged cache.
 
     Layout: PA_BBND. K/V and both E8M0 scale caches are stored in the natural
     ``[num_blocks, block_size, num_kv_heads, head_dim]`` order that
@@ -2340,17 +2368,14 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     aclgraph "path 7") is pending the operator-side contract and raises here.
     Speculative decoding is also out of scope for v1.
 
-    NOTE: kwarg names of the two QFA calls follow the QFA requirement doc's
-    torch-level calling example (torch_npu.npu_quant_flash_attn*,
-    dequant_scale_query/key/value, quant_scale_p, pa_block_size,
-    return_softmax_lse=bool). The public ops-transformer extension exposes a
-    DIFFERENT wrapper (cann_ops_transformer.quant_flash_attn: positional
-    q_descale/k_descale/v_descale, p_scale, no pa_block_size, an extra
-    layout_q_descale, and a v_descale placeholder requirement on the metadata
-    call); re-verify against the actual torch_npu build before on-device
-    bring-up. Any mismatch is confined to _get_qfa_metadata / _run_qfa (see
-    the bring-up checklist for the full signature diff and the
-    machine-validated vendored-wrapper call to fall back to).
+    NOTE: the QFA dual operators are called through _get_qfa_ops(), which
+    resolves cann_ops_transformer.ops.quant_flash_attn(_metadata) -- the
+    confirmed final delivery form, shipped with the CANN toolkit. That
+    wrapper's signature (verified on-device via inspect + the vendored-QFA
+    bring-up) differs from the requirement doc's torch_npu example: positional
+    q_descale/k_descale/v_descale/quant_mode, p_scale instead of
+    quant_scale_p, an extra layout_q_descale, no pa_block_size, and a
+    required v_descale placeholder on the metadata call for quant_mode=1.
     """
 
     # Installed via ``layer.impl.__class__`` assignment, which does not call
@@ -2372,7 +2397,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         *,
         cu_seqlens_q: torch.Tensor,
         seqused_kv: torch.Tensor,
-        batch_size: int,
         max_seqlen_q: int,
     ):
         """Return (computing once per step) the QFA metadata plan.
@@ -2385,28 +2409,32 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         if metadata is None:
             # TND + PA: pass cu_seqlens_q only; the KV side is addressed via
             # block_table + seqused_kv (QFA requirement doc, 3.2.3).
-            # NOTE: kwargs follow the delivered torch_npu wrapper example in
-            # the QFA requirement doc (3.4.2D). The public ops-transformer
-            # wrapper is machine-validated to additionally require a non-null
-            # v_descale for quant_mode=1 (a minimal 5D E8M0 placeholder
-            # suffices) plus layout_q_descale; if the torch_npu build matches
-            # that API instead, add both here (see the bring-up checklist).
-            metadata = torch_npu.npu_quant_flash_attn_metadata(
-                num_heads_q=self.num_heads,
-                num_heads_kv=self.num_kv_heads,
-                head_dim=self.head_size,
-                quant_mode=QFA_QUANT_MODE_MXFP8,
+            # quant_mode=1 refuses a null v_descale at the aclnn entry
+            # (quant_flash_attn_metadata_check.h), but under PA_BBND nothing
+            # reads it -- a minimal 5D E8M0 placeholder suffices. batch_size
+            # must NOT be passed with a TND layout_q (the checker rejects
+            # it); the op infers it from cu_seqlens_q.
+            _, metadata_op = _get_qfa_ops()
+            v_descale_stub = torch.zeros(
+                1, 1, 1, 1, 2, dtype=torch.uint8, device=cu_seqlens_q.device
+            ).view(torch_npu.float8_e8m0fnu)
+            metadata = metadata_op(
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_size,
+                QFA_QUANT_MODE_MXFP8,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_kv=None,
                 seqused_q=None,
                 seqused_kv=seqused_kv,
-                batch_size=batch_size,
+                v_descale=v_descale_stub,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=-1,
                 mask_mode=QFA_MASK_MODE_CAUSAL,
                 win_left=-1,
                 win_right=-1,
                 layout_q=QFA_LAYOUT_TND,
+                layout_q_descale=QFA_LAYOUT_TND,
                 layout_kv=QFA_LAYOUT_PA_BBND,
                 layout_out=QFA_LAYOUT_TND,
             )
@@ -2438,27 +2466,31 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         output: torch.Tensor,
     ) -> torch.Tensor:
         key, value, key_scale, value_scale = kv_cache
-        # PA_BBND: block axis is dim 1 of the paged K/V cache.
-        block_size = key.shape[1]
         # The scale caches are stored as raw uint8 (index_put_ on float8
         # either errors or falls back to AICPU); QFA's checker wants E8M0, so
         # bitcast at the call boundary. Same for the q scale when the quant
         # helper returns it as uint8 bytes.
-        if key_scale.dtype != torch.float8_e8m0fnu:
-            key_scale = key_scale.view(torch.float8_e8m0fnu)
-        if value_scale.dtype != torch.float8_e8m0fnu:
-            value_scale = value_scale.view(torch.float8_e8m0fnu)
-        if query_scale.dtype != torch.float8_e8m0fnu:
-            query_scale = query_scale.view(torch.float8_e8m0fnu)
-        result = torch_npu.npu_quant_flash_attn(
+        if key_scale.dtype != torch_npu.float8_e8m0fnu:
+            key_scale = key_scale.view(torch_npu.float8_e8m0fnu)
+        if value_scale.dtype != torch_npu.float8_e8m0fnu:
+            value_scale = value_scale.view(torch_npu.float8_e8m0fnu)
+        if query_scale.dtype != torch_npu.float8_e8m0fnu:
+            query_scale = query_scale.view(torch_npu.float8_e8m0fnu)
+        main_op, _ = _get_qfa_ops()
+        # cann_ops_transformer delivery signature (verified on-device):
+        # q/k/v/q_descale/k_descale/v_descale/quant_mode positional, p_scale
+        # instead of quant_scale_p, layout_q_descale, and no pa_block_size
+        # (the op infers the block size from the k/v cache shapes).
+        result = main_op(
             quant_query,
             key,
             value,
-            dequant_scale_query=query_scale,
-            dequant_scale_key=key_scale,
-            dequant_scale_value=value_scale,
+            query_scale,
+            key_scale,
+            value_scale,
+            QFA_QUANT_MODE_MXFP8,
             block_table=attn_metadata.block_tables,
-            quant_scale_p=None,
+            p_scale=None,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=None,
             seqused_q=None,
@@ -2466,7 +2498,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             sinks=None,
             attn_mask=self._qfa_int8_mask(attn_metadata),
             metadata=qfa_metadata,
-            quant_mode=QFA_QUANT_MODE_MXFP8,
             softmax_scale=self.scale,
             mask_mode=QFA_MASK_MODE_CAUSAL,
             win_left=-1,
@@ -2474,13 +2505,13 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=-1,
             layout_q=QFA_LAYOUT_TND,
+            layout_q_descale=QFA_LAYOUT_TND,
             layout_kv=QFA_LAYOUT_PA_BBND,
             layout_out=QFA_LAYOUT_TND,
-            pa_block_size=block_size,
             return_softmax_lse=False,
         )
-        # return_softmax_lse=False yields an empty LSE tensor in current QFA
-        # builds; tolerate both tuple and single-tensor returns.
+        # return_softmax_lse=False yields an empty LSE tensor in the
+        # cann_ops flavor; tolerate both tuple and single-tensor returns.
         attn_output = result[0] if isinstance(result, tuple) else result
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output
@@ -2524,7 +2555,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             attn_metadata,
             cu_seqlens_q=cu_seqlens_q,
             seqused_kv=seqused_kv,
-            batch_size=len(seqused_kv),
             max_seqlen_q=max_seqlen_q,
         )
         return self._run_qfa(
