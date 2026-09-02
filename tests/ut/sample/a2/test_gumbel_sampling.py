@@ -7,10 +7,14 @@
 # Tests for vllm_ascend.worker.v2.sample.gumbel on Ascend NPU.
 # Validates gumbel_sample and apply_temperature against PyTorch references.
 
+import math
+
 import pytest
 import torch
+from vllm.triton_utils import tl, triton
 
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
+from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import _npu_gumbel_block_argmax
 
 DEVICE = "npu"
 
@@ -660,7 +664,7 @@ class TestGumbelSampleLogitsCache:
             seed,
             pos,
             apply_temperature=True,
-            is_drafting=False,
+            is_drafting=True,
             logits_cache=cache,
             logits_cache_col=cols,
         )
@@ -704,7 +708,7 @@ class TestGumbelSampleLogitsCache:
                 seed,
                 pos,
                 apply_temperature=True,
-                is_drafting=False,
+                is_drafting=True,
                 logits_cache=cache,
                 logits_cache_col=cols[step],
             )
@@ -734,7 +738,293 @@ class TestGumbelSampleLogitsCache:
                 seed,
                 pos,
                 apply_temperature=True,
-                is_drafting=False,
+                is_drafting=True,
                 logits_cache=cache,
                 logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
             )
+
+
+@triton.jit
+def _npu_gumbel_block_argmax_wrapper_kernel(
+    # [num_tokens, V]
+    logits_ptr,
+    # [num_tokens]
+    idx_mapping_ptr,
+    # [max_num_reqs]
+    temp_ptr,
+    # [max_num_reqs]
+    seed_ptr,
+    # [num_tokens]
+    pos_ptr,
+    # [max_num_reqs, num_cols, V]
+    cache_ptr,
+    cache_stride_0,
+    cache_stride_1,
+    # [] (shared column) or [num_tokens] (per-token column)
+    cache_col_ptr,
+    vocab_size,
+    # [num_tokens]
+    value_out_ptr,
+    idx_out_ptr,
+    APPLY_TEMPERATURE: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Minimal launcher so _npu_gumbel_block_argmax's cache path can be tested
+    # directly: it is a device function, so a host-side call is impossible.
+    token_idx = tl.program_id(0).to(tl.int64)
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < vocab_size
+    logits = tl.load(logits_ptr + token_idx * vocab_size + block, mask=mask, other=float("-inf"))
+    value, idx = _npu_gumbel_block_argmax(
+        logits,
+        block,
+        mask,
+        token_idx,
+        idx_mapping_ptr,
+        temp_ptr,
+        seed_ptr,
+        pos_ptr,
+        cache_ptr,
+        cache_stride_0,
+        cache_stride_1,
+        cache_col_ptr,
+        vocab_size,
+        IS_DRAFTING=False,
+        APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+        USE_FP64=False,
+        PER_TOKEN_COL=PER_TOKEN_COL,
+    )
+    tl.store(value_out_ptr + token_idx, value)
+    tl.store(idx_out_ptr + token_idx, idx)
+
+
+class TestNpuGumbelBlockArgmaxCache:
+    """Direct coverage for _npu_gumbel_block_argmax's logits-cache path.
+
+    In production the rejection sampler's _resample_kernel calls the op with
+    logits_cache_ptr=None, so the cache path only runs when the NPU op is
+    patched into the upstream kernels (draft logits caching, upstream #50910).
+    These tests launch the op through a wrapper kernel (mirroring the
+    TestGumbelSampleLogitsCache assertions for gumbel_sample's cache) so the
+    fork-owned cache path keeps a regression guard.
+    """
+
+    BLOCK_SIZE = 8192
+
+    def _run(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temp: torch.Tensor,
+        seed: torch.Tensor,
+        pos: torch.Tensor,
+        cache: torch.Tensor,
+        cols: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens, vocab_size = logits.shape
+        value_out = torch.empty(num_tokens, dtype=torch.float32, device=DEVICE)
+        idx_out = torch.empty(num_tokens, dtype=torch.int64, device=DEVICE)
+        _npu_gumbel_block_argmax_wrapper_kernel[(num_tokens,)](
+            logits,
+            idx_mapping,
+            temp,
+            seed,
+            pos,
+            cache,
+            cache.stride(0),
+            cache.stride(1),
+            cols,
+            vocab_size,
+            value_out,
+            idx_out,
+            APPLY_TEMPERATURE=True,
+            PER_TOKEN_COL=cols.ndim > 0,
+            BLOCK_SIZE=self.BLOCK_SIZE,
+        )
+        torch.npu.synchronize()
+        return value_out, idx_out
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    @pytest.mark.parametrize("per_token_col", [False, True])
+    @torch.inference_mode()
+    def test_cache_path_stores_input_logits_bitwise(self, dtype: torch.dtype, per_token_col: bool):
+        """The op's cache store must be pre-temperature and bit-exact.
+
+        Temps far from 0.0/1.0 make a post-temperature store fail the bitwise
+        check in every dtype. Both column-addressing modes are covered (shared
+        0-d column and per-token column), matching TestGumbelSampleLogitsCache.
+        """
+        torch.manual_seed(0)
+        num_reqs, vocab_size, num_steps = 8, 4099, 3
+        logits = torch.randn(num_reqs, vocab_size, device=DEVICE, dtype=dtype)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+        temp = torch.tensor([0.1, 0.5, 1.5, 2.0, 0.7, 0.3, 0.9, 1.1], dtype=torch.float32, device=DEVICE)
+        seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+        # NPU: pos is cast to int32 inside the kernel.
+        pos = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+
+        cache = torch.zeros(num_reqs, num_steps, vocab_size, device=DEVICE, dtype=dtype)
+        if per_token_col:
+            # Each token lands in its own column, cycling through the steps.
+            cols = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE) % num_steps
+        else:
+            cols = torch.tensor(1, dtype=torch.int32, device=DEVICE)
+
+        _, idx_out = self._run(logits, idx_mapping, temp, seed, pos, cache, cols)
+        # Same (seed, pos) must reproduce the same noisy draw.
+        _, idx_out_2 = self._run(logits, idx_mapping, temp, seed, pos, cache, cols)
+        assert torch.equal(idx_out, idx_out_2), "same (seed, pos) produced different draws"
+
+        if per_token_col:
+            stored = cache[torch.arange(num_reqs, device=DEVICE), cols.long()]
+        else:
+            stored = cache[:, 1]
+            # Untouched columns must stay untouched.
+            assert not cache[:, 0].any() and not cache[:, 2].any()
+        assert torch.equal(_float_bits(stored), _float_bits(logits)), "cached logits differ from the input logits"
+        assert ((idx_out >= 0) & (idx_out < vocab_size)).all()
+
+    @torch.inference_mode()
+    def test_cache_path_greedy_returns_argmax(self):
+        """temp=0 applies neither temperature nor noise: argmax and raw max."""
+        torch.manual_seed(1)
+        num_reqs, vocab_size, num_steps = 4, 1031, 3
+        logits = torch.randn(num_reqs, vocab_size, device=DEVICE, dtype=torch.float32)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+        temp = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
+        seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+        pos = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+        cache = torch.zeros(num_reqs, num_steps, vocab_size, device=DEVICE, dtype=torch.float32)
+        cols = torch.tensor(0, dtype=torch.int32, device=DEVICE)
+
+        value_out, idx_out = self._run(logits, idx_mapping, temp, seed, pos, cache, cols)
+
+        assert torch.equal(idx_out, logits.argmax(dim=-1))
+        assert torch.equal(value_out, logits.max(dim=-1).values)
+        assert torch.equal(cache[:, 0], logits)
+
+
+# --------------------------- Noise streams ---------------------------------
+
+# Adapted from upstream tests/v1/worker/test_gpu_gumbel_sample.py
+# (upstream #54282: decouple the draft's Gumbel noise stream from the
+# target's via a Philox offset salt).
+
+# Dominant token is exp(HEAD_LOG_GAP)x larger than the unit-count tail, so the
+# tail sits ~HEAD_LOG_GAP logits below the top. That tail is the sensitive
+# part: the fp32 Gumbel noise must reach ~18 to ever sample it.
+HEAD_LOG_GAP = 18.0
+# 10-sigma band: a correct sampler effectively never trips it.
+Z_TOLERANCE = 10.0
+# NPU: upstream draws 500K samples in one call; the kernel's int64 argmax
+# scratch is [num_tokens, num_blocks], so draw in chunks to bound memory.
+NOISE_STREAM_VOCAB_SIZE = 200_000
+NOISE_STREAM_CHUNK = 50_000
+NOISE_STREAM_NUM_SAMPLES = 500_000
+
+
+def _make_heavy_tailed_counts(seed: int = 1234) -> torch.Tensor:
+    """Non-negative int64 counts of shape [vocab]; target prob = counts/N."""
+    gen = torch.Generator(device=DEVICE).manual_seed(seed)
+    counts = torch.randint(1, 4, (NOISE_STREAM_VOCAB_SIZE,), generator=gen, dtype=torch.int64, device=DEVICE)
+    counts[0] = round(math.exp(HEAD_LOG_GAP))  # dominant token
+    return counts
+
+
+def _counts_to_logits(counts: torch.Tensor) -> torch.Tensor:
+    # softmax(log(count)) == count / sum(count); count 0 -> logit -inf -> prob 0.
+    return counts.double().log().to(torch.float32)
+
+
+def _sample_noise_stream(
+    logits_1d: torch.Tensor,
+    *,
+    is_drafting: bool,
+) -> torch.Tensor:
+    """Sample NOISE_STREAM_NUM_SAMPLES tokens from one logit vector.
+
+    Fixed seed with a distinct `pos` per sample gives independent draws; the
+    logits are broadcast with a 0-stride view to avoid materializing
+    [num_samples, vocab_size]. NPU: pos is int32 (triton-ascend philox), and
+    draws are chunked to bound the kernel's scratch memory.
+    """
+    vocab_size = logits_1d.shape[0]
+    sampled_parts = []
+    for start in range(0, NOISE_STREAM_NUM_SAMPLES, NOISE_STREAM_CHUNK):
+        size = min(NOISE_STREAM_CHUNK, NOISE_STREAM_NUM_SAMPLES - start)
+        logits = logits_1d.unsqueeze(0).expand(size, vocab_size)
+        idx_mapping = torch.zeros(size, dtype=torch.int32, device=DEVICE)
+        temp = torch.tensor([1.0], dtype=torch.float32, device=DEVICE)
+        seed = torch.tensor([0xABCD], dtype=torch.int64, device=DEVICE)
+        pos = torch.arange(start, start + size, dtype=torch.int32, device=DEVICE)
+        sampled_parts.append(
+            gumbel_sample(
+                logits,
+                idx_mapping,
+                temp,
+                seed,
+                pos,
+                apply_temperature=True,
+                is_drafting=is_drafting,
+            )
+        )
+    return torch.cat(sampled_parts)
+
+
+def _z_score(observed: int, expected: float, num_trials: int) -> float:
+    p = expected / num_trials
+    return (observed - expected) / math.sqrt(num_trials * p * (1 - p))
+
+
+class TestGumbelSampleNoiseStreams:
+    """The draft's Gumbel noise stream must be disjoint from the target's."""
+
+    @torch.inference_mode()
+    def test_drafting_uses_a_separate_noise_stream(self):
+        """is_drafting salts the Philox offset: same inputs, different draws.
+
+        The draft proposal and the residual resample after a rejection must be
+        independent. They key noise by the same (seed, pos), so only the salt
+        keeps them apart -- without it the resample inherits the very noise
+        vector that picked the rejected proposal. See
+        test_gumbel_drafted_rejection_sample_is_unbiased in
+        tests/e2e/nightly/single_node/ops/singlecard_ops/triton/
+        test_rejection_sample_v2.py for the distributional consequence.
+
+        Relocating the offset must not distort the draw either, so both streams
+        are checked against the target's far-tail mass, which sits
+        HEAD_LOG_GAP logits below the head -- the regime where fp32 Gumbel
+        precision matters.
+        """
+        counts = _make_heavy_tailed_counts()
+        total = counts.sum().item()
+        logits = _counts_to_logits(counts)
+        tail_prob = (total - counts[0].item()) / total
+
+        target = _sample_noise_stream(logits, is_drafting=False)
+        draft = _sample_noise_stream(logits, is_drafting=True)
+
+        # The head dominates, so the streams agree on most draws by construction.
+        # Compare instead which draws leave the head: shared noise makes that
+        # identical, independent noise makes them differ on ~2p(1-p) of draws.
+        target_tail = target != 0
+        draft_tail = draft != 0
+        disagree = (target_tail != draft_tail).double().mean().item()
+        assert disagree > tail_prob, (
+            f"streams leave the head on the same draws ({disagree:.3e} disagreement "
+            f"vs tail mass {tail_prob:.3e}); the draft salt is not taking effect"
+        )
+
+        # Both streams must still reproduce the target's tail mass.
+        for name, tail in (("target", target_tail), ("draft", draft_tail)):
+            tail_count = tail.sum().item()
+            z = _z_score(tail_count, NOISE_STREAM_NUM_SAMPLES * tail_prob, NOISE_STREAM_NUM_SAMPLES)
+            assert abs(z) < Z_TOLERANCE, (
+                f"{name} tail mass {tail_count / NOISE_STREAM_NUM_SAMPLES:.3e} != {tail_prob:.3e} (z={z:.2f})"
+            )
+
+        # The draft stream is reproducible.
+        assert torch.equal(draft, _sample_noise_stream(logits, is_drafting=True))
+
+        torch.npu.synchronize()
