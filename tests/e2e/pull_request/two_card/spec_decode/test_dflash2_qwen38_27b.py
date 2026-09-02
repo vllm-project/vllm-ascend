@@ -92,7 +92,7 @@ def test_qwen38_27b_dflash_acceptance_tp2(
         expected_acceptance_length=expected_acceptance_length,
         runner_kwargs={
             "tensor_parallel_size": 2,
-            "max_model_len": 8096, 
+            "max_model_len": 8096,
             "compilation_config": CompilationConfig(cudagraph_mode="NONE"),
             "additional_config": additional_config,
         },
