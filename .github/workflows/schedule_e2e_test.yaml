@@ -240,8 +240,9 @@ jobs:
         run: |
           set -x
           python3 -m pip install pyyaml -q
-          python3 -c "import yaml,pprint; d=yaml.safe_load(open('${{ env.DAILY_CONFIG }}')); pprint.pprint(d); print('a2.nightly_hf:',d.get('a2',{}).get('nightly_hf'))"
           python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix
+          echo "======== GITHUB_OUTPUT raw dump ========"
+          cat "$GITHUB_OUTPUT"
 
   verify-image:
     name: Verify nightly-ci image (build gate)
