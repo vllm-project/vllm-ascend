@@ -135,6 +135,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
+        "dispatch_ffn_combine_w4_a8"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

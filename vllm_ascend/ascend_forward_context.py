@@ -275,6 +275,10 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
+_MAX_A2_FUSED_MC2_EP_SIZE = 8
+_MIN_A2_FUSED_MC2_LOCAL_EXPERTS = 3
+
+
 def _select_a2_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
@@ -285,6 +289,19 @@ def _select_a2_moe_comm_method(
         vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
     )
     num_experts_per_device = num_experts // ep_world_size
+    quant_type = getattr(
+        vllm_config.model_config.hf_text_config,
+        "moe_quantize",
+        getattr(vllm_config.model_config.hf_text_config, "quantize", None),
+    )
+    quant_name = str(getattr(quant_type, "name", quant_type)).lower()
+    if (
+        get_ascend_config().enable_fused_mc2 == 1
+        and quant_name == "w4a8"
+        and ep_world_size <= _MAX_A2_FUSED_MC2_EP_SIZE
+        and num_experts_per_device >= _MIN_A2_FUSED_MC2_LOCAL_EXPERTS
+    ):
+        return MoECommType.FUSED_MC2
     if (
         num_experts_per_device <= 24
         and ep_world_size >= 16
