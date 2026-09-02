@@ -545,8 +545,8 @@ def _mock_w8a8_gelu_compute(gate_up, *, gmm2_out=None, capture_quant=False):
     with (
         stream_patch,
         patch(f"{MOE_MLP}.torch_npu.npu_grouped_matmul", return_value=[gate_up], create=True) as mock_gmm,
-        patch(f"{MOE_MLP}.torch_npu.npu_dynamic_quant", side_effect=_dynamic_quant, create=True) as mock_dq,
-        patch.object(DeviceOperator, "npu_dynamic_quant", side_effect=_dynamic_quant),
+        patch(f"{MOE_MLP}.torch_npu.npu_dynamic_quant", side_effect=_dynamic_quant, create=True),
+        patch.object(DeviceOperator, "npu_dynamic_quant", side_effect=_dynamic_quant) as mock_dq,
         patch.object(
             DeviceOperator,
             "npu_grouped_matmul_gmm2",
