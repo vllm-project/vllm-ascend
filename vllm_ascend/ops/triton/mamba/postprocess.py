@@ -208,17 +208,34 @@ if vllm_version_is("0.27.1"):
             for row in range(dim_row_count):
                 row_src = (src_addr + row * dim_row_stride).to(tl.pointer_type(tl.uint8))
                 row_dst = (dst_addr + row * dim_row_stride).to(tl.pointer_type(tl.uint8))
+                # Same-block accept-bias rolls copy to a lower address
+                # with overlapping ranges (dst == block start, src == block
+                # start + bias): a forward store can overwrite a lane's
+                # source before it is loaded. Guard exactly like upstream
+                # batch_memcpy (barrier between the load and the store, the
+                # condition is uniform within the program).
+                row_left_overlap = (
+                    row_dst < row_src
+                    and row_dst + copy_size > row_src
+                )
                 for i in range(0, copy_size, COPY_BLOCK_SIZE):
                     mask = (i + offsets) < copy_size
                     data = tl.load(row_src + i + offsets, mask=mask)
+                    if row_left_overlap:
+                        tl.debug_barrier()
                     tl.store(row_dst + i + offsets, data, mask=mask)
         else:
             # SD conv / temporal: single contiguous region.
             src_ptr = src_addr.to(tl.pointer_type(tl.uint8))
             dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))
+            # Same overlap guard as the DS-conv branch above (upstream
+            # batch_memcpy semantics for accept-bias within-block rolls).
+            left_overlap = dst_ptr < src_ptr and dst_ptr + copy_size > src_ptr
             for i in range(0, copy_size, COPY_BLOCK_SIZE):
                 mask = (i + offsets) < copy_size
                 data = tl.load(src_ptr + i + offsets, mask=mask)
+                if left_overlap:
+                    tl.debug_barrier()
                 tl.store(dst_ptr + i + offsets, data, mask=mask)
 
 else:
