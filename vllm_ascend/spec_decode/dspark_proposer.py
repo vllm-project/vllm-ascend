@@ -143,7 +143,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         return (
             any("KimiK3" in architecture for architecture in target_architectures)
             and getattr(draft_hf_config, "model_type", None) == "qwen3"
-            and "Qwen3DSparkModel" in draft_architectures
+            and any(
+                architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
+                for architecture in draft_architectures
+            )
         )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
