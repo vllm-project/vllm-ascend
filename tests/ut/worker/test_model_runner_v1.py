@@ -205,6 +205,14 @@ class TestDSparkAuxCaptureMode(unittest.TestCase):
 
         self.assertTrue(runner._draft_uses_qwen3_gqa_dspark())
 
+    def test_legacy_qwen3_gqa_dspark_uses_materialized_stream(self):
+        runner = self._build_runner(
+            model_type="qwen3",
+            architecture="DSparkDraftModel",
+        )
+
+        self.assertTrue(runner._draft_uses_qwen3_gqa_dspark())
+
     def test_mla_dspark_keeps_raw_stream(self):
         runner = self._build_runner(
             model_type="kimi_k3_dspark",

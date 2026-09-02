@@ -1567,7 +1567,10 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
         speculative_config.use_dspark()
         and any("KimiK3" in arch for arch in target_architectures)
         and getattr(draft_model_config.hf_config, "model_type", None) == "qwen3"
-        and "Qwen3DSparkModel" in draft_architectures
+        and any(
+            architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
+            for architecture in draft_architectures
+        )
     )
     if uses_kimi_k3_gqa_dspark:
         draft_parallel_config = speculative_config.draft_parallel_config

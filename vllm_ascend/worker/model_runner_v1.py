@@ -716,7 +716,10 @@ class NPUModelRunner(GPUModelRunner):
             return False
         hf_config = draft_model_config.hf_config
         architectures = getattr(hf_config, "architectures", ()) or ()
-        return getattr(hf_config, "model_type", None) == "qwen3" and "Qwen3DSparkModel" in architectures
+        return getattr(hf_config, "model_type", None) == "qwen3" and any(
+            architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
+            for architecture in architectures
+        )
 
     def _uses_dcp_replicated_dspark_draft_kv(self) -> bool:
         """Whether this runner uses a DCP-sharded K3 target and GQA DSpark."""
