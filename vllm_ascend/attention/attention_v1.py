@@ -526,11 +526,20 @@ class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
 class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
     """Metadata builder for the C8-MXFP (QFA) backend.
 
-    The generic Ascend builder advertises ALWAYS cudagraph support and sizes
-    its block-table width with the 128-token generic block. The QFA path is
-    eager-only (graph capture raises in the impl) and uses 512-token kernel
-    blocks, so declare NEVER here: the engine then disables graph capture
-    during startup instead of failing later at capture time.
+    The generic Ascend builder sizes its block-table width with the
+    128-token generic block; this backend uses 512-token kernel blocks.
+
+    Cudagraph support is staged (phase-2 bring-up):
+    - PIECEWISE: supported -- QFA executes outside the compiled region as a
+      plain call (validated on-device by the vendored-QFA bring-up PR).
+    - FULL / FULL_DECODE_ONLY: the engine is allowed to attempt capture so
+      the missing .out() wrapper variant surfaces as a concrete capture-time
+      failure instead of being silently downgraded to eager. The vendored
+      bring-up proved the aclnn layer itself is out-semantics and works in
+      FULL graphs once the wrapper exposes caller-owned outputs; until the
+      cann_ops_transformer patch lands, FULL capture is expected to fail or
+      replay corrupt -- the impl guards with an explicit error at capture
+      time.
     """
 
     @classmethod
@@ -539,7 +548,12 @@ class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec,
     ) -> AttentionCGSupport:
-        return AttentionCGSupport.NEVER
+        mode = vllm_config.compilation_config.cudagraph_mode
+        if mode.has_piecewise_cudagraphs() and not mode.has_full_cudagraphs():
+            return AttentionCGSupport.PARTIAL
+        # FULL (incl. FULL_DECODE_ONLY): let the engine attempt the capture;
+        # the impl raises at capture time with the actionable reason.
+        return AttentionCGSupport.ALWAYS
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -2667,17 +2681,31 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         if self.vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("C8_MXFP v1 does not support PD disaggregation (kv_transfer) yet.")
         if _EXTRA_CTX.capturing:
-            # v1 is eager-only: FULL graph capture needs the operator aclgraph
-            # ("path 7") contract, and PIECEWISE capture of the AICPU metadata
-            # operator needs its own confirmation. Run with
-            # cudagraph_mode=NONE / enforce_eager until then. The metadata
-            # builder already reports AttentionCGSupport.NEVER so a normal
-            # engine start disables graphs before reaching this guard; it
-            # only fires when graphs were forced on.
-            raise NotImplementedError(
-                "C8_MXFP QFA does not support ACL graph capture yet; "
-                "run with cudagraph_mode=NONE (or enforce_eager)."
-            )
+            # Phase-2 bring-up, staged graph support:
+            # - PIECEWISE: the compiled region covers non-attention ops; QFA
+            #   runs outside it as a plain call and is capture-compatible
+            #   (validated on-device by the vendored-QFA bring-up PR).
+            # - FULL (incl. FULL_DECODE_ONLY): capture requires the caller-
+            #   owned-output (.out) wrapper variant of quant_flash_attn, which
+            #   the current cann_ops_transformer build lacks -- the allocating
+            #   variant re-allocates outputs every call, so a captured graph
+            #   would replay writes to freed/wild addresses (observed as AI
+            #   core wild-pointer crashes in the vendored bring-up). Fail at
+            #   capture time with the actionable reason instead of corrupting
+            #   replay. Land the out-variant patch (see
+            #   docs/qfa_out_overload_patch) to enable FULL graphs.
+            mode = self.vllm_config.compilation_config.cudagraph_mode
+            if mode.has_full_cudagraphs():
+                raise NotImplementedError(
+                    "C8_MXFP QFA FULL-graph capture requires the .out() wrapper variant of "
+                    "cann_ops_transformer.quant_flash_attn (caller-owned output tensors for "
+                    "torch.npu.graph_task_group). The current wrapper only exposes the "
+                    "allocating variant, which cannot be captured safely. Apply the "
+                    "quant_flash_attn_out patch to the CANN package (or run with "
+                    "cudagraph_mode=PIECEWISE / NONE)."
+                )
+            # PIECEWISE capture: QFA executes outside the compiled region;
+            # proceed.
         if kv_cache is None or len(kv_cache) < 4:
             raise RuntimeError(
                 "C8_MXFP attention requires a (k, v, k_scale, v_scale) KV cache "
