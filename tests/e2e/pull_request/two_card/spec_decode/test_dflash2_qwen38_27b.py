@@ -18,10 +18,10 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/e2e/pull_request/four_card/spec_decode/test_dflash2_qwen38_27b.py`.
+Run "pytest tests/e2e/pull_request/two_card/spec_decode/test_dflash2_qwen38_27b.py".
 """
 
-import json  # 新增：用于读写 config.json
+import json
 import os
 from unittest.mock import patch
 
@@ -80,7 +80,7 @@ def test_qwen38_27b_dflash_acceptance_tp2(
         config["use_sliding_window"] = False
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
-  
+
     _run_speculative_decoding(
         model_name=model_name,
         speculative_config={
