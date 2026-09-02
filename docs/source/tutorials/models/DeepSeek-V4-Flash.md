@@ -148,13 +148,10 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     Run the following script to execute online inference.
 
     ```shell
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE="AIV"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --max-model-len 133120 \
@@ -191,12 +188,10 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     Run the following script to execute online inference.
 
     ```shell
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
     export HCCL_OP_EXPANSION_MODE=AIV
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
         --max-model-len 800000 \
@@ -226,14 +221,11 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     Run the following script to execute online inference.
 
     ```shell
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
         --max-model-len 1048576 \
@@ -269,14 +261,11 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     Run the following script to execute online inference.
 
     ```shell
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    export HCCL_BUFFSIZE=1024
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
     export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
         --max-model-len 1048576 \
@@ -490,23 +479,16 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.1 # change to your own ip
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=2560
-        export TASK_QUEUE_ENABLE=1
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+        export HCCL_BUFFSIZE=2560
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
+        export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
@@ -559,22 +541,15 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.2 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=1200
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
@@ -638,23 +613,16 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.1 # change to your own ip
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=2560
-        export TASK_QUEUE_ENABLE=1
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export ASCEND_RT_VISIBLE_DEVICES=$1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+        export HCCL_BUFFSIZE=2560
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
+        export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
             --host 0.0.0.0 \
@@ -707,22 +675,15 @@ Before you start, please:
         nic_name="xxxx" # change to your own nic name
         local_ip=xx.xx.xx.2 # change to your own ip
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=1200
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
             --host 0.0.0.0 \
@@ -885,25 +846,15 @@ Before you start, please:
         nic_name="xxxxxx" #eg."enp67s0f0np0"
         local_ip=`hostname -I|awk -F " " '{print$1}'`
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=1200
-
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export TASK_QUEUE_ENABLE=1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \
@@ -961,24 +912,15 @@ Before you start, please:
         nic_name="xxxxxx" #eg."enp67s0f0np0"
         local_ip=`hostname -I|awk -F " " '{print$1}'`
 
-        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-        export HCCL_OP_EXPANSION_MODE="AIV"
-        export TASK_QUEUE_ENABLE=1
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=1200
-
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1024
-
+        export HCCL_IF_IP=$local_ip
+        export HCCL_OP_EXPANSION_MODE="AIV"
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8-mtp \
             --host 0.0.0.0 \

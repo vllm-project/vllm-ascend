@@ -134,14 +134,11 @@ nic_name="xxxx"
 local_ip="xxxx"
 
 # AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
-
 export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
+export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
   --host 0.0.0.0 \
   --port 8000 \
@@ -234,17 +231,12 @@ Run the following scripts on two nodes respectively.
     nic_name="xxxx"
     local_ip="xxxx"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_IF_IP=$local_ip
     export HCCL_INTRA_ROCE_ENABLE=0
-
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8000 \
@@ -279,17 +271,12 @@ Run the following scripts on two nodes respectively.
     local_ip="xxxx"
     node0_ip="xxxx" # same as the local_IP address in node 0
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_IF_IP=$local_ip
     export HCCL_INTRA_ROCE_ENABLE=0
-
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8000 \

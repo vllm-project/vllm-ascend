@@ -126,11 +126,8 @@ Run the following script to execute online inference.
 ```shell
 #!/bin/sh
 export HCCL_BUFFSIZE=512
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
-export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --data-parallel-size 2 \
@@ -169,16 +166,12 @@ While the previous documentation advises against multi-node deployment on the At
     nic_name="xxxx"
     local_ip="xxxx"
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
     export HCCL_BUFFSIZE=512
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE=AIV
-    export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
     --host 0.0.0.0 \
@@ -218,16 +211,12 @@ While the previous documentation advises against multi-node deployment on the At
     local_ip="xxxx"
     node0_ip="xxxx" # same as the local_IP address in node 0
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
     export HCCL_BUFFSIZE=512
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_IF_IP=$local_ip
     export HCCL_OP_EXPANSION_MODE=AIV
-    export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
     --host 0.0.0.0 \
@@ -374,22 +363,14 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
         export HCCL_BUFFSIZE=256
+        export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
@@ -437,22 +418,14 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
         export HCCL_BUFFSIZE=256
+        export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
@@ -498,26 +471,14 @@ Before you start, please
 
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-
         export HCCL_BUFFSIZE=512
+        export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-        export TASK_QUEUE_ENABLE=1
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-        export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
@@ -566,26 +527,14 @@ Before you start, please
 
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-
         export HCCL_BUFFSIZE=512
+        export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=1
-        export ASCEND_AGGREGATE_ENABLE=1
-        export ASCEND_TRANSPORT_PRINT=1
-        export ACL_OP_INIT_MODE=1
-        export ASCEND_A3_ENABLE=1
-        # Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request.
-        export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
-        export TASK_QUEUE_ENABLE=1
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-        export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \

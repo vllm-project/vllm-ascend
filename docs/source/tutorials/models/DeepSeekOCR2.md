@@ -123,12 +123,7 @@ Run the following script to execute online inference.
 ```shell
 #!/bin/sh
 
-export VLLM_USE_V1=1
-export TOKENIZERS_PARALLELISM=false
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export TASK_QUEUE_ENABLE=1
-export TOKENIZERS_PARALLELISM=false
-
 vllm serve /root/.cache/DeepSeek-OCR-2 \
     --served-model-name deepseekocr2 \
     --trust-remote-code \

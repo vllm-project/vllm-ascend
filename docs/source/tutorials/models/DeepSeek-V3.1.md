@@ -175,13 +175,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
 
     ```shell
     export HCCL_BUFFSIZE=512
-    export HCCL_CONNECT_TIMEOUT=600
-    export HCCL_EXEC_TIMEOUT=600
-
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=10
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=1
 
     vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
     --host 0.0.0.0 \
@@ -219,12 +213,10 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
     # AIV
-    export HCCL_OP_EXPANSION_MODE="AIV"
-
     export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
@@ -330,16 +322,12 @@ Run the following scripts on two nodes respectively.
     # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
     # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_IF_IP=$local_ip
     export HCCL_INTRA_ROCE_ENABLE=0
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
@@ -382,16 +370,12 @@ Run the following scripts on two nodes respectively.
     # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
     # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-    export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
-    export HCCL_SOCKET_IFNAME=$nic_name
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_INTRA_PCIE_ENABLE=1
+    export HCCL_IF_IP=$local_ip
     export HCCL_INTRA_ROCE_ENABLE=0
+    export HCCL_SOCKET_IFNAME=$nic_name
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
@@ -503,26 +487,15 @@ Parameter descriptions:
         # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
         # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
-
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-        export TASK_QUEUE_ENABLE=1
+        export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export VLLM_USE_V1=1
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
@@ -577,26 +550,15 @@ Parameter descriptions:
         # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
         # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
-
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=256
-        export TASK_QUEUE_ENABLE=1
+        export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export VLLM_USE_V1=1
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
@@ -651,25 +613,15 @@ Parameter descriptions:
         # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
         # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
-
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1100
-        export TASK_QUEUE_ENABLE=1
+        export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export VLLM_USE_V1=1
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
@@ -724,25 +676,15 @@ Parameter descriptions:
         # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
         # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
-
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export HCCL_BUFFSIZE=1100
-        export TASK_QUEUE_ENABLE=1
+        export HCCL_IF_IP=$local_ip
         export HCCL_OP_EXPANSION_MODE="AIV"
-        export VLLM_USE_V1=1
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
@@ -790,25 +732,15 @@ Parameter descriptions:
         nic_name="xxx"
         local_ip="192.xx.xx.1"
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
         export HCCL_BUFFSIZE=1024
-
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export TASK_QUEUE_ENABLE=1
-
-        export DYNAMIC_EPLB="true"
-
+        export HCCL_IF_IP=$local_ip
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export DYNAMIC_EPLB="true"
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
         vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/  \
         --host 0.0.0.0 \
         --port $2 \
@@ -855,22 +787,13 @@ Parameter descriptions:
         nic_name="xxx"
         local_ip="192.xx.xx.2"
 
-        export HCCL_IF_IP=$local_ip
-        export GLOO_SOCKET_IFNAME=$nic_name
-        export TP_SOCKET_IFNAME=$nic_name
-        export HCCL_SOCKET_IFNAME=$nic_name
-
-        export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-        export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=120
         export HCCL_BUFFSIZE=1024
-
-        export OMP_PROC_BIND=false
-        export OMP_NUM_THREADS=10
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export TASK_QUEUE_ENABLE=1
+        export HCCL_IF_IP=$local_ip
+        export HCCL_SOCKET_IFNAME=$nic_name
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export GLOO_SOCKET_IFNAME=$nic_name
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
         vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/ \
         --host 0.0.0.0 \
