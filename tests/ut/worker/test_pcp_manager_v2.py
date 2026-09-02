@@ -332,9 +332,7 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.pcp_manager = manager
     runner.is_last_pp_rank = is_last_pp_rank
     runner.use_spec_pp = False
-    execute_state = {
-        field: None for field in vllm_model_runner.ExecuteModelState._fields
-    }
+    execute_state = {field: None for field in vllm_model_runner.ExecuteModelState._fields}
     execute_state["input_batch"] = local_batch
     execute_state["finished_req_ids"] = set()
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(**execute_state)
