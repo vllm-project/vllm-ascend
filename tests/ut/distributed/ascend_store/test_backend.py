@@ -20,6 +20,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
@@ -29,6 +30,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend import (
+    MemcacheBackend,
+    _validate_device_ub_qos,
     extract_layout_config,
     make_full_key,
     make_hit_check_keys,
@@ -41,6 +44,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
     _convert_to_bytes,
     _parse_global_segment_size,
     _ssd_setup_kwargs,
+    _validate_store_qos,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend import (
     YuanrongConfig,
@@ -293,6 +297,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         backend.config = config
         backend.local_seg = None
         backend._use_fabric_mem = use_fabric_mem
+        backend._use_store_independent_te = False
         backend._contribute_memory = contribute_memory
         return backend
 
@@ -417,6 +422,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             backend._lazy_init = False
             backend._store_initialized = True
             backend._use_fabric_mem = False
+            backend._use_store_independent_te = False
             backend._store_init_lock = MagicMock()
             backend.local_seg = None
             return backend
@@ -457,6 +463,133 @@ class TestMooncakeBackendMethods(unittest.TestCase):
         ):
             b.register_buffer([100], [200])
             mock_te.register_buffer.assert_called_once()
+
+    def test_register_buffer_with_store_independent_te(self):
+        b = self._make_backend()
+        b._use_store_independent_te = True
+        b.store.register_buffer.return_value = 0
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+        ) as mock_te:
+            b.register_buffer([100, 101], [200, 201])
+            b.store.register_buffer.assert_any_call(100, 200)
+            b.store.register_buffer.assert_any_call(101, 201)
+            self.assertEqual(b.store.register_buffer.call_count, 2)
+            mock_te.register_buffer.assert_not_called()
+
+    def test_register_buffer_skips_fabric_mem(self):
+        b = self._make_backend()
+        b._use_fabric_mem = True
+        b.register_buffer([100], [200])
+        b.store.register_buffer.assert_not_called()
+
+    def test_setup_store_with_store_independent_te(self):
+        b = self._make_backend()
+        b._use_store_independent_te = True
+        b._contribute_memory = True
+        b.config = SimpleNamespace(
+            metadata_server="P2PHANDSHAKE",
+            global_segment_size=1024,
+            local_buffer_size=2048,
+            protocol="ascend",
+            device_name="",
+            master_server_address="127.0.0.1:50088",
+            enable_ssd_offload=False,
+            tenant_id="default",
+        )
+        with (
+            patch.object(sys.modules["mooncake.store"], "MooncakeDistributedStore", create=True) as mock_store_cls,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.global_te"
+            ) as mock_te,
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.get_ip",
+                return_value="127.0.0.1",
+            ),
+        ):
+            mock_store = mock_store_cls.return_value
+            mock_store.setup.return_value = 0
+            self.assertIs(b._setup_store(), mock_store)
+            mock_te.get_transfer_engine.assert_not_called()
+            mock_store.setup.assert_called_once()
+            setup_kwargs = mock_store.setup.call_args.kwargs
+            self.assertEqual(setup_kwargs["local_hostname"], "127.0.0.1")
+            self.assertEqual(setup_kwargs["local_buffer_size"], 0)
+            self.assertNotIn("engine", setup_kwargs)
+
+
+# =========================================================================
+# MooncakeBackend store QoS validation (ASCEND_GLOBAL_RESOURCE_CONFIG)
+# =========================================================================
+class TestMooncakeStoreQosValidation(unittest.TestCase):
+    _ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
+
+    @staticmethod
+    def _store_qos_env(qos) -> dict:
+        return {"ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config": {"qos": qos}}})}
+
+    def test_unset_env_passes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            _validate_store_qos()
+
+    def test_valid_qos_values_pass(self):
+        for qos in (0, 1, 2, 3, 4):
+            with self.subTest(qos=qos), patch.dict(os.environ, self._store_qos_env(qos)):
+                _validate_store_qos()
+
+    def test_out_of_range_qos_rejected(self):
+        for qos in (5, 6, 7, -1):
+            with (
+                self.subTest(qos=qos),
+                patch.dict(os.environ, self._store_qos_env(qos)),
+                self.assertRaisesRegex(ValueError, r"\[0, 4\]"),
+            ):
+                _validate_store_qos()
+
+    def test_non_integer_qos_rejected(self):
+        for qos in ("3", 2.5, True, None, [3]):
+            with (
+                self.subTest(qos=qos),
+                patch.dict(os.environ, self._store_qos_env(qos)),
+                self.assertRaisesRegex(ValueError, "QoS must be an integer"),
+            ):
+                _validate_store_qos()
+
+    def test_malformed_json_rejected(self):
+        with patch.dict(os.environ, {self._ENV: "not-json"}), self.assertRaisesRegex(ValueError, "not valid JSON"):
+            _validate_store_qos()
+
+    def test_missing_store_qos_passes(self):
+        # The top-level comm_resource_config.qos is not used by the KV pool and
+        # must not be validated here.
+        configs: tuple[dict, ...] = (
+            {},
+            {"comm_resource_config": {"qos": 7}},
+            {"store": {}},
+            {"store": {"comm_resource_config": {}}},
+            {"fabric_memory": {"max_capacity": 32}},
+        )
+        for config in configs:
+            with self.subTest(config=config), patch.dict(os.environ, {self._ENV: json.dumps(config)}):
+                _validate_store_qos()
+
+    def test_init_rejects_invalid_store_qos(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"metadata_server": "192.168.0.1:2379"}, f)
+            path = f.name
+        try:
+            env = {
+                "MOONCAKE_CONFIG_PATH": path,
+                "ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config": {"qos": 6}}}),
+            }
+            with (
+                patch.dict(os.environ, env),
+                patch.object(MooncakeBackend, "_setup_store"),
+                self.assertRaisesRegex(ValueError, r"\[0, 4\]"),
+            ):
+                MooncakeBackend(MagicMock())
+        finally:
+            os.unlink(path)
 
 
 # =========================================================================
@@ -829,6 +962,46 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         error_log = _format_log_call(mock_logger.error.call_args)
         self.assertIn("RuntimeError", error_log)
         self.assertIn("backend fail", error_log)
+
+
+# =========================================================================
+# MemcacheBackend QoS validation (MF_DEVICE_UB_QOS)
+# =========================================================================
+class TestMemcacheQosValidation(unittest.TestCase):
+    _ENV = "MF_DEVICE_UB_QOS"
+
+    def test_unset_or_empty_env_passes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            _validate_device_ub_qos()
+        with patch.dict(os.environ, {self._ENV: ""}):
+            _validate_device_ub_qos()
+
+    def test_valid_qos_values_pass(self):
+        for qos in ("0", "1", "2", "3", "4", " 3 "):
+            with self.subTest(qos=qos), patch.dict(os.environ, {self._ENV: qos}):
+                _validate_device_ub_qos()
+
+    def test_out_of_range_qos_rejected(self):
+        for qos in ("5", "7", "-1", "100"):
+            with (
+                self.subTest(qos=qos),
+                patch.dict(os.environ, {self._ENV: qos}),
+                self.assertRaisesRegex(ValueError, r"\[0, 4\]"),
+            ):
+                _validate_device_ub_qos()
+
+    def test_non_integer_qos_rejected(self):
+        for qos in ("abc", "3.5", "0x3"):
+            with (
+                self.subTest(qos=qos),
+                patch.dict(os.environ, {self._ENV: qos}),
+                self.assertRaisesRegex(ValueError, "QoS must be an integer"),
+            ):
+                _validate_device_ub_qos()
+
+    def test_init_rejects_invalid_qos(self):
+        with patch.dict(os.environ, {self._ENV: "7"}), self.assertRaisesRegex(ValueError, r"\[0, 4\]"):
+            MemcacheBackend(MagicMock())
 
 
 if __name__ == "__main__":

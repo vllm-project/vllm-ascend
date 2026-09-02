@@ -402,6 +402,15 @@ _distributed_utils.get_decode_context_model_parallel_world_size = MagicMock(  # 
 )
 sys.modules["vllm_ascend.distributed.utils"] = _distributed_utils
 
+# mooncake_backend imports get_global_rank from the real
+# vllm_ascend.distributed.parallel_state, whose import chain pulls in vllm.
+# Only mock it when vllm is absent; otherwise keep the real module so the
+# mock does not leak into other UTs collected in the same process.
+if _MOCK_VLLM_DEPS:
+    _ascend_parallel_state = _make_pkg("vllm_ascend.distributed.parallel_state")
+    _ascend_parallel_state.get_global_rank = MagicMock(return_value=0)  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend.distributed.parallel_state"] = _ascend_parallel_state
+
 _kv_transfer_real_path = os.path.join(_vllm_ascend_real_path, "distributed", "kv_transfer")
 if _MOCK_VLLM_DEPS:
     _kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer", _kv_transfer_real_path)

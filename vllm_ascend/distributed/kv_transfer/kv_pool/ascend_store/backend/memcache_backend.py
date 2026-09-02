@@ -10,7 +10,11 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    QOS_VALUE_MAX,
+    QOS_VALUE_MIN,
+    Backend,
+)
 
 
 def _is_device_sdma() -> bool:
@@ -29,6 +33,28 @@ def _is_device_sdma() -> bool:
 
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
+
+
+def _validate_device_ub_qos() -> None:
+    """Validate MF_DEVICE_UB_QOS used by the MemCache store transfers.
+
+    Only integers in [QOS_VALUE_MIN, QOS_VALUE_MAX] are supported; MemCache
+    silently falls back to its default QoS on invalid values, so fail fast
+    with a clear error instead.
+    """
+    qos_str = os.getenv("MF_DEVICE_UB_QOS")
+    if qos_str is None or not qos_str.strip():
+        return
+    try:
+        qos = int(qos_str)
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid MF_DEVICE_UB_QOS value {qos_str!r}: QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        ) from e
+    if not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
+        raise ValueError(
+            f"Invalid MF_DEVICE_UB_QOS value {qos}: QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        )
 
 
 class MmcDirect(Enum):
@@ -119,6 +145,7 @@ class MemcacheBackend(Backend):
         init_bm: bool = True,
         lazy_init: bool = False,
     ):
+        _validate_device_ub_qos()
         self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
         self._init_bm = init_bm
         self._lazy_init = lazy_init and _is_device_sdma()
