@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import torch
 
@@ -58,6 +61,33 @@ def test_dcp_decode_metadata_keeps_rank_local_context_lengths() -> None:
 
     np.testing.assert_array_equal(metadata.num_computed_tokens_of_dcp[:, 1], [12, 22])
     assert metadata.block_tables is block_tables
+
+
+def test_dcp_chunked_prefill_unpacks_standardized_kv_cache() -> None:
+    impl = object.__new__(AscendAttentionDCPImpl)
+    impl.dcp_rank = 0
+    impl.dcp_size = 1
+    impl.num_heads = 2
+    impl.head_size = 4
+    standardized_cache = torch.empty((2, 1, 1, 4))
+    cache_pair = (torch.empty((1, 1, 4)), torch.empty((1, 1, 4)))
+    chunked_context = SimpleNamespace(
+        local_context_lens_allranks=torch.zeros((1, 1), dtype=torch.int32),
+        local_total_toks=0,
+    )
+    metadata = MagicMock(spec=AscendAttentionDCPMetadata)
+    metadata.prefill = SimpleNamespace(chunked_context=chunked_context)
+
+    with (
+        patch.object(impl, "_unpack_kv_cache", return_value=cache_pair) as unpack_cache,
+        patch.object(impl, "_load_kv_for_chunk", return_value=cache_pair) as load_chunk,
+    ):
+        output, lse = impl._compute_prefill_context(torch.empty((1, 2, 4)), standardized_cache, metadata)
+
+    unpack_cache.assert_called_once_with(standardized_cache)
+    assert load_chunk.call_args.args[1] is cache_pair
+    assert output.shape == (1, 2, 4)
+    assert lse.shape == (1, 2, 1)
 
 
 def test_dcp_partial_attention_merge_matches_weighted_reference() -> None:

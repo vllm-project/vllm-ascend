@@ -428,20 +428,20 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
     def _compute_prefill_context(
         self,
         query: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
         attn_metadata: AscendAttentionDCPMetadata,
     ):
-        assert len(kv_cache) > 1
         assert attn_metadata is not None
         assert attn_metadata.prefill is not None
         assert attn_metadata.prefill.chunked_context is not None
+        cache_pair = self._unpack_kv_cache(kv_cache)
         prefill_metadata = attn_metadata.prefill
         local_chunked_kv_lens = prefill_metadata.chunked_context.local_context_lens_allranks
         assert local_chunked_kv_lens is not None
 
         local_chunked_kv_lens_rank = local_chunked_kv_lens[:, self.dcp_rank]
         total_toks = prefill_metadata.chunked_context.local_total_toks
-        key, value = self._load_kv_for_chunk(attn_metadata, kv_cache, local_chunked_kv_lens_rank, query, total_toks)
+        key, value = self._load_kv_for_chunk(attn_metadata, cache_pair, local_chunked_kv_lens_rank, query, total_toks)
         if self.dcp_size > 1:
             num_heads = self.num_heads * self.dcp_size
         else:
@@ -528,7 +528,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
