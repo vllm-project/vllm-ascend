@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.patch.worker.patch_mamba_utils import (
@@ -146,6 +148,52 @@ def test_load_only_step_does_not_hide_remote_state_copy_on_next_forward():
     assert collect.call_args.args[4:7] == (63, 64, 0)
     stage.assert_called_once_with(copy_bufs)
     assert mamba_state_idx["req"] == 64
+
+
+def test_layerwise_copy_selects_funcs_from_live_mamba_mapping():
+    from vllm_ascend.patch.worker import patch_mamba_utils as pm
+
+    state = torch.zeros((2, 1), dtype=torch.float32)
+    copy_func = MagicMock(
+        return_value=SimpleNamespace(
+            start_addr=state[0].data_ptr(),
+            num_elements=1,
+        )
+    )
+    mamba_type = MambaAttentionBackendEnum.GDN_ATTN
+    mamba_spec = MambaSpec(
+        block_size=1,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_type=mamba_type,
+    )
+    kv_cache_group = SimpleNamespace(
+        layer_names=["layers.0.linear_attn"],
+        kv_cache_spec=mamba_spec,
+    )
+    copy_bufs = SimpleNamespace(
+        src_ptrs=SimpleNamespace(np=np.zeros(2, dtype=np.int64)),
+        dst_ptrs=SimpleNamespace(np=np.zeros(2, dtype=np.int64)),
+        sizes=SimpleNamespace(np=np.zeros(2, dtype=np.int32)),
+        offset=0,
+        _layer_copy_metadata={},
+    )
+
+    pm._collect_mamba_copy_meta_with_layers(
+        copy_bufs,
+        SimpleNamespace(kv_cache_groups=[kv_cache_group]),
+        {mamba_type: (copy_func,)},
+        [0],
+        0,
+        1,
+        0,
+        SimpleNamespace(block_ids=([0, 1],)),
+        {"layers.0.linear_attn": SimpleNamespace(kv_cache=[state])},
+    )
+
+    copy_func.assert_called_once_with(state, [0, 1], 0, 1)
+    assert copy_bufs.offset == 1
+    assert copy_bufs._layer_copy_metadata["layers.0.linear_attn"][2] == [state.element_size()]
 
 
 def test_layerwise_mamba_copy_is_grouped_by_layer():

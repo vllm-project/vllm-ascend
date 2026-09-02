@@ -319,12 +319,18 @@ def _collect_mamba_copy_meta_with_layers(
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
-        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+        layer_names = kv_cache_group.layer_names
         for layer_name in layer_names:
             attention = forward_context[layer_name]
             kv_caches: list[torch.Tensor] = attention.kv_cache
             layer_meta = layer_copy_metadata.setdefault(layer_name, ([], [], []))
-            for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+            state_copy_funcs = _get_state_copy_funcs_for_layer(
+                kv_cache_group,
+                layer_name,
+                mamba_state_copy_funcs,
+            )
+            for state, state_copy_func in zip(kv_caches, state_copy_funcs):
                 copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)
                 src_ptr = copy_spec.start_addr
                 dst_ptr = state[dest_block_id].data_ptr()
