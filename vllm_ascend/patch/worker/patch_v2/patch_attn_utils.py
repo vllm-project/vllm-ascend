@@ -19,15 +19,42 @@ _upstream_allocate_kv_cache = vllm.v1.worker.gpu.attn_utils.allocate_kv_cache
 
 
 def _allocate_kv_cache_for_ascend(*args, **kwargs):
-    """Adapt vLLM's packed KV views to Ascend's split K/V interface."""
+    """Adapt vLLM's packed KV views to Ascend's split K/V interface.
+
+    The current vLLM allocator exposes regular attention as one logical
+    ``[B, H, N, K+V]`` view.  Ascend's paged-cache operator keeps K and V as
+    separate four-dimensional tensors, so split the last dimension without
+    copying the backing allocation.
+    """
     kv_caches = _upstream_allocate_kv_cache(*args, **kwargs)
+
+    kv_cache_config = args[0] if args else kwargs.get("kv_cache_config")
+    layer_specs = {}
+    if kv_cache_config is not None:
+        for group in kv_cache_config.kv_cache_groups:
+            spec = group.kv_cache_spec
+            per_layer_specs = getattr(spec, "kv_cache_specs", None)
+            for layer_name in group.layer_names:
+                layer_specs[layer_name] = (
+                    per_layer_specs.get(layer_name, spec)
+                    if per_layer_specs is not None
+                    else spec
+                )
+
     for layer_name, kv_cache in kv_caches.items():
-        if (
-            isinstance(kv_cache, torch.Tensor)
-            and kv_cache.ndim == 5
-            and kv_cache.shape[0] == 2
-        ):
-            kv_caches[layer_name] = (kv_cache[0], kv_cache[1])
+        if not isinstance(kv_cache, torch.Tensor) or kv_cache.ndim != 4:
+            continue
+        spec = layer_specs.get(layer_name)
+        k_dim = getattr(spec, "head_size", None)
+        v_dim = getattr(spec, "head_size_v", k_dim)
+        if k_dim is None or v_dim is None:
+            continue
+        if kv_cache.shape[-1] != k_dim + v_dim:
+            continue
+        kv_caches[layer_name] = (
+            kv_cache[..., :k_dim],
+            kv_cache[..., k_dim : k_dim + v_dim],
+        )
     return kv_caches
 
 
