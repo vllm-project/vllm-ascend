@@ -1,5 +1,12 @@
+import json
+from pathlib import Path
+
+from safetensors import safe_open
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.speculative import SpeculativeConfig
+
+_SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
+_QWEN3_5_MTP_WEIGHT_PREFIX = "mtp."
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -37,8 +44,67 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
     return hf_config
 
 
-def _dspark_post_init(self):
+def _checkpoint_has_qwen3_5_mtp_weights(model_path: str | Path | None) -> bool | None:
+    """Inspect a local safetensors checkpoint without loading tensor data."""
+    if not model_path:
+        return None
+
+    checkpoint_dir = Path(model_path)
+    if not checkpoint_dir.is_dir():
+        return None
+
+    index_path = checkpoint_dir / _SAFE_WEIGHTS_INDEX_NAME
+    if index_path.is_file():
+        try:
+            with index_path.open(encoding="utf-8") as index_file:
+                index = json.load(index_file)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(index, dict):
+            return None
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict):
+            return None
+        return any(name.startswith(_QWEN3_5_MTP_WEIGHT_PREFIX) for name in weight_map)
+
+    weight_files = sorted(checkpoint_dir.glob("*.safetensors"))
+    if not weight_files:
+        return None
+
+    try:
+        for weight_file in weight_files:
+            with safe_open(
+                str(weight_file),
+                framework="pt",
+                device="cpu",
+            ) as weights:
+                tensor_names = weights.keys()
+                if any(name.startswith(_QWEN3_5_MTP_WEIGHT_PREFIX) for name in tensor_names):
+                    return True
+    except Exception:
+        return None
+    return False
+
+
+def _validate_qwen3_5_mtp_checkpoint(speculative_config: SpeculativeConfig) -> None:
+    if speculative_config.method != "qwen3_5_mtp":
+        return
+
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    model_path = getattr(draft_model_config, "model", None)
+    if _checkpoint_has_qwen3_5_mtp_weights(model_path) is False:
+        raise ValueError(
+            "qwen3_5_mtp speculative decoding was requested, but the local "
+            f"checkpoint {model_path!r} does not contain any 'mtp.*' tensors. "
+            "SFT exports often save only the language-model backbone and drop "
+            "the pretrained MTP head. Remove the qwen3_5_mtp speculative config, "
+            "or export/merge the original MTP tensors before serving."
+        )
+
+
+def _speculative_config_post_init(self):
     _orig_post_init(self)
+    _validate_qwen3_5_mtp_checkpoint(self)
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
@@ -51,4 +117,4 @@ def _dspark_post_init(self):
 
 
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
-SpeculativeConfig.__post_init__ = _dspark_post_init
+SpeculativeConfig.__post_init__ = _speculative_config_post_init
