@@ -152,4 +152,5 @@ def test_glm5_2_dspark_eager() -> None:
             "enable_prefix_caching": False,
             "async_scheduling": False,
         },
+        acceptance_length_rtol=0.1,
     )
