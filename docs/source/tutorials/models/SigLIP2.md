@@ -8,6 +8,8 @@ Supported use cases include image-text similarity, zero-shot ImageNet classifica
 
 This guide describes how to deploy and evaluate SigLIP2 with vLLM Ascend on **Atlas 300I DUO**.
 
+This document is validated and written based on the **vLLM-Ascend main branch**. The current model (`siglip2-base-patch16-224`) is fully supported for text and image embedding in this branch. As a pooling model, SigLIP2 is used for offline `llm.embed()` and online `/v1/embeddings` serving; features such as PD separation and MTP are not applicable. Use **main** or a later official release that includes SigLIP2 support.
+
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -16,7 +18,11 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 ### 3.1 Model Weight
 
-- `siglip2-base-patch16-224` [Download model weight](https://huggingface.co/google/siglip2-base-patch16-224)
+| Weight Version | Hardware Requirements | Download Links |
+|----------------|-----------------------|----------------|
+| `siglip2-base-patch16-224` (FP16) | 1 Atlas 300I DUO node | [Modelscope](https://modelscope.cn/models/google/siglip2-base-patch16-224) \| [HuggingFace](https://huggingface.co/google/siglip2-base-patch16-224) |
+
+>**Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/google/siglip2-base-patch16-224`. In subsequent deployment commands, use this path or the Hugging Face model id `google/siglip2-base-patch16-224` as shown in this tutorial.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -32,32 +38,57 @@ For ImageNet val zero-shot Top-1 evaluation, prepare:
 
 ### 4.1 Docker Image Installation
 
-You can use our official docker image to run `SigLIP2` model directly.
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
 
-Start the Atlas 300I DUO docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+- Step 1: Download the latest Docker image
 
-```shell
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
-docker run --rm \
-    --name vllm-ascend \
-    --shm-size=1g \
-    --net=host \
-    --privileged=true \
-    --device /dev/davinci0 \
-    --device /dev/davinci_manager \
-    --device /dev/devmm_svm \
-    --device /dev/hisi_hdc \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /root/.cache:/root/.cache \
-    -it $IMAGE bash
-```
+  ```bash
+  docker pull quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+  ```
 
-After a successful docker run, you can verify the running container service by executing the `docker ps` command.
+- Step 2: Start Docker container
+
+  ```bash
+  # Set the vLLM Ascend image name.
+  export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+  export NAME=siglip2-dev
+
+  # Start the container with the variables defined above.
+  # Atlas 300I DUO uses a single NPU device (/dev/davinci0).
+  docker run --rm \
+  --name $NAME \
+  --net=host \
+  --shm-size=1g \
+  --privileged=true \
+  --device /dev/davinci0 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /root/.cache:/root/.cache \
+  -it $IMAGE bash
+  ```
+
+- Step 3: Installation Verification
+
+  After starting the container, run the following command to verify the installation:
+
+  ```bash
+  docker ps | grep $NAME
+  ```
+
+  Expected result: The container is listed with status `Up`. You can also verify the vllm-ascend version inside the container:
+
+  ```bash
+  pip show vllm-ascend
+  ```
+
+  Expected result: The version information is displayed, matching the pulled image version.
 
 ### 4.2 Source Code Installation
 
@@ -89,6 +120,7 @@ Required Parameter Descriptions:
 
 Key Parameter Descriptions:
 
+- **Tensor parallelism (TP) is not supported** for SigLIP2 online serving. Do not set `--tensor-parallel-size`; deploy on a single Atlas 300I DUO NPU as shown above.
 - `--runner pooling` is required. SigLIP2 is an embedding model, not a generative LLM.
 - `--max-model-len 64` matches SigLIP2 text tokenization (`padding=max_length`, `max_length=64`).
 - `--chat-template template_basic.jinja` is required when sending images via `messages` on `/v1/embeddings`.
@@ -400,7 +432,25 @@ Adjust `NUM_REQUESTS`, `CONCURRENCY`, and `WARMUP` at the top of the script. Set
 
 After about several minutes, you can get the performance evaluation result.
 
-## 9 FAQ
+## 9 Performance Tuning
+
+> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as text vs. image workload, request concurrency, batch size, and image resolution. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
+
+### 9.1 Recommended Configurations
+
+The recommended configurations are the same as those specified in [§5 Online Service Deployment](#5-online-service-deployment).
+
+### 9.2 Tuning Guidelines
+
+#### 9.2.1 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
+
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 **Q: Top-1 accuracy is near 0% but embeddings look valid.**
 
@@ -409,5 +459,3 @@ A: Check that ground-truth labels use PyTorch index (`val_label.txt`), not devki
 **Q: Can I embed text and image in one request?**
 
 A: No. SigLIP2 accepts text-only or image-only inputs per request.
-
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).

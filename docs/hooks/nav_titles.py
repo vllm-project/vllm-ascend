@@ -163,6 +163,7 @@ TITLES = {
     },
     "tutorials/models/Qwen3-VL-Embedding.md": {"en": "Qwen3-VL-Embedding", "zh": "Qwen3-VL-Embedding"},
     "tutorials/models/Qwen3-VL-Reranker.md": {"en": "Qwen3-VL-Reranker", "zh": "Qwen3-VL-Reranker"},
+    "tutorials/models/SigLIP2.md": {"en": "SigLIP2", "zh": "SigLIP2"},
     "tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md": {
         "en": "Qwen3.5-27B & Qwen3.6-27B",
         "zh": "Qwen3.5-27B & Qwen3.6-27B",
