@@ -117,27 +117,27 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install uv
-  
+
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
         with:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
           path: ./vllm-empty
-   
+  
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
-  
+
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
           submodules: recursive
-  
+
       - name: Rebase on ${{ inputs.base_ref }} snapshot
         env:
           BASE_REF: ${{ inputs.base_ref }}
@@ -156,7 +156,7 @@ jobs:
           git rebase "$BASE_SHA"
           git submodule sync --recursive
           git submodule update --init --recursive
-  
+
       - name: Get csrc hash
         id: get_csrc_hash
         run: |
@@ -165,15 +165,17 @@ jobs:
           set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           cd "$GITHUB_WORKSPACE"
+  
           # Match the cache producer's tracked csrc build inputs exactly.
           CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
           if [ -z "$CSRC_MANIFEST" ]; then
             echo "::error::No tracked csrc inputs found."
             exit 1
           fi
+  
           CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
           echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
-  
+
       - name: Get architecture
         id: get_arch
         run: |
@@ -183,7 +185,7 @@ jobs:
             aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
             *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
           esac
- 
+
       - name: Restore vllm-ascend csrc cache
         id: cache-csrc
         uses: runs-on/cache/restore@v5
@@ -202,15 +204,18 @@ jobs:
       - name: Install Mooncake wheel
         run: |
           set -euxo pipefail
+  
           apt-get install -y --no-install-recommends \
             libibverbs1 \
             ibverbs-providers \
             librdmacm1 \
             libnuma1
           ldconfig
+  
           pip install --no-cache-dir --no-deps \
             -i https://mirrors.aliyun.com/pypi/simple/ \
             mooncake-transfer-engine-npu==0.3.11.post1
+    
           pip show mooncake-transfer-engine-npu || true
 
       - name: Install vllm-project/vllm-ascend with device
@@ -352,7 +357,7 @@ jobs:
             else
               echo "::warning::No previous coverage data found on OBS (first run?). Backfill will be skipped."
             fi
- 
+
         - name: Backfill missing coverage data
           if: steps.coverage-completeness.outputs.has_missing == 'true'
           env:
@@ -383,6 +388,7 @@ jobs:
             COVERAGE_PKG_DIR="coverage/vllm-ascend"
             TASK_DIR="${COVERAGE_PKG_DIR}/${TASK_NAME}"
             mkdir -p "${TASK_DIR}" "${COVERAGE_PKG_DIR}/covstub/vllm_ascend"
+
             COVERAGE_FILE_COUNT=0
             while IFS= read -r f; do
               rel="${f#all-coverage/}"
@@ -394,18 +400,22 @@ jobs:
               cp "${f}" "${dest}"
               COVERAGE_FILE_COUNT=$((COVERAGE_FILE_COUNT + 1))
             done < <(find all-coverage -path '*/covdata/*' -type f 2>/dev/null)
+
             echo "Copied ${COVERAGE_FILE_COUNT} coverage files to ${TASK_DIR}"
             if [ "${COVERAGE_FILE_COUNT}" -eq 0 ]; then
               echo "::error::No coverage files found under all-coverage/*/covdata/"
               exit 1
             fi
+
             cp -r vllm_ascend/. "${COVERAGE_PKG_DIR}/covstub/vllm_ascend/"
             cp tests/coverage_settingInfo.xml "${COVERAGE_PKG_DIR}/settingInfo.xml"
             echo "${TASK_NAME}" > coverage_version.txt
+
             echo "=== package top level ==="
             find "${COVERAGE_PKG_DIR}" -maxdepth 1 2>/dev/null | head -20 || true
             echo "=== task dir file count ==="
             find "${TASK_DIR}" -type f | wc -l
+
             echo "=== building test_case_map.json ==="
             pip install regex
             python3 .github/workflows/scripts/test_selector.py \
@@ -415,6 +425,7 @@ jobs:
               --map-file test_case_map.json
             test -s test_case_map.json
             du -h test_case_map.json
+
             tar cf coverage.tar -C coverage vllm-ascend
             echo "Packed coverage/vllm-ascend into coverage.tar"
             du -h coverage.tar
@@ -422,6 +433,7 @@ jobs:
             tar tf coverage.tar | head -20 || true
             echo "=== tar task file count ==="
             tar tf coverage.tar | grep -c "vllm-ascend/${TASK_NAME}/" || true
+
             {
               echo "TASK_DATE=${TASK_DATE}"
               echo "TASK_NAME=${TASK_NAME}"
@@ -505,12 +517,14 @@ jobs:
             python3 - <<'EOF'
             import os
             from obs import ObsClient
+
             obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
             client = ObsClient(
                 access_key_id=os.environ['OBS_ACCESS_KEY'],
                 secret_access_key=os.environ['OBS_SECRET_KEY'],
                 server='https://obs.cn-north-4.myhuaweicloud.com',
             )
+
             resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
             if resp.status >= 300:
                 raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
