@@ -754,7 +754,7 @@ jobs:
           fi
 
           if [ "${HAS_TESTS}" = "true" ]; then
-            TESTS_RESULT="${{ needs.run-selected-tests.result }}"
+            TESTS_RESULT="${{ needs.run-selected-npu-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
             if [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
               echo "::error::Selected tests are required; add the ready-precise or ready-all label"
