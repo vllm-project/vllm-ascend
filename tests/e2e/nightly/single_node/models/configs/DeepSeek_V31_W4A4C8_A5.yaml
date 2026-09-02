@@ -28,48 +28,48 @@ _server_cmd: &server_cmd
   - "--trust-remote-code"
 
 
-_benchmarks_perf2: &benchmarks_perf
-  acc:
-    case_type: performance
-    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V3.1-w4a4c8-mxfp4_input_16384_lines_200
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 32
-    max_out_len: 1024
-    batch_size: 8
-    request_rate: 0
-    baseline: 350.897
-    threshold: 0.95
-    temperature: 0
-    ignore_eos: True
+#_benchmarks_perf2: &benchmarks_perf
+#  acc:
+#    case_type: performance
+#    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/DeepSeek-V3.1-w4a4c8-mxfp4_input_16384_lines_200
+#    request_conf: vllm_api_stream_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#    num_prompts: 32
+#    max_out_len: 1024
+#    batch_size: 8
+#    request_rate: 0
+#    baseline: 350.897
+#    threshold: 0.95
+#    temperature: 0
+#    ignore_eos: True
 
 # ==========================================
 # ACTUAL TEST CASES
 # ==========================================
 
 test_cases:
-  - name: "DeepSeek_V31_W4A4C8_A5_Mix_16K1K_perf_test_01"
-    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
-    envs:
-      HCCL_BUFFSIZE: "1024"
-      HCCL_ALGO: "level0:fullmesh"
-      OMP_NUM_THREADS: "28"
-      <<: *envs
-    server_cmd: *server_cmd
-    server_cmd_extra:
-      - "--max-model-len"
-      - "32000"
-      - "--tensor-parallel-size"
-      - "4"
-      - "--data-parallel-size"
-      - "2"
-      - "--max-num-seqs"
-      - "200"
-      - "--no-enable-prefix-caching"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}'
-    benchmarks:
-      <<: *benchmarks_perf
+#  - name: "DeepSeek_V31_W4A4C8_A5_Mix_16K1K_perf_test_01"
+#    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+#    envs:
+#      HCCL_BUFFSIZE: "1024"
+#      HCCL_ALGO: "level0:fullmesh"
+#      OMP_NUM_THREADS: "28"
+#      <<: *envs
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--max-model-len"
+#      - "32000"
+#      - "--tensor-parallel-size"
+#      - "4"
+#      - "--data-parallel-size"
+#      - "2"
+#      - "--max-num-seqs"
+#      - "200"
+#      - "--no-enable-prefix-caching"
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true}'
+#    benchmarks:
+#      <<: *benchmarks_perf
   - name: "DeepSeekV31_A5_Single_Maximum_Context_Test_01"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:

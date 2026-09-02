@@ -1,7 +1,7 @@
 test_name: "GLM51_w4a4c8_A5_double_16K1K_perf_test_001"
 model: "Eco-Tech/GLM-5.1-w8a8"
 num_nodes: 2
-npu_per_node: 16
+npu_per_node: 8
 env_common: &env_common
 #  HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: false
