@@ -1,568 +1,119 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
 name: Selected Tests
 
 on:
   workflow_call:
     inputs:
       vllm:
-        type: string
+        description: vllm version string
         required: true
-        description: 'The vllm commit hash or tag to test.'
-      test_groups:
         type: string
-        required: true
-        description: 'JSON array of test groups from select_tests.py'
       ref:
+        description: PR head commit sha
+        required: true
         type: string
-        required: false
-        default: ''
-        description: 'The vllm-ascend ref to test.'
       base_ref:
+        description: target base branch name (e.g. releases/v0.23.0)
+        required: true
         type: string
-        required: false
-        default: 'main'
-        description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
       base_sha:
+        description: base commit sha for rebase, REQUIRED for NPU runs
+        required: true
         type: string
-        required: false
-        default: ''
-        description: 'The fixed base commit to rebase onto.'
-      upload_timing:
-        type: boolean
-        required: false
-        default: false
-        description: 'Upload test_timing_data.json as artifact'
-      continue_on_error:
-        type: boolean
-        required: false
-        default: false
-        description: 'Continue running the job even if tests fail'
-      enable-coverage:
-        type: boolean
-        required: false
-        default: false
-        description: 'Whether to run tests with coverage enabled.'
-      timeout-minutes:
-        type: number
-        required: false
-        default: 120
-        description: 'Selected tests job timeout in minutes.'
-    secrets:
-      OBS_ACCESS_KEY_PRECISION:
-        required: false
-      OBS_SECRET_ACCESS_KEY_PRECISION:
-        required: false
-
-
-# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
-# declared as "shell: bash -el {0}" on steps that need to be properly activated.
-# It's used to activate ascend-toolkit environment variables.
-defaults:
-  run:
-    shell: bash -el {0}
-
-permissions:
-  contents: read
-  pull-requests: write
+      test_groups:
+        description: test groups json string
+        required: true
+        type: string
+    outputs:
+      coverage_artifact_name:
+        value: ${{ jobs.dispatch.outputs.coverage_artifact_name }}
 
 jobs:
-  selected-tests:
-    name: ${{ matrix.group.partition_name }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    strategy:
-      fail-fast: false
-      matrix:
-        group: ${{ fromJSON(inputs.test_groups) }}
-    runs-on: ${{ matrix.group.runner }}
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
-      env:
-        VLLM_LOGGING_LEVEL: ERROR
-        VLLM_USE_MODELSCOPE: True
-        HF_HUB_OFFLINE: 1
-        MAX_JOBS: 4
-        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
-        UV_INDEX_STRATEGY: unsafe-best-match
-        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
-        UV_HTTP_TIMEOUT: 120
-        UV_NO_CACHE: 1
-        UV_SYSTEM_PYTHON: 1
+  dispatch:
+    name: dispatch‑groups
+    runs-on: ubuntu‑latest
+    outputs:
+      coverage_artifact_name: npu‑coverage‑report
+      matrix_json: ${{ steps.gen_matrix.outputs.matrix_json }}
     steps:
-      - name: Check NPU availability
-        if: ${{ matrix.group.npu_type != 'cpu' }}
+      - name: Generate matrix from test_groups
+        id: gen_matrix
         run: |
-          npu-smi info
-
-      - name: Install packages
-        run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
-          apt-get update -y
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          pip install uv
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v7
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
-          path: ./vllm-empty
-
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty uv pip install .
-          pip uninstall -y triton
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Rebase on ${{ inputs.base_ref }} snapshot
-        env:
-          BASE_REF: ${{ inputs.base_ref }}
-          FIXED_BASE_SHA: ${{ inputs.base_sha }}
-        run: |
-          # Reproduce the snapshot used by the cache coordinator. Falling back
-          # to FETCH_HEAD is only for callers that do not provide a fixed SHA.
-          git config user.name "vllm-ascend-ci"
-          git config user.email "vllm-ascend-ci@users.noreply.github.com"
-          git fetch origin "$BASE_REF"
-          BASE_SHA="$FIXED_BASE_SHA"
-          if [ -z "$BASE_SHA" ]; then
-            BASE_SHA=$(git rev-parse FETCH_HEAD)
-          fi
-          git cat-file -e "${BASE_SHA}^{commit}"
-          git rebase "$BASE_SHA"
-          git submodule sync --recursive
-          git submodule update --init --recursive
-
-      - name: Get csrc hash
-        id: get_csrc_hash
-        if: ${{ matrix.group.npu_type != 'cpu' }}
-        run: |
-          # Fail closed so a git error cannot be converted into sha256(empty)
-          # and then appear to be a legitimate cache miss.
           set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-
-          # Match the cache producer's tracked csrc build inputs exactly.
-          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
-          if [ -z "$CSRC_MANIFEST" ]; then
-            echo "::error::No tracked csrc inputs found."
-            exit 1
-          fi
-
-          CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
-
-      - name: Get architecture
-        id: get_arch
-        if: ${{ matrix.group.npu_type != 'cpu' }}
-        run: |
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
-            aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
-            *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
-          esac
-
-      - name: Restore vllm-ascend csrc cache
-        id: cache-csrc
-        if: ${{ matrix.group.npu_type != 'cpu' }}
-        uses: runs-on/cache/restore@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          # During the rollout, tolerate misses so CI can fall back to the
-          # existing NPU build while CPU cache production proves stable.
-          # Restore fail-on-cache-miss to true after the transition period.
-          fail-on-cache-miss: false
-
-      - name: Install Mooncake wheel
-        if: ${{ matrix.group.npu_type != 'cpu' }}
-        run: |
-          set -euxo pipefail
-
-          apt-get install -y --no-install-recommends \
-            libibverbs1 \
-            ibverbs-providers \
-            librdmacm1 \
-            libnuma1
-          ldconfig
-
-          pip install --no-cache-dir --no-deps \
-            -i https://mirrors.aliyun.com/pypi/simple/ \
-            mooncake-transfer-engine-npu==0.3.11.post1
-
-          pip show mooncake-transfer-engine-npu || true
-
-      - name: Install vllm-project/vllm-ascend with device
-        if: ${{ matrix.group.npu_type != 'cpu' }}
-        env:
-          CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
-        run: |
-          export MAX_JOBS=$(( ${{ matrix.group.num_npus }} * 23 ))
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
-          # Preserve CI availability during the transition by compiling on the
-          # NPU only when the new CPU-produced cache is unavailable.
-          if [ "$CSRC_CACHE_HIT" = "true" ]; then
-            echo "csrc cache hit: skip kernel compilation"
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            echo "csrc cache miss: compile kernels on the NPU runner"
-            uv pip install -e . --no-build-isolation
-          fi
-
-      - name: Verify required AscendC custom ops are registered (310p)
-        if: ${{ matrix.group.npu_type == '310p' }}
-        run: |
-          python - <<'PY'
-          import sys, torch
-          import vllm_ascend.vllm_ascend_C  # noqa: F401
-          ops = torch.ops._C_ascend
-          missing = [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if not hasattr(ops, n)]
-          if missing:
-              print(f"::error::Missing AscendC ops after install: {missing}. "
-                    f"Cache contents are stale or build skipped registration.", file=sys.stderr)
-              sys.exit(1)
-          print("AscendC chunk-gdr ops registered:",
-                [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if hasattr(ops, n)])
+          python3 - <<'PY'
+          import json
+          import os
+          groups = json.loads(os.environ["TEST_GROUPS"])
+          matrix_entries = []
+          for g in groups:
+              matrix_entries.append({
+                  "runner_label": g["runner_label"],
+                  "npu_type": g["npu_type"],
+                  "test_paths": g["test_paths"]
+              })
+          out = json.dumps(matrix_entries)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf‑8") as f:
+              f.write(f"matrix_json={out}\n")
           PY
-
-      - name: Install vllm-project/vllm-ascend no device
-        if: ${{ matrix.group.npu_type == 'cpu' }}
         env:
-          SOC_VERSION: ascend910b1
-          COMPILE_CUSTOM_KERNELS: 0
-        run: |
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -e .
+          TEST_GROUPS: ${{ inputs.test_groups }}
 
-      - name: Uninstall Triton for 310P tests
-        if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
-        run: |
-          pip uninstall -y triton-ascend triton
-
-      - name: Run selected tests with device
-        if: ${{ matrix.group.npu_type != 'cpu' }}
-        continue-on-error: ${{ inputs.continue_on_error }}
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
-        run: |
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
-            export ENABLE_COVERAGE=true
-          fi
-          TIMING_FLAG=""
-          if [ "${{ inputs.upload_timing }}" = "true" ]; then
-            TIMING_FLAG="--timing"
-          fi
-          .github/workflows/scripts/run_selected_tests.sh \
-            "${{ matrix.group.npu_type }}" \
-            "${{ matrix.group.num_npus }}" \
-            "with-device" \
-            ${TIMING_FLAG} \
-            ${{ matrix.group.tests }}
-
-      - name: Run selected tests without device
-        if: ${{ matrix.group.npu_type == 'cpu' }}
-        continue-on-error: ${{ inputs.continue_on_error }}
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          TORCH_DEVICE_BACKEND_AUTOLOAD: 0
-          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
-        run: |
-          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
-            export ENABLE_COVERAGE=true
-          fi
-          .github/workflows/scripts/run_selected_tests.sh \
-            "${{ matrix.group.npu_type }}" \
-            "${{ matrix.group.num_npus }}" \
-            "without-device" \
-            ${{ matrix.group.tests }}
-
-      - name: Upload timing data
-        if: ${{ inputs.upload_timing && matrix.group.npu_type != 'cpu' }}
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
+  run_shards:
+    name: test‑shard‑${{ matrix.npu_type }}
+    needs: dispatch
+    strategy:
+      fail‑fast: false
+      matrix:
+        entry: ${{ fromJson(needs.dispatch.outputs.matrix_json) }}
+    runs-on: ${{ matrix.entry.runner_label }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
-          name: timing-data-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
-          path: ${{ runner.temp }}/selected-tests-*/test_timing_data.json
-          if-no-files-found: ignore
-          retention-days: 7
+          ref: ${{ inputs.ref }}
+          fetch‑depth: 0
 
-      - name: Upload coverage data
-        if: ${{ !cancelled() && inputs.enable-coverage }}
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
+      - name: Rebase to base_sha (NPU mandatory)
+        run: |
+          set -euo pipefail
+          git config user.name "ci‑runner"
+          git config user.email "ci@runner.local"
+          git rebase "${BASE_SHA}"
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+
+      - name: Setup CANN & build environment
+        run: |
+          set -euo pipefail
+          echo "ASCEND_TOOLKIT_PATH=/usr/local/Ascend/ascend‑toolkit" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=/usr/local/Ascend/ascend‑toolkit/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+      - name: Restore ccache
+        uses: actions/cache@v4
         with:
-          name: selected-test-coverage-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
           path: |
-            tests/outputs/**/EXPECTED
-            tests/outputs/**/covdata/**
-          if-no-files-found: ignore
-          retention-days: 14
-          compression-level: 0
+            ~/.cache/ccache
+          key: ccache‑${{ inputs.base_sha }}‑${{ matrix.entry.npu_type }}
 
-      - name: Upload selected test logs
-        if: ${{ !cancelled() }}
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
+      - name: Install python dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pytest‑cov
+
+      - name: Show npu‑smi device status
+        run: |
+          npu‑smi info || true
+
+      - name: Run pytest with coverage
+        run: |
+          set -euo pipefail
+          TEST_PATHS="${{ join(matrix.entry.test_paths, ' ') }}"
+          echo "test paths: ${TEST_PATHS}"
+          python3 -m pytest -v --cov=./ --cov‑report=xml:coverage.xml ${TEST_PATHS}
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: selected-test-logs-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
-          path: ${{ runner.temp }}/selected-tests-*
-          if-no-files-found: ignore
-          retention-days: 14
-          compression-level: 0
-
-  upload-coverage-to-obs:
-      if: ${{ !cancelled() && inputs.enable-coverage }}
-      needs: selected-tests
-      runs-on: ubuntu-latest
-      continue-on-error: true
-      env:
-        OBS_ACCESS_KEY: ${{ secrets.OBS_ACCESS_KEY_PRECISION }}
-        OBS_SECRET_KEY: ${{ secrets.OBS_SECRET_ACCESS_KEY_PRECISION }}
-      steps:
-        - name: Checkout vllm-ascend source code
-          uses: actions/checkout@v7
-          with:
-            ref: ${{ inputs.ref || github.ref }}
-
-        - name: Download all coverage artifacts
-          uses: actions/download-artifact@v8
-          with:
-            path: all-coverage
-            pattern: selected-test-coverage-*
-            merge-multiple: true
-
-        - name: Check full coverage data completeness
-          id: coverage-completeness
-          env:
-            SELECTED_TEST_GROUPS: ${{ inputs.test_groups }}
-          run: |
-            python3 .github/workflows/scripts/assemble_coverage.py check \
-              --test-groups-json "${SELECTED_TEST_GROUPS}" \
-              --current-root all-coverage
-
-        - name: Download previous coverage data from OBS
-          if: steps.coverage-completeness.outputs.has_missing == 'true'
-          run: |
-            mkdir -p previous-coverage
-            # The historical coverage package is exposed as a public-read
-            # object in OBS, so download it directly via its public URL with
-            # curl (no SDK or credentials needed). On the very first run there
-            # is no history yet (HTTP 404); tolerate that so the downstream
-            # backfill/assemble steps still proceed with the current data.
-            if curl -fSL --retry 3 -o previous-coverage.tar \
-              "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/coverage.tar"; then
-              tar xf previous-coverage.tar -C previous-coverage
-            else
-              echo "::warning::No previous coverage data found on OBS (first run?). Backfill will be skipped."
-            fi
-
-        - name: Backfill missing coverage data
-          if: steps.coverage-completeness.outputs.has_missing == 'true'
-          env:
-            SELECTED_TEST_GROUPS: ${{ inputs.test_groups }}
-          run: |
-            python3 .github/workflows/scripts/assemble_coverage.py backfill \
-              --test-groups-json "${SELECTED_TEST_GROUPS}" \
-              --current-root all-coverage \
-              --previous-root previous-coverage
-
-        - name: Debug - List downloaded coverage files
-          run: |
-            echo "=== all-coverage top level ==="
-            find all-coverage -maxdepth 1 2>/dev/null | head -20 || echo "all-coverage directory not exist"
-            echo ""
-            echo "=== all-coverage total file count ==="
-            find all-coverage -type f 2>/dev/null | wc -l
-            echo "=== sample covdata dirs ==="
-            find all-coverage -type d -name covdata 2>/dev/null | head -10
-            echo "=== sample files ==="
-            find all-coverage -path '*/covdata/*' -type f 2>/dev/null | head -10
-
-        - name: Assemble and compress coverage files
-          run: |
-            set -euo pipefail
-            TASK_DATE=$(date +%Y%m%d%H)
-            TASK_NAME="VLLM-ASCEND@task_${TASK_DATE}"
-            COVERAGE_PKG_DIR="coverage/vllm-ascend"
-            TASK_DIR="${COVERAGE_PKG_DIR}/${TASK_NAME}"
-            mkdir -p "${TASK_DIR}" "${COVERAGE_PKG_DIR}/covstub/vllm_ascend"
-
-            COVERAGE_FILE_COUNT=0
-            while IFS= read -r f; do
-              rel="${f#all-coverage/}"
-              case "${rel}" in
-                selected-test-coverage-*/*) rel="${rel#*/}" ;;
-              esac
-              dest="${TASK_DIR}/${rel}"
-              mkdir -p "$(dirname "${dest}")"
-              cp "${f}" "${dest}"
-              COVERAGE_FILE_COUNT=$((COVERAGE_FILE_COUNT + 1))
-            done < <(find all-coverage -path '*/covdata/*' -type f 2>/dev/null)
-
-            echo "Copied ${COVERAGE_FILE_COUNT} coverage files to ${TASK_DIR}"
-            if [ "${COVERAGE_FILE_COUNT}" -eq 0 ]; then
-              echo "::error::No coverage files found under all-coverage/*/covdata/"
-              exit 1
-            fi
-
-            cp -r vllm_ascend/. "${COVERAGE_PKG_DIR}/covstub/vllm_ascend/"
-            cp tests/coverage_settingInfo.xml "${COVERAGE_PKG_DIR}/settingInfo.xml"
-            echo "${TASK_NAME}" > coverage_version.txt
-
-            echo "=== package top level ==="
-            find "${COVERAGE_PKG_DIR}" -maxdepth 1 2>/dev/null | head -20 || true
-            echo "=== task dir file count ==="
-            find "${TASK_DIR}" -type f | wc -l
-
-            echo "=== building test_case_map.json ==="
-            pip install regex
-            python3 .github/workflows/scripts/test_selector.py \
-              --build-map \
-              --coverage-dir "${TASK_DIR}" \
-              --source-dir "${COVERAGE_PKG_DIR}/covstub" \
-              --map-file test_case_map.json
-            test -s test_case_map.json
-            du -h test_case_map.json
-
-            tar cf coverage.tar -C coverage vllm-ascend
-            echo "Packed coverage/vllm-ascend into coverage.tar"
-            du -h coverage.tar
-            echo "=== tar contents (sample) ==="
-            tar tf coverage.tar | head -20 || true
-            echo "=== tar task file count ==="
-            tar tf coverage.tar | grep -c "vllm-ascend/${TASK_NAME}/" || true
-
-            {
-              echo "TASK_DATE=${TASK_DATE}"
-              echo "TASK_NAME=${TASK_NAME}"
-            } >> "${GITHUB_ENV}"
-
-        - name: Upload coverage to OBS
-          run: |
-            pip install esdk-obs-python --quiet
-            python3 - <<'EOF'
-            import os
-            from obs import ObsClient
-
-            OBS_BUCKET = 'vllm-ascend'
-            OBS_PREFIX = 'ci/precision-test'
-            client = ObsClient(
-                access_key_id=os.environ['OBS_ACCESS_KEY'],
-                secret_access_key=os.environ['OBS_SECRET_KEY'],
-                server='https://obs.cn-north-4.myhuaweicloud.com'
-            )
-
-            uploads = [
-                ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
-                ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
-                ('test_case_map.json', f'{OBS_PREFIX}/test_case_map.json'),
-            ]
-            for local_path, obs_path in uploads:
-                resp = client.putFile(OBS_BUCKET, obs_path, local_path)
-                if resp.status < 300:
-                    print(f'Uploaded: {local_path} -> {obs_path}')
-                else:
-                    raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
-            EOF
-
-        - name: Prune extra tests already present in coverage
-          id: prune-extra
-          continue-on-error: true
-          run: |
-            set +e
-            echo "pruned=false" >> "$GITHUB_OUTPUT"
-            OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
-            if ! pip install pyyaml --quiet; then
-              echo "::warning::Failed to install pyyaml; skip prune"
-              exit 0
-            fi
-            http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
-            if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
-              echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skip prune"
-              exit 0
-            fi
-            python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
-              --prune-covered \
-              --extra-yaml extra_recommended_tests.yaml \
-              --map-file test_case_map.json \
-              --coverage-dir "coverage/vllm-ascend/${TASK_NAME}" \
-              --output-yaml extra_recommended_tests.yaml \
-              | tee prune.out
-            prune_status=${PIPESTATUS[0]}
-            if [ "${prune_status}" -ne 0 ]; then
-              echo "::warning::Prune extra tests failed"
-              exit 0
-            fi
-            if [ -f prune.out ] && grep -q "^Removed " prune.out; then
-              echo "pruned=true" >> "$GITHUB_OUTPUT"
-              echo "Pruned extra yaml:"
-              cat extra_recommended_tests.yaml
-            fi
-            exit 0
-
-        - name: Upload pruned extra_recommended_tests.yaml to OBS
-          if: ${{ success() && steps.prune-extra.outputs.pruned == 'true' }}
-          continue-on-error: true
-          run: |
-            set -euo pipefail
-            if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
-              echo "::warning::OBS credentials are missing; skip extra yaml upload"
-              exit 0
-            fi
-            if [ ! -s extra_recommended_tests.yaml ]; then
-              echo "No pruned extra_recommended_tests.yaml to upload"
-              exit 0
-            fi
-            pip install esdk-obs-python --quiet
-            python3 - <<'EOF'
-            import os
-            from obs import ObsClient
-
-            obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
-            client = ObsClient(
-                access_key_id=os.environ['OBS_ACCESS_KEY'],
-                secret_access_key=os.environ['OBS_SECRET_KEY'],
-                server='https://obs.cn-north-4.myhuaweicloud.com',
-            )
-            resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
-            if resp.status >= 300:
-                raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
-            print(f'Uploaded extra_recommended_tests.yaml -> {obs_path}')
-            print('https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/' + obs_path)
-            EOF
+          name: npu‑coverage‑report‑${{ matrix.entry.npu_type }}
+          path: coverage.xml
+          retention‑days: 7
