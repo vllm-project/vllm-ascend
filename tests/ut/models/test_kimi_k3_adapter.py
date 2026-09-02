@@ -4,6 +4,7 @@
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
@@ -12,10 +13,82 @@ from vllm_ascend.models import kimi_k3
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiK3MultiModalProjector,
     AscendKimiLinearModel,
+    _get_decoder_layer_idx_from_weight_name,
+    _get_kimi_k3_num_loaded_layers,
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [("0", 4), ("3", 3)],
+)
+def test_kimi_k3_layer_reduction_config(
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str,
+    expected: int,
+):
+    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", env_value)
+
+    assert _get_kimi_k3_num_loaded_layers(4) == expected
+
+
+@pytest.mark.parametrize("env_value", ["-1", "5", "True", "3.0"])
+def test_kimi_k3_layer_reduction_config_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str,
+):
+    monkeypatch.setenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS", env_value)
+
+    with pytest.raises(ValueError, match="VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS"):
+        _get_kimi_k3_num_loaded_layers(4)
+
+
+@pytest.mark.parametrize(
+    ("weight_name", "expected_layer"),
+    [
+        ("model.layers.2.mlp.gate_proj.weight", 2),
+        ("layers.3.self_attn.q_proj.weight", 3),
+        ("language_model.model.layers.4.mlp.up_proj.weight", 4),
+        ("model.layers.invalid.mlp.gate_proj.weight", None),
+        ("model.embed_tokens.weight", None),
+    ],
+)
+def test_kimi_k3_layer_reduction_parses_loader_prefixes(
+    weight_name: str,
+    expected_layer: int | None,
+):
+    assert _get_decoder_layer_idx_from_weight_name(weight_name) == expected_layer
+
+
+def test_kimi_k3_layer_reduction_skips_weights_for_omitted_layers(monkeypatch):
+    model = AscendKimiLinearModel.__new__(AscendKimiLinearModel)
+    nn.Module.__init__(model)
+    model.num_loaded_layers = 2
+    loaded_names = []
+
+    def fake_upstream_load_weights(_self, weights):
+        loaded_names.extend(name for name, *_ in weights)
+        return set(loaded_names)
+
+    monkeypatch.setattr(
+        kimi_k3.UpstreamKimiLinearModel,
+        "load_weights",
+        fake_upstream_load_weights,
+    )
+    loaded = model.load_weights(
+        iter(
+            [
+                ("layers.1.router.weight", torch.tensor([1.0])),
+                ("layers.2.router.weight", torch.tensor([2.0])),
+            ]
+        )
+    )
+
+    assert loaded_names == ["layers.1.router.weight"]
+    assert loaded == {"layers.1.router.weight"}
 
 
 def test_ascend_attn_res_matches_canonical_k3_math():
