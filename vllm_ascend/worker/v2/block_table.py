@@ -48,7 +48,6 @@ class AscendBlockTables(BlockTables):
             cp_size,
             cp_rank,
             cp_interleave,
-            slot_mapping_enabled,
         )
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
