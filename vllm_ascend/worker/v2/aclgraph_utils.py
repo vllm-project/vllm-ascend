@@ -214,6 +214,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        pcp_manager: Any = None,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
@@ -221,7 +222,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
-        pcp_manager = getattr(self.model_runner, "pcp_manager", None)
+        if pcp_manager is None:
+            pcp_manager = getattr(self.model_runner, "pcp_manager", None)
         if pcp_manager is not None:
             cudagraph_utils.prepare_inputs_to_capture = partial(
                 _prepare_pcp_inputs_to_capture,
@@ -236,6 +238,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
+                pcp_manager=pcp_manager,
                 has_lora=has_lora,
                 use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                 lora_capture_hook=lora_capture_hook,
