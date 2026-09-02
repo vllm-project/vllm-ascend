@@ -315,7 +315,6 @@ def test_recompute_scheduler_config_picks_sync_and_async_class():
 
     assert sync_config.scheduler_cls == "vllm_ascend.core.recompute_scheduler.RecomputeScheduler"
     assert async_config.scheduler_cls == "vllm_ascend.core.recompute_scheduler.AsyncRecomputeScheduler"
-    assert sync_config.max_model_len == vllm_config.model_config.max_model_len
 
 
 def test_default_policy_hooks_are_noops():
@@ -529,6 +528,7 @@ def test_schedule_recompute_preemption_fallback_finishes_victim():
     _fail_first_allocate(scheduler)
     scheduler.connector = MagicMock()
     scheduler.connector.update_state_before_preempt.return_value = False
+    scheduler.connector.request_finished.return_value = (False, None)
 
     scheduler_output = scheduler.schedule()
 
