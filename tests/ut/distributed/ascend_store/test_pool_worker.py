@@ -23,6 +23,9 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import (
+    pool_worker as pool_worker_module,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     LayerTransferTask,
@@ -1433,6 +1436,224 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         worker.m_store.batch_alloc.assert_called_once_with([key], [64])
         self.assertEqual(worker._allocated_gvas[key], 202)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202])
+
+    def _run_alloc_for_save_with_counter(self, worker, request):
+        """Run _alloc_gvas_for_save with a counting wrapper on block_hash_to_str."""
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker"
+        original = pool_worker_module.block_hash_to_str
+        calls = []
+
+        def counting(block_hash):
+            calls.append(block_hash)
+            return original(block_hash)
+
+        with patch(f"{module}.block_hash_to_str", side_effect=counting):
+            worker._alloc_gvas_for_save([request])
+        return calls
+
+    def test_alloc_gvas_for_save_converts_each_hash_once(self):
+        worker = self._make_gva_worker()
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=64,
+            target_token_len=64,
+            block_ids=[7, 8, 9, 10],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8, 9, 10], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8, 9, 10], dtype=np.int64)],
+        )
+        worker.m_store.batch_alloc.return_value = [301, 302, 303, 304]
+        worker.m_store.batch_is_exist.return_value = [1, 1, 1, 1]
+
+        calls = self._run_alloc_for_save_with_counter(worker, request)
+
+        self.assertEqual(calls, ["h0", "h1", "h2", "h3"])
+
+    def test_alloc_gvas_for_save_converts_each_hash_once_with_cached_prefix(self):
+        worker = self._make_gva_worker()
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=64,
+            target_token_len=64,
+            block_ids=[7, 8, 9, 10],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8, 9, 10], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8, 9, 10], dtype=np.int64)],
+        )
+        for hash_str, gva in (("h0", 101), ("h1", 102)):
+            key = worker._make_layerwise_gva_key(0, hash_str)
+            worker._allocated_gvas[key] = gva
+        worker.m_store.batch_is_exist.return_value = [1, 1]
+        worker.m_store.batch_alloc.return_value = [303, 304]
+
+        calls = self._run_alloc_for_save_with_counter(worker, request)
+
+        self.assertEqual(calls, ["h0", "h1", "h2", "h3"])
+        # Blocks skipped by the cached-prefix while loop keep GVA 0 in the
+        # transfer array; their GVAs are reused via _allocated_gvas instead.
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 0, 303, 304])
+
+    def test_alloc_gvas_for_save_converts_each_hash_once_all_cached(self):
+        worker = self._make_gva_worker()
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=64,
+            target_token_len=64,
+            block_ids=[7, 8, 9, 10],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8, 9, 10], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8, 9, 10], dtype=np.int64)],
+        )
+        for hash_str, gva in (("h0", 101), ("h1", 102), ("h2", 103), ("h3", 104)):
+            key = worker._make_layerwise_gva_key(0, hash_str)
+            worker._allocated_gvas[key] = gva
+        worker.m_store.batch_is_exist.return_value = [1, 1, 1, 1]
+
+        calls = self._run_alloc_for_save_with_counter(worker, request)
+
+        self.assertEqual(calls, ["h0", "h1", "h2", "h3"])
+        worker.m_store.batch_alloc.assert_not_called()
+        # All blocks are skipped by the while loop; the transfer array keeps 0.
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 0, 0, 0])
+
+    def test_alloc_gvas_for_save_skips_scan_when_start_block_lifted_beyond_end(self):
+        worker = self._make_gva_worker()
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=16,
+            target_token_len=16,
+            block_ids=[7, 8, 9, 10],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            can_save=True,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=64,
+                can_load=True,
+                kvpool_store_skip_tokens=64,
+            ),
+            block_ids_np=np.asarray([7, 8, 9, 10], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8, 9, 10], dtype=np.int64)],
+        )
+
+        calls = self._run_alloc_for_save_with_counter(worker, request)
+
+        self.assertEqual(calls, [])
+        worker.m_store.batch_alloc.assert_not_called()
+
+    def test_alloc_gvas_for_save_with_partial_lift_keeps_key_offsets_aligned(self):
+        # hit_full_blocks lifts scan_start to 1 while blocks 1..3 still need
+        # saving: exercises the non-zero index offset into the precomputed
+        # block_keys list (a missing "- scan_start" would silently pick the
+        # wrong key instead of raising).
+        worker = self._make_gva_worker()
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=64,
+            target_token_len=64,
+            block_ids=[7, 8, 9, 10],
+            block_hashes=["h0", "h1", "h2", "h3"],
+            can_save=True,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=16,
+                can_load=True,
+                kvpool_store_skip_tokens=16,
+            ),
+            block_ids_np=np.asarray([7, 8, 9, 10], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8, 9, 10], dtype=np.int64)],
+        )
+        worker.m_store.batch_alloc.return_value = [303, 304]
+        worker.m_store.batch_is_exist.return_value = [1, 1, 1]
+
+        calls = self._run_alloc_for_save_with_counter(worker, request)
+
+        self.assertEqual(calls, ["h1", "h2", "h3"])
+        alloc_keys = worker.m_store.batch_alloc.call_args.args[0]
+        self.assertEqual(
+            alloc_keys,
+            [
+                worker._make_layerwise_gva_key(0, "h1"),
+                worker._make_layerwise_gva_key(0, "h2"),
+                worker._make_layerwise_gva_key(0, "h3"),
+            ],
+        )
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 303, 304, 0])
+
+    def test_alloc_gvas_for_save_converts_each_hash_once_duplicate_hashes(self):
+        worker = self._make_gva_worker()
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=64,
+            target_token_len=64,
+            block_ids=[7, 8, 9, 10],
+            block_hashes=["h0", "h1", "h0", "h2"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8, 9, 10], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8, 9, 10], dtype=np.int64)],
+        )
+        worker.m_store.batch_alloc.return_value = [301, 302, 303, 304]
+        worker.m_store.batch_is_exist.return_value = [1, 1, 1, 1]
+
+        calls = self._run_alloc_for_save_with_counter(worker, request)
+
+        self.assertEqual(calls, ["h0", "h1", "h0", "h2"])
+        alloc_keys = worker.m_store.batch_alloc.call_args.args[0]
+        self.assertEqual(
+            alloc_keys,
+            [
+                worker._make_layerwise_gva_key(0, "h0"),
+                worker._make_layerwise_gva_key(0, "h1"),
+                worker._make_layerwise_gva_key(0, "h0"),
+                worker._make_layerwise_gva_key(0, "h2"),
+            ],
+        )
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [301, 302, 303, 304])
+
+    def test_alloc_gvas_for_save_keys_unchanged_multi_group(self):
+        worker = self._make_gva_worker(2)
+        worker.m_store.batch_alloc.return_value = [301, 302, 303, 304]
+        worker.m_store.batch_is_exist.return_value = [1, 1, 1, 1]
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=64,
+            target_token_len=64,
+            block_ids=[7, 8],
+            block_ids_by_group=[[7, 8], [9, 10]],
+            block_hashes=["h0", "h1"],
+            can_save=True,
+            block_ids_np=np.asarray([7, 8], dtype=np.int64),
+            block_ids_by_group_np=[np.asarray([7, 8], dtype=np.int64), np.asarray([9, 10], dtype=np.int64)],
+        )
+
+        calls = self._run_alloc_for_save_with_counter(worker, request)
+
+        self.assertEqual(calls, ["h0", "h1", "h0", "h1"])
+        self.assertEqual(
+            request.save_keys,
+            [
+                worker._make_layerwise_gva_key(0, "h0"),
+                worker._make_layerwise_gva_key(0, "h1"),
+                worker._make_layerwise_gva_key(1, "h0"),
+                worker._make_layerwise_gva_key(1, "h1"),
+            ],
+        )
 
     def test_partial_decode_is_saved_and_loaded_for_reused_layer(self):
         worker = self._make_worker()
