@@ -47,6 +47,12 @@ def _reshape_and_cache_with_diagnostics(self, *args, **kwargs):
             type(self.key_cache).__name__,
             getattr(self.key_cache, "shape", None),
         )
+    if not isinstance(kv_cache, tuple):
+        logger.warning(
+            "Ascend MRV2 non-tuple cache before reshape: type=%s shape=%s",
+            type(kv_cache).__name__,
+            getattr(kv_cache, "shape", None),
+        )
     return _upstream_reshape_and_cache(self, *args, **kwargs)
 
 
