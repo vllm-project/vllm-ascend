@@ -171,6 +171,11 @@ a3:
         size: 2
   single_node:
     test_config:
+      # pytest-driven tests
+      - name: sparse-kv-offload-ops
+        os: linux-aarch64-nightly-a3-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_sparse_kv_offload.py
+      # YAML-driven tests
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml

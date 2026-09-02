@@ -21,6 +21,7 @@ import torch
 
 from vllm_ascend.utils import bootstrap_custom_op_env
 
+# Import the packaged extension so the CPU-dispatched Sparse KV ops are registered.
 bootstrap_custom_op_env(include_vendor_lib=True)
 import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped] # noqa: E402,F401
 
