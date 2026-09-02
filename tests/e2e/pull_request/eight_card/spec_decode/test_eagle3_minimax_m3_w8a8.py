@@ -28,7 +28,7 @@ import pytest
 
 from tests.e2e.pull_request.utils import _run_speculative_decoding
 
-MODELS = ["/mnt/weight/MiniMax-M3-w8a8"]
+MODELS = ["UploadWeight/MiniMax-M3-w8a8"]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
@@ -62,7 +62,6 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         "CLOSE_MATMUL_K_SHIFT": "1",
         "HCCL_BUFFSIZE": "1024",
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
-        "ASCEND_RT_VISIBLE_DEVICES": "4,5,6,7,8,9,10,11",
         "ASCEND_LAUNCH_BLOCKING": "1",
     },
 )
@@ -76,7 +75,7 @@ def test_minimax_m3_eagle3_acceptance_tp8(
         model_name=model_name,
         speculative_config={
             "method": "eagle3",
-            "model": "/mnt/weight/MiniMax-M3-EAGLE3",
+            "model": "UploadWeight/MiniMax-M3-EAGLE3",
             "num_speculative_tokens": num_speculative_tokens,
             "enforce_eager": True,
             "attention_backend": "FLASH_ATTN",
