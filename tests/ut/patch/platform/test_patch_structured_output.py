@@ -317,6 +317,7 @@ def test_grammar_bitmask_validates_post_reasoning_drafts_before_accepting():
     grammar = FakeGrammar()
     reasoner = SimpleNamespace(is_reasoning_end_streaming=lambda _all_ids, delta_ids: list(delta_ids) == [marker])
     manager = object.__new__(StructuredOutputManager)
+    manager.enable_in_reasoning = False
     manager.vllm_config = SimpleNamespace(
         num_speculative_tokens=3,
         scheduler_config=SimpleNamespace(max_num_seqs=1),
