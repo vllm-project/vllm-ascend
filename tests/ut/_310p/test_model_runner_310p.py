@@ -33,6 +33,11 @@ def _prepare_inputs_source() -> str:
     return source[start:end]
 
 
+def _worker_source() -> str:
+    source_path = Path(__file__).resolve().parents[3] / "vllm_ascend" / "_310p" / "worker_310p.py"
+    return source_path.read_text(encoding="utf-8")
+
+
 def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
     source = _prepare_inputs_source()
 
@@ -89,6 +94,13 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
 
     assert calls == ["update", "model"]
     torch.testing.assert_close(hidden_states, torch.ones(1))
+
+
+def test_310p_worker_init_device_uses_common_logical_to_physical_mapping() -> None:
+    source = _worker_source()
+
+    assert "device = self._resolve_device()" in source
+    assert 'torch.device(f"npu:{self.local_rank}")' not in source
 
 
 class TestNPUModelRunner310(TestBase):

@@ -516,6 +516,7 @@ class TestNPUWorker(TestBase):
         mock_snapshot_cls.return_value = mock_snapshot
 
         # Mock current_platform for v0.24.0 init_device path
+        mock_current_platform.device_id_to_physical_device_id.return_value = 4
         mock_current_platform.logical_device_id_to_visible_device_id.return_value = 0
         mock_current_platform.device_type = "npu"
 
@@ -535,10 +536,13 @@ class TestNPUWorker(TestBase):
             worker.cache_config = MagicMock()
             worker.cache_config.gpu_memory_utilization = 0.5
 
-            # Test _init_device
-            result = worker._init_device()
+            # Test _init_device without requiring an NPU runtime in the unit-test environment.
+            with patch("torch.npu.is_available", return_value=True), patch("torch.npu.device_count", return_value=1):
+                result = worker._init_device()
 
             mock_init_dist_env.assert_called_once()
+            mock_current_platform.device_id_to_physical_device_id.assert_called_once_with(0)
+            self.assertEqual(worker.physical_device_id, 4)
             self.assertEqual(str(result), "npu:0")
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)
@@ -1398,8 +1402,10 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.logger")
     @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
+    @patch("vllm_ascend.worker.worker.bind_cpus")
     def test_compile_or_warm_up_model_with_eager_mode(
         self,
+        mock_bind_cpus,
         mock_warm_up_atb,
         mock_logger,
         mock_get_ascend_config,
@@ -1410,7 +1416,7 @@ class TestNPUWorker(TestBase):
         mock_ascend_config = MagicMock()
         mock_ascend_config.ascend_compilation_config = MagicMock()
         mock_ascend_config.ascend_compilation_config.enable_npugraph_ex = False
-        mock_ascend_config.enable_cpu_binding = False
+        mock_ascend_config.enable_cpu_binding = True
         mock_get_ascend_config.return_value = mock_ascend_config
         mock_get_ascend_device_type.return_value = get_hardware_profile(AscendDeviceType.A2)
         from vllm_ascend.worker.worker import NPUWorker
@@ -1428,6 +1434,8 @@ class TestNPUWorker(TestBase):
             worker.model_config.seed = 12345
             worker.cache_config = MagicMock()
             worker.cache_config.kv_cache_memory_bytes = 1024
+            worker.local_rank = 0
+            worker.physical_device_id = 4
 
             # Setup compilation config
             worker.vllm_config.compilation_config = MagicMock()
@@ -1455,6 +1463,7 @@ class TestNPUWorker(TestBase):
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
             mock_kernel_warmup.assert_called_once_with(worker)
+            mock_bind_cpus.assert_called_once_with(0, npu_id=4)
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
     @patch("vllm_ascend.worker.worker.get_current_hardware_profile")

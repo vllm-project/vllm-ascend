@@ -371,7 +371,7 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-    def _init_device(self):
+    def _resolve_device(self):
         # vLLM v0.24.0 (PR #45026) removed automatic per-process device
         # isolation for DP workers. Mirror gpu_worker.py::init_device:
         # shift self.local_rank by dp_local_rank * tp_pp_world_size so
@@ -417,8 +417,14 @@ class NPUWorker(WorkerBase):
                 f"DP adjusted local rank {self.local_rank} is out of bounds for {visible_device_count} devices."
             )
 
+        self.physical_device_id = current_platform.device_id_to_physical_device_id(self.local_rank)
         visible_device_index = current_platform.logical_device_id_to_visible_device_id(self.local_rank)
         device = torch.device(f"{current_platform.device_type}:{visible_device_index}")
+
+        return device
+
+    def _init_device(self):
+        device = self._resolve_device()
 
         torch.npu.set_device(device)
 
@@ -827,7 +833,7 @@ class NPUWorker(WorkerBase):
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:
             try:
-                bind_cpus(self.local_rank)
+                bind_cpus(self.local_rank, npu_id=self.physical_device_id)
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
 

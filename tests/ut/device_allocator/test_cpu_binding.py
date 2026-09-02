@@ -28,6 +28,7 @@ from vllm_ascend.utils import AscendDeviceType
 def make_cpu_alloc(rank_id=0):
     cpu_alloc = object.__new__(CpuAlloc)
     cpu_alloc.rank_id = rank_id
+    cpu_alloc.current_npu = 0
     cpu_alloc.device_info = SimpleNamespace(
         running_npu_list=[0],
         all_logic_npus=[0],
@@ -308,6 +309,28 @@ class TestCpuAlloc(unittest.TestCase):
         ]
         self.cpu_alloc = CpuAlloc(0)
 
+    @patch("vllm_ascend.cpu_binding.DeviceInfo")
+    def test_explicit_npu_id_overrides_running_npu_order(self, mock_device_info):
+        mock_device_info.return_value.running_npu_list = [1, 3]
+
+        cpu_alloc = CpuAlloc(rank_id=0, npu_id=3)
+
+        self.assertEqual(cpu_alloc.current_npu, 3)
+
+    @patch("vllm_ascend.cpu_binding.DeviceInfo")
+    def test_explicit_npu_id_must_be_running(self, mock_device_info):
+        mock_device_info.return_value.running_npu_list = [1, 3]
+
+        with self.assertRaisesRegex(RuntimeError, "Mapped NPU 2"):
+            CpuAlloc(rank_id=0, npu_id=2)
+
+    @patch("vllm_ascend.cpu_binding.DeviceInfo")
+    def test_rank_fallback_validates_running_npu_range(self, mock_device_info):
+        mock_device_info.return_value.running_npu_list = [1]
+
+        with self.assertRaisesRegex(RuntimeError, "Rank 1 is out of range"):
+            CpuAlloc(rank_id=1)
+
     def test_average_distribute(self):
         self.cpu_alloc.npu_cpu_pool = {0: [10, 11, 12, 13], 1: [10, 11, 12, 13]}
         groups = {"[10, 11, 12, 13]": [0, 1]}
@@ -336,6 +359,8 @@ class TestCpuAlloc(unittest.TestCase):
         self.assertEqual(self.cpu_alloc._binding_mode(), "topo_affinity")
         mock_get_device_type.return_value = get_hardware_profile(AscendDeviceType.A3)
         self.assertEqual(self.cpu_alloc._binding_mode(), "global_slice")
+        mock_get_device_type.return_value = get_hardware_profile(AscendDeviceType._310P)
+        self.assertEqual(self.cpu_alloc._binding_mode(), "topo_affinity")
         mock_get_device_type.return_value = get_hardware_profile(AscendDeviceType.A5)
         self.assertEqual(self.cpu_alloc._binding_mode(), "topo_affinity")
 
@@ -554,6 +579,7 @@ class TestCpuAlloc(unittest.TestCase):
         mock_execute_command.return_value = ("PCIe Bus Info 0000:03:00.0", 0)
         self.cpu_alloc.rank_id = 0
         self.cpu_alloc.device_info.running_npu_list = [3]
+        self.cpu_alloc.current_npu = 3
         self.cpu_alloc.npu_cpu_pool = {3: [0, 1, 2, 3, 4]}
 
         self.cpu_alloc.bind_npu_irq()
@@ -915,6 +941,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     def test_print_plan_handles_empty_release_assignment(self, mock_logger_info, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [1]
+        cpu_alloc.current_npu = 1
         cpu_alloc.rank_id = 0
         cpu_alloc.assign_main = {1: [2, 3]}
         cpu_alloc.assign_acl = {1: [4]}
@@ -931,6 +958,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     def test_print_plan_uses_ascend_950_worker_log(self, mock_logger_info, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [1]
+        cpu_alloc.current_npu = 1
         cpu_alloc.rank_id = 0
         cpu_alloc.assign_main = {1: [2, 3]}
         cpu_alloc.assign_acl = {1: []}
@@ -953,6 +981,7 @@ class TestCpuBindingSupplemental(unittest.TestCase):
     def test_print_plan_handles_non_empty_release_assignment(self, mock_logger_info, _mock_get_device_type):
         cpu_alloc = make_cpu_alloc()
         cpu_alloc.device_info.running_npu_list = [1]
+        cpu_alloc.current_npu = 1
         cpu_alloc.rank_id = 0
         cpu_alloc.assign_main = {1: [2, 3]}
         cpu_alloc.assign_acl = {1: [4]}
@@ -1295,9 +1324,9 @@ class TestBindingSwitch(unittest.TestCase):
     @patch("vllm_ascend.cpu_binding.CpuAlloc")
     @patch("vllm_ascend.cpu_binding.is_arm_cpu", return_value=True)
     def test_bind_cpus_runs_allocator_on_arm(self, _mock_is_arm_cpu, mock_cpu_alloc):
-        bind_cpus(1)
+        bind_cpus(1, npu_id=3)
 
-        mock_cpu_alloc.assert_called_once_with(1)
+        mock_cpu_alloc.assert_called_once_with(1, npu_id=3)
         mock_cpu_alloc.return_value.run_all.assert_called_once_with()
 
 
