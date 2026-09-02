@@ -338,6 +338,7 @@ class AscendStep3p5MTPProposer(AscendEagleProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        target_model_cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> torch.Tensor:
         # Dynamic SD: honor the scheduled per-step K, unified with
         # ``AscendSpecDecodeBaseProposer._propose`` (this override does not call
