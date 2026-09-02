@@ -236,19 +236,21 @@ jobs:
         id: set-matrix
         env:
           MATRIX_FILE: ${{ env.DAILY_CONFIG }}
-          MATRIX_OUTPUTS: '{"a2_nightly_hf":"daily.a2_nightly_hf","a3_nightly_hf":"daily.a3_nightly_hf"}'
         run: |
           set -x
           python3 -m pip install pyyaml -q
-          echo "MATRIX_FILE=${MATRIX_FILE}"
-          echo "file exists? $(test -f "${MATRIX_FILE}" && echo YES || echo NO)"
-          ls -la .github/workflows/configs/ || true
-          # 执行脚本，stderr也打到stdout，抓报错
           RAW_OUT=$(python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix 2>&1)
           echo "RAW_OUT==>"
           echo "${RAW_OUT}"
           echo "<==RAW_OUT"
-          echo "${RAW_OUT}" >> "$GITHUB_OUTPUT"
+
+          # 关键兜底：脚本输出为空，输出合法空数组，避免fromJson("")
+          if [[ -z "${RAW_OUT}" ]]; then
+            echo "a2_nightly_hf=[]" >> "$GITHUB_OUTPUT"
+            echo "a3_nightly_hf=[]" >> "$GITHUB_OUTPUT"
+          else
+            echo "${RAW_OUT}" >> "$GITHUB_OUTPUT"
+          fi
 
   verify-image:
     name: Verify nightly-ci image (build gate)
@@ -277,10 +279,7 @@ jobs:
   a2-nightly-hf:
     name: A2 nightly high-freq
     needs: [setup-vars, verify-image]
-    if: |
-      github.event_name != 'pull_request' &&
-      needs.verify-image.result == 'success' &&
-      needs.setup-vars.outputs.a2_nightly_hf != ''
+    if: needs.verify-image.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -300,10 +299,7 @@ jobs:
   a3-nightly-hf:
     name: A3 nightly high-freq
     needs: [setup-vars, verify-image]
-    if: |
-      github.event_name != 'pull_request' &&
-      needs.verify-image.result == 'success' &&
-      needs.setup-vars.outputs.a3_nightly_hf != ''
+    if: needs.verify-image.result == 'success'
     strategy:
       fail-fast: false
       max-parallel: 2
