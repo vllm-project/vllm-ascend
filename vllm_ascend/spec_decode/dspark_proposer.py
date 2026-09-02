@@ -30,17 +30,6 @@ class AscendDSparkProposer(AscendDflashProposer):
     anchor-first query block emits all speculative tokens.
     """
 
-    @staticmethod
-    def _supports_phase1_aclgraph(vllm_config: VllmConfig) -> bool:
-        model_config = getattr(vllm_config, "model_config", None)
-        target_architectures = getattr(model_config, "architectures", ()) or ()
-        speculative_config = getattr(vllm_config, "speculative_config", None)
-        draft_model_config = getattr(speculative_config, "draft_model_config", None)
-        draft_architectures = getattr(draft_model_config, "architectures", ()) or ()
-        if not draft_architectures and draft_model_config is not None:
-            draft_architectures = getattr(draft_model_config.hf_config, "architectures", ()) or ()
-        return "GlmMoeDsaForCausalLM" in target_architectures and "Qwen3DSparkModel" in draft_architectures
-
     def set_resolved_cudagraph_mode(self, mode: CUDAGraphMode) -> None:
         super().set_resolved_cudagraph_mode(mode)
         # The structural capability also covers FULL_AND_PIECEWISE decode:
@@ -50,8 +39,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         fallback_reasons = []
         if mode != CUDAGraphMode.FULL_DECODE_ONLY:
             fallback_reasons.append("resolved mode is outside phase-1 rollout")
-        if not getattr(self, "_dspark_phase1_model_supported", True):
-            fallback_reasons.append("target/draft model pair is not enabled")
         if getattr(self, "dynamic_spec", None) is not None:
             fallback_reasons.append("dynamic verify length is enabled")
         if getattr(getattr(self, "speculative_config", None), "enforce_eager", False):
@@ -77,12 +64,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         if not getattr(self, "_dspark_graph_gate_logged", False):
             logger.info(
                 "DSpark MRV1 request-aligned ACLGraph rollout enabled=%s "
-                "(resolved_mode=%s, model_supported=%s, static_verify=%s, "
+                "(resolved_mode=%s, static_verify=%s, "
                 "draft_enforce_eager=%s, probabilistic_draft=%s, dcp_size=%s, "
                 "fallback_reason=%s)",
                 self._dspark_graph_rollout_enabled,
                 mode,
-                getattr(self, "_dspark_phase1_model_supported", True),
                 getattr(self, "dynamic_spec", None) is None,
                 getattr(getattr(self, "speculative_config", None), "enforce_eager", False),
                 getattr(self, "_enable_probabilistic_draft_probs", False),
@@ -264,7 +250,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 device=device,
             )
-        self._dspark_phase1_model_supported = self._supports_phase1_aclgraph(vllm_config)
         # The resolved-mode hook enables graph execution after the runner has
         # applied all compilation-mode fallbacks.
         self.use_cuda_graph = False

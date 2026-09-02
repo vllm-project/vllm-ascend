@@ -110,6 +110,9 @@ def _is_glm_model(model_config) -> bool:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+    use_cuda_graph: bool
+    use_eagle: bool
+    enable_enpu: bool
 
     def set_resolved_cudagraph_mode(self, mode: CUDAGraphMode) -> None:
         """Record the runner's final graph-mode decision.

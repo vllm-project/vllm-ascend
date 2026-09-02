@@ -122,10 +122,6 @@ class _DSparkProposerTestBase:
             ),
         ):
             proposer = AscendDSparkProposer(vllm_config, device)
-        proposer._initial_query_buffer_shapes = (
-            proposer.positions.shape,
-            proposer._slot_mapping_buffer.shape,
-        )
         num_query_total = num_reqs * proposer.num_query_per_req
         proposer.positions = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer.positions[:num_query_total] = torch.arange(num_query_total, dtype=torch.int32)
@@ -351,10 +347,6 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
-        assert proposer._initial_query_buffer_shapes == (
-            torch.Size([expected_max_query_tokens]),
-            torch.Size([expected_max_query_tokens]),
-        )
         assert proposer._dspark_draft_buffer.shape == (_MAX_BATCH_SIZE, 1 + _NUM_SPECULATIVE_TOKENS)
 
 
@@ -385,30 +377,8 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
         assert proposer._request_aligned_decode_graph is structural
         assert proposer._dspark_graph_rollout_enabled is rollout
 
-    @pytest.mark.parametrize(
-        ("target_arch", "draft_arch", "supported"),
-        [
-            ("GlmMoeDsaForCausalLM", "Qwen3DSparkModel", True),
-            ("DeepseekV32ForCausalLM", "Qwen3DSparkModel", False),
-            ("GlmMoeDsaForCausalLM", "KimiK3DSparkForCausalLM", False),
-        ],
-    )
-    def test_phase1_model_capability_is_narrow(self, target_arch, draft_arch, supported):
-        config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=[target_arch]),
-            speculative_config=SimpleNamespace(
-                draft_model_config=SimpleNamespace(
-                    architectures=[draft_arch],
-                    hf_config=SimpleNamespace(architectures=[draft_arch]),
-                ),
-            ),
-        )
-
-        assert AscendDSparkProposer._supports_phase1_aclgraph(config) is supported
-
     def test_dynamic_verify_length_disables_rollout(self):
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer._dspark_phase1_model_supported = True
         proposer.dynamic_spec = object()
 
         proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
@@ -419,7 +389,6 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
 
     def test_dcp_disables_phase1_rollout(self):
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer._dspark_phase1_model_supported = True
         proposer.dynamic_spec = None
         proposer.dcp_size = 2
         proposer.num_query_per_req = 8
@@ -440,7 +409,6 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
 
     def test_probabilistic_draft_sampling_disables_rollout_and_capture(self):
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer._dspark_phase1_model_supported = True
         proposer.dynamic_spec = None
         proposer._enable_probabilistic_draft_probs = True
         proposer.num_query_per_req = 8
@@ -459,7 +427,6 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
 
     def test_explicit_draft_eager_disables_rollout_and_capture(self):
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer._dspark_phase1_model_supported = True
         proposer.dynamic_spec = None
         proposer.speculative_config = SimpleNamespace(
             enforce_eager=True,
@@ -484,7 +451,6 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
 
     def test_delayed_full_graph_rechecks_padded_batch_requirement(self):
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer._dspark_phase1_model_supported = True
         proposer.dynamic_spec = None
         proposer.speculative_config = SimpleNamespace(
             enforce_eager=False,
@@ -499,7 +465,6 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
 
     def test_resolved_gate_wraps_loaded_draft_runnable(self):
         proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer._dspark_phase1_model_supported = True
         proposer.dynamic_spec = None
         proposer._runnable = proposer._run_merged_draft
         runner_update_stream = object()
@@ -727,7 +692,6 @@ class TestDSparkGraphDescriptor(_DSparkProposerTestBase):
             optimistic_seq_lens_cpu=torch.arange(4, dtype=torch.int32),
             seq_lens=torch.arange(4, dtype=torch.int32),
         )
-        proposer._dspark_phase1_model_supported = True
         proposer.set_resolved_cudagraph_mode(CUDAGraphMode.FULL_DECODE_ONLY)
         proposer.vllm_config = SimpleNamespace()
         proposer.token_indices_to_sample = torch.zeros(32, dtype=torch.int32)
