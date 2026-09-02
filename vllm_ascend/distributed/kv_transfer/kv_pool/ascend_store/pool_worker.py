@@ -2280,13 +2280,13 @@ class KVPoolWorker:
 
         # Layerwise keys do not contain pp_rank. Preserve their existing
         # replacement and expansion behavior.
-        expanded: list[str] = []
+        fallback_expanded: list[str] = []
         for pp_rank in range(self.pp_size):
             for tp_rank in range(group_tp_size):
                 for key in keys:
                     tp_key = self._replace_key_field(key, "head_or_tp_rank", tp_rank)
-                    expanded.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
-        return expanded
+                    fallback_expanded.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
+        return fallback_expanded
 
     def _lookup_with_coordinator(
         self,
