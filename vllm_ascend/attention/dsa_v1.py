@@ -399,6 +399,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_threshold = 1
         self.spec_slot_mapping = None
         self.dspark_swa_indices_buffer: torch.Tensor | None = None
+        self.dspark_swa_topk_lengths_buffer: torch.Tensor | None = None
         if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
             vllm_config
         ):
@@ -430,6 +431,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             )
             self.dspark_swa_indices_buffer = torch.zeros(
                 (max_dspark_rows, 1, _dspark_index_width),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.dspark_swa_topk_lengths_buffer = torch.zeros(
+                (max_dspark_rows, 1),
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -508,6 +514,24 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         self.dspark_swa_indices_buffer[:num_rows].copy_(indices)
         return self.dspark_swa_indices_buffer[:num_rows]
+
+    def _store_dspark_swa_topk_lengths(self, topk_lengths: torch.Tensor) -> torch.Tensor:
+        """Store DSpark SWA valid widths in an address-stable buffer.
+
+        SparseFlashMla consumes ori_topk_length asynchronously. Keep its
+        address stable for the same reason as dspark_swa_indices: MRV2 graph
+        capture and task-queue execution must not retain an address from a
+        temporary build_dspark_swa_indices result.
+        """
+        if self.dspark_swa_topk_lengths_buffer is None:
+            return topk_lengths
+        num_rows = topk_lengths.shape[0]
+        assert num_rows <= self.dspark_swa_topk_lengths_buffer.shape[0], (
+            f"dspark_swa_topk_lengths needs {num_rows} rows but the static buffer "
+            f"only has {self.dspark_swa_topk_lengths_buffer.shape[0]}"
+        )
+        self.dspark_swa_topk_lengths_buffer[:num_rows].copy_(topk_lengths)
+        return self.dspark_swa_topk_lengths_buffer[:num_rows]
 
     @classmethod
     def get_cudagraph_support(
@@ -855,7 +879,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 storage_block_size=self.storage_block_size,
             )
             dspark_swa_indices = self._store_dspark_swa_indices(dspark_swa_indices[: self.num_decode_tokens])
-            dspark_swa_topk_lengths = dspark_swa_topk_lengths[: self.num_decode_tokens]
+            dspark_swa_topk_lengths = self._store_dspark_swa_topk_lengths(
+                dspark_swa_topk_lengths[: self.num_decode_tokens]
+            )
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
         dspark_smla_metadata = None
         if dspark_swa_indices is not None:
@@ -1023,7 +1049,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 storage_block_size=self.storage_block_size,
             )
             dspark_swa_indices = self._store_dspark_swa_indices(dspark_swa_indices[: self.num_actual_tokens])
-            dspark_swa_topk_lengths = dspark_swa_topk_lengths[: self.num_actual_tokens]
+            dspark_swa_topk_lengths = self._store_dspark_swa_topk_lengths(
+                dspark_swa_topk_lengths[: self.num_actual_tokens]
+            )
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         cu_seqlens_cmp_kv = None

@@ -156,6 +156,27 @@ def test_build_dspark_swa_indices_rejects_narrow_index_width():
         )
 
 
+def test_store_dspark_swa_inputs_reuses_static_buffers():
+    builder = _make_builder(compressor_ratio=1)
+
+    indices = torch.arange(24, dtype=torch.int32).view(3, 1, 8)
+    topk_lengths = torch.tensor([[8], [7], [6]], dtype=torch.int32)
+    stored_indices = builder._store_dspark_swa_indices(indices)
+    stored_topk_lengths = builder._store_dspark_swa_topk_lengths(topk_lengths)
+    indices_ptr = stored_indices.data_ptr()
+    topk_lengths_ptr = stored_topk_lengths.data_ptr()
+
+    next_indices = torch.full((3, 1, 8), -1, dtype=torch.int32)
+    next_topk_lengths = torch.tensor([[5], [4], [3]], dtype=torch.int32)
+    stored_indices = builder._store_dspark_swa_indices(next_indices)
+    stored_topk_lengths = builder._store_dspark_swa_topk_lengths(next_topk_lengths)
+
+    assert stored_indices.data_ptr() == indices_ptr
+    assert stored_topk_lengths.data_ptr() == topk_lengths_ptr
+    assert torch.equal(stored_indices, next_indices)
+    assert torch.equal(stored_topk_lengths, next_topk_lengths)
+
+
 def test_build_dspark_smla_metadata_uses_ori_sparse_contract():
     builder = _make_builder(compressor_ratio=1)
     generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
