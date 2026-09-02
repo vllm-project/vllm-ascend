@@ -34,26 +34,30 @@ _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
 
 
-def _zero_padded_output(
-    output: torch.Tensor,
-    num_live_tokens: torch.Tensor,
-) -> torch.Tensor:
-    """Clear graph-padding rows using a device-side live-token count."""
-    token_indices = torch.arange(
-        output.shape[1],
-        dtype=num_live_tokens.dtype,
-        device=output.device,
-    )
-    valid_tokens = token_indices < num_live_tokens
-    return torch.where(valid_tokens.view(1, -1, 1, 1), output, 0.0)
+def _live_token_counts(attn_metadata: GDNAttentionMetadata) -> tuple[int, int]:
+    """Return CPU-side live spec / non-spec token counts for this step.
+
+    FULL-graph dummy sequences have length 0, so these counts stay equal to the
+    packed query tokens and do not include graph-padded rows. ``_forward`` is
+    eager-broken during capture, so slicing with these Python ints is valid.
+    """
+    spec_live = attn_metadata.num_spec_decode_tokens if attn_metadata.spec_sequence_masks is not None else 0
+    non_spec_live = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
+    return spec_live, non_spec_live
 
 
-def _zero_padded_recurrent_output(
-    output: torch.Tensor,
-    query_start_loc: torch.Tensor,
-) -> torch.Tensor:
-    """Clear graph-padding rows skipped by recurrent KDA."""
-    return _zero_padded_output(output, query_start_loc[-1])
+def _take_live_tokens(output: torch.Tensor, live_tokens: int) -> torch.Tensor:
+    """Drop kernel output rows past the packed live prefix.
+
+    Conv / recurrent skip zero-length graph sequences and leave those rows
+    untouched. Keep the same input shape as GDN (``[:num_actual_tokens]``) and
+    discard the skipped tail here instead of an elementwise mask.
+    """
+    if live_tokens <= 0:
+        return output[:, :0]
+    if output.shape[1] > live_tokens:
+        return output[:, :live_tokens]
+    return output
 
 
 def _prepare_beta(
@@ -164,7 +168,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             g1 = self.f_b_proj(f_a)[0]
             g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
             g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
-            core_attn_out = torch.empty(
+            # Match GDN: skipped graph-padding rows stay defined zeros instead of
+            # an uninitialized ``empty`` allocation.
+            core_attn_out = torch.zeros(
                 (1, num_tokens, self.local_num_heads, self.head_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
@@ -348,6 +354,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx
         non_spec_token_indices = attn_metadata.non_spec_token_indx
+        spec_live, non_spec_live = _live_token_counts(attn_metadata)
 
         if spec_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -402,10 +409,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 attn_metadata.spec_state_indices_tensor,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
             )
-            core_spec = _zero_padded_recurrent_output(
-                core_spec,
-                attn_metadata.spec_query_start_loc,
-            )
+            core_spec = _take_live_tokens(core_spec, spec_live)
 
         core_non_spec = None
         if mixed_non_spec is not None and mixed_non_spec.shape[0] > 0:
@@ -497,12 +501,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     attn_metadata.non_spec_state_indices_tensor,
                 )
 
-        if core_non_spec is not None:
-            assert attn_metadata.non_spec_query_start_loc is not None
-            core_non_spec = _zero_padded_recurrent_output(
-                core_non_spec,
-                attn_metadata.non_spec_query_start_loc,
-            )
+            if core_non_spec is not None:
+                core_non_spec = _take_live_tokens(core_non_spec, non_spec_live)
 
         if core_spec is None and core_non_spec is None:
             # Idle DP dummy runs carry graph-shaped metadata with no live work.
@@ -510,35 +510,35 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             core_attn_out.zero_()
             return
 
-        num_live_tokens = None
+        live_tokens = 0
         if core_spec is not None:
-            assert attn_metadata.spec_query_start_loc is not None
-            num_live_tokens = attn_metadata.spec_query_start_loc[-1]
+            live_tokens += spec_live
         if core_non_spec is not None:
-            assert attn_metadata.non_spec_query_start_loc is not None
-            num_non_spec_tokens = attn_metadata.non_spec_query_start_loc[-1]
-            num_live_tokens = num_non_spec_tokens if num_live_tokens is None else num_live_tokens + num_non_spec_tokens
-        assert num_live_tokens is not None
+            live_tokens += non_spec_live
 
-        # Reuse the caller-owned result buffer. FULL graphs can leave rows
-        # outside the live spec/non-spec index sets, so define them before the
-        # two index copies rather than allocating a temporary merged tensor.
+        # Dummy sequences contribute 0 tokens, so live rows are a packed prefix.
+        # Zero the scheduler window first so skipped kernel tails cannot leak,
+        # then scatter/copy only that prefix (GDN copies the full kernel tensor).
         core_attn_out[:, :num_actual_tokens].zero_()
         if core_spec is not None and core_non_spec is not None:
             assert spec_token_indices is not None
             assert non_spec_token_indices is not None
-            assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
+            spec_token_indices = spec_token_indices[:spec_live]
+            non_spec_token_indices = non_spec_token_indices[:non_spec_live]
+            assert spec_token_indices.numel() == core_spec.shape[1]
+            assert non_spec_token_indices.numel() == core_non_spec.shape[1]
             core_attn_out[:, :num_actual_tokens].index_copy_(1, spec_token_indices, core_spec)
             core_attn_out[:, :num_actual_tokens].index_copy_(1, non_spec_token_indices, core_non_spec)
         elif core_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_spec
+            core_attn_out[:, :spec_live] = core_spec
         elif core_non_spec is not None:
-            core_attn_out[:, :num_actual_tokens] = core_non_spec
+            core_attn_out[:, :non_spec_live] = core_non_spec
 
-        # The registered Ascend FusedRMSNormGated uses the fused norm-gate
-        # kernel while preserving the upstream parameter/loading contract.
-        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
-        # Mask again after the norm gate: zero * sigmoid(NaN) is still NaN in
-        # static padding rows whose captured gate values are not live.
-        core_attn_out[:, :num_actual_tokens].copy_(_zero_padded_output(normalized, num_live_tokens))
+        # Restrict FusedRMSNormGated to the packed live prefix. GDN norms the
+        # full tensor after zeros(); KDA cannot, because captured g2 padding
+        # can be NaN and 0 * sigmoid(NaN) is NaN.
+        if live_tokens > 0:
+            core_attn_out[:, :live_tokens].copy_(
+                self.o_norm(core_attn_out[:, :live_tokens], g2[:live_tokens]),
+            )
         core_attn_out[:, num_actual_tokens:].zero_()
