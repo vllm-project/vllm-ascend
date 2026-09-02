@@ -19,6 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -78,8 +79,11 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs as envs_ascend
 from vllm_ascend.models.llama_eagle3 import get_rotation_path
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
+
+logger = init_logger(__name__)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
@@ -87,6 +91,41 @@ if HAS_TRITON:
     )
 else:
     apply_attn_res = None  # type: ignore[assignment]
+
+
+def _get_kimi_k3_num_loaded_layers(total_num_layers: int) -> int:
+    """Return the requested Kimi K3 decoder-layer count for debug loading."""
+    requested_num_layers_raw = envs_ascend.VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS
+    try:
+        requested_num_layers = int(requested_num_layers_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS must be an integer in "
+            f"[0, {total_num_layers}], got {requested_num_layers_raw!r}"
+        ) from exc
+    if requested_num_layers == 0:
+        return total_num_layers
+    if not 1 <= requested_num_layers <= total_num_layers:
+        raise ValueError(
+            "VLLM_ASCEND_KIMI_K3_MAX_LOADED_LAYERS must be in "
+            f"[0, {total_num_layers}], got {requested_num_layers}"
+        )
+    return requested_num_layers
+
+
+def _get_decoder_layer_idx_from_weight_name(weight_name: str) -> int | None:
+    """Extract a Kimi K3 decoder-layer index from an inner or VL checkpoint key."""
+    layer_prefix = "layers."
+    prefix_idx = weight_name.find(layer_prefix)
+    if prefix_idx < 0:
+        return None
+
+    layer_idx_start = prefix_idx + len(layer_prefix)
+    layer_idx_end = weight_name.find(".", layer_idx_start)
+    if layer_idx_end < 0:
+        return None
+    layer_idx_text = weight_name[layer_idx_start:layer_idx_end]
+    return int(layer_idx_text) if layer_idx_text.isdecimal() else None
 
 
 def _apply_ascend_attn_res(
@@ -535,6 +574,15 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         config = vllm_config.model_config.hf_text_config
         self.config = config
         self.vocab_size = config.vocab_size
+        self.num_loaded_layers = _get_kimi_k3_num_loaded_layers(config.num_hidden_layers)
+        if self.num_loaded_layers != config.num_hidden_layers:
+            logger.warning_once(
+                "Kimi K3 layer-reduced debug mode is enabled: loading and "
+                "executing decoder layers [0, %d) out of %d. Generated "
+                "results are not model-quality valid.",
+                self.num_loaded_layers,
+                config.num_hidden_layers,
+            )
         parallel_config = vllm_config.parallel_config
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
@@ -563,7 +611,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
+            self.num_loaded_layers,
             get_layer,
             prefix=f"{prefix}.layers",
         )
@@ -603,6 +651,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         def remap_mixed_gate_weights():
             for args in weights:
                 name, loaded_weight = args[:2]
+                layer_idx = _get_decoder_layer_idx_from_weight_name(name)
+                if layer_idx is not None and layer_idx >= self.num_loaded_layers:
+                    continue
                 for source, target, shard_id in gate_mapping:
                     if source not in name:
                         continue
@@ -770,6 +821,49 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM):
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.model.dspark_aux_capture_materialized = enabled
+        if not enabled:
+            return
+
+        num_loaded_layers = self.model.num_loaded_layers
+        total_num_layers = self.model.config.num_hidden_layers
+        if num_loaded_layers == total_num_layers:
+            return
+
+        aux_layers = tuple(self.model.aux_hidden_state_layers)
+        if not aux_layers:
+            return
+        if len(aux_layers) > num_loaded_layers:
+            raise ValueError(
+                "Kimi K3 layer-reduced debug mode cannot provide "
+                f"{len(aux_layers)} distinct DSpark auxiliary hidden states "
+                f"from only {num_loaded_layers} loaded decoder layers."
+            )
+
+        # Qwen3 GQA DSpark consumes materialized inputs from several target
+        # layers. Preserve the number and ordering of those features in the
+        # layer-reduced debug model by projecting their relative positions
+        # onto the loaded prefix. This is only a functional-debug fallback:
+        # the remapped features are not quality-equivalent to the trained
+        # full-model target layers.
+        max_loaded_idx = num_loaded_layers - 1
+        max_full_idx = total_num_layers - 1
+        remapped_layers: list[int] = []
+        for idx, layer_idx in enumerate(aux_layers):
+            remaining = len(aux_layers) - idx - 1
+            lower_bound = remapped_layers[-1] + 1 if remapped_layers else 0
+            upper_bound = max_loaded_idx - remaining
+            scaled_idx = round(layer_idx * max_loaded_idx / max_full_idx)
+            remapped_layers.append(min(max(scaled_idx, lower_bound), upper_bound))
+
+        remapped_aux_layers = tuple(remapped_layers)
+        self.model._set_aux_hidden_state_layers(remapped_aux_layers)
+        logger.warning_once(
+            "Kimi K3 layer-reduced debug mode remapped Qwen3 GQA DSpark "
+            "auxiliary capture layers from %s to %s. Generated results are "
+            "not model-quality valid.",
+            aux_layers,
+            remapped_aux_layers,
+        )
 
 
 class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
