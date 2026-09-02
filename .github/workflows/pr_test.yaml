@@ -153,7 +153,7 @@ jobs:
         with:
           path: /tmp/pre-commit-cache
           key: pre-commit-${{ steps.get_hash.outputs.PRE_COMMIT_HASH }}
-  
+
       - name: Run pre-commit
         env:
           PRE_COMMIT_HOME: /tmp/pre-commit-cache
@@ -260,6 +260,7 @@ jobs:
           sparse-checkout: |
             .github/workflows/scripts
           sparse-checkout-cone-mode: false
+
       - name: Download test case map and coverage package
         run: |
           set -euo pipefail
@@ -283,6 +284,7 @@ jobs:
           test -d vllm-ascend/covstub
           echo "Extracted vllm-ascend/covstub"
           find vllm-ascend/covstub -maxdepth 2 -type d | head -20 || true
+
       - name: Recommend tests for current PR
         run: |
           set -euo pipefail
@@ -299,6 +301,7 @@ jobs:
             --github-pr "${PR_SPEC}" \
             --source-dir ./vllm-ascend/covstub \
             --map-file test_case_map.json
+  
       - name: Merge extra tests from YAML
         run: |
           set -euo pipefail
@@ -319,6 +322,7 @@ jobs:
             echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skipped"
             rm -f extra_recommended_tests.obs.yaml
           fi
+
       - name: Export coverage paths output
         id: export-paths
         if: ${{ !cancelled() }}
@@ -366,6 +370,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+
       - name: Resolve source snapshot
         id: source-snapshot
         env:
@@ -425,10 +430,12 @@ jobs:
               - 'tests/e2e/*.sh'
               - 'tools/**'
               - 'CMakeLists.txt'
+    
       - name: Validate test coverage config
         run: |
           pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
+
       - name: Decide test selection mode
         id: decide
         env:
@@ -451,6 +458,7 @@ jobs:
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
           echo "Selection mode: ${MODE}"
+
       - name: Select tests from coverage recommendations
         id: scope-rec
         if: steps.decide.outputs.mode == 'recommended'
@@ -465,6 +473,7 @@ jobs:
           cat "$LIST_FILE"
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file "$LIST_FILE"
+  
       - name: Select all tests
         id: scope-all
         if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
@@ -472,6 +481,7 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
           python3 .github/workflows/scripts/select_tests.py --all-tests
+
       - name: Set no-tests output when no tests selected
         id: noop
         if: >-
@@ -493,6 +503,7 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --curated a5 \
             --runner-label-override linux-aarch64-a5-4
+  
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
         if: steps.filter.outputs.src != 'true'
@@ -501,6 +512,7 @@ jobs:
             echo "has_tests=false"
             echo "test_groups=[]"
           } >> "$GITHUB_OUTPUT"
+
       - name: Add upstream test cache target
         id: cache-targets
         env:
