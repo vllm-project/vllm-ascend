@@ -275,7 +275,7 @@ class TestAscendSFACacheComposition(TestBase):
         "vllm_ascend.device.device_op.torch_npu.npu_lightning_indexer",
         create=True,
     )
-    def test_li_indexer_uses_torch_npu_operator(self, mock_indexer, _mock_custom_indexer):
+    def test_li_indexer_uses_torch_npu_operator(self, mock_indexer):
         expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
         mock_indexer.return_value = expected_topk, torch.empty(0)
         q_li = torch.zeros(2, 1, 128, dtype=torch.bfloat16)
