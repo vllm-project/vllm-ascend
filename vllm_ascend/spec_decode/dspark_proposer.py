@@ -44,14 +44,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                 "DSpark Markov-head correction. Set "
                 "additional_config.enable_reduce_sample=false."
             )
-        finegrained_tp_config = additional_config.get("finegrained_tp_config", {}) or {}
-        if finegrained_tp_config.get("lmhead_tensor_parallel_size", 0):
-            raise ValueError(
-                "DSpark on the v1 model runner does not support fine-grained "
-                "LM-head tensor parallelism; keep "
-                "additional_config.finegrained_tp_config."
-                "lmhead_tensor_parallel_size=0."
-            )
         if vllm_config.speculative_config.draft_sample_method == "probabilistic":
             raise ValueError(
                 "DSpark probabilistic draft sampling is not supported on the v1 "

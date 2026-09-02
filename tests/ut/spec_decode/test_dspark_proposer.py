@@ -342,12 +342,6 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
                 id="reduce-sample-bypasses-markov-head",
             ),
             pytest.param(
-                {"finegrained_tp_config": {"lmhead_tensor_parallel_size": 2}},
-                "greedy",
-                "does not support fine-grained LM-head",
-                id="finegrained-lmhead-tp",
-            ),
-            pytest.param(
                 {},
                 "probabilistic",
                 "probabilistic draft sampling is not supported",

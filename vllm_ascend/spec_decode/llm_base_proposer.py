@@ -1359,11 +1359,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable():
-            max_num_reqs_across_dp = (
-                self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
-            )
+            if self.method == "dspark":
+                # DSpark draft decoding runs outside ACLGraph. Its real LMHead
+                # input is B * K; only pad it to the current target graph bucket.
+                num_indices = batch_size * self.num_speculative_tokens
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
+                max_num_reqs_across_dp = (num_input_tokens // self.num_query_per_req) * self.num_speculative_tokens
+            else:
+                max_num_reqs_across_dp = (
+                    self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
+                )
             # It is necessary to evaluate the case where num_indices becomes large
-            # in the context of the dummy‑run accompaniment of p‑eagle.
+            # in the context of the dummy-run accompaniment of p-eagle.
             if num_indices > max_num_reqs_across_dp:
                 ori_token_indices_to_sample = token_indices_to_sample
             else:
@@ -1413,6 +1420,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # We changed `flash_comm_v1_enabled` to avoid `markov_emb` from being split.
                 with _disable_flash_comm_v1_context():
                     raw_logits = self.model.compute_logits(sample_hidden_states)
+                    if lmhead_tp_enable():
+                        # Keep the padded shape through the LMHead TP collective,
+                        # then remove dummy sampling rows before grouping them by
+                        # request for Markov decoding.
+                        raw_logits = raw_logits[:num_indices]
                     logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
                     num_blk = logits.shape[0]
                     draft_token_ids = self._dspark_draft_buffer[:num_blk]
