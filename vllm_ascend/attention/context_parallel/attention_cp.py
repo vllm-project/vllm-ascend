@@ -431,12 +431,11 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
         attn_metadata: AscendAttentionDCPMetadata,
     ):
-        assert attn_metadata is not None
-        assert attn_metadata.prefill is not None
-        assert attn_metadata.prefill.chunked_context is not None
         cache_pair = self._unpack_kv_cache(kv_cache)
         prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata is not None
         chunked_context = prefill_metadata.chunked_context
+        assert chunked_context is not None
         local_chunked_kv_lens = chunked_context.local_context_lens_allranks
         assert local_chunked_kv_lens is not None
 
