@@ -238,14 +238,17 @@ jobs:
           MATRIX_FILE: ${{ env.DAILY_CONFIG }}
           MATRIX_OUTPUTS: '{"a2_nightly_hf":"daily.a2_nightly_hf","a3_nightly_hf":"daily.a3_nightly_hf"}'
         run: |
+          set -x
           python3 -m pip install pyyaml -q
-          # 捕获python脚本stdout输出，写入GITHUB_OUTPUT
-          RAW_OUT=$(python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix)
-          echo "$RAW_OUT" >> "$GITHUB_OUTPUT"
-          # debug打印，CI日志看输出
-          echo "=====DEBUG set‑matrix raw output===="
-          echo "$RAW_OUT"
-          ls -la "${MATRIX_FILE}"
+          echo "MATRIX_FILE=${MATRIX_FILE}"
+          echo "file exists? $(test -f "${MATRIX_FILE}" && echo YES || echo NO)"
+          ls -la .github/workflows/configs/ || true
+          # 执行脚本，stderr也打到stdout，抓报错
+          RAW_OUT=$(python3 .github/workflows/scripts/resolve_nightly_tests.py --mode=matrix 2>&1)
+          echo "RAW_OUT==>"
+          echo "${RAW_OUT}"
+          echo "<==RAW_OUT"
+          echo "${RAW_OUT}" >> "$GITHUB_OUTPUT"
 
   verify-image:
     name: Verify nightly-ci image (build gate)
