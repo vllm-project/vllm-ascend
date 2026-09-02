@@ -43,6 +43,13 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
 
+      - name: Install python dependencies
+        run: |
+          set -euo pipefail
+          python3 -m ensurepip --upgrade
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pytest-cov
+
       - name: Resolve source snapshot (optional rebase)
         run: |
           set -euo pipefail
