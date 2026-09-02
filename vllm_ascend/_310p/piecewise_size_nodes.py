@@ -108,3 +108,8 @@ def install_piecewise_size_node_compat() -> None:
 def install_full_decode_size_node_compat() -> None:
     """Install the same independently valid guard for FULL_DECODE_ONLY."""
     _install_size_node_compat("full_decode_only")
+
+
+def install_full_and_piecewise_size_node_compat() -> None:
+    """Install the idempotent compile guard for the hybrid graph capability."""
+    _install_size_node_compat("full_and_piecewise")

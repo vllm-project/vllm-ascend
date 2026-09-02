@@ -33,10 +33,19 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend._310p.attention.metadata_builder import (
+    dflash_hybrid_draft_capture_scope_310,
+)
+from vllm_ascend._310p.dflash_full_and_piecewise import (
+    get_310p_dflash_graph_capabilities,
+    is_310p_dflash_effective_piecewise,
+    is_310p_dflash_full_and_piecewise,
+)
 from vllm_ascend._310p.dflash_full_decode_only import (
     is_310p_dflash_full_decode_only,
 )
@@ -54,6 +63,29 @@ from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
 # room for up to 15 draft tokens. Real-weight Qwen3.5-9B runs and isolated
 # CausalConv1d/GDN comparisons cover K=6, K=8 and K=15.
 MAX_SUPPORTED_NUM_SPEC_TOKENS_310P = 15
+
+
+def _uses_int32_draft_address_math_310(vllm_config: Any) -> bool:
+    """Avoid 310P's unaligned dynamic-int64 address arithmetic in graphs."""
+    return is_310p_dflash_full_decode_only(
+        vllm_config
+    ) or is_310p_dflash_full_and_piecewise(vllm_config)
+
+
+def _uses_piecewise_persistent_buffers(vllm_config: Any) -> bool:
+    """Use PIECEWISE buffers only for an effective PIECEWISE round.
+
+    Pure PIECEWISE keeps its historical behavior. Hybrid mode must consult the
+    current forward context instead of inferring runtime state from the
+    configured capability.
+    """
+    if is_310p_dflash_piecewise(vllm_config):
+        return True
+    try:
+        runtime_mode = get_forward_context().cudagraph_runtime_mode
+    except (AssertionError, RuntimeError):
+        return False
+    return is_310p_dflash_effective_piecewise(vllm_config, runtime_mode)
 
 
 def _validate_num_spec_tokens_310(num_speculative_tokens: int | None) -> None:
@@ -242,7 +274,7 @@ def _prepare_per_layer_slot_mappings_310(
     query_req_ids = torch.arange(batch_size, device=proposer.device).repeat_interleave(num_query_per_req)
     context_slots_by_size: dict[int, torch.Tensor] = {}
     query_slots_by_size: dict[int, torch.Tensor] = {}
-    use_int32_math = is_310p_dflash_full_decode_only(proposer.vllm_config)
+    use_int32_math = _uses_int32_draft_address_math_310(proposer.vllm_config)
     for block_size in sorted(set(block_sizes_by_layer.values())):
         context_slots_by_size[block_size] = _compute_slots_for_block_size_310(
             out_context_positions[:num_context],
@@ -313,6 +345,7 @@ def wrap_dummy_run_with_draft_flag(original):
     @functools.wraps(original)
     def dummy_run(self, *args, **kwargs):
         num_tokens = kwargs.get("num_tokens", args[0] if args else None)
+        num_reqs = kwargs.get("num_reqs")
         runtime_mode = kwargs.get(
             "aclgraph_runtime_mode",
             CUDAGraphMode.NONE,
@@ -325,6 +358,7 @@ def wrap_dummy_run_with_draft_flag(original):
                 **kwargs,
             )
             num_tokens = bound.arguments.get("num_tokens", num_tokens)
+            num_reqs = bound.arguments.get("num_reqs", num_reqs)
             runtime_mode = bound.arguments.get(
                 "aclgraph_runtime_mode",
                 runtime_mode,
@@ -333,9 +367,15 @@ def wrap_dummy_run_with_draft_flag(original):
         except (TypeError, ValueError):
             pass
 
+        vllm_config = getattr(self, "vllm_config", None)
+        uses_hybrid_graph = (
+            vllm_config is not None
+            and is_310p_dflash_full_and_piecewise(vllm_config)
+        )
         rope_num_tokens = num_tokens
         if is_profile:
             runtime_mode = CUDAGraphMode.FULL
+        if is_profile or uses_hybrid_graph:
             max_query_tokens = getattr(self, "max_query_tokens", None)
             if isinstance(rope_num_tokens, int) and isinstance(max_query_tokens, int):
                 rope_num_tokens = min(rope_num_tokens, max_query_tokens)
@@ -349,8 +389,9 @@ def wrap_dummy_run_with_draft_flag(original):
                 runtime_mode=runtime_mode,
             )
 
-        vllm_config = getattr(self, "vllm_config", None)
-        if vllm_config is not None and is_310p_dflash_piecewise(vllm_config):
+        if vllm_config is not None and (
+            is_310p_dflash_piecewise(vllm_config) or get_310p_dflash_graph_capabilities(vllm_config).supports_piecewise
+        ):
             runner = getattr(self, "runner", None)
             capacity_tokens = getattr(runner, "max_num_tokens", None)
             if isinstance(capacity_tokens, int) and capacity_tokens > 0:
@@ -358,6 +399,19 @@ def wrap_dummy_run_with_draft_flag(original):
         prev_flag = AscendRotaryEmbedding310._is_drafting_update_enabled
         AscendRotaryEmbedding310.set_rope_position_flag_310p(True)
         try:
+            if (
+                uses_hybrid_graph
+                and runtime_mode is CUDAGraphMode.FULL
+                and isinstance(num_tokens, int)
+                and num_tokens > 0
+                and isinstance(num_reqs, int)
+                and num_reqs > 0
+            ):
+                with dflash_hybrid_draft_capture_scope_310(
+                    real_num_reqs=num_reqs,
+                    capacity_tokens=num_tokens,
+                ):
+                    return original(self, *args, **kwargs)
             return original(self, *args, **kwargs)
         finally:
             AscendRotaryEmbedding310.set_rope_position_flag_310p(prev_flag)
@@ -410,7 +464,7 @@ def _copy_and_expand_inputs_ascendc(
 
     if num_rejected_tokens_gpu is not None:
         num_rejected = num_rejected_tokens_gpu.to(torch.int32)
-    elif is_310p_dflash_piecewise(self.vllm_config):
+    elif _uses_piecewise_persistent_buffers(self.vllm_config):
         max_num_reqs = int(self.runner.max_num_reqs)
         zero_buffer = getattr(self, "_zero_num_rejected_buffer_310", None)
         if zero_buffer is None or zero_buffer.shape[0] < max_num_reqs:
@@ -464,7 +518,7 @@ def _copy_and_expand_inputs_ascendc(
         int(self.kernel_block_size),
         num_context,
         batch_size,
-        use_int32_math=is_310p_dflash_full_decode_only(self.vllm_config),
+        use_int32_math=_uses_int32_draft_address_math_310(self.vllm_config),
     )
 
     # A hybrid DFlash cache group can use several physical cache block sizes.
@@ -581,7 +635,7 @@ class AscendDflashProposer310(AscendDflashProposer):
         # address is not guaranteed to be 64-byte aligned. Sequence lengths
         # are bounded by max_model_len and the downstream draft buffers are
         # int32, so keep this arithmetic in int32 as well.
-        use_int32_math = is_310p_dflash_full_decode_only(self.vllm_config)
+        use_int32_math = _uses_int32_draft_address_math_310(self.vllm_config)
         effective_seq_lens = cad.seq_lens.to(torch.int32) if use_int32_math else cad.seq_lens
         if has_num_rejected:
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu.to(effective_seq_lens.dtype)
@@ -641,8 +695,46 @@ class AscendDflashProposer310(AscendDflashProposer):
         extra_attn_metadata_args: dict,
     ) -> dict[str, Any]:
         """Build metadata with the physical slot mapping of each draft layer."""
+        hybrid_full = is_310p_dflash_full_and_piecewise(self.vllm_config)
+        logger.debug(
+            "[310p-dflash-full-and-piecewise/draft-metadata] "
+            "event=first-step-builder builder=%s hybrid=%s per_layer_slots=%s",
+            type(builder).__name__,
+            hybrid_full,
+            bool(
+                getattr(
+                    self,
+                    "_dflash_query_slot_mapping_by_layer_310",
+                    None,
+                )
+            ),
+        )
+
+        def build_metadata(
+            layer_common_metadata: CommonAttentionMetadata,
+        ):
+            if not hybrid_full:
+                return builder.build(
+                    0,
+                    layer_common_metadata,
+                    self.runner.get_model(),
+                    **extra_attn_metadata_args,
+                )
+            return builder.build(
+                0,
+                layer_common_metadata,
+                self.runner.get_model(),
+                is_drafting=True,
+                dflash_hybrid_draft_step=0,
+                **extra_attn_metadata_args,
+            )
+
         query_slots_by_layer = getattr(self, "_dflash_query_slot_mapping_by_layer_310", None)
         if not query_slots_by_layer:
+            if hybrid_full:
+                attn_metadata = build_metadata(common_attn_metadata)
+                if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
+                    attn_metadata.attn_mask = None
             return {layer_name: attn_metadata for layer_name in self.attn_layer_names}
 
         metadata_by_slots: dict[int, Any] = {}
@@ -655,12 +747,7 @@ class AscendDflashProposer310(AscendDflashProposer):
                     common_attn_metadata,
                     slot_mapping=slot_mapping,
                 )
-                layer_metadata = builder.build(
-                    0,
-                    layer_common_metadata,
-                    self.runner.get_model(),
-                    **extra_attn_metadata_args,
-                )
+                layer_metadata = build_metadata(layer_common_metadata)
                 if hasattr(layer_metadata, "causal") and not layer_metadata.causal:
                     layer_metadata.attn_mask = None
                 metadata_by_slots[cache_key] = layer_metadata

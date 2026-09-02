@@ -125,6 +125,21 @@ The details of each configuration option are as follows:
 | `fuse_norm_quant`  | bool | `True` | Whether to enable fuse_norm_quant pass. |
 | `fuse_qknorm_rope` | bool | `True` | Whether to enable fuse_qknorm_rope pass. If Triton is not in the environment, set it to False. |
 | `fuse_muls_add` | bool | `True` | Whether to enable fuse_muls_add pass.|
+| `dflash_full_and_piecewise_capture_config` | dict | unset | Explicit mode-specific capture portfolio for Ascend 310P DFlash `FULL_AND_PIECEWISE`. See [Graph Mode Guide](../feature_guide/graph_mode.md#310p-dflash-asymmetric-portfolio). |
+
+`dflash_full_and_piecewise_capture_config` currently accepts exactly one
+PIECEWISE capacity and one FULL capacity:
+
+| Name | Type | Description |
+| ---- | ---- | ----------- |
+| `piecewise_capture_size` | int | The only resident PIECEWISE descriptor capacity. Must be positive. |
+| `full_capture_size` | int | The only resident FULL descriptor capacity, shared by Target and Draft. Must be positive and divisible by `num_speculative_tokens + 1`. |
+
+This option is active only for Ascend 310P + DFlash +
+`FULL_AND_PIECEWISE`. If it is omitted, the existing upstream shared
+`cudagraph_capture_sizes` behavior is unchanged. Multiple resident PIECEWISE
+buckets are intentionally rejected in the first production version because
+that portfolio has not passed the current Event-resource validation.
 
 **eplb_config**
 

@@ -23,14 +23,25 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
     AttentionBackendEnum,
     register_backend,
 )
+
 from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
     is_compressed_mask_supported,
 )
+from vllm_ascend._310p.attention.dflash_hybrid_draft_graph_safe_attention import (
+    dflash_hybrid_draft_graph_safe_attention_310,
+)
 from vllm_ascend._310p.attention.metadata_builder import (
     AscendAttentionMetadataBuilder310,
+    get_dflash_hybrid_draft_attention_inputs_310,
     get_query_lens_cpu,
 )
+from vllm_ascend._310p.dflash_full_and_piecewise import (
+    is_310p_dflash_effective_full,
+    is_310p_dflash_effective_piecewise,
+    is_310p_dflash_full_and_piecewise,
+)
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, get_forward_context
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
@@ -38,6 +49,7 @@ from vllm_ascend.attention.attention_v1 import (
     AscendAttentionState,
     AscendMetadata,
 )
+
 MASK_TYPE_NORM_COMPRESS_SELF_ATTENTION = 3
 MASK_TYPE_NORM_COMPRESS_PAGED_ATTENTION = 5
 
@@ -161,6 +173,22 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             output,
         )
 
+    def _uses_hybrid_piecewise_prefill(self) -> bool:
+        """Return whether this forward uses the hybrid PIECEWISE prefill route."""
+        if not is_310p_dflash_full_and_piecewise(self.vllm_config):
+            return False
+
+        from vllm_ascend.ascend_forward_context import get_forward_context
+
+        try:
+            runtime_mode = get_forward_context().cudagraph_runtime_mode
+        except (AssertionError, RuntimeError):
+            return False
+        return is_310p_dflash_effective_piecewise(
+            self.vllm_config,
+            runtime_mode,
+        )
+
     def forward_paged_attention(
         self,
         query: Any,
@@ -231,7 +259,25 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         aligned_tokens = int(query.shape[0])
         delta = aligned_tokens - real_tokens
 
-        # Adjust sequence length if padding (alignment) was applied to the inputs.
+        # FULL_AND_PIECEWISE keeps a fixed physical descriptor while prefill is
+        # executed by the PIECEWISE route.  The descriptor tail is capacity,
+        # not part of the final logical request.  Run attention only over the
+        # real view and keep the returned physical output buffer stable for the
+        # surrounding graph islands.
+        if delta > 0 and self._uses_hybrid_piecewise_prefill():
+            output_slice = output[:real_tokens]
+            self._flash_attention(
+                query[:real_tokens],
+                key[:real_tokens],
+                value[:real_tokens],
+                attn_metadata.attn_mask,
+                seq_len,
+                output_slice,
+            )
+            output[real_tokens:].zero_()
+            return output
+
+        # Preserve the established public 310P behavior for every other route.
         # Clone first so the shared host buffer is never mutated in place.
         if delta:
             seq_len = seq_len.clone()
@@ -253,6 +299,34 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             attn_metadata (AscendMetadata): Metadata containing start locations and block tables.
             output: The output tensor.
         """
+        private_draft_inputs = (
+            get_dflash_hybrid_draft_attention_inputs_310(attn_metadata)
+        )
+        try:
+            runtime_mode = get_forward_context().cudagraph_runtime_mode
+        except (AssertionError, RuntimeError):
+            runtime_mode = None
+        if (
+            private_draft_inputs is not None
+            and _EXTRA_CTX.is_draft_model
+            and not attn_metadata.causal
+            and runtime_mode is not None
+            and is_310p_dflash_effective_full(
+                self.vllm_config,
+                runtime_mode,
+            )
+        ):
+            return dflash_hybrid_draft_graph_safe_attention_310(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                inputs=private_draft_inputs,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                output=output,
+            )
+
         num_actual_tokens = int(attn_metadata.num_actual_tokens)
         query = query[:num_actual_tokens]
         output_slice = output[:num_actual_tokens]
@@ -260,8 +334,6 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         # Host qLens filled in AscendAttentionMetadataBuilder310.build(); eager fallback only.
         qlens = get_query_lens_cpu(attn_metadata)
         if qlens is None:
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
             if _EXTRA_CTX.capturing:
                 raise RuntimeError(
                     "310P splitfuse requires attn_metadata.query_lens_cpu during graph capture; "

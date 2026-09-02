@@ -44,6 +44,9 @@ from vllm_ascend._310p.dflash_fdo_numerical_probe import (
     create_draft_boundary_probe,
     create_draft_layer_probe,
 )
+from vllm_ascend._310p.dflash_full_and_piecewise import (
+    is_310p_dflash_full_and_piecewise,
+)
 from vllm_ascend._310p.dflash_full_decode_contract import (
     build_draft_full_decode_contract_sources,
 )
@@ -811,7 +814,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         num_input_tokens: int,
         runtime_mode: CUDAGraphMode,
     ) -> torch.Tensor:
-        if runtime_mode == CUDAGraphMode.FULL and is_310p_dflash_full_decode_only(self.vllm_config):
+        if runtime_mode == CUDAGraphMode.FULL and (
+            is_310p_dflash_full_decode_only(self.vllm_config)
+            or is_310p_dflash_full_and_piecewise(self.vllm_config)
+        ):
             return self._get_positions(num_input_tokens)
         return target_positions
 
@@ -1898,6 +1904,27 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             return "DeepSeekMTPModel" in architectures
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
+    def _compute_draft_step_slot_mapping(
+        self,
+        block_table_for_slot: torch.Tensor,
+        clamped_positions: torch.Tensor,
+        block_size: int,
+    ) -> torch.Tensor:
+        """Compute one Draft step's slot mapping.
+
+        Backend subclasses may override storage preparation, while the default
+        path preserves the existing public Gather/Add behavior exactly.
+        """
+        logical_positions = (
+            clamped_positions[0] if self.uses_mrope else clamped_positions
+        )
+        block_numbers = logical_positions // block_size
+        block_ids = block_table_for_slot.gather(
+            dim=1,
+            index=block_numbers.view(-1, 1),
+        ).view(-1)
+        return block_ids * block_size + logical_positions % block_size
+
     def attn_update_stack_num_spec_norm(
         self,
         # `draft_index` must start from `1`, no `0`
@@ -2042,16 +2069,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 block_table_for_slot = old_common_metadata.block_table_tensor
 
-            if self.uses_mrope:
-                block_numbers = clamped_positions[0] // block_size
-            else:
-                block_numbers = clamped_positions // block_size
-            block_ids = block_table_for_slot.gather(dim=1, index=block_numbers.view(-1, 1))
-            block_ids = block_ids.view(-1)
-            if self.uses_mrope:
-                slot_mapping = block_ids * block_size + clamped_positions[0] % block_size
-            else:
-                slot_mapping = block_ids * block_size + clamped_positions % block_size
+            slot_mapping = self._compute_draft_step_slot_mapping(
+                block_table_for_slot,
+                clamped_positions,
+                block_size,
+            )
 
             # Mask out the slot mappings that exceed the max model length.
             # Otherwise, the KV cache will be inadvertently updated with the

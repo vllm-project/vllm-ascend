@@ -15,6 +15,8 @@
 # limitations under the License.
 import json
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import logger
@@ -22,6 +24,70 @@ from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+
+DFLASH_FULL_AND_PIECEWISE_CAPTURE_CONFIG = (
+    "dflash_full_and_piecewise_capture_config"
+)
+
+
+@dataclass(frozen=True)
+class DFlashFullAndPiecewiseCaptureConfig:
+    """One resource-safe PIECEWISE bucket and one shared FULL bucket."""
+
+    piecewise_capture_size: int
+    full_capture_size: int
+
+    @classmethod
+    def from_raw(
+        cls,
+        raw: Any,
+    ) -> "DFlashFullAndPiecewiseCaptureConfig | None":
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"{DFLASH_FULL_AND_PIECEWISE_CAPTURE_CONFIG} must be a mapping"
+            )
+
+        expected = {"piecewise_capture_size", "full_capture_size"}
+        actual = set(raw)
+        if actual != expected:
+            raise ValueError(
+                f"{DFLASH_FULL_AND_PIECEWISE_CAPTURE_CONFIG} requires exactly "
+                f"{sorted(expected)}, got {sorted(actual)}"
+            )
+
+        piecewise = raw["piecewise_capture_size"]
+        full = raw["full_capture_size"]
+        if isinstance(piecewise, (list, tuple, set)):
+            raise ValueError(
+                "Ascend 310P DFlash FULL_AND_PIECEWISE currently only "
+                "supports one PIECEWISE capture capacity; multiple "
+                "PIECEWISE buckets have not passed Event-resource validation"
+            )
+        if isinstance(full, (list, tuple, set)):
+            raise ValueError(
+                "Ascend 310P DFlash FULL_AND_PIECEWISE currently only "
+                "supports one FULL capture capacity shared by Target and Draft"
+            )
+        for name, value in (
+            ("piecewise_capture_size", piecewise),
+            ("full_capture_size", full),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}")
+
+        return cls(
+            piecewise_capture_size=piecewise,
+            full_capture_size=full,
+        )
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "piecewise_capture_size": self.piecewise_capture_size,
+            "full_capture_size": self.full_capture_size,
+        }
 
 
 class AscendConfig:
@@ -561,6 +627,13 @@ class AscendCompilationConfig:
         self.enable_npugraph_ex = enable_npugraph_ex
         self.enable_static_kernel = enable_static_kernel
         self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
+        capture_config = DFlashFullAndPiecewiseCaptureConfig.from_raw(
+            kwargs.get(DFLASH_FULL_AND_PIECEWISE_CAPTURE_CONFIG)
+        )
+        if capture_config is not None:
+            self.dflash_full_and_piecewise_capture_config = (
+                capture_config.as_dict()
+            )
         if self.enable_static_kernel:
             assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
 

@@ -143,6 +143,109 @@ def test_dummy_capture_prepares_dual_rope_before_graph_capture():
     finish_rope.assert_called_once_with("prepared")
 
 
+def test_hybrid_dummy_capture_clamps_rope_to_draft_query_capacity():
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dflash"),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        additional_config={
+            "ascend_compilation_config": {
+                "dflash_full_and_piecewise_capture_config": {
+                    "piecewise_capture_size": 64,
+                    "full_capture_size": 160,
+                },
+            },
+        },
+    )
+    prepare_rope = MagicMock(return_value="prepared")
+    finish_rope = MagicMock()
+    fake_self = SimpleNamespace(
+        vllm_config=config,
+        max_query_tokens=32,
+        _get_positions=MagicMock(
+            side_effect=lambda num_tokens: torch.arange(
+                num_tokens,
+                dtype=torch.int32,
+            ),
+        ),
+        _prepare_full_decode_draft_rope=prepare_rope,
+        _finish_full_decode_draft_rope=finish_rope,
+    )
+
+    def original(
+        self,
+        num_tokens,
+        *,
+        aclgraph_runtime_mode=CUDAGraphMode.NONE,
+        is_profile=False,
+    ):
+        del self, num_tokens, aclgraph_runtime_mode, is_profile
+        return "captured"
+
+    wrapped = wrap_dummy_run_with_draft_flag(original)
+    with patch(
+        "vllm_ascend._310p.dflash_full_and_piecewise.is_310p",
+        return_value=True,
+    ):
+        assert (
+            wrapped(
+                fake_self,
+                160,
+                aclgraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            )
+            == "captured"
+        )
+
+    fake_self._get_positions.assert_called_once_with(32)
+    prepare_rope.assert_called_once()
+    rope_call = prepare_rope.call_args.kwargs
+    torch.testing.assert_close(
+        rope_call["query_positions"],
+        torch.arange(32, dtype=torch.int32),
+    )
+    assert rope_call["query_actual_tokens"] == 32
+    assert rope_call["descriptor_tokens"] == 32
+    assert rope_call["runtime_mode"] == CUDAGraphMode.PIECEWISE
+    finish_rope.assert_called_once_with("prepared")
+
+
+def test_hybrid_capability_reserves_draft_rope_capacity_before_capture():
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dflash"),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        additional_config={
+            "ascend_compilation_config": {
+                "dflash_full_and_piecewise_capture_config": {
+                    "piecewise_capture_size": 64,
+                    "full_capture_size": 160,
+                },
+            },
+        },
+    )
+    fake_self = SimpleNamespace(
+        vllm_config=config,
+        runner=SimpleNamespace(max_num_tokens=400),
+        _get_positions=MagicMock(return_value=torch.arange(64, dtype=torch.int32)),
+    )
+
+    wrapped = wrap_dummy_run_with_draft_flag(lambda self, *args, **kwargs: "captured")
+    with (
+        patch(
+            "vllm_ascend._310p.dflash_full_and_piecewise.is_310p",
+            return_value=True,
+        ),
+        patch(
+            "vllm_ascend._310p.spec_decode.dflash_proposer_310.configure_draft_rope_capacity_310",
+        ) as reserve,
+    ):
+        assert wrapped(fake_self, 64) == "captured"
+
+    reserve.assert_called_once_with(400)
+
+
 def test_compute_slots_supports_mixed_physical_block_sizes():
     positions = torch.tensor([63, 64, 127, 128], dtype=torch.int32)
     request_ids = torch.zeros(4, dtype=torch.long)
@@ -177,6 +280,37 @@ def test_compute_slots_avoids_dynamic_int64_add_on_310p():
 
     assert slots.dtype == torch.int32
     assert slots.tolist() == list(range(130635, 130651)) + list(range(44886, 44902))
+
+
+def test_hybrid_uses_int32_draft_address_math_without_changing_other_modes():
+    config = SimpleNamespace()
+    with (
+        patch.object(
+            dflash_proposer_310,
+            "is_310p_dflash_full_decode_only",
+            return_value=False,
+        ),
+        patch.object(
+            dflash_proposer_310,
+            "is_310p_dflash_full_and_piecewise",
+            return_value=True,
+        ),
+    ):
+        assert dflash_proposer_310._uses_int32_draft_address_math_310(config)
+
+    with (
+        patch.object(
+            dflash_proposer_310,
+            "is_310p_dflash_full_decode_only",
+            return_value=False,
+        ),
+        patch.object(
+            dflash_proposer_310,
+            "is_310p_dflash_full_and_piecewise",
+            return_value=False,
+        ),
+    ):
+        assert not dflash_proposer_310._uses_int32_draft_address_math_310(config)
 
 
 def test_dflash_seq_lens_update_avoids_dynamic_int64_add_on_310p():
@@ -404,3 +538,70 @@ class TestCopyAndExpandInputsAscendC(TestBase):
         self.assertEqual(first.shape, (1,))
         self.assertEqual(first.data_ptr(), second.data_ptr())
         torch.testing.assert_close(first, torch.zeros(1, dtype=torch.int32))
+
+    def test_hybrid_zero_rejection_buffer_depends_on_effective_piecewise_mode(self):
+        num_context = 12
+        target_positions = torch.arange(num_context, dtype=torch.int32)
+        fake_self = self._make_self(num_query_total=4, num_context=num_context)
+        fake_self.vllm_config = SimpleNamespace(
+            speculative_config=SimpleNamespace(method="dflash"),
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            ),
+            additional_config={
+                "ascend_compilation_config": {
+                    "dflash_full_and_piecewise_capture_config": {
+                        "piecewise_capture_size": 64,
+                        "full_capture_size": 160,
+                    },
+                },
+            },
+        )
+
+        with (
+            patch(
+                "vllm_ascend._310p.dflash_full_and_piecewise.is_310p",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend._310p.spec_decode.dflash_proposer_310.get_forward_context",
+                return_value=SimpleNamespace(
+                    cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                ),
+            ),
+        ):
+            captured = {}
+            self._run(
+                fake_self,
+                target_positions,
+                num_context,
+                batch_size=1,
+                num_query_per_req=4,
+                captured=captured,
+            )
+            piecewise_buffer = fake_self._zero_num_rejected_buffer_310
+
+        del fake_self._zero_num_rejected_buffer_310
+        with (
+            patch(
+                "vllm_ascend._310p.dflash_full_and_piecewise.is_310p",
+                return_value=True,
+            ),
+            patch(
+                "vllm_ascend._310p.spec_decode.dflash_proposer_310.get_forward_context",
+                return_value=SimpleNamespace(
+                    cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                ),
+            ),
+        ):
+            self._run(
+                fake_self,
+                target_positions,
+                num_context,
+                batch_size=1,
+                num_query_per_req=4,
+                captured={},
+            )
+
+        self.assertEqual(piecewise_buffer.shape, (16,))
+        self.assertFalse(hasattr(fake_self, "_zero_num_rejected_buffer_310"))

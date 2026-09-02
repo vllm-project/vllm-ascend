@@ -103,9 +103,7 @@ def test_probe_configuration_uses_centralized_env_registry(tmp_path):
         (False, "dflash", CUDAGraphMode.FULL_DECODE_ONLY),
         (True, "mtp", CUDAGraphMode.FULL_DECODE_ONLY),
         (True, None, CUDAGraphMode.FULL_DECODE_ONLY),
-        (True, "dflash", CUDAGraphMode.PIECEWISE),
         (True, "dflash", CUDAGraphMode.FULL),
-        (True, "dflash", CUDAGraphMode.FULL_AND_PIECEWISE),
     ],
 )
 def test_enabled_probe_rejects_outside_310p_dflash_eager_or_fdo(
@@ -126,9 +124,14 @@ def test_enabled_probe_rejects_outside_310p_dflash_eager_or_fdo(
 
 @pytest.mark.parametrize(
     "mode",
-    [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY],
+    [
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    ],
 )
-def test_enabled_probe_accepts_only_comparable_eager_and_fdo_modes(
+def test_enabled_probe_accepts_comparable_eager_fdo_and_hybrid_modes(
     tmp_path,
     mode,
 ):
@@ -614,6 +617,45 @@ def test_target_runner_delegates_target_layer_capture(monkeypatch):
     )
 
 
+def test_target_runner_records_layer_probe_during_prefill_without_spec_metadata(
+    monkeypatch,
+):
+    """Catch the prefill layer trace being dropped by a SPEC-only early return."""
+    runner = object.__new__(model_runner_v1.NPUModelRunner)
+    boundary_recorder = SimpleNamespace(record_after_model=Mock())
+    layer_recorder = SimpleNamespace(record_after_model=Mock())
+    runner._fdo_target_numerical_probe = boundary_recorder
+    runner._fdo_target_layer_probe = layer_recorder
+    runner.input_batch = SimpleNamespace(req_ids=["req-0"])
+    runner.requests = {"req-0": SimpleNamespace(output_token_ids=[])}
+    monkeypatch.setattr(
+        model_runner_v1,
+        "get_tp_group",
+        lambda: SimpleNamespace(rank_in_group=0),
+    )
+
+    runner._record_target_numerical_probe(
+        input_ids=torch.arange(82, dtype=torch.int32),
+        positions=torch.arange(82, dtype=torch.int32),
+        sample_indices=torch.tensor([81], dtype=torch.int64),
+        selected_hidden=torch.zeros((1, 3), dtype=torch.float16),
+        logits=torch.zeros((1, 5), dtype=torch.float32),
+        descriptor=160,
+        actual_tokens=82,
+        runtime_mode=CUDAGraphMode.PIECEWISE,
+        spec_decode_metadata=None,
+    )
+
+    boundary_recorder.record_after_model.assert_not_called()
+    layer_recorder.record_after_model.assert_called_once_with(
+        tp_rank=0,
+        generated_prefix=(),
+        descriptor=160,
+        actual_tokens=82,
+        runtime_mode=CUDAGraphMode.PIECEWISE,
+    )
+
+
 class _TargetProbeNorm(torch.nn.Module):
     def forward(self, hidden_states, residual=None):
         if residual is None:
@@ -802,6 +844,60 @@ def test_draft_boundary_probe_records_inputs_and_remapped_proposals(tmp_path):
     assert all(record.identity.draft_substep is None for record in records)
     assert by_role["proposed_token_ids"].tensor.tolist() == [[501, 502, 503]]
     assert by_role["graph_runtime"].tensor.tolist() == [[1, 16, 1]]
+
+
+def test_rejection_loop_probe_records_accepted_token_contract(tmp_path):
+    config = _writer_config(
+        tmp_path,
+        component="rejection",
+        dataset_request=12,
+        max_records=8,
+    )
+    probe = numerical_probe.RejectionLoopProbe(config)
+
+    probe.record_after_sample(
+        tp_rank=0,
+        generated_prefix=(101, 102, 103),
+        draft_token_ids=torch.tensor([501, 502, 601], dtype=torch.int32),
+        num_draft_tokens=torch.tensor([2, 1], dtype=torch.int32),
+        sampled_token_ids=torch.tensor(
+            [[501, 901, -1], [701, -1, -1]],
+            dtype=torch.int32,
+        ),
+        valid_sampled_token_count=torch.tensor([2, 1], dtype=torch.int64),
+        descriptor=16,
+        actual_tokens=5,
+    )
+
+    records = numerical_probe.load_probe_records(tmp_path / "trace" / "rank0")
+    by_role = {record.identity.semantic_role: record for record in records}
+    assert set(by_role) == {
+        "draft_token_ids",
+        "num_draft_tokens",
+        "sampled_token_ids",
+        "valid_sampled_token_count",
+    }
+    assert all(record.identity.component == "rejection" for record in records)
+    assert all(record.identity.generated_prefix == (101, 102, 103) for record in records)
+    assert by_role["draft_token_ids"].tensor.tolist() == [501, 502, 601]
+    assert by_role["num_draft_tokens"].tensor.tolist() == [2, 1]
+    assert by_role["sampled_token_ids"].tensor.tolist() == [
+        [501, 901, -1],
+        [701, -1, -1],
+    ]
+    assert by_role["valid_sampled_token_count"].tensor.tolist() == [2, 1]
+
+
+def test_model_runner_rejection_probe_is_noop_when_disabled():
+    runner = object.__new__(model_runner_v1.NPUModelRunner)
+    runner._fdo_rejection_numerical_probe = None
+
+    runner._record_rejection_numerical_probe(
+        sampled_token_ids=object(),
+        spec_decode_metadata=object(),
+        descriptor=16,
+        actual_tokens=5,
+    )
 
 
 def test_draft_proposer_delegates_only_when_probe_is_enabled(monkeypatch):

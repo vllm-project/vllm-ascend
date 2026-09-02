@@ -94,3 +94,34 @@ def test_install_full_decode_size_node_compat_uses_same_scalar_guard(
 
     assert calls == [graph]
     assert list(graph.graph.find_nodes(op="call_method", target="size")) == []
+
+
+def test_hybrid_size_node_capability_does_not_stack_process_global_patch(
+    monkeypatch,
+) -> None:
+    from vllm.compilation import backends
+
+    from vllm_ascend._310p.piecewise_size_nodes import (
+        install_full_and_piecewise_size_node_compat,
+        install_full_decode_size_node_compat,
+        install_piecewise_size_node_compat,
+    )
+
+    calls = []
+
+    def original(graph: fx.GraphModule) -> None:
+        calls.append(graph)
+
+    monkeypatch.setattr(backends, "_decompose_size_nodes", original)
+
+    install_full_and_piecewise_size_node_compat()
+    installed = backends._decompose_size_nodes
+    install_full_and_piecewise_size_node_compat()
+    install_piecewise_size_node_compat()
+    install_full_decode_size_node_compat()
+
+    assert backends._decompose_size_nodes is installed
+    graph = _make_size_dim_graph()
+    installed(graph)
+    assert calls == [graph]
+    assert list(graph.graph.find_nodes(op="call_method", target="size")) == []

@@ -21,8 +21,11 @@ from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
+from vllm_ascend._310p.dflash_full_and_piecewise import (
+    is_310p_dflash_effective_piecewise,
+    is_310p_dflash_full_and_piecewise,
+)
 from vllm_ascend._310p.dflash_full_decode_only import is_310p_dflash_full_decode_only
-from vllm_ascend._310p.dflash_piecewise import is_310p_dflash_piecewise
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, nd_to_nz_2d, nd_to_nz_spec
 
@@ -97,10 +100,14 @@ class AttentionMaskBuilder310:
             )
             return False
         runtime_mode = forward_context.cudagraph_runtime_mode
-        piecewise_graph = runtime_mode == CUDAGraphMode.PIECEWISE and is_310p_dflash_piecewise(vllm_config)
+        piecewise_graph = is_310p_dflash_effective_piecewise(
+            vllm_config,
+            runtime_mode,
+        )
+        hybrid_full_graph = runtime_mode == CUDAGraphMode.FULL and is_310p_dflash_full_and_piecewise(vllm_config)
         full_decode_graph = runtime_mode == CUDAGraphMode.FULL and is_310p_dflash_full_decode_only(vllm_config)
         logger.debug(
-            "[310p-dflash-graph/mask-route] runtime=%s configured=%s piecewise=%s full_decode_only=%s",
+            "[310p-dflash-graph/mask-route] runtime=%s configured=%s piecewise=%s hybrid_full=%s full_decode_only=%s",
             getattr(runtime_mode, "name", runtime_mode),
             getattr(
                 vllm_config.compilation_config.cudagraph_mode,
@@ -108,9 +115,10 @@ class AttentionMaskBuilder310:
                 vllm_config.compilation_config.cudagraph_mode,
             ),
             piecewise_graph,
+            hybrid_full_graph,
             full_decode_graph,
         )
-        return piecewise_graph or full_decode_graph
+        return piecewise_graph or hybrid_full_graph or full_decode_graph
 
     @staticmethod
     def _get_graph_safe_query_positions(

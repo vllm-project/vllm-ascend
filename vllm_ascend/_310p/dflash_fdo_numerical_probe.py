@@ -13,7 +13,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-"""Bounded, opt-in numerical probes for 310P DFlash FDO diagnosis."""
+"""Bounded, opt-in numerical probes for 310P DFlash graph diagnosis."""
 
 from __future__ import annotations
 
@@ -41,7 +41,14 @@ PROBE_MAX_RECORDS_ENV = envs.FDO_PROBE_MAX_RECORDS_ENV
 PROBE_MAX_BYTES_ENV = envs.FDO_PROBE_MAX_BYTES_ENV
 
 _COMPONENTS = frozenset({"boundary", "target", "target_layer", "draft", "rejection", "layer"})
-_COMPARABLE_MODES = frozenset({CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY})
+_COMPARABLE_MODES = frozenset(
+    {
+        CUDAGraphMode.NONE,
+        CUDAGraphMode.PIECEWISE,
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        CUDAGraphMode.FULL_AND_PIECEWISE,
+    }
+)
 
 
 class FdoNumericalProbeConfigError(ValueError):
@@ -119,7 +126,8 @@ class FdoNumericalProbeConfig:
             or mode not in _COMPARABLE_MODES
         ):
             raise FdoNumericalProbeConfigError(
-                "the numerical probe is restricted to 310P DFlash Eager and FULL_DECODE_ONLY"
+                "the numerical probe is restricted to 310P DFlash Eager, "
+                "PIECEWISE, FULL_DECODE_ONLY, and FULL_AND_PIECEWISE"
             )
 
         component = values.get(PROBE_COMPONENT_ENV, "boundary")
@@ -1180,6 +1188,109 @@ def create_draft_boundary_probe(
     if not config.enabled or config.component not in {"boundary", "draft"}:
         return None
     return DraftBoundaryProbe(config)
+
+
+class RejectionLoopProbe:
+    """Export the accepted-token contract after the public rejection sampler."""
+
+    def __init__(self, config: FdoNumericalProbeConfig) -> None:
+        if not config.enabled or config.output_dir is None:
+            raise FdoNumericalProbeConfigError("rejection probing requires an enabled configuration")
+        if config.component != "rejection":
+            raise FdoNumericalProbeConfigError(f"rejection probe cannot serve component {config.component!r}")
+        self._config = config
+        self._writers: dict[int, BoundedProbeWriter] = {}
+        self._iterations: dict[int, int] = {}
+        self._exhausted_ranks: set[int] = set()
+
+    def _writer(self, tp_rank: int) -> BoundedProbeWriter:
+        writer = self._writers.get(tp_rank)
+        if writer is None:
+            assert self._config.output_dir is not None
+            writer = BoundedProbeWriter(
+                replace(
+                    self._config,
+                    output_dir=self._config.output_dir / f"rank{tp_rank}",
+                )
+            )
+            self._writers[tp_rank] = writer
+        return writer
+
+    def record_after_sample(
+        self,
+        *,
+        tp_rank: int,
+        generated_prefix: tuple[int, ...],
+        draft_token_ids: torch.Tensor,
+        num_draft_tokens: torch.Tensor,
+        sampled_token_ids: torch.Tensor,
+        valid_sampled_token_count: torch.Tensor,
+        descriptor: int,
+        actual_tokens: int,
+    ) -> None:
+        if tp_rank in self._exhausted_ranks:
+            return
+        if draft_token_ids.ndim != 1 or num_draft_tokens.ndim != 1:
+            raise FdoNumericalProbeArtifactError("rejection draft inputs must be one-dimensional")
+        if sampled_token_ids.ndim != 2 or valid_sampled_token_count.ndim != 1:
+            raise FdoNumericalProbeArtifactError("rejection sampled tokens must be request-major")
+        num_reqs = num_draft_tokens.shape[0]
+        if sampled_token_ids.shape[0] != num_reqs or valid_sampled_token_count.shape[0] != num_reqs:
+            raise FdoNumericalProbeArtifactError("rejection request rows must align")
+        if int(num_draft_tokens.sum().item()) != draft_token_ids.numel():
+            raise FdoNumericalProbeArtifactError("flattened draft tokens do not match per-request widths")
+        if bool(torch.any(valid_sampled_token_count > sampled_token_ids.shape[1]).item()):
+            raise FdoNumericalProbeArtifactError("valid sampled-token count exceeds the sampler row width")
+
+        iteration = self._iterations.get(tp_rank, 0)
+        request_rows = tuple(range(num_reqs))
+        tensors = (
+            (
+                "draft_token_ids",
+                draft_token_ids,
+                tuple(range(draft_token_ids.shape[0])),
+            ),
+            ("num_draft_tokens", num_draft_tokens, request_rows),
+            ("sampled_token_ids", sampled_token_ids, request_rows),
+            (
+                "valid_sampled_token_count",
+                valid_sampled_token_count,
+                request_rows,
+            ),
+        )
+        writer = self._writer(tp_rank)
+        try:
+            for semantic_role, tensor, active_rows in tensors:
+                identity = ProbeTraceIdentity(
+                    mode=self._config.mode or "",
+                    component="rejection",
+                    tp_rank=tp_rank,
+                    dataset_request=self._config.dataset_request,
+                    generated_prefix=generated_prefix,
+                    speculative_iteration=iteration,
+                    draft_substep=None,
+                    descriptor=descriptor,
+                    actual_tokens=actual_tokens,
+                    active_rows=active_rows,
+                    semantic_role=semantic_role,
+                    shape=tuple(tensor.shape),
+                    dtype=str(tensor.dtype),
+                )
+                writer.write_tensor(identity, tensor)
+        except FdoNumericalProbeLimitError:
+            self._exhausted_ranks.add(tp_rank)
+            return
+        self._iterations[tp_rank] = iteration + 1
+
+
+def create_rejection_loop_probe(
+    vllm_config: VllmConfig,
+) -> RejectionLoopProbe | None:
+    """Create the rejection observer only for explicit diagnostic runs."""
+    config = FdoNumericalProbeConfig.from_environ(vllm_config)
+    if not config.enabled or config.component != "rejection":
+        return None
+    return RejectionLoopProbe(config)
 
 
 class DraftLayerProbe:

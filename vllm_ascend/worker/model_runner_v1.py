@@ -102,6 +102,7 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 from vllm_ascend._310p.dflash_fdo_numerical_probe import (
+    create_rejection_loop_probe,
     create_target_boundary_probe,
     create_target_layer_probe,
 )
@@ -379,6 +380,9 @@ class NPUModelRunner(GPUModelRunner):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
         self._fdo_target_numerical_probe = create_target_boundary_probe(
+            vllm_config
+        )
+        self._fdo_rejection_numerical_probe = create_rejection_loop_probe(
             vllm_config
         )
         self._fdo_target_layer_probe = create_target_layer_probe(
@@ -2058,10 +2062,7 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         boundary_probe = self._fdo_target_numerical_probe
         layer_probe = getattr(self, "_fdo_target_layer_probe", None)
-        if (
-            (boundary_probe is None and layer_probe is None)
-            or spec_decode_metadata is None
-        ):
+        if boundary_probe is None and layer_probe is None:
             return
         req_ids = self.input_batch.req_ids
         if len(req_ids) == 1:
@@ -2078,7 +2079,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             )
         tp_rank = get_tp_group().rank_in_group
-        if boundary_probe is not None:
+        if boundary_probe is not None and spec_decode_metadata is not None:
             boundary_probe.record_after_model(
                 tp_rank=tp_rank,
                 generated_prefix=generated_prefix,
@@ -2099,6 +2100,53 @@ class NPUModelRunner(GPUModelRunner):
                 actual_tokens=actual_tokens,
                 runtime_mode=runtime_mode,
             )
+
+    @torch.inference_mode()
+    def _record_rejection_numerical_probe(
+        self,
+        *,
+        sampled_token_ids: torch.Tensor,
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        descriptor: int,
+        actual_tokens: int,
+    ) -> None:
+        probe = self._fdo_rejection_numerical_probe
+        if probe is None or spec_decode_metadata is None:
+            return
+        req_ids = self.input_batch.req_ids
+        if len(req_ids) == 1:
+            generated_prefix = tuple(
+                self.requests[req_ids[0]].output_token_ids
+            )
+        else:
+            generated_prefix = tuple(
+                token
+                for req_id in req_ids
+                for token in (
+                    *self.requests[req_id].output_token_ids,
+                    -1,
+                )
+            )
+        num_draft_tokens = torch.tensor(
+            spec_decode_metadata.num_draft_tokens,
+            dtype=torch.int32,
+            device=sampled_token_ids.device,
+        )
+        valid_sampled_token_count = torch.sum(
+            sampled_token_ids != PLACEHOLDER_TOKEN_ID,
+            dim=1,
+            dtype=torch.int64,
+        )
+        probe.record_after_sample(
+            tp_rank=get_tp_group().rank_in_group,
+            generated_prefix=generated_prefix,
+            draft_token_ids=spec_decode_metadata.draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            sampled_token_ids=sampled_token_ids,
+            valid_sampled_token_count=valid_sampled_token_count,
+            descriptor=descriptor,
+            actual_tokens=actual_tokens,
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -2618,7 +2666,16 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
-
+        self._record_rejection_numerical_probe(
+            sampled_token_ids=sampler_output.sampled_token_ids,
+            spec_decode_metadata=spec_decode_metadata,
+            descriptor=batch_desc.num_tokens,
+            actual_tokens=(
+                int(spec_decode_metadata.logits_indices.numel())
+                if spec_decode_metadata is not None
+                else 0
+            ),
+        )
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
                 self.sampling_done_event = torch.npu.Event()
@@ -2681,7 +2738,6 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
         )
-
         with record_function_or_nullcontext("draft_token"):
             if self.speculative_config:
                 if not early_pp_padded_drafter:

@@ -91,6 +91,43 @@ llm = LLM(
 
 For the detailed meaning of `NONE`, `PIECEWISE`, `FULL`, `FULL_DECODE_ONLY`, and `FULL_AND_PIECEWISE`, as well as the generic fallback policy, see the upstream [CUDA Graphs](https://docs.vllm.ai/en/latest/design/cuda_graphs/) design doc.
 
+### 310P DFlash asymmetric portfolio {: #310p-dflash-asymmetric-portfolio }
+
+Ascend 310P DFlash can explicitly assign one descriptor capacity to
+PIECEWISE and one descriptor capacity to FULL when using
+`FULL_AND_PIECEWISE`. This avoids treating every value in the shared upstream
+`cudagraph_capture_sizes` list as belonging to both runtime modes.
+
+```bash
+vllm serve /path/to/target-model \
+  --speculative-config \
+  '{"method":"dflash","model":"/path/to/draft-model","num_speculative_tokens":7}' \
+  --compilation-config \
+  '{"cudagraph_mode":"FULL_AND_PIECEWISE"}' \
+  --additional-config \
+  '{"ascend_compilation_config":{"dflash_full_and_piecewise_capture_config":{"piecewise_capture_size":32,"full_capture_size":80}}}'
+```
+
+With this example the capture inventory is mode-owned:
+
+- PIECEWISE captures descriptor 32 only;
+- Target FULL captures descriptor 80 only;
+- the Draft FULL island uses the same descriptor 80;
+- no PIECEWISE 80 or FULL 32 graph is created.
+
+The capacities are deployment parameters, not automatically derived values.
+The FULL capacity must be divisible by the speculative verification width
+(`num_speculative_tokens + 1`) and fit the configured deployment limits.
+Runtime selection still uses vLLM's existing dispatcher: eligible uniform
+speculative verification that matches the configured FULL descriptor selects
+FULL, compatible prefill/mixed work selects PIECEWISE, and workloads that do
+not fit safely follow the existing PIECEWISE/NONE fallback without truncation.
+
+The current resource-safe production boundary is one PIECEWISE bucket and one
+FULL bucket. Multiple PIECEWISE buckets fail during configuration validation
+instead of risking Event-resource exhaustion during capture. If the new
+configuration is absent, all existing graph-mode behavior is preserved.
+
 ### Attention backend compatibility
 
 Not all attention backends support all graph modes. vLLM checks attention backend compatibility during compatibility checks and, when possible, automatically adjusts `cudagraph_mode` to a more compatible mode instead of failing immediately. In practice, this means a requested full-graph mode may be narrowed to a mixed or piecewise mode, and if the backend cannot support graph execution at all, graph mode may be disabled.

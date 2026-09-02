@@ -251,10 +251,10 @@ def test_dflash_piecewise_scope_has_no_sticky_process_state() -> None:
         (True, "dflash", CUDAGraphMode.NONE, True),
         (True, "dflash", CUDAGraphMode.FULL, True),
         (True, "dflash", CUDAGraphMode.FULL_DECODE_ONLY, True),
-        (True, "dflash", CUDAGraphMode.FULL_AND_PIECEWISE, True),
+        (True, "dflash", CUDAGraphMode.FULL_AND_PIECEWISE, False),
     ],
 )
-def test_only_dflash_piecewise_mixed_capture_bypasses_uniform_spec_guard(
+def test_dflash_piecewise_capable_modes_bypass_uniform_spec_guard(
     is_310p_platform: bool,
     method: str,
     mode: CUDAGraphMode,
@@ -270,6 +270,14 @@ def test_only_dflash_piecewise_mixed_capture_bypasses_uniform_spec_guard(
     runner.vllm_config = SimpleNamespace(
         speculative_config=runner.speculative_config,
         compilation_config=SimpleNamespace(cudagraph_mode=mode),
+        additional_config={
+            "ascend_compilation_config": {
+                "dflash_full_and_piecewise_capture_config": {
+                    "piecewise_capture_size": 64,
+                    "full_capture_size": 160,
+                },
+            },
+        },
     )
     observed_force_eager = []
 
@@ -279,6 +287,10 @@ def test_only_dflash_piecewise_mixed_capture_bypasses_uniform_spec_guard(
 
     with (
         patch.object(scope_module, "is_310p", return_value=is_310p_platform),
+        patch(
+            "vllm_ascend._310p.dflash_full_and_piecewise.is_310p",
+            return_value=is_310p_platform,
+        ),
         patch.object(
             model_runner_310p,
             "is_310p_dflash_full_decode_only",
@@ -300,6 +312,89 @@ def test_only_dflash_piecewise_mixed_capture_bypasses_uniform_spec_guard(
 
     assert result == "dispatch"
     assert observed_force_eager == [expected_force_eager]
+
+
+@pytest.mark.parametrize(
+    ("attn_state", "computed", "scheduled"),
+    [
+        (AscendAttentionState.PrefillNoCache, [0], [82]),
+        (AscendAttentionState.ChunkedPrefill, [64], [64]),
+        (AscendAttentionState.ChunkedPrefill, [24, 0], [16, 40]),
+        (AscendAttentionState.SpecDecoding, [120, 80], [16, 16]),
+    ],
+)
+def test_hybrid_target_phases_reach_existing_dispatcher_without_force_eager(
+    attn_state,
+    computed,
+    scheduled,
+):
+    runner = object.__new__(NPUModelRunner310)
+    runner.attn_state = attn_state
+    runner._spec_dummy_capture = False
+    runner.speculative_config = SimpleNamespace(
+        method="dflash",
+        num_speculative_tokens=15,
+    )
+    runner.uniform_decode_query_len = 16
+    runner.max_num_reqs = 20
+    runner.input_batch = SimpleNamespace(
+        num_computed_tokens_cpu=torch.tensor(computed, dtype=torch.int32).numpy(),
+    )
+    runner.vllm_config = SimpleNamespace(
+        speculative_config=runner.speculative_config,
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            max_cudagraph_capture_size=400,
+        ),
+        additional_config={
+            "ascend_compilation_config": {
+                "dflash_full_and_piecewise_capture_config": {
+                    "piecewise_capture_size": 64,
+                    "full_capture_size": 160,
+                },
+            },
+        },
+    )
+    observed_force_eager = []
+    selected = CUDAGraphMode.FULL if attn_state is AscendAttentionState.SpecDecoding else CUDAGraphMode.PIECEWISE
+
+    def parent_determine(self, **kwargs):
+        observed_force_eager.append(kwargs["force_eager"])
+        descriptor = SimpleNamespace(
+            num_tokens=max(sum(scheduled), 160),
+            num_reqs=(len(scheduled) if selected is CUDAGraphMode.FULL else None),
+        )
+        return selected, descriptor
+
+    with (
+        patch(
+            "vllm_ascend._310p.dflash_full_and_piecewise.is_310p",
+            return_value=True,
+        ),
+        patch.object(
+            model_runner_310p,
+            "is_310p_dflash_full_decode_only",
+            return_value=False,
+        ),
+        patch.object(
+            NPUModelRunner,
+            "_determine_batch_execution_and_padding",
+            new=parent_determine,
+        ),
+    ):
+        result = runner._determine_batch_execution_and_padding(
+            num_tokens=sum(scheduled),
+            num_reqs=len(scheduled),
+            num_scheduled_tokens_np=torch.tensor(
+                scheduled,
+                dtype=torch.int32,
+            ).numpy(),
+            max_num_scheduled_tokens=max(scheduled),
+            use_cascade_attn=False,
+        )
+
+    assert result[0] is selected
+    assert observed_force_eager == [False]
 
 
 def test_piecewise_dispatch_debug_handles_uninitialized_attention_state() -> None:

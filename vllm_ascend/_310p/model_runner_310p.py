@@ -48,6 +48,11 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
+from vllm_ascend._310p.dflash_full_and_piecewise import (
+    build_dflash_hybrid_route_observation,
+    classify_dflash_hybrid_route,
+    is_310p_dflash_full_and_piecewise,
+)
 from vllm_ascend._310p.dflash_full_decode_only import (
     classify_dflash_full_decode_batch,
     is_310p_dflash_full_decode_only,
@@ -59,6 +64,7 @@ from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.piecewise_size_nodes import (
+    install_full_and_piecewise_size_node_compat,
     install_full_decode_size_node_compat,
     install_piecewise_size_node_compat,
 )
@@ -75,6 +81,16 @@ from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 _DFLASH_DRAFT_BLOCK_ALIGNMENT = 128
+
+
+def _uses_dflash_graph_int32_position_staging_310(vllm_config: Any) -> bool:
+    """Scope the 310P-safe position arithmetic to DFlash FULL graph modes."""
+    return is_310p_dflash_full_decode_only(vllm_config) or is_310p_dflash_full_and_piecewise(vllm_config)
+
+
+def _uses_dflash_graph_alignment_safe_rejection_310(vllm_config: Any) -> bool:
+    """Scope aligned greedy rejection writes to 310P DFlash FULL graph modes."""
+    return is_310p_dflash_full_decode_only(vllm_config) or is_310p_dflash_full_and_piecewise(vllm_config)
 
 
 def _resize_dflash_draft_kv_cache_specs(
@@ -201,6 +217,32 @@ class NPUModelRunner310(NPUModelRunner):
         super().__init__(*args, **kwargs)
         if is_310p_dflash_piecewise(self.vllm_config):
             install_piecewise_size_node_compat()
+        elif is_310p_dflash_full_and_piecewise(self.vllm_config):
+            install_full_and_piecewise_size_node_compat()
+            self._fdo_position_base_i32 = torch.empty(
+                self.max_num_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self._fdo_query_pos_i32 = torch.empty_like(
+                self._fdo_position_base_i32,
+            )
+            self._fdo_positions_i32 = torch.empty_like(
+                self._fdo_position_base_i32,
+            )
+            self._fdo_position_staging_logged = False
+            rope_positions = None
+            if self.uses_mrope:
+                rope_positions = self.mrope_positions.gpu
+            elif self.uses_xdrope_dim > 0:
+                rope_positions = self.xdrope_positions.gpu
+            self._fdo_rope_i32 = (
+                torch.empty_like(rope_positions, dtype=torch.int32) if rope_positions is not None else None
+            )
+            self._fdo_rope_result_i32 = (
+                torch.empty_like(rope_positions, dtype=torch.int32) if rope_positions is not None else None
+            )
+            self._fdo_rope_staging_logged = False
         elif is_310p_dflash_full_decode_only(self.vllm_config):
             install_full_decode_size_node_compat()
             self._fdo_position_base_i32 = torch.empty(
@@ -253,7 +295,11 @@ class NPUModelRunner310(NPUModelRunner):
         if getattr(self, "rejection_sampler", None) is not None:
             self.rejection_sampler = AscendRejectionSampler310(
                 self.sampler,
-                use_fdo_alignment_safe_greedy=(is_310p_dflash_full_decode_only(self.vllm_config)),
+                use_fdo_alignment_safe_greedy=(
+                    _uses_dflash_graph_alignment_safe_rejection_310(
+                        self.vllm_config
+                    )
+                ),
             )
         if self.speculative_config is not None and self.speculative_config.method == "ngram":
             # 310P ngram requires decode-only graph shapes to be built with q_len=1.
@@ -332,6 +378,7 @@ class NPUModelRunner310(NPUModelRunner):
     ):
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         dflash_piecewise_active = is_310p_dflash_piecewise(self.vllm_config)
+        dflash_hybrid_active = is_310p_dflash_full_and_piecewise(self.vllm_config)
         dflash_full_decode_only_active = is_310p_dflash_full_decode_only(self.vllm_config)
         forced_full_decode_capture = (
             dflash_full_decode_only_active and self._fdo_graph_capture_active and force_uniform_decode is True
@@ -370,6 +417,7 @@ class NPUModelRunner310(NPUModelRunner):
         if (
             self.attn_state in (AscendAttentionState.ChunkedPrefill, AscendAttentionState.PrefillCacheHit)
             and not forced_full_decode_capture
+            and not dflash_hybrid_active
         ):
             force_eager = True
 
@@ -377,6 +425,7 @@ class NPUModelRunner310(NPUModelRunner):
         if (
             self.speculative_config is not None
             and not dflash_piecewise_active
+            and not dflash_hybrid_active
             and not forced_full_decode_capture
             and (
                 self.attn_state != AscendAttentionState.SpecDecoding
@@ -431,6 +480,56 @@ class NPUModelRunner310(NPUModelRunner):
             force_num_active_loras=force_num_active_loras,
             num_encoder_reqs=num_encoder_reqs,
         )
+
+        if dflash_hybrid_active and isinstance(result, tuple) and len(result) >= 2:
+            runtime_mode, batch_descriptor = result[:2]
+            num_speculative_tokens = int(self.vllm_config.speculative_config.num_speculative_tokens)
+            route_decision = classify_dflash_hybrid_route(
+                attn_state=self.attn_state,
+                num_reqs=num_reqs,
+                num_tokens=num_tokens,
+                num_scheduled_tokens=num_scheduled_tokens_np,
+                all_decode=bool(is_all_decode),
+                num_speculative_tokens=num_speculative_tokens,
+                forced_uniform_capture=force_uniform_decode is True,
+            )
+            route_observation = build_dflash_hybrid_route_observation(
+                configured_mode=(self.vllm_config.compilation_config.cudagraph_mode),
+                effective_mode=runtime_mode,
+                decision=route_decision,
+                descriptor=batch_descriptor,
+                max_num_reqs=self.max_num_reqs,
+                max_capture_tokens=(self.vllm_config.compilation_config.max_cudagraph_capture_size),
+            )
+            logger.debug(
+                "[310p-dflash-full-and-piecewise/route] configured=%s "
+                "effective=%s phase=%s active_num_reqs=%d real_num_tokens=%d "
+                "k=%d verification_width=%d required_tokens=%d candidate=%s "
+                "descriptor=%s physical_request_capacity=%d "
+                "physical_token_capacity=%d padding_request_count=%d "
+                "padding_token_count=%d padding_ratio=%.6f selected=%s "
+                "fallback_reason=%s contract_reason=%s "
+                "contract_capacity_mismatch_reason=%s",
+                route_observation.configured_mode.name,
+                route_observation.effective_mode.name,
+                route_observation.runtime_phase.value,
+                route_observation.active_num_reqs,
+                route_observation.real_num_tokens,
+                route_observation.num_speculative_tokens,
+                route_observation.verification_width,
+                route_observation.required_tokens,
+                route_observation.candidate_mode.name,
+                route_observation.descriptor,
+                route_observation.physical_request_capacity,
+                route_observation.physical_token_capacity,
+                route_observation.padding_request_count,
+                route_observation.padding_token_count,
+                route_observation.padding_ratio,
+                route_observation.selected_mode.name,
+                route_observation.fallback_reason,
+                route_decision.contract_reason,
+                route_observation.contract_mismatch_reason,
+            )
 
         if dflash_full_decode_only_active:
             runtime_mode, batch_descriptor = result[:2]
@@ -854,7 +953,7 @@ class NPUModelRunner310(NPUModelRunner):
         )
         if use_async_device_metadata:
             req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
-            if is_310p_dflash_full_decode_only(self.vllm_config):
+            if _uses_dflash_graph_int32_position_staging_310(self.vllm_config):
                 _copy_positions_via_int32_staging_310(
                     self.positions[:total_num_scheduled_tokens],
                     self._fdo_position_base_i32,
@@ -913,7 +1012,7 @@ class NPUModelRunner310(NPUModelRunner):
         if use_async_device_metadata and (self.uses_mrope or self.uses_xdrope_dim > 0):
             req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
             target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
-            if is_310p_dflash_full_decode_only(self.vllm_config):
+            if _uses_dflash_graph_int32_position_staging_310(self.vllm_config):
                 assert self._fdo_rope_i32 is not None
                 assert self._fdo_rope_result_i32 is not None
                 _apply_position_drift_via_int32_staging_310(

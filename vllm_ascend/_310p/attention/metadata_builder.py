@@ -15,16 +15,29 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend._310p.attention.attention_mask import (
     AttentionMaskBuilder310,
     is_compressed_mask_supported,
+)
+from vllm_ascend._310p.attention.dflash_hybrid_draft_graph_safe_attention import (
+    DFlashHybridDraftAttentionInputs310,
+    create_dflash_hybrid_draft_attention_inputs_310,
+    update_dflash_hybrid_draft_attention_inputs_310,
+)
+from vllm_ascend._310p.dflash_full_and_piecewise import (
+    is_310p_dflash_full_and_piecewise,
 )
 from vllm_ascend.attention.attention_v1 import (
     AscendAttentionMetadataBuilder,
@@ -34,6 +47,44 @@ from vllm_ascend.attention.attention_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 QUERY_LENS_CPU_ATTR = "query_lens_cpu"
+DFLASH_HYBRID_DRAFT_ATTENTION_INPUTS_ATTR = (
+    "_dflash_hybrid_draft_attention_inputs_310"
+)
+
+
+@dataclass(frozen=True)
+class _DFlashHybridDraftCaptureScope310:
+    real_num_reqs: int
+    capacity_tokens: int
+
+
+_DFLASH_HYBRID_DRAFT_CAPTURE_SCOPE_310: ContextVar[
+    _DFlashHybridDraftCaptureScope310 | None
+] = ContextVar(
+    "dflash_hybrid_draft_capture_scope_310",
+    default=None,
+)
+
+
+@contextmanager
+def dflash_hybrid_draft_capture_scope_310(
+    *,
+    real_num_reqs: int,
+    capacity_tokens: int,
+) -> Iterator[None]:
+    """Mark only the 310P Hybrid Draft dummy-capture metadata build."""
+    if real_num_reqs <= 0 or capacity_tokens <= 0:
+        raise ValueError("Draft FULL capture capacities must be positive")
+    token = _DFLASH_HYBRID_DRAFT_CAPTURE_SCOPE_310.set(
+        _DFlashHybridDraftCaptureScope310(
+            real_num_reqs=real_num_reqs,
+            capacity_tokens=capacity_tokens,
+        )
+    )
+    try:
+        yield
+    finally:
+        _DFLASH_HYBRID_DRAFT_CAPTURE_SCOPE_310.reset(token)
 
 
 def set_query_lens_cpu(attn_metadata: AscendMetadata, query_lens_cpu: torch.Tensor) -> None:
@@ -46,6 +97,16 @@ def get_query_lens_cpu(attn_metadata: AscendMetadata) -> torch.Tensor | None:
     if value is None:
         return None
     return value
+
+
+def get_dflash_hybrid_draft_attention_inputs_310(
+    attn_metadata: AscendMetadata,
+) -> DFlashHybridDraftAttentionInputs310 | None:
+    return getattr(
+        attn_metadata,
+        DFLASH_HYBRID_DRAFT_ATTENTION_INPUTS_ATTR,
+        None,
+    )
 
 
 class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
@@ -75,6 +136,10 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
             device (torch.device): The device (NPU) to run operations on.
         """
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # The public builder does not expose the config as an instance field.
+        # Keep a private 310P reference so the exact Hybrid-only adapter can be
+        # selected without changing any public builder contract.
+        self._vllm_config_310 = vllm_config
 
         # Override the mask builder with the 310P-specific version
         max_model_len = vllm_config.model_config.max_model_len
@@ -84,6 +149,92 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         if device.type != "cpu":
             max_num_seqs = vllm_config.scheduler_config.max_num_seqs
             self._query_lens_cpu_buffer = torch.empty(max_num_seqs, dtype=torch.int32, device="cpu", pin_memory=True)
+
+    def _prepare_dflash_hybrid_draft_attention_inputs_310(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        *,
+        draft_step: int,
+        real_num_reqs_override: int | None = None,
+        capacity_tokens_override: int | None = None,
+    ) -> DFlashHybridDraftAttentionInputs310:
+        """Build one step's runtime source for the shared Draft FULL graph."""
+        valid_num_tokens = int(common_attn_metadata.num_actual_tokens)
+        query_width = int(
+            getattr(common_attn_metadata, "decode_token_per_req", 0)
+            or getattr(common_attn_metadata, "max_query_len", 0)
+        )
+        if real_num_reqs_override is None:
+            if query_width <= 0 or valid_num_tokens % query_width:
+                raise RuntimeError(
+                    "310P DFlash Hybrid Draft cannot derive logical request "
+                    f"count: tokens={valid_num_tokens}, "
+                    f"query_width={query_width}"
+                )
+            valid_num_reqs = valid_num_tokens // query_width
+        else:
+            valid_num_reqs = int(real_num_reqs_override)
+        capacity_tokens = int(
+            common_attn_metadata.num_input_tokens
+            if capacity_tokens_override is None
+            else capacity_tokens_override
+        )
+        capacity_reqs = int(common_attn_metadata.block_table_tensor.shape[0])
+        max_blocks = int(common_attn_metadata.block_table_tensor.shape[1])
+        if valid_num_reqs <= 0:
+            raise RuntimeError("310P DFlash Hybrid Draft has no logical request")
+        if common_attn_metadata.query_start_loc.shape[0] < valid_num_reqs + 1:
+            raise RuntimeError(
+                "310P DFlash Hybrid Draft query_start_loc does not cover "
+                "logical requests"
+            )
+
+        device = common_attn_metadata.query_start_loc.device
+        cache_key = (
+            int(draft_step),
+            capacity_reqs,
+            capacity_tokens,
+            max_blocks,
+            device.type,
+            device.index,
+        )
+        cache = getattr(
+            self,
+            "_dflash_hybrid_draft_attention_input_cache_310",
+            None,
+        )
+        if cache is None:
+            cache = {}
+            self._dflash_hybrid_draft_attention_input_cache_310 = cache
+        inputs = cache.get(cache_key)
+        if inputs is None:
+            inputs = create_dflash_hybrid_draft_attention_inputs_310(
+                capacity_reqs=capacity_reqs,
+                capacity_tokens=capacity_tokens,
+                max_blocks=max_blocks,
+                device=device,
+            )
+            cache[cache_key] = inputs
+
+        query_lens = (
+            common_attn_metadata.query_start_loc[1 : valid_num_reqs + 1]
+            - common_attn_metadata.query_start_loc[:valid_num_reqs]
+        ).to(torch.int32)
+        seq_lens = common_attn_metadata.seq_lens[:valid_num_reqs].to(
+            torch.int32
+        )
+        block_table = common_attn_metadata.block_table_tensor[
+            :valid_num_reqs
+        ].to(torch.int32)
+        update_dflash_hybrid_draft_attention_inputs_310(
+            inputs,
+            query_lens=query_lens,
+            seq_lens=seq_lens,
+            block_table=block_table,
+            valid_num_reqs=valid_num_reqs,
+            valid_num_tokens=valid_num_tokens,
+        )
+        return inputs
 
     def _fill_query_lens_cpu(
         self, num_reqs: int, query_start_loc_cpu: torch.Tensor, is_drafting: bool = False
@@ -111,8 +262,50 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool = False,
         is_drafting: bool = False,
+        dflash_hybrid_draft_step: int = -1,
     ) -> AscendMetadata:
+        private_draft_inputs = None
+        capture_scope = _DFLASH_HYBRID_DRAFT_CAPTURE_SCOPE_310.get()
+        hybrid_draft = (
+            (is_drafting or capture_scope is not None)
+            and not common_attn_metadata.causal
+            and is_310p_dflash_full_and_piecewise(self._vllm_config_310)
+        )
+        logger.debug(
+            "[310p-dflash-full-and-piecewise/draft-metadata] "
+            "event=builder-route builder=%s is_drafting=%s causal=%s "
+            "hybrid=%s step=%d",
+            type(self).__name__,
+            is_drafting,
+            common_attn_metadata.causal,
+            hybrid_draft,
+            dflash_hybrid_draft_step,
+        )
+        if hybrid_draft:
+            private_draft_inputs = (
+                self._prepare_dflash_hybrid_draft_attention_inputs_310(
+                    common_attn_metadata,
+                    draft_step=dflash_hybrid_draft_step,
+                    real_num_reqs_override=(
+                        capture_scope.real_num_reqs
+                        if capture_scope is not None
+                        else None
+                    ),
+                    capacity_tokens_override=(
+                        capture_scope.capacity_tokens
+                        if capture_scope is not None
+                        else None
+                    ),
+                )
+            )
         attn_metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+
+        if private_draft_inputs is not None:
+            setattr(
+                attn_metadata,
+                DFLASH_HYBRID_DRAFT_ATTENTION_INPUTS_ATTR,
+                private_draft_inputs,
+            )
 
         num_reqs = common_attn_metadata.num_reqs
 
@@ -163,5 +356,9 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
     ):
         # override build_for_drafting for passing status.
         return self.build(
-            common_prefix_len=0, common_attn_metadata=common_attn_metadata, fast_build=True, is_drafting=True
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            fast_build=True,
+            is_drafting=True,
+            dflash_hybrid_draft_step=draft_index,
         )

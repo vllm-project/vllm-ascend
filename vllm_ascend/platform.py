@@ -535,6 +535,16 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        if hasattr(
+            ascend_compilation_config,
+            "dflash_full_and_piecewise_capture_config",
+        ):
+            from vllm_ascend._310p.dflash_full_and_piecewise import (
+                apply_dflash_full_and_piecewise_capture_config,
+            )
+
+            apply_dflash_full_and_piecewise_capture_config(vllm_config)
+
         # Recompute cudagraph sizes after Ascend-specific compatibility updates.
         # The platform default max is injected earlier via
         # `apply_config_platform_defaults`, so this late pass should only honor

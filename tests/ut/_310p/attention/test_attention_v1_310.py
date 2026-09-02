@@ -16,6 +16,7 @@
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import CUDAGraphMode
 
 from tests.ut.base import TestBase
 from vllm_ascend._310p.attention.attention_v1 import (
@@ -62,6 +63,11 @@ class TestAscendAttentionBackendImpl310(TestBase):
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
         self.config_patcher.start()
+        self.utils_config_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config",
+            return_value=self.mock_vllm_config,
+        )
+        self.utils_config_patcher.start()
         self.impl = AscendAttentionBackendImpl310(
             num_heads=8,
             head_size=128,
@@ -116,6 +122,61 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.assertEqual(kwargs["num_kv_heads"], self.impl.num_kv_heads)
         self.assertIs(kwargs["out"], output)
         self.assertIs(result, output)
+
+    @patch("vllm_ascend._310p.dflash_full_and_piecewise.is_310p", return_value=True)
+    @patch("torch_npu._npu_flash_attention")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_hybrid_piecewise_prefill_keeps_padding_out_of_logical_attention(
+        self,
+        mock_get_forward_context,
+        mock_npu_flash_attention,
+        mock_is_310p,
+    ):
+        """Catch physical descriptor padding being appended to the real request."""
+        real_tokens = 82
+        physical_tokens = 160
+        query = torch.randn(physical_tokens, 8, 64)
+        key = torch.randn(physical_tokens, 8, 64)
+        value = torch.randn(physical_tokens, 8, 64)
+        output = torch.full_like(query, 7)
+
+        self.mock_vllm_config.speculative_config.method = "dflash"
+        self.mock_vllm_config.compilation_config.cudagraph_mode = (
+            CUDAGraphMode.FULL_AND_PIECEWISE
+        )
+        self.mock_vllm_config.additional_config = {
+            "ascend_compilation_config": {
+                "dflash_full_and_piecewise_capture_config": {
+                    "piecewise_capture_size": 64,
+                    "full_capture_size": 160,
+                },
+            },
+        }
+        mock_get_forward_context.return_value.cudagraph_runtime_mode = (
+            CUDAGraphMode.PIECEWISE
+        )
+
+        metadata = self.attn_metadata
+        metadata.attn_mask = torch.randn(1, 1, physical_tokens, physical_tokens)
+        metadata.seq_lens = torch.tensor([real_tokens], dtype=torch.int32)
+        metadata.seq_lens_cpu = torch.tensor([real_tokens], dtype=torch.int32)
+
+        self.impl.support_compressed_mask = False
+        result = self.impl.forward_prefill_310(query, key, value, metadata, output)
+
+        mock_npu_flash_attention.assert_called_once()
+        kwargs = mock_npu_flash_attention.call_args.kwargs
+        self.assertEqual(kwargs["query"].shape[0], real_tokens)
+        self.assertEqual(kwargs["key"].shape[0], real_tokens)
+        self.assertEqual(kwargs["value"].shape[0], real_tokens)
+        self.assertEqual(kwargs["out"].shape[0], real_tokens)
+        torch.testing.assert_close(
+            kwargs["seq_len"], torch.tensor([real_tokens], dtype=torch.int32)
+        )
+        self.assertIs(result, output)
+        torch.testing.assert_close(
+            output[real_tokens:], torch.zeros_like(output[real_tokens:])
+        )
 
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_flash_attention")
@@ -313,6 +374,27 @@ class TestAscendAttentionMetadataBuilder310(TestBase):
         expected = torch.tensor([1, 4, 6], dtype=torch.int32)
         torch.testing.assert_close(result, expected)
         assert result.data_ptr() == builder._query_lens_cpu_buffer[:3].data_ptr()
+
+    def test_fill_query_lens_cpu_refreshes_same_buffer_for_piecewise_replay(self):
+        """A fixed descriptor must consume the current runtime qLens values."""
+        builder = AscendMetadataBuilder310Direct.__new__(AscendMetadataBuilder310Direct)
+        builder._query_lens_cpu_buffer = torch.zeros(4, dtype=torch.int32, device="cpu")
+
+        first = builder._fill_query_lens_cpu(
+            num_reqs=1,
+            query_start_loc_cpu=torch.tensor([0, 640], dtype=torch.int32),
+            is_drafting=False,
+        )
+        first_snapshot = first.clone()
+        second = builder._fill_query_lens_cpu(
+            num_reqs=1,
+            query_start_loc_cpu=torch.tensor([0, 896], dtype=torch.int32),
+            is_drafting=False,
+        )
+
+        assert first.data_ptr() == second.data_ptr()
+        torch.testing.assert_close(first_snapshot, torch.tensor([640], dtype=torch.int32))
+        torch.testing.assert_close(second, torch.tensor([896], dtype=torch.int32))
 
     def test_fill_query_lens_cpu_with_buffer_is_drafting(self):
         builder = AscendMetadataBuilder310Direct.__new__(AscendMetadataBuilder310Direct)

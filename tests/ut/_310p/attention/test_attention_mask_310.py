@@ -221,6 +221,44 @@ class TestAttentionMaskBuilder310(TestBase):
             zero_descriptor_padding=False,
         )
 
+    def test_hybrid_graph_safe_positions_follow_effective_runtime_mode(self):
+        config = SimpleNamespace(
+            speculative_config=SimpleNamespace(method="dflash"),
+            compilation_config=SimpleNamespace(
+                cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            ),
+            additional_config={
+                "ascend_compilation_config": {
+                    "dflash_full_and_piecewise_capture_config": {
+                        "piecewise_capture_size": 64,
+                        "full_capture_size": 160,
+                    },
+                },
+            },
+        )
+
+        with patch(
+            "vllm_ascend._310p.dflash_full_and_piecewise.is_310p",
+            return_value=True,
+        ):
+            with patch(
+                "vllm_ascend._310p.attention.attention_mask.get_forward_context",
+                return_value=SimpleNamespace(
+                    vllm_config=config,
+                    cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                ),
+            ):
+                self.assertTrue(AttentionMaskBuilder310._requires_graph_safe_query_positions())
+
+            with patch(
+                "vllm_ascend._310p.attention.attention_mask.get_forward_context",
+                return_value=SimpleNamespace(
+                    vllm_config=config,
+                    cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                ),
+            ):
+                self.assertTrue(AttentionMaskBuilder310._requires_graph_safe_query_positions())
+
     def test_get_compressed_non_causal_splitfuse_mask_310(self):
         from vllm_ascend._310p.attention.attention_mask import COMPRESSED_MASK_SEQ_LEN
 

@@ -27,6 +27,23 @@ vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices = prepare_chunk_i
 
 vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_offsets_310
 
+
+_original_spec_decode_base_proposer_init_310 = AscendSpecDecodeBaseProposer.__init__
+
+
+def _init_spec_decode_base_proposer_310(self, *args, **kwargs):
+    """Preserve the public constructor and initialize guarded 310P buffers."""
+    _original_spec_decode_base_proposer_init_310(self, *args, **kwargs)
+    AscendSpecDecodeBaseProposer310._initialize_hybrid_draft_slot_mapping_310(self)
+
+
+AscendSpecDecodeBaseProposer.__init__ = (  # type: ignore[method-assign]
+    _init_spec_decode_base_proposer_310
+)
+AscendSpecDecodeBaseProposer.load_model = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310.load_model
+)
+
 # 310P: protect tail slot during MTP input_ids shift to avoid GatherV2 corruption
 # caused by the NPU slice-assign writing one element past the intended range
 # on the persistent drafter input_ids buffer.
@@ -35,6 +52,9 @@ AscendSpecDecodeBaseProposer.set_inputs_first_pass = (  # type: ignore[method-as
 )
 AscendSpecDecodeBaseProposer._run_merged_draft = (  # type: ignore[method-assign]
     AscendSpecDecodeBaseProposer310._run_merged_draft
+)
+AscendSpecDecodeBaseProposer._compute_draft_step_slot_mapping = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310._compute_draft_step_slot_mapping
 )
 AscendSpecDecodeBaseProposer._prepare_full_decode_draft_rope = (  # type: ignore[method-assign]
     AscendSpecDecodeBaseProposer310._prepare_full_decode_draft_rope

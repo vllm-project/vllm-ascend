@@ -1,6 +1,12 @@
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor
+from vllm.logger import init_logger
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+
+logger = init_logger(__name__)
+_original_initialize_cudagraph_keys = (
+    CudagraphDispatcher.initialize_cudagraph_keys
+)
 
 
 def _create_padded_batch_descriptor(
@@ -36,3 +42,58 @@ def _create_padded_batch_descriptor(
 
 
 CudagraphDispatcher._create_padded_batch_descriptor = _create_padded_batch_descriptor
+
+
+def _initialize_cudagraph_keys(
+    self,
+    cudagraph_mode: CUDAGraphMode,
+    uniform_decode_query_len: int = 1,
+):
+    additional_config = getattr(self.vllm_config, "additional_config", None) or {}
+    ascend_compilation_config = additional_config.get(
+        "ascend_compilation_config",
+        {},
+    )
+    explicit_portfolio = (
+        isinstance(ascend_compilation_config, dict)
+        and "dflash_full_and_piecewise_capture_config"
+        in ascend_compilation_config
+    )
+    if not explicit_portfolio:
+        return _original_initialize_cudagraph_keys(
+            self,
+            cudagraph_mode,
+            uniform_decode_query_len,
+        )
+
+    from vllm_ascend._310p.dflash_full_and_piecewise import (
+        initialize_dflash_full_and_piecewise_cudagraph_keys,
+    )
+
+    if initialize_dflash_full_and_piecewise_cudagraph_keys(
+        self,
+        cudagraph_mode,
+        uniform_decode_query_len,
+    ):
+        inventory = {
+            mode.name: sorted(
+                descriptor.num_tokens
+                for descriptor in descriptors
+            )
+            for mode, descriptors in self.cudagraph_keys.items()
+        }
+        logger.info(
+            "[310p-dflash-full-and-piecewise/portfolio] mode=%s "
+            "inventory=%s",
+            cudagraph_mode.name,
+            inventory,
+        )
+        return
+    _original_initialize_cudagraph_keys(
+        self,
+        cudagraph_mode,
+        uniform_decode_query_len,
+    )
+
+
+CudagraphDispatcher.initialize_cudagraph_keys = _initialize_cudagraph_keys
