@@ -293,6 +293,51 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        from dataclasses import fields as dc_fields
+        from vllm.config.utils import replace as vllm_replace
+
+        # The drafter inherits the main engine's kv_transfer_config, including
+        # the "prefill"/"decode" sub-configs that declare PD parallelism
+        # (dp_size/tp_size). Reconstructing the draft config via replace()
+        # re-runs check_kv_extra_config, which compares those declared dp_size
+        # values against the drafter's own (per-rank) data_parallel_size and
+        # raises a false "conflicting data parallel size" error. The drafter
+        # never owns a KV connector (it is built from the main worker's
+        # vllm_config, not the draft config), so temporarily strip these
+        # sub-configs from the worker config around the super() call. This
+        # defers the kernel/attention overrides to the base implementation and
+        # stays compatible with proposer subclasses that wrap super() themselves.
+        orig_vllm_config = self.vllm_config
+        kvtc = orig_vllm_config.kv_transfer_config
+        if kvtc is not None:
+            # Build a separate KVTransferConfig with prefill/decode stripped.
+            # vllm_replace(kvtc, ...) cannot be used here: platform init injects
+            # a non-field marker (_engine_id_patched) onto the instance, and
+            # vllm_replace iterates __dict__ requiring every key to be a declared
+            # field. Reconstruct from declared fields only so injected attrs are
+            # filtered out.
+            declared = {f.name for f in dc_fields(type(kvtc))}
+            stripped_values = {
+                k: v for k, v in kvtc.__dict__.items() if k in declared
+            }
+            # kv_connector_extra_config defaults to {} (default_factory), but
+            # guard against None in case a caller/override leaves it unset.
+            extra_src = stripped_values.get("kv_connector_extra_config") or {}
+            stripped_values["kv_connector_extra_config"] = {
+                k: v
+                for k, v in extra_src.items()
+                if k not in ("prefill", "decode")
+            }
+            self.vllm_config = vllm_replace(
+                orig_vllm_config,
+                kv_transfer_config=type(kvtc)(**stripped_values),
+            )
+        try:
+            return super()._create_draft_vllm_config()
+        finally:
+            self.vllm_config = orig_vllm_config
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
