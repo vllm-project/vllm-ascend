@@ -34,6 +34,7 @@ class AscendBlockTables(BlockTables):
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes

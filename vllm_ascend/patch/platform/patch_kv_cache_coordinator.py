@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
+import inspect
 import sys
 from collections.abc import Mapping
 from math import lcm
@@ -36,6 +37,22 @@ from vllm_ascend.utils import vllm_version_is
 USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
+
+
+def _call_orig_get_kv_cache_coordinator(**kwargs):
+    """Call the upstream helper while tolerating supported vLLM signatures.
+
+    The vLLM API changed several times around 0.27.1. In particular, the
+    remote validation environment may not expose ``num_prefill_lookahead``
+    even though the Ascend compatibility patch does. Keep the Ascend-side
+    call site feature-complete and pass only arguments accepted by the
+    installed upstream helper.
+    """
+    parameters = inspect.signature(_orig_get_kv_cache_coordinator).parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return _orig_get_kv_cache_coordinator(**kwargs)
+    filtered_kwargs = {name: value for name, value in kwargs.items() if name in parameters}
+    return _orig_get_kv_cache_coordinator(**filtered_kwargs)
 
 
 def _select_kv_token_budget(
@@ -550,7 +567,7 @@ if vllm_version_is("0.27.1"):
             )
             orig_kwargs["max_in_flight_tokens"] = token_budget
             orig_kwargs["scheduler_block_size"] = scheduler_block_size
-            return _orig_get_kv_cache_coordinator(**orig_kwargs)
+            return _call_orig_get_kv_cache_coordinator(**orig_kwargs)
 
         return AscendHybridKVCacheCoordinator(
             kv_cache_config,
@@ -623,7 +640,7 @@ else:
             orig_kwargs["max_in_flight_tokens"] = token_budget
             orig_kwargs["scheduler_block_size"] = scheduler_block_size
             orig_kwargs["num_prefill_lookahead"] = num_prefill_lookahead
-            return _orig_get_kv_cache_coordinator(**orig_kwargs)
+            return _call_orig_get_kv_cache_coordinator(**orig_kwargs)
 
         return AscendHybridKVCacheCoordinator(  # type: ignore[call-arg]
             kv_cache_config,

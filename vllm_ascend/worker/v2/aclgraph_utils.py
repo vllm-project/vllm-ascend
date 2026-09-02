@@ -214,6 +214,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        pcp_manager: Any = None,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
@@ -221,7 +222,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
-        pcp_manager = getattr(self.model_runner, "pcp_manager", None)
+        if pcp_manager is None:
+            pcp_manager = getattr(self.model_runner, "pcp_manager", None)
         if pcp_manager is not None:
             cudagraph_utils.prepare_inputs_to_capture = partial(
                 _prepare_pcp_inputs_to_capture,
@@ -284,6 +286,13 @@ class ModelWithContext(nn.Module):
 
     def markov_bias(self, markov_embed: torch.Tensor):
         return self.original_model.markov_bias(markov_embed)
+
+    def compute_confidence(
+        self,
+        head_hidden: torch.Tensor,
+        markov_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.original_model.compute_confidence(head_hidden, markov_embed)
 
     def map_draft_to_target(self, draft_ids: torch.Tensor):
         return self.original_model.map_draft_to_target(draft_ids)

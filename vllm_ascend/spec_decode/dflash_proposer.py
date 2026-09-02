@@ -91,6 +91,7 @@ class AscendDflashProposer(AscendEagleProposer):
         if dynamic_spec_config.method == "dflash":
             self.dynamic_spec = DynamicSpecScheduler(
                 method="dflash",
+                policy=dynamic_spec_config.policy,
                 method_params=dynamic_spec_config.method_params,
                 max_batch_size=self.max_batch_size,
                 num_speculative_tokens=self.num_speculative_tokens,

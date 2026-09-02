@@ -17,6 +17,8 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from typing import Any
+
 import torch
 from vllm.triton_utils import tl, triton
 
@@ -80,7 +82,8 @@ def apply_temperature(
     do_not_specialize=[
         "local_argmax_stride",
         "local_max_stride",
-        "processed_logits_stride",
+        "processed_logits_stride_0",
+        "processed_logits_stride_1",
         "logits_stride",
         "vocab_size",
         "num_blocks",
@@ -92,7 +95,8 @@ def _gumbel_sample_kernel(
     local_max_ptr,
     local_max_stride,
     processed_logits_ptr,
-    processed_logits_stride,
+    processed_logits_stride_0,
+    processed_logits_stride_1,
     processed_logits_col_ptr,
     logits_ptr,
     logits_stride,
@@ -105,6 +109,8 @@ def _gumbel_sample_kernel(
     BLOCK_SIZE: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
+    IS_DRAFTING: tl.constexpr,
+    CACHE_AFTER_TEMPERATURE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
 
@@ -122,11 +128,16 @@ def _gumbel_sample_kernel(
         logits = logits.to(tl.float32)
 
         block_temp = temp
+        raw_logits = logits
         if block_temp != 0.0 and APPLY_TEMPERATURE:
             logits = logits / block_temp
 
         if processed_logits_ptr is not None:
-            # Store the temperature-applied logits.
+            # The current upstream rejection sampler expects raw logits in its
+            # cache and applies temperature when reading them.  Keep the old
+            # processed-logits behavior for legacy callers through the
+            # CACHE_AFTER_TEMPERATURE specialization.
+            cache_logits = logits if CACHE_AFTER_TEMPERATURE else raw_logits
             if processed_logits_col_ptr is not None:
                 if PER_TOKEN_COL:
                     col = tl.load(processed_logits_col_ptr + token_idx)
@@ -135,8 +146,11 @@ def _gumbel_sample_kernel(
             else:
                 col = 0
             tl.store(
-                processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
-                logits,
+                processed_logits_ptr
+                + req_state_idx * processed_logits_stride_0
+                + col * processed_logits_stride_1
+                + block,
+                cache_logits,
                 mask=mask,
             )
 
@@ -146,6 +160,10 @@ def _gumbel_sample_kernel(
             # NOTE(Ronald1995): change pos's dtype to tl.int32, because triton-ascend's
             # compiler doesn't support uint64 of pos arg.
             pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+            if IS_DRAFTING:
+                # Keep draft and target Gumbel streams disjoint while using
+                # the same request seed and token position.
+                pos = pos + (1 << 30)
             gumbel_seed = tl.randint(seed, pos)
 
             # NOTE(Ronald1995): r is tl.float64 in vllm, change it to tl.float32,
@@ -171,13 +189,53 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
-    output_processed_logits: torch.Tensor | None = None,
-    output_processed_logits_col: torch.Tensor | None = None,
+    is_drafting: bool | torch.Tensor | None = False,
+    logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
+    logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
+    **legacy_kwargs: Any,
 ) -> torch.Tensor:
+    # vLLM <= 0.27.1 called these buffers output_processed_logits* and did
+    # not pass is_drafting.  Accept both APIs because the selected vLLM main
+    # revision uses the newer names while the Ascend unit tests and release
+    # branch still exercise the old names.
+    legacy_cache = legacy_kwargs.pop("output_processed_logits", None)
+    legacy_cache_col = legacy_kwargs.pop("output_processed_logits_col", None)
+    if legacy_kwargs:
+        unexpected = next(iter(legacy_kwargs))
+        raise TypeError(f"gumbel_sample() got an unexpected keyword argument '{unexpected}'")
+
+    legacy_api = legacy_cache is not None or legacy_cache_col is not None
+    if not isinstance(is_drafting, bool):
+        # Old positional tail:
+        # (output_processed_logits, output_processed_logits_col, use_fp64).
+        legacy_api = True
+        positional_cache = is_drafting
+        positional_cache_col = logits_cache
+        positional_use_fp64 = logits_cache_col if isinstance(logits_cache_col, bool) else use_fp64
+        is_drafting = False
+        logits_cache = positional_cache
+        logits_cache_col = positional_cache_col
+        use_fp64 = positional_use_fp64
+
+    if legacy_cache is not None:
+        logits_cache = legacy_cache
+    if legacy_cache_col is not None:
+        logits_cache_col = legacy_cache_col
+
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
+    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    pos = pos.contiguous()
+    if logits_cache_col is not None:
+        logits_cache_col = logits_cache_col.contiguous()
     num_tokens, vocab_size = logits.shape
+    if logits_cache is not None:
+        if logits_cache.size(-1) < vocab_size:
+            raise ValueError(
+                f"logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
+                f"than sampled logits ({vocab_size})."
+            )
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = torch.empty(
@@ -192,15 +250,16 @@ def gumbel_sample(
         dtype=torch.float32,
         device=logits.device,
     )
-    per_token_col = output_processed_logits_col is not None and output_processed_logits_col.dim() > 0
+    per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
     _gumbel_sample_kernel[(num_tokens,)](
         local_argmax,
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        output_processed_logits,
-        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-        output_processed_logits_col,
+        logits_cache,
+        logits_cache.stride(0) if logits_cache is not None else 0,
+        logits_cache.stride(1) if logits_cache is not None and logits_cache.dim() > 1 else 0,
+        logits_cache_col,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -212,6 +271,8 @@ def gumbel_sample(
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
         PER_TOKEN_COL=per_token_col,
+        IS_DRAFTING=is_drafting,
+        CACHE_AFTER_TEMPERATURE=legacy_api,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)

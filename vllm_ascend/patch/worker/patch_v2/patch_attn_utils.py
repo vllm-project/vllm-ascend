@@ -9,7 +9,6 @@ from vllm_ascend.worker.v2.attn_utils import (
     get_kv_cache_spec,
 )
 
-
 def _get_ascend_sfa_indexer_backend(_self):
     return AscendSFAIndexerBackend
 

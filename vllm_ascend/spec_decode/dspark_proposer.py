@@ -62,6 +62,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if dynamic_spec_config.method == "dspark":
             self.dynamic_spec = DynamicSpecScheduler(
                 method="dspark",
+                policy=dynamic_spec_config.policy,
                 method_params=dynamic_spec_config.method_params,
                 max_batch_size=self.max_batch_size,
                 num_speculative_tokens=self.num_speculative_tokens,

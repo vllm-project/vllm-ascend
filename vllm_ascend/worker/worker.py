@@ -774,6 +774,29 @@ class NPUWorker(WorkerBase):
 
         kernel_warmup(self)
 
+        # Dynamic speculative decoding can replace its external/manual
+        # latency table with a profile measured on the actual model, KV-cache,
+        # TP topology and Ascend runtime.  This runs after the ordinary warmup
+        # and before graph capture; V2/varlen graph changes are intentionally
+        # not part of this path yet.
+        profile_dynamic_spec = getattr(
+            self.model_runner,
+            "profile_dynamic_spec_hardware",
+            None,
+        )
+        if profile_dynamic_spec is not None:
+            try:
+                profile_dynamic_spec()
+            except (OSError, TypeError, ValueError, RuntimeError) as exc:
+                dynamic_spec = getattr(getattr(self.model_runner, "drafter", None), "dynamic_spec", None)
+                if dynamic_spec is not None and hasattr(dynamic_spec, "fallback_to_confidence_budget"):
+                    dynamic_spec.fallback_to_confidence_budget(exc)
+                logger.warning(
+                    "Startup dynamic speculative hardware profiling failed; "
+                    "continuing with confidence-budget fallback: %s",
+                    exc,
+                )
+
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             npugraph_memory_bytes = self.model_runner.capture_model()

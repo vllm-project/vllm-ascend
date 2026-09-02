@@ -884,6 +884,10 @@ class DynamicSpecConfig:
     # Dynamic speculative-length methods. "dspark" relies on the DSpark
     # confidence head; models without such a head need another method.
     SUPPORTED_METHODS: ClassVar[tuple[str, ...]] = ("dspark", "dflash")
+    SUPPORTED_POLICIES: ClassVar[tuple[str, ...]] = (
+        "confidence_budget",
+        "hardware_aware",
+    )
 
     # None disables the dynamic speculative-length path.
     method: str | None = None
@@ -893,12 +897,36 @@ class DynamicSpecConfig:
     # budget_threshold). Empty by default, in which case each method
     # falls back to its own built-in defaults.
     method_params: dict[str, Any] = dataclasses.field(default_factory=dict)
+    # ``confidence_budget`` preserves the original dynamic policy, while
+    # ``hardware_aware`` consumes an Ascend latency/SPS profile.
+    policy: str = "confidence_budget"
+    # Batch-level proposal gate. It is opt-in so existing dynamic speculative
+    # decoding keeps its current behaviour.
+    proposal_gate_enabled: bool = False
+    proposal_gate_params: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate(self):
         if self.method is not None and self.method not in self.SUPPORTED_METHODS:
             raise ValueError(
                 f"dynamic_spec_config.method must be one of {self.SUPPORTED_METHODS} or None, got {self.method!r}"
+            )
+        if self.policy not in self.SUPPORTED_POLICIES:
+            raise ValueError(
+                "dynamic_spec_config.policy must be one of "
+                f"{self.SUPPORTED_POLICIES}, got {self.policy!r}"
+            )
+        if not isinstance(self.method_params, dict):
+            raise TypeError(
+                "dynamic_spec_config.method_params must be a dict, "
+                f"got {type(self.method_params).__name__}: "
+                f"{self.method_params}"
+            )
+        if not isinstance(self.proposal_gate_params, dict):
+            raise TypeError(
+                "dynamic_spec_config.proposal_gate_params must be a dict, "
+                f"got {type(self.proposal_gate_params).__name__}: "
+                f"{self.proposal_gate_params}"
             )
         return self
 

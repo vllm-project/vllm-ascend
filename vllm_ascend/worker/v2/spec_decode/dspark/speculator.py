@@ -36,6 +36,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.physical_k import physical_k_scope
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
@@ -44,6 +45,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
+        self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
 
     def load_draft_model(
         self,
@@ -105,8 +107,15 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         self.attn_backends = attn_backends
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+    def build_draft_attn_metadatas(
+        self,
+        num_reqs_padded,
+        seq_lens_cpu_upper_bound,
+        num_tokens_padded=None,
+    ):
+        num_tokens_padded = num_tokens_padded or (
+            num_reqs_padded * self.num_query_per_req
+        )
         assert self.input_batch is not None
         # The draft attention metadata is built through the generic
         # (Ascend) build_attn_metadata path; the factory forwards the draft
@@ -162,7 +171,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         next_prefill_tokens: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
+        dp_sync: Any = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
@@ -170,27 +179,30 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
-        with (
-            build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
-            ),
-        ):
-            return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                num_tokens_across_dp,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
-                is_profile=is_profile,
-            )
+        with physical_k_scope(self, input_batch):
+            with (
+                build_attn_metadata_wrapper(),
+                build_draft_attn_metadata_factory(
+                    self.input_buffers.positions,
+                    self.max_num_tokens,
+                    torch.from_numpy(self.input_batch.is_prefilling_np),
+                ),
+            ):
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    dp_sync,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                )

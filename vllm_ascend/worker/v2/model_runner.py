@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import inspect
 from contextlib import contextmanager
 
 import numpy as np
@@ -243,6 +244,7 @@ class NPUModelRunner(GPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
         context_len: int = 0,
+        valid_dummy_state_slots: bool = False,
     ):
         self._cpp_execution_time_ms = None
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
@@ -251,23 +253,18 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
         )
 
-        if vllm_version_is("0.27.1"):
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-            )
-        else:
-            output = super().execute_model(
-                scheduler_output,
-                intermediate_tensors=intermediate_tensors,
-                dummy_run=dummy_run,
-                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                is_profile=is_profile,
-                context_len=context_len,
-            )
+        execute_kwargs = {
+            "intermediate_tensors": intermediate_tensors,
+            "dummy_run": dummy_run,
+            "skip_attn_for_dummy_run": skip_attn_for_dummy_run,
+            "is_profile": is_profile,
+            "context_len": context_len,
+        }
+        if "valid_dummy_state_slots" in inspect.signature(
+            super().execute_model
+        ).parameters:
+            execute_kwargs["valid_dummy_state_slots"] = valid_dummy_state_slots
+        output = super().execute_model(scheduler_output, **execute_kwargs)
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
@@ -542,23 +539,6 @@ class NPUModelRunner(GPUModelRunner):
             idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
             num_reqs = len(req_ids)
 
-            num_valid_tokens = num_scheduled_tokens_np
-            if scheduler_output.scheduled_spec_decode_tokens:
-                num_valid_tokens = np.array(
-                    [
-                        num_toks - len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
-                        for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
-                    ],
-                    dtype=np.int32,
-                )
-            attn_state = build_attn_state(
-                self.vllm_config,
-                self.input_buffers.seq_lens_np,
-                num_reqs,
-                num_scheduled_tokens_np,
-                num_valid_tokens,
-            )
-
             # Get the number of draft tokens for each request.
             draft_tokens = scheduler_output.scheduled_spec_decode_tokens
             num_draft_tokens_per_req = None
@@ -585,7 +565,39 @@ class NPUModelRunner(GPUModelRunner):
                 np.cumsum(num_logits, out=cu_num_logits_np[1:])
                 cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
+            # Draft compaction changes only the speculative suffix. Preserve
+            # the original target-token count for Ascend phase classification;
+            # it is the number of scheduled tokens minus the scheduler's full
+            # draft suffix, not the compacted draft budget.
+            num_valid_tokens = num_scheduled_tokens_np
+            if draft_tokens:
+                num_valid_tokens = np.array(
+                    [
+                        num_toks - len(draft_tokens.get(i, []))
+                        for num_toks, i in zip(num_scheduled_tokens_np, req_ids)
+                    ],
+                    dtype=np.int32,
+                )
+
             num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+            adaptive_verification = (
+                self.adaptive_verification
+                if num_draft_tokens_per_req is not None
+                else None
+            )
+            if adaptive_verification is not None:
+                # The scheduler stores the original, evenly distributed draft
+                # budget. Compact it before building Ascend attention state so
+                # the CPU-side phase classification sees the same target/draft
+                # split as the V2 input batch.
+                num_scheduled_tokens_np, cu_num_logits_np = (
+                    adaptive_verification.compact_batch(
+                        num_draft_tokens_per_req,
+                        num_scheduled_tokens_np,
+                        cu_num_logits_np,
+                    )
+                )
+
             # Get query_start_loc.
             # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
             # See _pad_query_start_loc_for_fia.
@@ -611,6 +623,18 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc = self.input_buffers.query_start_loc
             async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
+            if adaptive_verification is not None:
+                # Reallocate the compacted draft prefix on device. This keeps
+                # the target logits and query layout consistent with the
+                # adaptive verification budget selected in gather_batch_req_state.
+                cu_num_logits, query_start_loc, total_num_draft_tokens = (
+                    adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
+                )
+                total_num_logits = (
+                    num_reqs * self.model_state.num_new_sampled_tokens_per_step
+                    + total_num_draft_tokens
+                )
+
             if draft_tokens:
                 expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                     idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
@@ -619,6 +643,14 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
             query_start_loc = query_start_loc[: num_reqs_padded + 1]
             self.eplb.set_batch_phase(batch_req_state.has_prefill)
+
+            attn_state = build_attn_state(
+                self.vllm_config,
+                self.input_buffers.seq_lens_np,
+                num_reqs,
+                num_scheduled_tokens_np,
+                num_valid_tokens,
+            )
 
             # Get prefill tokens if any.
             if batch_req_state.has_prefill:
@@ -926,13 +958,25 @@ class NPUModelRunner(GPUModelRunner):
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
 
-        if num_tokens_padded == num_reqs_padded * self.decode_query_len:
+        # A hardware-aware V2 draft can select a smaller uniform physical K
+        # and therefore a smaller query width than the maximum configured
+        # decode width.  Infer that width from the selected FULL graph bucket;
+        # mixed batches keep the existing dummy-row path.
+        runtime_query_len = self.decode_query_len
+        if (
+            num_reqs_padded > 0
+            and num_tokens_padded % num_reqs_padded == 0
+        ):
+            runtime_query_len = num_tokens_padded // num_reqs_padded
+
+        if num_tokens_padded == num_reqs_padded * runtime_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * runtime_query_len
+                + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
