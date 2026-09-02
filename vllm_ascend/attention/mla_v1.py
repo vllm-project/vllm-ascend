@@ -989,15 +989,44 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_layers = len(attn_keys)
         if num_layers == 0:
             return
+        if graph_params is None:
+            raise RuntimeError("MLA graph parameters were not initialized before graph replay.")
+
+        captured_attn_params = graph_params.attn_params.get(num_tokens)
+        captured_handles = graph_params.handles.get(num_tokens)
+        captured_events = graph_params.events.get(num_tokens)
+        if not captured_attn_params or not captured_handles or not captured_events:
+            populated_sizes = sorted(
+                size for size, params in graph_params.attn_params.items() if params
+            )
+            raise RuntimeError(
+                "No captured MLA graph parameters for the requested Query T: "
+                f"{num_tokens=}, populated_sizes={populated_sizes}. The graph "
+                "update key must match the Query T used during capture."
+            )
+        if not (
+            len(captured_attn_params) == len(captured_handles) == len(captured_events)
+        ):
+            raise RuntimeError(
+                "Incomplete captured MLA graph parameters for "
+                f"{num_tokens=}: attn_params={len(captured_attn_params)}, "
+                f"handles={len(captured_handles)}, events={len(captured_events)}."
+            )
         if _EXTRA_CTX.is_draft_model:
-            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
+            if len(captured_attn_params) % num_layers != 0:
+                raise RuntimeError(
+                    "Captured MLA draft attention count is not aligned with "
+                    f"the runtime layer count for {num_tokens=}: "
+                    f"captured={len(captured_attn_params)}, layers={num_layers}."
+                )
+            attn_keys = attn_keys * (len(captured_attn_params) // num_layers)
         attn_count = 0
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
                 attn_keys,
-                graph_params.attn_params[num_tokens],
-                graph_params.handles[num_tokens],
-                graph_params.events[num_tokens],
+                captured_attn_params,
+                captured_handles,
+                captured_events,
             ):
                 (
                     q_nope,

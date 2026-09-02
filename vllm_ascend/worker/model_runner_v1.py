@@ -5002,7 +5002,40 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                if self.speculative_config.method == "dspark" and isinstance(
+                    self.drafter,
+                    AscendDSparkProposer,
+                ):
+                    # GraphParams is keyed by the attention operator's Query
+                    # T, not necessarily by the target graph descriptor width.
+                    # In K3 MLA FULL decode graphs these are B*N and B*(N+1)
+                    # respectively.  The draft ACLGraphWrapper captures only
+                    # FULL descriptors, so PIECEWISE sizes must not introduce
+                    # empty graph-parameter slots here.
+                    full_draft_capture_descs = [
+                        desc
+                        for mode, descs in capture_descs
+                        if mode == CUDAGraphMode.FULL
+                        for desc in descs
+                    ]
+                    draft_capture_sizes = {
+                        self.drafter.get_graph_query_num_tokens(
+                            desc.num_tokens,
+                            desc.num_reqs,
+                        )
+                        if desc.uniform and desc.num_reqs is not None
+                        else desc.num_tokens
+                        for desc in full_draft_capture_descs
+                    }
+                    if not draft_capture_sizes:
+                        draft_capture_sizes.update(capture_sizes)
+                    logger.info(
+                        "DSpark draft graph Query-T sizes: %s",
+                        sorted(draft_capture_sizes),
+                    )
+                    set_draft_graph_params(sorted(draft_capture_sizes))
+                else:
+                    set_draft_graph_params(capture_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""

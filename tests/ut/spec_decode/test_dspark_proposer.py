@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.spec_decode.dspark_proposer as dspark_proposer_module
@@ -63,6 +64,7 @@ class _DSparkProposerTestBase:
         block_size: int,
         hf_config: SimpleNamespace | None = None,
         draft_attn_causal: bool | None = None,
+        use_cuda_graph: bool = False,
     ):
         device = torch.device("cpu")
         vllm_config = cls._make_vllm_config(hf_config or SimpleNamespace())
@@ -83,6 +85,11 @@ class _DSparkProposerTestBase:
             proposer.hidden_size = _HIDDEN_SIZE
             proposer.hidden_states = torch.empty(0)
             proposer._dflash_hidden_states = torch.empty(0)
+            proposer._enable_probabilistic_draft_probs = (
+                vllm_config.speculative_config.draft_sample_method == "probabilistic"
+            )
+            proposer._last_draft_probs = None
+            proposer.use_cuda_graph = use_cuda_graph
             proposer.model = (
                 SimpleNamespace(get_draft_attn_causal=lambda: [draft_attn_causal])
                 if draft_attn_causal is not None
@@ -116,8 +123,10 @@ class _DSparkProposerTestBase:
         ]
         proposer._layer_group_idx = [gid]
         block_table = torch.zeros((num_reqs, 16), dtype=torch.int32, device=device)
+        block_table_buffer = torch.zeros((num_reqs + 1, 16), dtype=torch.int32, device=device)
+        block_table_buffer[:num_reqs].copy_(block_table)
         proposer._per_group_block_tables = {gid: block_table}
-        proposer._per_group_block_table_buffers = {gid: block_table}
+        proposer._per_group_block_table_buffers = {gid: block_table_buffer}
         slot = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         proposer._per_group_slot_mappings = {gid: slot}
         proposer._per_group_kernel_block_sizes = {gid: block_size}
@@ -133,6 +142,8 @@ class _DSparkProposerTestBase:
         num_reqs,
         block_size,
         seq_len=128,
+        host_seq_len=None,
+        async_metadata=False,
         context=None,
         num_rejected=None,
         with_optional_attrs=False,
@@ -151,11 +162,16 @@ class _DSparkProposerTestBase:
         query_start_loc_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
         if context is not None:
             query_start_loc_cpu[num_reqs] = context
+        if host_seq_len is None:
+            host_seq_len = seq_len
+        canonical_seq_lens_cpu = torch.full((num_reqs,), host_seq_len, dtype=torch.int32)
         cad = SimpleNamespace(
             num_reqs=num_reqs,
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=torch.full((num_reqs,), seq_len, dtype=torch.int32),
+            _seq_lens_cpu=canonical_seq_lens_cpu,
+            seq_lens_cpu=None if async_metadata else canonical_seq_lens_cpu,
             max_seq_len=seq_len,
         )
         if with_optional_attrs:
@@ -189,6 +205,8 @@ class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
             query_start_loc=torch.arange(num_reqs + 1, dtype=torch.int32) * block_size,
             query_start_loc_cpu=torch.zeros(num_reqs + 1, dtype=torch.int32),
             seq_lens=torch.full((num_reqs,), 128, dtype=torch.int32),
+            _seq_lens_cpu=torch.full((num_reqs,), 128, dtype=torch.int32),
+            seq_lens_cpu=torch.full((num_reqs,), 128, dtype=torch.int32),
             max_seq_len=128,
         )
         proposer.set_inputs_first_pass(
@@ -392,10 +410,20 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
             block_size=_NUM_SPECULATIVE_TOKENS,
             hf_config=hf_config,
         )
-        expected_max_query_tokens = _MAX_BATCH_SIZE * expected_num_query_per_req
+        expected_max_query_tokens = _MAX_BATCH_SIZE * (1 + _NUM_SPECULATIVE_TOKENS)
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
+
+    def test_static_config_preserves_parent_graph_mode(self) -> None:
+        proposer = self._make_proposer(
+            max_num_tokens=_MAX_NUM_TOKENS,
+            num_reqs=_MAX_BATCH_SIZE,
+            block_size=_NUM_SPECULATIVE_TOKENS,
+            use_cuda_graph=True,
+        )
+
+        assert proposer.use_cuda_graph is True
 
 
 # fmt: off
@@ -419,6 +447,22 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
         assert proposer._per_group_block_tables[gid] is block_table
         assert proposer._per_group_slot_mappings[gid] is slot_mapping
 
+    def test_block_table_buffer_keeps_graph_padding_row(self):
+        num_reqs, block_size, max_num_tokens = 4, 5, 256
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
+        )
+        gid = 7
+        block_table = torch.arange(num_reqs * 16, dtype=torch.int32).reshape(num_reqs, 16)
+        slot_mapping = torch.zeros(max_num_tokens, dtype=torch.int32)
+
+        proposer.set_per_group_attn_metadata(gid, block_table, slot_mapping)
+
+        buffer = proposer._per_group_block_table_buffers[gid]
+        assert buffer.shape == (num_reqs + 1, 16)
+        assert torch.equal(buffer[:num_reqs], block_table)
+        assert torch.count_nonzero(buffer[num_reqs]) == 0
+
     def test_overwrites_existing_gid(self):
         num_reqs, block_size, max_num_tokens = 2, 5, 256
         proposer = self._make_proposer(
@@ -435,12 +479,137 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
         assert proposer._per_group_slot_mappings[gid] is new_slot_mapping
         assert proposer._per_group_block_tables[gid] is not old_block_table
 
+    def test_rejects_block_table_over_request_capacity(self):
+        num_reqs, block_size, max_num_tokens = 2, 5, 256
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
+        )
+
+        with pytest.raises(ValueError, match="exceeds the configured request capacity"):
+            proposer.set_per_group_attn_metadata(
+                7,
+                torch.zeros((num_reqs + 1, 16), dtype=torch.int32),
+                torch.zeros(max_num_tokens, dtype=torch.int32),
+            )
+
+        assert 7 not in proposer._per_group_block_tables
+        assert 7 not in proposer._per_group_slot_mappings
+
+
+class TestPadQueryStartLocForGraph:
+    @staticmethod
+    def _make_query_start_loc(values: list[int], capacity: int):
+        host = np.zeros(capacity, dtype=np.int32)
+        host[: len(values)] = values
+        return SimpleNamespace(np=host, copy_to_gpu=MagicMock())
+
+    @pytest.mark.parametrize(
+        ("num_query_per_req", "real_num_reqs", "graph_num_reqs", "num_input_tokens", "expected"),
+        [
+            pytest.param(7, 1, 2, 16, [0, 7, 14, 16], id="virtual-tail"),
+            pytest.param(5, 2, 8, 48, [0, 5, 10, 15, 20, 25, 30, 35, 40, 48], id="request-padding"),
+            pytest.param(7, 1, 3, 16, [0, 7, 14, 16], id="clamped-to-token-budget"),
+        ],
+    )
+    def test_matches_graph_capture_layout(
+        self,
+        num_query_per_req: int,
+        real_num_reqs: int,
+        graph_num_reqs: int,
+        num_input_tokens: int,
+        expected: list[int],
+    ) -> None:
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = num_query_per_req
+        initial = [idx * num_query_per_req for idx in range(real_num_reqs + 1)]
+        query_start_loc = self._make_query_start_loc(initial, graph_num_reqs + 2)
+
+        num_metadata_reqs = proposer.pad_query_start_loc_for_graph(
+            query_start_loc,
+            num_input_tokens,
+            real_num_reqs,
+            graph_num_reqs,
+        )
+
+        assert num_metadata_reqs == len(expected) - 1
+        assert query_start_loc.np[: num_metadata_reqs + 1].tolist() == expected
+        assert query_start_loc.np[: num_metadata_reqs + 1].max() <= num_input_tokens
+        query_start_loc.copy_to_gpu.assert_called_once_with()
+
+    def test_rejects_missing_tail_capacity(self) -> None:
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.num_query_per_req = 7
+        query_start_loc = self._make_query_start_loc([0, 7], capacity=3)
+
+        with pytest.raises(ValueError, match="no room for the graph-padding tail"):
+            proposer.pad_query_start_loc_for_graph(
+                query_start_loc,
+                num_input_tokens=16,
+                real_num_reqs=1,
+                graph_num_reqs=2,
+            )
+
+
+class TestDSparkGraphDispatch:
+    def test_uses_target_verification_width(self, monkeypatch) -> None:
+        class StopAfterFirstDispatch(RuntimeError):
+            pass
+
+        batch_size = 16
+        num_speculative_tokens = 7
+        num_draft_tokens = batch_size * num_speculative_tokens
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "dspark"
+        proposer.num_speculative_tokens = num_speculative_tokens
+        proposer.hidden_size = _HIDDEN_SIZE
+        proposer.use_cuda_graph = True
+        proposer.model = SimpleNamespace(combine_hidden_states=lambda hidden_states: hidden_states)
+        proposer.set_inputs_first_pass = MagicMock(
+            return_value=(
+                num_draft_tokens,
+                torch.arange(num_draft_tokens, dtype=torch.int32),
+                SimpleNamespace(),
+                None,
+            )
+        )
+        dispatcher = MagicMock()
+        dispatcher.dispatch.return_value = (
+            CUDAGraphMode.FULL,
+            SimpleNamespace(num_tokens=128, num_reqs=batch_size),
+        )
+        proposer.runner = SimpleNamespace(
+            dcp_manager=None,
+            input_batch=SimpleNamespace(lora_id_to_lora_request={}),
+            cudagraph_dispatcher=dispatcher,
+            _sync_metadata_across_dp=MagicMock(side_effect=StopAfterFirstDispatch),
+        )
+        metadata = SimpleNamespace(batch_size=lambda: batch_size)
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.K3DSparkForCausalLM",
+            object,
+        )
+
+        with pytest.raises(StopAfterFirstDispatch):
+            proposer._propose(
+                target_token_ids=torch.zeros(num_draft_tokens, dtype=torch.int64),
+                target_positions=torch.zeros(num_draft_tokens, dtype=torch.int32),
+                target_hidden_states=torch.zeros((num_draft_tokens, _HIDDEN_SIZE)),
+                next_token_ids=torch.zeros(batch_size, dtype=torch.int64),
+                token_indices_to_sample=torch.arange(num_draft_tokens, dtype=torch.int32),
+                common_attn_metadata=metadata,
+                target_model_batch_desc=SimpleNamespace(uniform=True),
+                sampling_metadata=SimpleNamespace(),
+            )
+
+        dispatcher.dispatch.assert_called_once_with(
+            num_tokens=batch_size * (1 + num_speculative_tokens),
+            uniform_decode=True,
+            has_lora=False,
+        )
+
 
 class TestDSparkInitValidation:
-    """``AscendDSparkProposer.__init__`` rejects probabilistic draft sampling
-    (unsupported on the v1 model runner) and, for the greedy path, allocates
-    the DSpark-specific draft/seed buffers and overrides the DFlash
-    query-token / cudagraph defaults."""
+    """Tests DSpark-specific buffers and graph/query-layout overrides."""
 
     @staticmethod
     def _make_vllm_config(
@@ -470,6 +639,7 @@ class TestDSparkInitValidation:
         max_num_tokens,
         dtype,
         device,
+        use_cuda_graph=False,
     ):
         """Replace the heavy DFlash/Eagle base init with a stub that only sets
         the attributes DSpark's ``__init__`` subsequently reads."""
@@ -485,6 +655,12 @@ class TestDSparkInitValidation:
             self.hidden_size = 0
             self.hidden_states = None
             self._dflash_hidden_states = None
+            self._enable_probabilistic_draft_probs = (
+                vllm_config.speculative_config.draft_sample_method
+                == "probabilistic"
+            )
+            self._last_draft_probs = None
+            self.use_cuda_graph = use_cuda_graph
 
         monkeypatch.setattr(AscendDflashProposer, "__init__", _stub)
 
@@ -528,7 +704,7 @@ class TestDSparkInitValidation:
         proposer = AscendDSparkProposer(vllm_config, device)
 
         blk = 1 + num_spec
-        max_query_tokens = max_batch * num_spec
+        max_query_tokens = max_batch * blk
         # DSpark-specific draft / seed buffers.
         assert proposer._dspark_draft_buffer.shape == (max_batch, blk)
         assert proposer._dspark_draft_buffer.dtype == torch.int64
@@ -538,10 +714,10 @@ class TestDSparkInitValidation:
         assert proposer.hidden_size == hidden
         assert proposer.hidden_states.shape == (max_num_tokens, hidden)
         assert proposer._dflash_hidden_states.shape == (max_num_tokens, hidden)
-        # DSpark runs eager only (Ascend cudagraph unsupported on this path).
+        # The parent graph mode is preserved; this stub configures eager mode.
         assert proposer.use_cuda_graph is False
-        # anchor-first: N query tokens per request, no bonus token (unlike
-        # DFlash's 1+N).
+        # Capacity follows the target verification width (1+N), including
+        # anchor-first graph-padding tokens.
         assert proposer.max_query_tokens == max_query_tokens
         assert proposer.positions.shape == (max_query_tokens,)
         assert proposer.positions.dtype == torch.int32
@@ -684,7 +860,31 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert torch.equal(cad.query_start_loc, expected_qsl)
         assert torch.equal(cad.query_start_loc_cpu, expected_qsl)
         # seq_lens grow by block_size when no tokens were rejected.
-        assert torch.equal(cad.seq_lens, torch.full((num_reqs,), 128 + block_size, dtype=torch.int32))
+        expected_seq_lens = torch.full((num_reqs,), 128 + block_size, dtype=torch.int32)
+        assert torch.equal(cad.seq_lens, expected_seq_lens)
+        assert torch.equal(cad._seq_lens_cpu, expected_seq_lens)
+        assert torch.equal(cad.seq_lens_cpu, expected_seq_lens)
+
+    def test_canonical_host_seq_lens_remains_authoritative(self):
+        num_reqs, block_size, max_num_tokens = 4, 5, 256
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
+        )
+
+        _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            seq_len=128,
+            host_seq_len=126,
+            async_metadata=True,
+        )[:4]
+
+        assert torch.equal(
+            cad._seq_lens_cpu,
+            torch.full((num_reqs,), 126 + block_size, dtype=torch.int32),
+        )
+        assert cad.seq_lens_cpu is None
 
 
 class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
@@ -703,12 +903,22 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         )
         rejected = torch.full((num_reqs,), 2, dtype=torch.int32)
         _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
-            proposer, num_reqs=num_reqs, block_size=block_size, num_rejected=rejected
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            host_seq_len=126,
+            async_metadata=True,
+            num_rejected=rejected,
         )[:4]
         # effective = seq_lens(128) - rejected(2) = 126; then + block_size(5) = 131.
         assert torch.equal(
             cad.seq_lens, torch.full((num_reqs,), 128 - 2 + block_size, dtype=torch.int32)
         )
+        assert torch.equal(
+            cad._seq_lens_cpu,
+            torch.full((num_reqs,), 126 + block_size, dtype=torch.int32),
+        )
+        assert cad.seq_lens_cpu is None
 
     def test_kernel_called_with_has_num_rejected(self, monkeypatch):
         kernel = MagicMock()

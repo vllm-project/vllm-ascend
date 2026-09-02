@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -113,6 +114,98 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
         )
 
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+
+
+class TestDSparkFullGraphSeqLens:
+    def test_preserves_corrected_device_and_host_lengths(self, monkeypatch):
+        class StopAfterSeqLensPadding(RuntimeError):
+            pass
+
+        batch_size = 2
+        num_speculative_tokens = 7
+        metadata = SimpleNamespace(
+            batch_size=lambda: batch_size,
+            num_reqs=batch_size,
+            query_start_loc=torch.tensor([0, 7, 14], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 7, 14], dtype=torch.int32),
+            block_table_tensor=torch.ones((batch_size, 4), dtype=torch.int32),
+            seq_lens=torch.tensor([107, 207], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([108, 208], dtype=torch.int32),
+            _seq_lens_cpu=torch.tensor([109, 209], dtype=torch.int32),
+            num_computed_tokens_cpu=None,
+        )
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "dspark"
+        proposer.num_speculative_tokens = num_speculative_tokens
+        proposer.hidden_size = 4
+        proposer.use_cuda_graph = True
+        proposer.model = SimpleNamespace(combine_hidden_states=lambda hidden_states: hidden_states)
+        proposer.set_inputs_first_pass = MagicMock(
+            return_value=(
+                batch_size * num_speculative_tokens,
+                torch.arange(batch_size * num_speculative_tokens, dtype=torch.int32),
+                metadata,
+                None,
+            )
+        )
+        dispatcher = MagicMock()
+        dispatcher.dispatch.side_effect = [
+            (
+                CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=16, num_reqs=batch_size),
+            ),
+            (
+                CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=16, num_reqs=batch_size),
+            ),
+        ]
+        proposer.runner = SimpleNamespace(
+            dcp_manager=None,
+            input_batch=SimpleNamespace(lora_id_to_lora_request={}),
+            cudagraph_dispatcher=dispatcher,
+            _sync_metadata_across_dp=MagicMock(return_value=(16, None, None)),
+            seq_lens=torch.tensor([1, 2], dtype=torch.int32),
+            optimistic_seq_lens_cpu=torch.tensor([3, 4], dtype=torch.int32),
+        )
+        query_start_loc_cpu = torch.zeros(6, dtype=torch.int32)
+        proposer.query_start_loc = SimpleNamespace(
+            gpu=torch.zeros(6, dtype=torch.int32),
+            cpu=query_start_loc_cpu,
+            np=query_start_loc_cpu.numpy(),
+        )
+        proposer.pad_query_start_loc_for_graph = MagicMock(return_value=3)
+        proposer.decode_threshold = 1 + num_speculative_tokens
+        proposer.dcp_size = 1
+
+        captured = {}
+
+        def stop_after_seq_lens_padding(common_attn_metadata, *_args):
+            captured["seq_lens"] = common_attn_metadata.seq_lens.clone()
+            captured["seq_lens_cpu"] = common_attn_metadata.seq_lens_cpu.clone()
+            captured["_seq_lens_cpu"] = common_attn_metadata._seq_lens_cpu.clone()
+            raise StopAfterSeqLensPadding
+
+        proposer._prepare_parallel_draft_seq_lens_cpu = stop_after_seq_lens_padding
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.K3DSparkForCausalLM",
+            object,
+        )
+
+        with pytest.raises(StopAfterSeqLensPadding):
+            proposer._propose(
+                target_token_ids=torch.zeros(batch_size, dtype=torch.int64),
+                target_positions=torch.zeros(batch_size, dtype=torch.int32),
+                target_hidden_states=torch.zeros((batch_size, 4)),
+                next_token_ids=torch.zeros(batch_size, dtype=torch.int64),
+                token_indices_to_sample=torch.arange(batch_size, dtype=torch.int32),
+                common_attn_metadata=metadata,
+                target_model_batch_desc=SimpleNamespace(uniform=True),
+                sampling_metadata=SimpleNamespace(),
+            )
+
+        assert torch.equal(captured["seq_lens"], torch.tensor([107, 207, 0], dtype=torch.int32))
+        assert torch.equal(captured["seq_lens_cpu"], torch.tensor([108, 208, 0], dtype=torch.int32))
+        assert torch.equal(captured["_seq_lens_cpu"], torch.tensor([109, 209, 0], dtype=torch.int32))
 
 
 class TestDisableFlashCommV1Context:
