@@ -28,7 +28,6 @@ import pytest
 
 from tests.e2e.pull_request.utils import _run_speculative_decoding
 
-# 主模型路径
 MODELS = ["/mnt/weight/MiniMax-M3-w8a8"]
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -37,8 +36,6 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 @pytest.mark.parametrize(
     ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
     [
-        # 注意：对于 EAGLE3 且 num_speculative_tokens=3，接受长度通常在 2.0 ~ 2.8 之间。
-        # 此处暂设为 2.5 作为占位符。首次运行后，请根据终端日志中的 "Mean acceptance length" 实际值进行修改。
         pytest.param(
             2.68,
             3,
@@ -59,7 +56,6 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         "TASK_QUEUE_ENABLE": "1",
         "VLLM_LOGGING_LEVEL": "INFO",
         "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "ASCEND_LAUNCH_BLOCKING": "1",
         "LCCL_DETERMINISTI": "1",
         "HCCL_DETERMINISTIC": "true",
         "ATB_MATMUL_SHUFFLE_K_ENABLE": "0",
@@ -67,6 +63,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         "HCCL_BUFFSIZE": "1024",
         "VLLM_ASCEND_ENABLE_FUSED_MC2": "1",
         "ASCEND_RT_VISIBLE_DEVICES": "4,5,6,7,8,9,10,11",
+        "ASCEND_LAUNCH_BLOCKING": "1",
     },
 )
 def test_minimax_m3_eagle3_acceptance_tp8(
@@ -89,7 +86,7 @@ def test_minimax_m3_eagle3_acceptance_tp8(
             "tensor_parallel_size": 8,     
             "max_model_len": 8192,     
             "max_num_batched_tokens": 4096, 
-            "trust_remote_code": True,
-            "additional_config": additional_config,。
+            "enforce_eager": True, 
+            "additional_config": additional_config,
         },
     )
