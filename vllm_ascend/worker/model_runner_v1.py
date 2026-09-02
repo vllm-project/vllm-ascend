@@ -188,7 +188,6 @@ from vllm_ascend.utils import (
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
-    vllm_version_is,
     weak_ref_tensor,
     weak_ref_tensors,
 )
@@ -2037,10 +2036,6 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if vllm_version_is("0.27.1"):
-            if self.vllm_config.model_config.enable_return_routed_experts and self.routed_experts_initialized:
-                self.routed_experts_capturer.clear_buffer()
-
         profiling_chunk_config = self.ascend_config.scheduler_config.profiling_chunk_config
         if profiling_chunk_config.enabled and profiling_chunk_config.need_timing:
             # Check if the scheduler signaled that calibration is complete.
@@ -2334,15 +2329,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
-        # Set cudagraph mode to none if calc_kv_scales is true.
-        # KV scales calculation involves dynamic operations that are incompatible
-        # with CUDA graph capture.
-        # vLLM v0.27.1 still supports runtime KV scale calculation. Upstream main
-        # removed this state in vllm-project/vllm#49389.
-        if vllm_version_is("0.27.1") and self.calculate_kv_scales:  # type: ignore[has-type]
-            cudagraph_mode = CUDAGraphMode.NONE
-            # Mark KV scales as calculated after the first forward pass
-            self.calculate_kv_scales = False  # type: ignore[has-type]
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)

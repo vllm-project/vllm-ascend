@@ -149,7 +149,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 # vllm-project/vllm#50000). Ascend keeps its own kernel for NPU, matching
 # the upstream parameter layout.
 
-if vllm_version_is("0.27.1"):
+if vllm_version_is("0.28.0"):
 
     @triton.jit
     def _prepare_dflash_inputs_kernel_ascend(

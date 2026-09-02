@@ -78,30 +78,6 @@ from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
 
-@contextmanager
-def _use_ascend_pcp_manager_for_vllm_0271():
-    """Make the legacy vLLM PCP builder instantiate the Ascend manager.
-
-    vLLM 0.27.1 hard-codes ``PCPManager`` inside
-    ``maybe_build_pcp_manager``. Newer versions accept a manager class from
-    the model runner, so this compatibility shim is needed only while the
-    legacy builder runs.
-    """
-    if not vllm_version_is("0.27.1"):
-        yield
-        return
-
-    # Patch the exact module object captured by GPUModelRunner. vLLM 0.27.1
-    # resolves PCPManager through this alias inside initialize_kv_cache().
-    pcp_module = vllm_model_runner.pcp
-    original_pcp_manager_cls = pcp_module.PCPManager
-    pcp_module.PCPManager = AscendPCPManager
-    try:
-        yield
-    finally:
-        pcp_module.PCPManager = original_pcp_manager_cls
-
-
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
@@ -225,7 +201,7 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
+        with graph_manager_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)

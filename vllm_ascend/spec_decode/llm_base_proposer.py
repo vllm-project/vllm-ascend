@@ -1729,7 +1729,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model_config = getattr(self, "draft_model_config", None)
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
-            if vllm_version_is("0.27.1"):
+            if vllm_version_is("0.28.0"):
                 return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
             else:
                 return bool(

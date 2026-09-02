@@ -31,7 +31,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.kv_connector import get_kv_connector
-from vllm.v1.worker.gpu.model_runner import sort_batch_req_ids
+from vllm.v1.worker.gpu.model_runner import BatchReqState, sort_batch_req_ids
 from vllm.v1.worker.utils import bind_kv_cache
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
@@ -39,14 +39,11 @@ from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-
-if not vllm_version_is("0.27.1"):
-    from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
@@ -127,14 +124,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
-        if vllm_version_is("0.27.1"):
-            req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
-        else:
-            req_ids = sort_batch_req_ids(
-                num_tokens_per_req,
-                scheduler_output.scheduled_spec_decode_tokens,
-                self.decode_query_len,
-            )
+        req_ids = sort_batch_req_ids(
+            num_tokens_per_req,
+            scheduler_output.scheduled_spec_decode_tokens,
+            self.decode_query_len,
+        )
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
         num_scheduled_tokens = np.fromiter(
@@ -263,8 +257,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        if not vllm_version_is("0.27.1"):
-            input_batch_kwargs["has_prefill"] = batch_has_prefill
+        input_batch_kwargs["has_prefill"] = batch_has_prefill
         input_batch = AscendInputBatch(**input_batch_kwargs)
         # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
         # arange buffer above is only for slot-mapping / non-MRoPE paths.
@@ -280,25 +273,14 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.req_states.num_computed_tokens_cpu.copy_(torch.from_numpy(np_vals))
         self.req_states.num_computed_tokens.cpu.copy_(torch.from_numpy(np_vals))
 
-    if vllm_version_is("0.27.1"):
-
-        def prepare_inputs(
-            self,
-            scheduler_output: SchedulerOutput,
-            batch_desc: BatchExecutionDescriptor,
-        ) -> AscendInputBatch:
-            return self._prepare_inputs_310p(scheduler_output, batch_desc)
-
-    else:
-
-        def prepare_inputs(  # type: ignore[misc, override]
-            self,
-            scheduler_output: SchedulerOutput,
-            batch_req_state: BatchReqState,
-            batch_desc: BatchExecutionDescriptor,
-        ) -> AscendInputBatch:
-            del batch_req_state
-            return self._prepare_inputs_310p(scheduler_output, batch_desc)
+    def prepare_inputs(  # type: ignore[misc, override]
+        self,
+        scheduler_output: SchedulerOutput,
+        batch_req_state: BatchReqState,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> AscendInputBatch:
+        del batch_req_state
+        return self._prepare_inputs_310p(scheduler_output, batch_desc)
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         super().finish_requests(scheduler_output)

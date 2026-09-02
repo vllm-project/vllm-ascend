@@ -37,7 +37,7 @@ def test_add_request_does_not_inject_placeholder_spec_tokens():
     scheduler.requests = {}
     scheduler.log_stats = False
     scheduler.connector = None
-    if not vllm_version_is("0.27.1"):
+    if not vllm_version_is("0.28.0"):
         # vllm main: Scheduler.add_request reads spec_decode_metrics_level.
         scheduler.spec_decode_metrics_level = "none"
 

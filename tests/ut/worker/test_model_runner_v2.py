@@ -20,8 +20,7 @@ def _make_runner(need_timing: bool = True):
     return runner
 
 
-@pytest.mark.parametrize("is_vllm_0_27_1", [True, False], ids=["v0.27.1", "newer"])
-def test_execute_model_records_profiling_time(is_vllm_0_27_1):
+def test_execute_model_records_profiling_time():
     runner = _make_runner()
     scheduler_output = SimpleNamespace(disable_profiling_timing=False)
 
@@ -31,10 +30,6 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
             "execute_model",
             return_value=None,
         ) as mock_execute_model,
-        patch(
-            "vllm_ascend.worker.v2.model_runner.vllm_version_is",
-            return_value=is_vllm_0_27_1,
-        ),
         patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
         patch(
             "vllm_ascend.core.profiling_chunk_predictor.time.perf_counter",
@@ -51,9 +46,8 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
         "dummy_run": False,
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
+        "context_len": 0,
     }
-    if not is_vllm_0_27_1:
-        expected_kwargs["context_len"] = 0
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
