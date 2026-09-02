@@ -10,25 +10,37 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
         param.data.fill_(loaded_weight.item())
     else:
         # ModelSlim exports the per-channel V cache scale as a column vector
-        # ([hidden, 1]) while the registered parameter is 1-D; flatten first.
-        # No TP narrow here: under tensor parallelism vLLM's param loader has
-        # already sliced the checkpoint to this rank's share (per output
-        # channels / KV heads) before calling the weight loader -- slicing
-        # again double-shards it (passed on TP1/TP2 only by coincidence:
-        # with num_kv_heads == tp_size, channel-even split equals per-head
-        # split; it breaks on TP4 where heads < tp size). Assert on numel so
-        # any future mismatch in the upstream sharding semantics fails loud
-        # instead of silently loading wrong scales.
+        # ([hidden, 1]); flatten it first. The loader delivers the FULL-width
+        # scale on every rank (attention-module parameters bypass the
+        # ColumnParallelLinear sharding), so slice it here following the same
+        # rule vLLM uses to replicate KV heads under GQA TP: with
+        # num_kv_heads < tp_size each head is replicated across
+        # tp_size // num_kv_heads ranks and rank r owns the 256-dim slice of
+        # head r // (tp_size // num_kv_heads). When num_kv_heads >= tp_size
+        # this degenerates to the plain contiguous narrow.
         if loaded_weight.dim() != 1:
             loaded_weight = loaded_weight.flatten()
+        if loaded_weight.numel() != param.numel():
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+            head_dim = param.numel()  # this rank's full (possibly replicated) head width
+            total = loaded_weight.numel()
+            num_heads_total = total // head_dim if total % head_dim == 0 else None
+            if num_heads_total is None or num_heads_total < 1:
+                raise AssertionError(
+                    "[vllm-ascend/MXFP8_PER_CHANNEL] Cannot map V cache scale of "
+                    f"{total} elements onto a per-rank head width of {head_dim} "
+                    f"(TP size {tp_size}, TP rank {tp_rank})."
+                )
+            heads_per_rank_group = max(1, tp_size // num_heads_total)
+            src_head = tp_rank // heads_per_rank_group
+            loaded_weight = loaded_weight.narrow(0, src_head * head_dim, head_dim)
         assert param.numel() == loaded_weight.numel(), (
             "[vllm-ascend/MXFP8_PER_CHANNEL] V cache scale size mismatch: parameter "
-            f"has {param.numel()} elements (num_kv_heads x head_dim on this rank) but "
-            f"the loader delivered {loaded_weight.numel()} (TP size "
+            f"has {param.numel()} elements but the sliced weight has "
+            f"{loaded_weight.numel()} (TP size "
             f"{get_tensor_model_parallel_world_size()}, TP rank "
-            f"{get_tensor_model_parallel_rank()}). The upstream sharding of "
-            "v_cache_scale does not match the per-head layout this scheme "
-            "registers."
+            f"{get_tensor_model_parallel_rank()})."
         )
         param.data.copy_(loaded_weight.view_as(param))
 

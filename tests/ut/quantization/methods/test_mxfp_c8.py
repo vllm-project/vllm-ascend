@@ -118,26 +118,54 @@ class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):
 
         self.assertTrue(torch.equal(param, torch.full((512,), 119, dtype=torch.uint8)))
 
-    def test_weight_loader_uses_pre_sliced_shard_under_tp(self):
-        """Under TP, vLLM's param loader delivers the checkpoint ALREADY
-        sliced to this rank's share (channel/head split done upstream); the
-        weight loader must not narrow again (double-sharding passed on TP2
-        only because channel-even split equals per-head split when
-        num_kv_heads == tp_size, and broke on TP4). A pre-sliced shard loads
-        verbatim; a mismatched size fails loud."""
+    def test_weight_loader_slices_replicated_heads_under_tp(self):
+        """The loader delivers the FULL-width scale on every rank (attention
+        params bypass ColumnParallelLinear sharding). Under GQA TP with
+        num_kv_heads < tp_size, vLLM replicates each KV head across
+        tp_size // num_kv_heads ranks; rank r owns the head-dim slice of
+        head r // (tp_size // num_kv_heads). TP4 over 2 heads: ranks 0/1 ->
+        head 0, ranks 2/3 -> head 1. When num_kv_heads == tp_size it
+        degenerates to the plain contiguous narrow (TP2: rank 0 -> [0,256),
+        rank 1 -> [256,512))."""
+        from unittest.mock import patch
+
+        import torch as _torch
+
         from vllm_ascend.quantization.methods.kv_cache.mxfp_c8 import _quant_weight_loader
 
-        # TP4, rank 3: upstream delivers this rank's [128] slice of the
-        # [512]-wide scale; the per-rank parameter is also [128].
-        shard = torch.arange(384, 512, dtype=torch.uint8)
-        param = torch.zeros(128, dtype=torch.uint8)
-        _quant_weight_loader(param, shard)
-        self.assertTrue(torch.equal(param, shard))
+        loader_mod = "vllm_ascend.quantization.methods.kv_cache.mxfp_c8"
 
-        # A size the upstream loader would never deliver must raise.
-        full_weight = torch.arange(512, dtype=torch.uint8)
-        with self.assertRaises(AssertionError):
-            _quant_weight_loader(param, full_weight)
+        def _head_val(head: int) -> int:
+            return 100 + head  # head 0 -> 100s, head 1 -> 101s...
+
+        full = _torch.cat(
+            [_torch.full((256,), _head_val(h), dtype=_torch.uint8) for h in range(2)]
+        )
+        param = _torch.zeros(256, dtype=_torch.uint8)
+
+        # TP4 rank 3 -> head 1
+        with (
+            patch(f"{loader_mod}.get_tensor_model_parallel_rank", return_value=3),
+            patch(f"{loader_mod}.get_tensor_model_parallel_world_size", return_value=4),
+        ):
+            _quant_weight_loader(param, full)
+        self.assertTrue(_torch.equal(param, _torch.full((256,), 101, dtype=_torch.uint8)))
+
+        # TP2 rank 1 -> head 1 (plain narrow case)
+        with (
+            patch(f"{loader_mod}.get_tensor_model_parallel_rank", return_value=1),
+            patch(f"{loader_mod}.get_tensor_model_parallel_world_size", return_value=2),
+        ):
+            _quant_weight_loader(param, full)
+        self.assertTrue(_torch.equal(param, _torch.full((256,), 101, dtype=_torch.uint8)))
+
+        # TP4 rank 0 -> head 0
+        with (
+            patch(f"{loader_mod}.get_tensor_model_parallel_rank", return_value=0),
+            patch(f"{loader_mod}.get_tensor_model_parallel_world_size", return_value=4),
+        ):
+            _quant_weight_loader(param, full)
+        self.assertTrue(_torch.equal(param, _torch.full((256,), 100, dtype=_torch.uint8)))
 
     def test_installs_c8_backend_with_512_token_blocks(self):
         from vllm_ascend.attention.attention_v1 import (
