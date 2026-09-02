@@ -59,7 +59,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         state: torch.Tensor | torch.dtype,
     ) -> FlaGDNAdapter | None:
         fla_soc = get_fla_gdn_soc()
-        if fla_soc is None or getattr(self, "num_spec", 0) > 0 or get_pcp_group().world_size != 1:
+        if fla_soc is None or get_pcp_group().world_size != 1:
             return None
 
         mode_value = ascend_envs.VLLM_ASCEND_GDN_BACKEND
@@ -257,7 +257,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
-        if get_fla_gdn_soc() is not None:
+        # The warmup path constructs the FLA adapter lazily, which imports
+        # fla_npu at runtime. torch.compile (FULL_DECODE_ONLY) traces this
+        # forward with fullgraph, and dynamo refuses to trace importlib
+        # calls, so skip the warmup block while dynamo is compiling. Real
+        # forwards still run it once before any graph capture.
+        if get_fla_gdn_soc() is not None and not torch.compiler.is_compiling():
             state_dtype = self.get_state_dtype()[1]
             fla_warmup_adapter = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(
                 self,
@@ -376,12 +381,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
-        use_stage1_adapter = spec_sequence_masks is None and not getattr(forward_context, "capturing", False)
-        fla_adapter = (
-            AscendGatedDeltaNetAttention._get_fla_gdn_adapter(self, mixed_qkv, ssm_state)
-            if use_stage1_adapter
-            else None
-        )
+        fla_adapter = AscendGatedDeltaNetAttention._get_fla_gdn_adapter(self, mixed_qkv, ssm_state)
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))

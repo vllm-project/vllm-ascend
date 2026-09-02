@@ -96,6 +96,8 @@ class GDNOperator(StrEnum):
 
 _STAGE1_NATIVE_ONLY = {
     GDNOperator.L2NORM_FWD,
+    GDNOperator.CAUSAL_CONV1D,
+    GDNOperator.RECURRENT_GATED_DELTA_RULE,
 }
 _STAGE1_REPLACEMENTS = tuple(operator for operator in GDNOperator if operator not in _STAGE1_NATIVE_ONLY)
 
@@ -953,7 +955,7 @@ class FlaGDNAdapter:
             )
             return output
 
-        selection = self.dispatcher.select(
+        selection = self.dispatcher.select_native_only(
             GDNOperator.CAUSAL_CONV1D,
             self.signature,
             native=native,
@@ -1003,7 +1005,7 @@ class FlaGDNAdapter:
             native=l2norm_fwd,
             native_symbol="vllm.third_party.fla.l2norm_fwd",
         )
-        recurrent_selection = self.dispatcher.select(
+        recurrent_selection = self.dispatcher.select_native_only(
             GDNOperator.RECURRENT_GATED_DELTA_RULE,
             self.signature,
             native=torch.ops._C_ascend.npu_recurrent_gated_delta_rule,

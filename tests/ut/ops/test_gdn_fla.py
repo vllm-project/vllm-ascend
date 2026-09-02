@@ -73,11 +73,11 @@ def test_parse_gdn_backend_config_accepts_explicit_global_modes():
 def test_parse_gdn_backend_config_accepts_per_operator_overrides():
     config = parse_gdn_backend_config(
         "auto",
-        "causal_conv1d=fla_npu,chunk_fwd_o=native",
+        "solve_tri=fla_npu,chunk_fwd_o=native",
     )
 
     assert config.overrides == {
-        GDNOperator.CAUSAL_CONV1D: GDNBackendMode.FLA_NPU,
+        GDNOperator.SOLVE_TRI: GDNBackendMode.FLA_NPU,
         GDNOperator.CHUNK_FWD_O: GDNBackendMode.NATIVE,
     }
 
@@ -95,7 +95,9 @@ def test_parse_gdn_backend_config_rejects_invalid_global_mode(mode):
         "causal_conv1d=invalid",
         "causal_conv1d=auto",
         "l2norm_fwd=fla_npu",
-        "causal_conv1d=native,causal_conv1d=fla_npu",
+        "causal_conv1d=fla_npu",
+        "recurrent_gated_delta_rule=fla_npu",
+        "solve_tri=native,solve_tri=fla_npu",
         "causal_conv1d",
         "=native",
     ],
@@ -191,7 +193,7 @@ def test_strict_fla_mode_does_not_hide_probe_failure():
 
 def test_strict_adapter_validation_aggregates_missing_symbols(monkeypatch):
     def resolver(operator):
-        if operator in {GDNOperator.CAUSAL_CONV1D, GDNOperator.SOLVE_TRI}:
+        if operator in {GDNOperator.CHUNK_FWD_O, GDNOperator.SOLVE_TRI}:
             raise ImportError(f"missing {operator.value}")
         return _fla_operator, f"fla_npu.{operator.value}"
 
@@ -205,7 +207,7 @@ def test_strict_adapter_validation_aggregates_missing_symbols(monkeypatch):
         )
 
     message = str(error.value)
-    assert "causal_conv1d: missing causal_conv1d" in message
+    assert "chunk_fwd_o: missing chunk_fwd_o" in message
     assert "solve_tri: missing solve_tri" in message
 
 
@@ -403,14 +405,15 @@ def test_prefill_pipeline_rejects_non_integral_grouped_heads():
 def test_causal_conv_adapter_maps_stateful_arguments(monkeypatch):
     calls = []
 
-    def causal_conv(x, weight, bias, conv_states, **kwargs):
-        calls.append((x, weight, bias, conv_states, kwargs))
-        conv_states.add_(1)
-        return x + 2
+    def native_causal_conv1d(output, input_tensor, conv_weight, *, conv_state, bias_opt, **kwargs):
+        calls.append((input_tensor, conv_weight, bias_opt, conv_state, kwargs))
+        conv_state.add_(1)
+        output.copy_(input_tensor + 2)
 
     monkeypatch.setattr(
-        "vllm_ascend.ops.gdn_fla.resolve_fla_operator",
-        lambda operator: (causal_conv, "fla_npu.ops.ascendc.causal_conv1d"),
+        "torch.ops._C_ascend",
+        SimpleNamespace(npu_causal_conv1d_custom=native_causal_conv1d),
+        raising=False,
     )
     adapter = FlaGDNAdapter(
         parse_gdn_backend_config("fla_npu", ""),
@@ -439,18 +442,17 @@ def test_causal_conv_adapter_maps_stateful_arguments(monkeypatch):
         run_mode=0,
     )
 
-    # The first call is an isolated state clone smoke probe; the second call
-    # applies the operator to the live cache only after the probe succeeds.
-    assert len(calls) == 2
+    # causal_conv1d is retained native in Stage 1: exactly one direct call
+    # against the live cache, without any FLA clone smoke probe.
+    assert len(calls) == 1
     assert calls[-1][4] == {
-        "query_start_loc": query_start_loc,
-        "cache_indices": cache_indices,
-        "initial_state_mode": initial_state_mode,
-        "num_accepted_tokens": None,
+        "query_start_loc_opt": query_start_loc,
+        "cache_indices_opt": cache_indices,
+        "initial_state_mode_opt": initial_state_mode,
+        "num_accepted_tokens_opt": None,
         "activation_mode": 1,
         "pad_slot_id": -1,
         "run_mode": 0,
-        "head_num": 0,
     }
     torch.testing.assert_close(output, x + 2)
     torch.testing.assert_close(state, torch.ones_like(state))
@@ -788,7 +790,7 @@ def test_fla_routing_rejects_non_bfloat16_strict_operator_override(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_GDN_BACKEND", "auto")
     monkeypatch.setenv(
         "VLLM_ASCEND_GDN_OP_BACKENDS",
-        "causal_conv1d=fla_npu",
+        "solve_tri=fla_npu",
     )
 
     with (
