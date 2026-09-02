@@ -125,7 +125,7 @@ def quant_apply_mlp(
     swiglu_beta: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
 ) -> torch.Tensor:
-    logger.debug(f"****before GMM***{group_list=}")
+    logger.info(f"****before GMM***{group_list=}")
     input_hidden_dtype = hidden_states.dtype
     act_name = getattr(activation, "value", activation)
     use_gmm_swiglu_quant_fusion = _gmm_swiglu_quant_fusion_enabled(

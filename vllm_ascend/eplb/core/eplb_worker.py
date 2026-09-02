@@ -213,7 +213,7 @@ class EplbWorker:
         """
         Compute `new_map` by calling the `rebalance_experts` method of the policy instance.
         """
-        logger.debug(f"load_info before policy: {load_info}")
+        logger.info(f"load_info before policy: {load_info}")
         if self.old_expert_maps is None:
             return False, None, None
 
