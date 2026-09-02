@@ -88,10 +88,7 @@ class AscendMlaDCPMetadataBuilder(
         if chunked_context_metadata is None:
             return None
 
-        local_context_lens_allranks = self._get_dcp_context_lens(
-            common_attn_metadata,
-            start=self.num_decodes,
-        )
+        local_context_lens_allranks = self._get_dcp_local_context_lens_allranks()
         padded_local_context_lens_cpu = (
             cdiv(self.context_lens_cpu, self.cp_virtual_block_size) * self.cp_local_block_size
         )
@@ -137,6 +134,23 @@ class AscendMlaDCPMetadataBuilder(
             ),
             cu_seq_lens_lst=self.cu_seq_lens_cpu.tolist(),
             chunk_size=padded_local_max_context_chunk_across_ranks,
+        )
+
+    def _get_dcp_local_context_lens_allranks(self) -> torch.Tensor:
+        """Build DCP-local lengths for the KV cache loaded by chunked prefill.
+
+        Speculative draft metadata repurposes ``num_computed_tokens_of_dcp``
+        for the draft's full KV length. Chunked-context reorganization only
+        loads the already-computed cache, whose global lengths are kept in
+        ``context_lens_cpu`` by the base MLA builder. Derive the local layout
+        from that authoritative source so the gathered tensors and target
+        cumulative sequence lengths describe the same token set.
+        """
+        assert self.context_lens_cpu is not None
+        return get_dcp_local_seq_lens(
+            self.context_lens_cpu,
+            self.dcp_size,
+            self.cp_local_block_size,
         )
 
     def build_decode_metadata(

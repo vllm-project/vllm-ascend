@@ -96,6 +96,24 @@ def test_mla_dcp_uses_padded_local_chunk_lengths() -> None:
     torch.testing.assert_close(impl.get_context_seq_len_npu(1, metadata), padded_lengths[1])
 
 
+def test_mla_dcp_chunked_context_uses_computed_lengths() -> None:
+    """Draft key lengths must not replace chunked-cache context lengths."""
+    builder = AscendMlaDCPMetadataBuilder.__new__(AscendMlaDCPMetadataBuilder)
+    builder.context_lens_cpu = torch.tensor([1, 31], dtype=torch.int32)
+    builder.dcp_size = 4
+    builder.cp_local_block_size = 16
+
+    local_context_lens = builder._get_dcp_local_context_lens_allranks()
+
+    torch.testing.assert_close(
+        local_context_lens,
+        torch.tensor(
+            [[1, 0, 0, 0], [16, 15, 0, 0]],
+            dtype=torch.int32,
+        ),
+    )
+
+
 @patch(
     "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
     SimpleNamespace(is_draft_model=False, capturing=False),
