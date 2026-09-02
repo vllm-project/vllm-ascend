@@ -701,6 +701,18 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler.update_connector_output(output)
         scheduler._block_pool.free_blocks.assert_not_called()
 
+    def test_finished_send_updates_delayed_release_metrics(self):
+        scheduler = self._make_scheduler()
+        scheduler._set_delayed_free("r1", True)
+
+        entered = scheduler.get_stats()
+        self.assertEqual(entered.data["delayed_release_requests"], 1)
+        self.assertEqual(entered.data["delayed_release_started"], 1)
+
+        scheduler.update_finished_sending({"r1"})
+        released = scheduler.get_stats()
+        self.assertEqual(released.data["delayed_release_requests"], 0)
+
 
 class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
     """Test request_finished_all_groups."""
