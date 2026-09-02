@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
-          fetch‑depth: 0
+          fetch-depth: 0
 
       - name: Resolve source snapshot (optional rebase)
         run: |
@@ -91,4 +91,4 @@ jobs:
         with:
           name: cpu‑coverage‑report
           path: coverage.xml
-          retention‑days: 7
+          retention-days: 7
