@@ -21,7 +21,7 @@ from importlib.util import find_spec as real_find_spec
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from vllm.config import KVTransferConfig, ModelConfig, VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
@@ -1226,7 +1226,10 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         ),
     )
     def test_omni_additional_config_warns_and_is_preserved(self, _mock_find_spec, mock_warning):
-        vllm_config = VllmConfig(model_config=ModelConfig(), additional_config={"vllm_omni_option": True})
+        vllm_config = VllmConfig()
+        vllm_config.additional_config = {"vllm_omni_option": True}
+
+        init_ascend_config(vllm_config)
 
         self.assertIs(vllm_config.additional_config["vllm_omni_option"], True)
         mock_warning.assert_any_call(
