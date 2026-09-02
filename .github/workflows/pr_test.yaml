@@ -569,24 +569,26 @@ jobs:
   filter-test-groups:
     needs: [select-tests]
     if: ${{ !cancelled() && needs.select-tests.result == 'success' }}
-    runs-on: linux-amd64-cpu-8-hk
+    runs-on: linux-amd64-cpu-8h
     container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+      image: quay.io/ascend/lint-base:latest
     outputs:
       npu_test_groups: ${{ steps.filter.outputs.npu_test_groups }}
       cpu_test_groups: ${{ steps.filter.outputs.cpu_test_groups }}
     steps:
       - name: Filter test groups split cpu / npu
         id: filter
+        env:
+          RAW_GROUPS: ${{ needs.select-tests.outputs.test_groups }}
         run: |
           set -euo pipefail
-          RAW_GROUPS=${{ needs.select-tests.outputs.test_groups }}
           python3 - <<'PY'
           import json
-          raw = json.loads("""${RAW_GROUPS}""")
+          import os
+          raw = json.loads(os.environ["RAW_GROUPS"])
           npu_list = [g for g in raw if g.get("npu_type") != "cpu"]
           cpu_list = [g for g in raw if g.get("npu_type") == "cpu"]
-          with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf‑8") as f:
               f.write(f"npu_test_groups={json.dumps(npu_list)}\n")
               f.write(f"cpu_test_groups={json.dumps(cpu_list)}\n")
           PY
