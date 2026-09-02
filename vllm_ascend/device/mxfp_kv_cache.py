@@ -1,7 +1,6 @@
 import torch
 import torch_npu
 
-
 # KV cache MXFP8 scale layouts. The block and head axes are ordered the way
 # QuantFlashAttn's PA_BBND reads them -- the same order as the K/V caches
 # themselves ([num_blocks, block_size, num_kv_heads, head_dim]) -- so attention
