@@ -21,9 +21,10 @@ def _record_forward_context(trace, *args, **kwargs):
         trace.events.append("context-exit")
 
 
-def _make_executor(active: bool, trace):
+def _make_executor(active: bool, trace, uses_external_events: bool = False):
     return SimpleNamespace(
         submission_in_flight=active,
+        uses_external_events=uses_external_events,
         release=MagicMock(side_effect=lambda: trace.events.append("release")),
     )
 
@@ -39,9 +40,7 @@ def _make_execute_runner(executor, trace, forward_error=None):
     runner.vllm_config = SimpleNamespace(model_config=model_config)
     runner.model_config = model_config
     runner.ascend_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(
-            profiling_chunk_config=SimpleNamespace(need_timing=False)
-        )
+        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
     )
     runner.execute_model_state = None
     runner.speculative_config = None
@@ -87,10 +86,9 @@ def _make_execute_runner(executor, trace, forward_error=None):
     runner.device_metadata_executor = executor
     runner._has_sinks = False
     runner.eplb_heat_collection_status = False
-    runner.maybe_get_kv_connector_output = MagicMock(
-        return_value=nullcontext(SimpleNamespace())
-    )
+    runner.maybe_get_kv_connector_output = MagicMock(return_value=nullcontext(SimpleNamespace()))
     runner.model = MagicMock()
+
     def model_forward(*args, **kwargs):
         trace.events.append("model-forward")
         if forward_error is not None:
@@ -115,9 +113,7 @@ def _make_dummy_runner(executor, trace, mode, forward_error=None):
     runner.max_num_tokens = 4
     runner.dynamic_eplb = False
     batch_desc = SimpleNamespace(num_tokens=1, num_reqs=1)
-    runner._determine_batch_execution_and_padding = MagicMock(
-        return_value=(mode, batch_desc, False, None, None)
-    )
+    runner._determine_batch_execution_and_padding = MagicMock(return_value=(mode, batch_desc, False, None, None))
     runner.dcp_size = 1
     runner.speculative_config = None
     runner.synchronize_input_prep = nullcontext
@@ -128,19 +124,16 @@ def _make_dummy_runner(executor, trace, mode, forward_error=None):
         np=np.zeros(5, dtype=np.int32),
         copy_to_gpu=MagicMock(),
     )
-    runner._get_cumsum_and_arange = MagicMock(
-        return_value=np.ones(1, dtype=np.int32)
-    )
+    runner._get_cumsum_and_arange = MagicMock(return_value=np.ones(1, dtype=np.int32))
     runner._has_gdn = False
     runner._pad_query_start_loc_for_fia = MagicMock(return_value=1)
-    runner.input_batch = SimpleNamespace(
-        block_table=SimpleNamespace(commit_block_table=MagicMock())
-    )
+    runner.input_batch = SimpleNamespace(block_table=SimpleNamespace(commit_block_table=MagicMock()))
     runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
 
     def build_metadata(*args, **kwargs):
         trace.events.append("metadata-build")
         executor.submission_in_flight = True
+        executor.uses_external_events = kwargs["batch_descriptor"] is not None
         return "metadata", None
 
     runner._build_attention_metadata = MagicMock(side_effect=build_metadata)
@@ -158,6 +151,7 @@ def _make_dummy_runner(executor, trace, mode, forward_error=None):
     runner.device_metadata_executor = executor
     runner._has_sinks = False
     runner.eplb_heat_collection_status = False
+
     def model_forward(*args, **kwargs):
         trace.events.append("model-forward")
         if forward_error is not None:
@@ -170,6 +164,40 @@ def _make_dummy_runner(executor, trace, mode, forward_error=None):
     runner.use_compress = False
     runner._finalize_dump_data = MagicMock()
     return runner
+
+
+@pytest.mark.parametrize(
+    ("mode", "uses_external_events", "should_raise"),
+    [
+        (CUDAGraphMode.FULL, False, True),
+        (CUDAGraphMode.FULL, True, False),
+        (CUDAGraphMode.PIECEWISE, False, False),
+        (CUDAGraphMode.NONE, False, False),
+    ],
+)
+def test_full_mode_requires_external_events(mode, uses_external_events, should_raise):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    executor = SimpleNamespace(
+        submission_in_flight=True,
+        uses_external_events=uses_external_events,
+    )
+    runner.device_metadata_executor = executor
+
+    if should_raise:
+        with pytest.raises(RuntimeError, match="requires external events"):
+            runner._prepare_device_metadata_for_forward(mode)
+    else:
+        assert runner._prepare_device_metadata_for_forward(mode) is executor
+
+
+def test_inactive_executor_is_not_forwarded():
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.device_metadata_executor = SimpleNamespace(
+        submission_in_flight=False,
+        uses_external_events=False,
+    )
+
+    assert runner._prepare_device_metadata_for_forward(CUDAGraphMode.FULL) is None
 
 
 @pytest.fixture
@@ -196,9 +224,7 @@ def forward_patches(monkeypatch):
     monkeypatch.setattr(
         model_runner_v1,
         "set_ascend_forward_context",
-        lambda *args, **kwargs: _record_forward_context(
-            trace, *args, **kwargs
-        ),
+        lambda *args, **kwargs: _record_forward_context(trace, *args, **kwargs),
     )
     return trace
 
@@ -230,9 +256,7 @@ def test_execute_model_releases_only_active_submission(forward_patches, active):
 
 def test_execute_model_does_not_release_failed_forward(forward_patches):
     executor = _make_executor(True, forward_patches)
-    runner = _make_execute_runner(
-        executor, forward_patches, RuntimeError("forward failed")
-    )
+    runner = _make_execute_runner(executor, forward_patches, RuntimeError("forward failed"))
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=1,
         num_scheduled_tokens={"req": 1},
