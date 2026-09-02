@@ -61,10 +61,13 @@ def test_qwen3_6_27b_multimodel_fia_eager():
     assert outputs[0][1]
 
 
-@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+@patch.dict(
+    os.environ,
+    {"HCCL_BUFFSIZE": "1024", "VLLM_USE_V2_MODEL_RUNNER": "1"},
+)
 @wait_until_npu_memory_free()
-def test_qwen3_6_27b_multimodel_fia_acl_graph():
-    """Verify multimodal generation with FIA op and FULL_AND_PIECEWISE graph mode."""
+def test_qwen3_6_27b_multimodel_encoder_acl_graph_mrv2():
+    """Verify MRV2 encoder ACL graph while decoder graph capture is disabled."""
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     questions = [
         "What is the content of this image?",
@@ -90,7 +93,7 @@ def test_qwen3_6_27b_multimodel_fia_acl_graph():
         },
         compilation_config={
             "cudagraph_mm_encoder": True,
-            "cudagraph_capture_sizes": [1],
+            "cudagraph_mode": "NONE",
             "encoder_cudagraph_token_budgets": [128, 256, 512, 1024, 1536, 2048, 2560, 3072, 3584, 4096],
         },
     ) as vllm_model:

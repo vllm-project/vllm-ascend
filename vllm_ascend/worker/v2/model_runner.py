@@ -75,7 +75,7 @@ from vllm_ascend.worker.v2.pp_utils import (
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
-from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+from vllm_ascend.worker.v2.utils import communicator_switch, torch_cuda_wrapper
 
 
 @contextmanager
@@ -233,6 +233,21 @@ class NPUModelRunner(GPUModelRunner):
                 self.model_state.pcp_manager = self.pcp_manager
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    @torch.inference_mode()
+    def capture_model(self) -> int:
+        """Capture decoder and multimodal encoder graphs on Ascend."""
+        if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
+            encoder_runner = getattr(self.model_state, "encoder_runner", None)
+            encoder_manager = getattr(encoder_runner, "cudagraph_manager", None)
+            if encoder_manager is not None and self.update_stream is not None:
+                encoder_manager.update_stream = self.update_stream
+
+        # EncoderRunner uses vLLM's generic graph_capture(), whose communicator
+        # type check expects the CUDA symbol. Temporarily bind that symbol to
+        # NPUCommunicator, as is already done for decoder ACL graph capture.
+        with torch_cuda_wrapper(), communicator_switch():
+            return super().capture_model()
 
     @torch.inference_mode()
     def execute_model(
