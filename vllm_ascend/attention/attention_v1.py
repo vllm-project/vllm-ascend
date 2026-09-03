@@ -562,6 +562,100 @@ class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
         )
 
 
+def _update_qfa_graph_param(update_stream, handle, event, param, metadata) -> None:
+    """Replay-time update for one captured QFA .out op (vendored-QFA bring-up
+    methodology, fe58a86a).
+
+    Re-sends the whole call with the current step's tensors: aclnn recomputes
+    tiling on every invocation, so the update replaces tiling as well, not
+    just buffer addresses. q_fp8 / q_descale keep their captured graph-internal
+    addresses (the graph recomputes them from the step's query). The metadata
+    plan is recomputed here per update (the graph replay itself does not run
+    the Python impl, so the per-step plan cache on AscendMetadata is not
+    populated on this path); the plan write is an AICPU op whose completion
+    must be pinned against this update stream before the re-sent call reads
+    the plan (waiting on the whole stream would deadlock a graph parked on
+    the event -- only the recorded point is awaited).
+    """
+    _, metadata_op, out_op = _get_qfa_ops()
+
+    actual_seq_lengths_q = metadata.actual_seq_lengths_q
+    num_tokens = int(actual_seq_lengths_q[-1])
+    device = param.seqused_kv.device
+    cu_seqlens_q = _build_qfa_cu_seqlens(actual_seq_lengths_q, device)
+    seqused_kv = torch.tensor(metadata.seq_lens_list, dtype=torch.int32, device=device)
+    max_seqlen_q = num_tokens
+
+    # Recompute the AICPU plan for this step (per-step, shared by all layers:
+    # the plan depends on heads/batch, which are identical across layers, and
+    # not on per-layer caches). The e8m0 v_descale stub is only checked for
+    # non-nullness under PA_BBND.
+    v_descale_stub = torch.zeros(1, 1, 1, 1, 2, dtype=torch.uint8, device=device).view(
+        torch.float8_e8m0fnu
+    )
+    qfa_plan = metadata_op(
+        param.num_heads,
+        _qfa_plan_kv_heads(param),
+        param.head_size,
+        QFA_QUANT_MODE_MXFP8,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_kv=None,
+        seqused_q=None,
+        seqused_kv=seqused_kv,
+        v_descale=v_descale_stub,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_kv=-1,
+        mask_mode=QFA_MASK_MODE_CAUSAL,
+        win_left=-1,
+        win_right=-1,
+        layout_q=QFA_LAYOUT_TND,
+        layout_q_descale=QFA_LAYOUT_TND,
+        layout_kv=QFA_LAYOUT_PA_BBND,
+        layout_out=QFA_LAYOUT_TND,
+    )
+
+    torch.npu.graph_task_update_begin(update_stream, handle)
+    out_op(
+        param.q_fp8,
+        param.k,
+        param.v,
+        param.q_descale,
+        param.k_descale,
+        param.v_descale,
+        QFA_QUANT_MODE_MXFP8,
+        block_table=metadata.block_tables,
+        p_scale=None,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_kv=None,
+        seqused_q=None,
+        seqused_kv=seqused_kv,
+        sinks=None,
+        attn_mask=param.attn_mask,
+        metadata=qfa_plan,
+        softmax_scale=param.softmax_scale,
+        mask_mode=QFA_MASK_MODE_CAUSAL,
+        win_left=-1,
+        win_right=-1,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_kv=-1,
+        layout_q=QFA_LAYOUT_TND,
+        layout_q_descale=QFA_LAYOUT_TND,
+        layout_kv=QFA_LAYOUT_PA_BBND,
+        layout_out=QFA_LAYOUT_TND,
+        return_softmax_lse=False,
+        out=param.attn_output,
+        softmax_lse=param.softmax_lse,
+    )
+    torch.npu.graph_task_update_end(update_stream)
+    event.record(update_stream)
+
+
+def _qfa_plan_kv_heads(param) -> int:
+    """KV head count for the metadata plan, derived from the captured K cache
+    (PA_BBND: [num_blocks, block_size, num_kv_heads, head_dim])."""
+    return param.k.shape[2]
+
+
 class AscendAttentionBackendImpl(AttentionImpl):
     def __init__(
         self,
@@ -882,6 +976,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     handles,
                     events,
                 ):
+                    if isinstance(param, QFAGraphAttentionParams):
+                        if _EXTRA_CTX.is_draft_model:
+                            draft_step, key = draft_attn_key_steps[attn_count]
+                            metadata = attn_metadata[draft_step][key]
+                            attn_count = attn_count + 1
+                        else:
+                            metadata_key = (
+                                param.layer_name
+                                if getattr(param, "layer_name", None) is not None and param.layer_name in attn_metadata
+                                else key
+                            )
+                            metadata = attn_metadata[metadata_key]
+                        _update_qfa_graph_param(
+                            update_stream, handle, event, param, metadata
+                        )
+                        continue
                     if isinstance(param, PagedAttentionGraphParam):
                         if _EXTRA_CTX.is_draft_model:
                             draft_step, key = draft_attn_key_steps[attn_count]
@@ -2326,18 +2436,22 @@ def _build_qfa_cu_seqlens(cumulative_seq_lengths: list[int], device: torch.devic
     return torch.tensor([0, *cumulative_seq_lengths], dtype=torch.int32, device=device)
 
 
-# Resolved lazily and cached: (main_op, metadata_op). The QFA dual operators
-# are delivered through the cann_ops_transformer package shipped with the
-# CANN toolkit (confirmed final delivery form). That wrapper's call shape
-# (verified on-device): positional q/k/v/q_descale/k_descale/v_descale/
-# quant_mode, p_scale instead of quant_scale_p, an extra layout_q_descale,
-# no pa_block_size, and a required non-null v_descale placeholder on the
-# metadata call for quant_mode=1 (batch_size must not be passed with a TND
-# layout_q; the op infers it from cu_seqlens_q).
-_QFA_OPS: tuple[Any, Any] | None = None
+# Resolved lazily and cached: (main_op, metadata_op, out_op | None). The QFA
+# dual operators are delivered through the cann_ops_transformer package
+# shipped with the CANN toolkit (confirmed final delivery form). That
+# wrapper's call shape (verified on-device): positional q/k/v/q_descale/
+# k_descale/v_descale/quant_mode, p_scale instead of quant_scale_p, an extra
+# layout_q_descale, no pa_block_size, and a required non-null v_descale
+# placeholder on the metadata call for quant_mode=1 (batch_size must not be
+# passed with a TND layout_q; the op infers it from cu_seqlens_q).
+# ``out_op`` is the caller-owned-output variant needed for FULL-graph capture
+# (torch.npu.graph_task_group); it comes from the out-variant patch to the
+# CANN package and is None on unpatched builds (FULL capture then raises
+# with the actionable reason).
+_QFA_OPS: tuple[Any, Any, Any | None] | None = None
 
 
-def _get_qfa_ops() -> tuple[Any, Any]:
+def _get_qfa_ops() -> tuple[Any, Any, Any | None]:
     global _QFA_OPS
     if _QFA_OPS is None:
         try:
@@ -2350,8 +2464,41 @@ def _get_qfa_ops() -> tuple[Any, Any]:
                 "cann_ops_transformer.ops.quant_flash_attn(_metadata) could not "
                 "be imported in this environment."
             ) from None
-        _QFA_OPS = (main_op, metadata_op)
+        try:
+            from cann_ops_transformer.ops import quant_flash_attn_out as out_op
+        except ImportError:
+            out_op = None
+        _QFA_OPS = (main_op, metadata_op, out_op)
     return _QFA_OPS
+
+
+@dataclass
+class QFAGraphAttentionParams:
+    """Captured QFA call parameters for FULL-graph replay.
+
+    Mirrors the vendored-QFA bring-up (TallMessiWu#2, fe58a86a): the capture
+    holds caller-owned output buffers (fixed addresses for replay) plus weak
+    refs to the per-step tensors that the replay-time update re-sends. q_fp8 /
+    q_descale are NOT re-sent on update -- the graph recomputes them from the
+    current step's query, so their captured addresses are already correct.
+    """
+
+    q_fp8: torch.Tensor
+    q_descale: torch.Tensor
+    k: torch.Tensor
+    v: torch.Tensor
+    k_descale: torch.Tensor
+    v_descale: torch.Tensor
+    block_table: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    seqused_kv: torch.Tensor
+    attn_mask: torch.Tensor | None
+    softmax_scale: float
+    max_seqlen_q: int
+    num_heads: int
+    head_size: int
+    attn_output: torch.Tensor
+    softmax_lse: torch.Tensor
 
 
 class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
@@ -2496,7 +2643,42 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             value_scale = value_scale.view(torch.float8_e8m0fnu)
         if query_scale.dtype != torch.float8_e8m0fnu:
             query_scale = query_scale.view(torch.float8_e8m0fnu)
-        main_op, _ = _get_qfa_ops()
+        attn_mask = self._qfa_int8_mask(attn_metadata)
+        main_op, _, out_op = _get_qfa_ops()
+
+        if _EXTRA_CTX.capturing and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            # FULL-graph capture path (vendored-QFA bring-up, fe58a86a):
+            # wrap the caller-owned-output call in graph_task_group_begin/end
+            # so the op becomes a replayable task; register the captured
+            # params for the replay-time update (which re-sends the call with
+            # the current step's tensors -- aclnn recomputes tiling on every
+            # call, so the update replaces tiling as well, not just addresses).
+            if out_op is None:
+                raise NotImplementedError(
+                    "C8_MXFP QFA FULL-graph capture requires the .out() wrapper variant of "
+                    "cann_ops_transformer.quant_flash_attn (caller-owned output tensors for "
+                    "torch.npu.graph_task_group). The current wrapper only exposes the "
+                    "allocating variant, which cannot be captured safely. Apply the "
+                    "quant_flash_attn_out patch to the CANN package (or run with "
+                    "cudagraph_mode=PIECEWISE / NONE)."
+                )
+            return self._capture_qfa_full_graph(
+                quant_query,
+                query_scale,
+                key,
+                value,
+                key_scale,
+                value_scale,
+                cu_seqlens_q,
+                seqused_kv,
+                attn_mask,
+                qfa_metadata,
+                max_seqlen_q,
+                num_tokens,
+                output,
+                out_op,
+            )
+
         # cann_ops_transformer delivery signature (verified on-device):
         # q/k/v/q_descale/k_descale/v_descale/quant_mode positional, p_scale
         # instead of quant_scale_p, layout_q_descale, and no pa_block_size
@@ -2516,7 +2698,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             seqused_q=None,
             seqused_kv=seqused_kv,
             sinks=None,
-            attn_mask=self._qfa_int8_mask(attn_metadata),
+            attn_mask=attn_mask,
             metadata=qfa_metadata,
             softmax_scale=self.scale,
             mask_mode=QFA_MASK_MODE_CAUSAL,
@@ -2535,6 +2717,113 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         attn_output = result[0] if isinstance(result, tuple) else result
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output
+        return output
+
+    def _capture_qfa_full_graph(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_scale: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        seqused_kv: torch.Tensor,
+        attn_mask: torch.Tensor | None,
+        qfa_metadata: torch.Tensor,
+        max_seqlen_q: int,
+        num_tokens: int,
+        output: torch.Tensor,
+        out_op: Any,
+    ) -> torch.Tensor:
+        """Capture the QFA .out call into the current NPU graph task group.
+
+        Registers a QFAGraphAttentionParams entry; the replay-time update
+        (update_graph_params) re-sends the call with the current step's
+        block_table / lengths / metadata before every replay. q_fp8/q_descale
+        are recomputed inside the graph each step, so they are registered but
+        never re-sent (their captured addresses are the graph-internal ones).
+        """
+        if _EXTRA_CTX.is_draft_model:
+            graph_params = get_draft_graph_params()
+        else:
+            graph_params = get_graph_params()
+        assert graph_params is not None, "QFA capture requires initialized graph params"
+
+        # Caller-owned output buffers: fixed addresses across capture/replay.
+        # The capture-time output slice is the tensor the graph writes into;
+        # the softmax LSE buffer is unused (return_softmax_lse=False) but must
+        # be a valid device tensor for the op signature.
+        attn_output = output
+        softmax_lse = torch.zeros(1, dtype=torch.float32, device=quant_query.device)
+
+        stream = torch_npu.npu.current_stream()
+        event = torch.npu.ExternalEvent()
+        event.wait(stream)
+        event.reset(stream)
+        graph_params.events[num_tokens].append(event)
+
+        graph_params.attn_params[num_tokens].append(
+            QFAGraphAttentionParams(
+                # Strong refs for q_fp8/q_descale: the graph recomputes them
+                # from the step's query INTO these captured buffers every
+                # replay, so the buffers must stay alive (weak refs would let
+                # the allocator reuse them; the vendored bring-up kept them
+                # alive for exactly this reason).
+                q_fp8=quant_query,
+                q_descale=query_scale,
+                k=key,
+                v=value,
+                k_descale=key_scale,
+                v_descale=value_scale,
+                block_table=weak_ref_tensors(attn_metadata.block_tables),
+                cu_seqlens_q=weak_ref_tensors(cu_seqlens_q),
+                seqused_kv=weak_ref_tensors(seqused_kv),
+                attn_mask=weak_ref_tensors(attn_mask) if attn_mask is not None else None,
+                softmax_scale=self.scale,
+                max_seqlen_q=max_seqlen_q,
+                num_heads=self.num_heads,
+                head_size=self.head_size,
+                attn_output=weak_ref_tensors(attn_output),
+                softmax_lse=softmax_lse,
+            )
+        )
+
+        torch.npu.graph_task_group_begin(stream)
+        out_op(
+            quant_query,
+            key,
+            value,
+            query_scale,
+            key_scale,
+            value_scale,
+            QFA_QUANT_MODE_MXFP8,
+            block_table=attn_metadata.block_tables,
+            p_scale=None,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=None,
+            seqused_q=None,
+            seqused_kv=seqused_kv,
+            sinks=None,
+            attn_mask=attn_mask,
+            metadata=qfa_metadata,
+            softmax_scale=self.scale,
+            mask_mode=QFA_MASK_MODE_CAUSAL,
+            win_left=-1,
+            win_right=-1,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=-1,
+            layout_q=QFA_LAYOUT_TND,
+            layout_q_descale=QFA_LAYOUT_TND,
+            layout_kv=QFA_LAYOUT_PA_BBND,
+            layout_out=QFA_LAYOUT_TND,
+            return_softmax_lse=False,
+            out=attn_output,
+            softmax_lse=softmax_lse,
+        )
+        handle = torch.npu.graph_task_group_end(stream)
+        graph_params.handles[num_tokens].append(handle)
+        # The captured op already wrote into ``output``; nothing to copy.
         return output
 
     def _forward_mxfp8_attention(
@@ -2681,29 +2970,31 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         if self.vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("C8_MXFP v1 does not support PD disaggregation (kv_transfer) yet.")
         if _EXTRA_CTX.capturing:
-            # Phase-2 bring-up, staged graph support:
+            # Phase-2 graph support, staged:
             # - PIECEWISE: the compiled region covers non-attention ops; QFA
             #   runs outside it as a plain call and is capture-compatible
             #   (validated on-device by the vendored-QFA bring-up PR).
-            # - FULL (incl. FULL_DECODE_ONLY): capture requires the caller-
-            #   owned-output (.out) wrapper variant of quant_flash_attn, which
-            #   the current cann_ops_transformer build lacks -- the allocating
-            #   variant re-allocates outputs every call, so a captured graph
-            #   would replay writes to freed/wild addresses (observed as AI
-            #   core wild-pointer crashes in the vendored bring-up). Fail at
-            #   capture time with the actionable reason instead of corrupting
-            #   replay. Land the out-variant patch (see
-            #   docs/qfa_out_overload_patch) to enable FULL graphs.
+            # - FULL (incl. FULL_DECODE_ONLY): _run_qfa routes to
+            #   _capture_qfa_full_graph, which wraps the caller-owned-output
+            #   (.out) variant in graph_task_group_begin/end and registers
+            #   the replay params. The out variant comes from the CANN-package
+            #   patch; without it, capture raises the actionable error below
+            #   (the allocating variant re-allocates outputs every call, so a
+            #   captured graph would replay writes to freed/wild addresses --
+            #   observed as AI core wild-pointer crashes in the vendored
+            #   bring-up).
             mode = self.vllm_config.compilation_config.cudagraph_mode
             if mode.has_full_cudagraphs():
-                raise NotImplementedError(
-                    "C8_MXFP QFA FULL-graph capture requires the .out() wrapper variant of "
-                    "cann_ops_transformer.quant_flash_attn (caller-owned output tensors for "
-                    "torch.npu.graph_task_group). The current wrapper only exposes the "
-                    "allocating variant, which cannot be captured safely. Apply the "
-                    "quant_flash_attn_out patch to the CANN package (or run with "
-                    "cudagraph_mode=PIECEWISE / NONE)."
-                )
+                _, _, out_op = _get_qfa_ops()
+                if out_op is None:
+                    raise NotImplementedError(
+                        "C8_MXFP QFA FULL-graph capture requires the .out() wrapper variant of "
+                        "cann_ops_transformer.quant_flash_attn (caller-owned output tensors for "
+                        "torch.npu.graph_task_group). The current wrapper only exposes the "
+                        "allocating variant, which cannot be captured safely. Apply the "
+                        "quant_flash_attn_out patch to the CANN package (or run with "
+                        "cudagraph_mode=PIECEWISE / NONE)."
+                    )
             # PIECEWISE capture: QFA executes outside the compiled region;
             # proceed.
         if kv_cache is None or len(kv_cache) < 4:
