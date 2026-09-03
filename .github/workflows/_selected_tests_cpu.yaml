@@ -78,7 +78,7 @@ jobs:
           VENV_PY=${GITHUB_WORKSPACE}/venv/bin/python3
           VENV_SITE=$(${VENV_PY} -c "import site; print(site.getsitepackages()[0])")
           ${VENV_PY} -m pip install --upgrade pip
-          ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema
+          ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema vllm==0.23.1
 
           echo "$GITHUB_WORKSPACE" > "${VENV_SITE}/vllm_ascend_src.pth"
           if [ -d "${GITHUB_WORKSPACE}/vllm" ]; then
@@ -87,9 +87,8 @@ jobs:
 
           echo "=== pth file content ==="
           cat "${VENV_SITE}/vllm_ascend_src.pth"
-          echo "=== check vllm submodule dir ==="
-          ls -la ${GITHUB_WORKSPACE}/ || true
-          ls -la ${GITHUB_WORKSPACE}/vllm 2>/dev/null || echo "WARN: vllm submodule dir NOT FOUND"
+          echo "=== check vllm module ==="
+          ${VENV_PY} -c "import vllm; print(f'vllm imported ok, path={vllm.__file__}')"
         env:
           VLLM_ASCEND_CPU_ONLY: 1
           SKIP_TRITON_ASCEND_IMPORT: 1
