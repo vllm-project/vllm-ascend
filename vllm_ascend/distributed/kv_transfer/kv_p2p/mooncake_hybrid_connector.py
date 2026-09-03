@@ -53,12 +53,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import (
-    RegisterRegions,
-    collect_aligned_kv_cache_register_regions,
-    get_transfer_timeout_value,
-    validate_register_region_count,
-)
+from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
 from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
 
 # isort: off
@@ -77,7 +72,6 @@ DONE_RECVING_MSG = b"done_recving_msg"
 # number of peers is larger than max_workers. Yield after a small FIFO batch so
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
-KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
 
 
 class RemotePortInfo(TypedDict):
@@ -1669,31 +1663,6 @@ class MooncakeConnectorWorker:
         assert self._decode_pp_size == 1, "decode pp size must be 1"
         self._prefill_pp_layer_partition = prefill_parallel_config.get("pp_layer_partition")
 
-    @staticmethod
-    def _as_kv_cache_tuple(kv_cache_tuple: Any) -> list[torch.Tensor]:
-        if isinstance(kv_cache_tuple, (list, tuple)):
-            return list(kv_cache_tuple)
-        return [kv_cache_tuple]
-
-    def _get_registered_kv_tensor_buffers(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-    ) -> tuple[list[int], list[int]]:
-        descriptor_tensors: list[tuple[int, list[torch.Tensor]]] = []
-        for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-            shared_tensors = [
-                single_kv_cache
-                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor)
-                for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name])
-            ]
-            descriptor_tensors.append((kv_cache_tensor.size, shared_tensors))
-
-        regions = collect_aligned_kv_cache_register_regions(
-            descriptor_tensors,
-            KV_CACHE_BUFFER_ALIGNMENT,
-        )
-        return regions.ptrs, regions.lengths
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
@@ -1770,9 +1739,40 @@ class MooncakeConnectorWorker:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
 
         if self.use_hybrid:
-            ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
-        register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
-        validate_register_region_count(register_regions)
+            # KVCacheTensor.size is the size of the shared backing pool, not
+            # the byte length of every logical tensor group described by it.
+            ptrs = []
+            lengths = []
+            for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+                tensor_addrs = []
+                tensor_ends = []
+                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
+                    kv_cache_tuple = kv_caches[layer_name]
+                    if not isinstance(kv_cache_tuple, (tuple, list)):
+                        kv_cache_tuple = [kv_cache_tuple]
+                    for tensor in kv_cache_tuple:
+                        tensor_nbytes = tensor.element_size() * math.prod(tensor.shape)
+                        if tensor_nbytes == 0:
+                            continue
+                        tensor_addrs.append(tensor.data_ptr())
+                        tensor_ends.append(tensor.data_ptr() + tensor_nbytes)
+                if tensor_addrs:
+                    start = min(tensor_addrs)
+                    ptrs.append(start)
+                    lengths.append(max(tensor_ends) - start)
+
+            # Overlaid hybrid groups may still cover the same physical bytes.
+            regions = sorted((ptr, ptr + length) for ptr, length in zip(ptrs, lengths))
+            merged_regions: list[tuple[int, int]] = []
+            for start, end in regions:
+                if merged_regions and start < merged_regions[-1][1]:
+                    previous_start, previous_end = merged_regions[-1]
+                    merged_regions[-1] = (previous_start, max(previous_end, end))
+                else:
+                    merged_regions.append((start, end))
+            ptrs = [start for start, _ in merged_regions]
+            lengths = [end - start for start, end in merged_regions]
+
         global_te.register_buffer(ptrs, lengths)
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(

@@ -61,9 +61,9 @@ from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, Ascen
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
-    collect_aligned_kv_cache_register_regions,
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
+    tensor_storage_key,
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import (
@@ -2437,25 +2437,121 @@ class MooncakeConnectorWorker:
             layer_spec = layer_spec.kv_cache_specs[layer_name]
         return layer_spec
 
+    @staticmethod
+    def _recover_aligned_kv_tensor_base(
+        shared_tensors: list[torch.Tensor],
+        tensor_size: int,
+    ) -> int | None:
+        """Recover the aligned raw buffer base behind hybrid cache views."""
+        candidates: set[int] = set()
+        for tensor in shared_tensors:
+            storage = tensor.untyped_storage()
+            storage_base = tensor_storage_key(tensor)
+            aligned_base = (
+                (storage_base + KV_CACHE_BUFFER_ALIGNMENT - 1) // KV_CACHE_BUFFER_ALIGNMENT * KV_CACHE_BUFFER_ALIGNMENT
+            )
+            storage_end = storage_base + storage.nbytes()
+            if aligned_base <= tensor.data_ptr() and aligned_base + tensor_size <= storage_end:
+                candidates.add(aligned_base)
+
+        if len(candidates) > 1:
+            raise RuntimeError(
+                "Unable to recover one aligned KV tensor base from hybrid cache views: "
+                f"candidates={sorted(candidates)}, tensor_size={tensor_size}."
+            )
+        return candidates.pop() if candidates else None
+
     def _get_registered_kv_tensor_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
-        descriptor_tensors: list[tuple[int, list[torch.Tensor]]] = []
+        ptrs: list[int] = []
+        lengths: list[int] = []
+        private_layer_tensors: list[torch.Tensor] = []
+
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_tensors: list[torch.Tensor] = []
             for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
                 for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
                     shared_tensors.append(single_kv_cache)
-            descriptor_tensors.append((kv_cache_tensor.size, shared_tensors))
 
-        regions = collect_aligned_kv_cache_register_regions(
-            descriptor_tensors,
-            KV_CACHE_BUFFER_ALIGNMENT,
-        )
-        return regions.ptrs, regions.lengths
+            if not shared_tensors:
+                continue
+            # Hybrid cache views can begin after Mamba padding, and target and
+            # draft MLA groups can use different padding.  Arithmetic based on
+            # a previous group's padding can yield a wrong but still aligned
+            # address, so always recover the allocation base from storage.
+            base_addr = self._recover_aligned_kv_tensor_base(
+                shared_tensors,
+                kv_cache_tensor.size,
+            )
+            if base_addr is None:
+                # vLLM #51718 describes all layers in one KVCacheTensor backed
+                # by a shared allocation. Ascend's hybrid KV-transfer layout
+                # can instead materialize one aligned allocation per layer,
+                # including a single-layer descriptor with one private
+                # storage. No individual storage then needs to span the
+                # descriptor's total size, so register the real layer storage
+                # ranges below.
+                private_layer_tensors.extend(shared_tensors)
+                continue
+            if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
+                raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
+            ptrs.append(base_addr)
+            lengths.append(kv_cache_tensor.size)
+
+        if private_layer_tensors:
+            regions_by_storage: OrderedDict[int, tuple[int, int]] = OrderedDict()
+            for tensor in private_layer_tensors:
+                if tensor.numel() == 0:
+                    continue
+                storage = tensor.untyped_storage()
+                storage_base = tensor_storage_key(tensor)
+                aligned_base = (
+                    (storage_base + KV_CACHE_BUFFER_ALIGNMENT - 1)
+                    // KV_CACHE_BUFFER_ALIGNMENT
+                    * KV_CACHE_BUFFER_ALIGNMENT
+                )
+                tensor_span = tensor.element_size() + sum(
+                    (size - 1) * stride * tensor.element_size() for size, stride in zip(tensor.shape, tensor.stride())
+                )
+                tensor_end = tensor.data_ptr() + tensor_span
+                storage_end = storage_base + storage.nbytes()
+                if not (aligned_base <= tensor.data_ptr() and tensor_end <= storage_end):
+                    raise RuntimeError(
+                        "Unable to recover an aligned private KV layer storage: "
+                        f"data_ptr={tensor.data_ptr()}, tensor_end={tensor_end}, "
+                        f"storage=[{storage_base}, {storage_end})."
+                    )
+                previous = regions_by_storage.get(storage_base)
+                regions_by_storage[storage_base] = (
+                    aligned_base,
+                    max(previous[1] if previous is not None else aligned_base, tensor_end),
+                )
+
+            ptrs.extend(base for base, _ in regions_by_storage.values())
+            lengths.extend(end - base for base, end in regions_by_storage.values())
+
+        return ptrs, lengths
 
     def _get_registered_kv_tensor_buffers_hybrid(
         self, kv_caches: dict[str, torch.Tensor]
     ) -> tuple[list[int], list[int]]:
-        return self._get_registered_kv_tensor_buffers(kv_caches)
+        ptrs: list[int] = []
+        lengths: list[int] = []
+
+        for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+            shared_addrs: list[int] = []
+            for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
+                for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
+                    shared_addrs.append(single_kv_cache.data_ptr())
+
+            if not shared_addrs:
+                continue
+            base_addr = min(shared_addrs)
+            if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
+                raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
+            ptrs.append(base_addr)
+            lengths.append(kv_cache_tensor.size)
+
+        return ptrs, lengths
 
     def _get_registered_layer_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
         ptrs: list[int] = []
