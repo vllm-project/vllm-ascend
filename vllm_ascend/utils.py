@@ -39,14 +39,13 @@ from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.device.device_config import (  # noqa: F401
-    AscendDeviceType,
-    check_ascend_device_type,
-    get_ascend_device_type,
-    is_310p,
-    is_950,
+from vllm_ascend.device.device_config import check_ascend_device_type  # noqa: F401
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    OperatorRegistryFamily,
+    WeightLayoutPolicy,
+    get_current_hardware_profile,
 )
-from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -57,7 +56,6 @@ COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
 FP8_METHOD = "fp8"
-SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
 ACL_FORMAT_FRACTAL_ND = 2
@@ -168,7 +166,7 @@ def is_rc_device() -> bool:
     ``accelerators``.
     """
     global _IS_RC_DEVICE
-    if not get_current_hardware_profile().supports(HardwareCapability.RC_DEVICE_DISCOVERY):
+    if not get_current_hardware_profile().supports(HardwareCapability.PCIE_ROOT_COMPLEX_MODE_DETECTION):
         return False
     if _IS_RC_DEVICE is not None:
         return _IS_RC_DEVICE
@@ -424,10 +422,12 @@ def enable_custom_op():
 
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
-    # FIXME(linfeng): Currently custom op compilation and execution are partially available
-    # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
+    # FIXME(linfeng): Custom-op compilation and execution are only partially
+    # available on profiles without runtime registration support. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
+    if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(
+        HardwareCapability.ASCEND_CUSTOM_OP_RUNTIME_REGISTRATION
+    ):
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -759,8 +759,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
         REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
-    # Override selected ops when the compatibility implementations are required.
-    if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
+    # Override only the kernels selected by the profile's registry family.
+    if (
+        get_current_hardware_profile().operator_registry_family
+        is OperatorRegistryFamily.BASE_WITH_TRITON_FREE_KERNEL_OVERRIDES
+    ):
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310

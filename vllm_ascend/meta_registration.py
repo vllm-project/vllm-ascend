@@ -72,6 +72,6 @@ def sgmv_expand_meta(
     return y_out
 
 
-if get_current_hardware_profile().supports(HardwareCapability.BGMV_SGMV_META_REGISTRATION):
+if get_current_hardware_profile().supports(HardwareCapability.BGMV_SGMV_META_KERNELS):
     register_meta_if_necessary("_C_ascend", "bgmv_expand", bgmv_expand_meta)
     register_meta_if_necessary("_C_ascend", "sgmv_expand", sgmv_expand_meta)

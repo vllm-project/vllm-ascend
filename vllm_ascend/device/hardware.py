@@ -7,7 +7,7 @@
 This module deliberately depends only on the Python standard library so it can
 also be loaded by ``setup.py`` before vllm-ascend is installed. Device identity
 must stay inside the device abstraction package; callers outside this package
-should consume semantic capabilities from ``device_config`` instead.
+should consume semantic capabilities and policies from ``hardware_profile``.
 """
 
 from enum import Enum

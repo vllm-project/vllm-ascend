@@ -8,19 +8,20 @@ from typing import Any
 
 import torch
 
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    enable_custom_op,
-    get_ascend_device_type,
+from vllm_ascend.device.hardware_profile import (
+    MiniMaxM3IndexerFamily,
+    MiniMaxM3SparseAttentionPrefillFamily,
+    get_current_hardware_profile,
 )
+from vllm_ascend.utils import enable_custom_op
 
 _SPARSE_ATTN_INNER_PRECISE = 4
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
-_ASCEND_DEVICE_TYPE = get_ascend_device_type()
 _FP8_E4M3_MAX = 448.0
+_HARDWARE_PROFILE = get_current_hardware_profile()
 
-if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
+if _HARDWARE_PROFILE.minimax_m3_indexer_family is MiniMaxM3IndexerFamily.ASCENDC_SCORE_AND_DECODE_WITH_TRITON_TOPK:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
         minimax_m3_index_topk as _minimax_m3_index_prefill_topk,
     )
@@ -49,8 +50,8 @@ def _npu_k2q_csr(
     q_global_offset: int | bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert MiniMax-M3 q2k indices to k2q CSR on NPU."""
-    # A5 disables the generic custom-op loader, so register the in-tree
-    # MiniMax M3 operators lazily after the NPU runtime has been initialized.
+    # This path can run when the generic custom-op loader is disabled, so
+    # register the in-tree MiniMax M3 operators after NPU initialization.
     import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
     enable_custom_op()
@@ -495,7 +496,7 @@ def minimax_m3_index_tp_block_parallel_decode(
 
 
 @torch.no_grad()
-def _minimax_m3_sparse_attn_a3(
+def _minimax_m3_sparse_attn_select_count_score(
     q: torch.Tensor,
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
     topk_idx: torch.Tensor,
@@ -527,7 +528,7 @@ def _minimax_m3_sparse_attn_a3(
     output.copy_(out)
 
 
-def _minimax_m3_sparse_attn_a5(
+def _minimax_m3_sparse_attn_k2q_csr_score(
     q: torch.Tensor,
     kv_cache: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor],
     topk_idx: torch.Tensor,
@@ -580,6 +581,12 @@ def _minimax_m3_sparse_attn_a5(
     output.copy_(out)
 
 
+_MINIMAX_M3_SPARSE_ATTN_PREFILL_IMPLS = {
+    MiniMaxM3SparseAttentionPrefillFamily.SELECT_INDEX_AND_COUNT_SCORE: _minimax_m3_sparse_attn_select_count_score,
+    MiniMaxM3SparseAttentionPrefillFamily.K2Q_CSR_SCORE: _minimax_m3_sparse_attn_k2q_csr_score,
+}
+
+
 @torch.no_grad()
 def minimax_m3_sparse_attn(
     q: torch.Tensor,
@@ -596,9 +603,9 @@ def minimax_m3_sparse_attn(
     block_size: int = 128,
 ) -> None:
     del prefix_lens, max_query_len
-    sparse_attn_impl = (
-        _minimax_m3_sparse_attn_a5 if _ASCEND_DEVICE_TYPE == AscendDeviceType.A5 else _minimax_m3_sparse_attn_a3
-    )
+    sparse_attn_impl = _MINIMAX_M3_SPARSE_ATTN_PREFILL_IMPLS[
+        _HARDWARE_PROFILE.minimax_m3_sparse_attention_prefill_family
+    ]
     sparse_attn_impl(
         q,
         kv_cache,

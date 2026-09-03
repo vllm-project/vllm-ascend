@@ -16,9 +16,16 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    MiniMaxM3SparseAttentionPrefillFamily,
+)
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
+from vllm_ascend.models.minimax_m3 import minimax_m3 as minimax_m3_model_module
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
 from vllm_ascend.models.minimax_m3.minimax_m3 import (
+    MiniMaxM3MLP,
+    MiniMaxM3SwiGLUOAI,
     _cast_for_cache,
     _resolve_layer_kv_cache_dtype,
     _resolve_layer_kv_cache_dtypes,
@@ -45,6 +52,7 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _use_fused_qkv_indexer,
     minimax_m3_sparse_forward,
 )
+from vllm_ascend.models.minimax_m3.ops import msa_m3_npu as msa_m3_npu_module
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     MiniMaxM3TPDecodeScoreMetadata,
     _as_ascendc_index_kv_cache,
@@ -59,7 +67,26 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     minimax_m3_sparse_attn_decode as minimax_m3_sparse_attn_decode_npu,
 )
-from vllm_ascend.utils import AscendDeviceType
+
+
+def _profile_supporting(*capabilities: HardwareCapability) -> SimpleNamespace:
+    supported = frozenset(capabilities)
+    return SimpleNamespace(supports=supported.__contains__)
+
+
+class _FakeLinear(torch.nn.Module):
+    def __init__(self, *, uses_mxfp8: bool) -> None:
+        super().__init__()
+        if uses_mxfp8:
+            quant_scheme_type = type(
+                "AscendW8A8MXFP8DynamicLinearMethod",
+                (),
+                {},
+            )
+            quant_scheme = quant_scheme_type()
+        else:
+            quant_scheme = object()
+        self.quant_method = SimpleNamespace(quant_method=quant_scheme)
 
 
 @dataclass
@@ -531,43 +558,370 @@ def test_register_m3_sparse_packed_modules_adds_split_indexer_mapping() -> None:
     }
 
 
-def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
+def _make_sparse_prepare_subject() -> tuple[
+    MiniMaxM3SparseAttention,
+    MagicMock,
+    MagicMock,
+    MagicMock,
+]:
+    attention = object.__new__(MiniMaxM3SparseAttention)
+    torch.nn.Module.__init__(attention)
+    attention.q_size = 4
+    attention.kv_size = 2
+    attention.index_q_size = 2
+    attention.idx_head_dim = 2
+
+    main_qkv = MagicMock(name="main_qkv")
+    main_qkv.device.type = "npu"
+    main_qkv.dtype = torch.bfloat16
+    attention.qkv_proj = MagicMock(return_value=(main_qkv, None))
+
+    index_qk = MagicMock(name="index_qk")
+    index_q = MagicMock(name="index_q")
+    index_k = MagicMock(name="index_k")
+    index_qk.split.return_value = (index_q, index_k)
+    attention.indexer_proj = MagicMock(return_value=(index_qk, None))
+
+    attention._qk_norm = MagicMock()
+    attention._index_qk_norm = MagicMock(return_value=(index_q, index_k))
+    attention.rotary_emb = MagicMock()
+    attention.rotary_emb.is_neox_style = True
+    attention.rotary_emb.cos_sin_cache = MagicMock(name="cos_sin_cache")
+    attention.q_norm = SimpleNamespace(
+        weight=torch.zeros(4, dtype=torch.bfloat16),
+        variance_epsilon=1.0e-6,
+    )
+    attention.k_norm = SimpleNamespace(
+        weight=torch.zeros(2, dtype=torch.bfloat16),
+    )
+    return attention, main_qkv, index_q, index_k
+
+
+def test_sparse_prepare_uses_fused_qkv_when_capability_and_contract_match() -> None:
+    attention, main_qkv, index_q, index_k = _make_sparse_prepare_subject()
+    fused_q = MagicMock(name="fused_q")
+    fused_k = MagicMock(name="fused_k")
+    fused_v = MagicMock(name="fused_v")
+    rotated_index_q = MagicMock(name="rotated_index_q")
+    rotated_index_k = MagicMock(name="rotated_index_k")
+    attention.rotary_emb.return_value = (rotated_index_q, rotated_index_k)
+    positions = torch.tensor([0, 1], dtype=torch.int64)
+    hidden_states = MagicMock(name="hidden_states")
+
+    with (
+        patch.object(
+            minimax_m3_model_module,
+            "_HARDWARE_PROFILE",
+            _profile_supporting(HardwareCapability.MINIMAX_M3_FUSED_QKV_RMSNORM_ROPE),
+        ),
+        patch.object(
+            minimax_m3_model_module.torch.ops.vllm,
+            "qkv_rmsnorm_rope",
+            create=True,
+            return_value=(fused_q, fused_k, fused_v),
+        ) as mock_fused_qkv,
+    ):
+        result = attention._sparse_prepare(positions, hidden_states)
+
+    assert result == (
+        fused_q,
+        fused_k,
+        fused_v,
+        rotated_index_q,
+        rotated_index_k,
+    )
+    attention._qk_norm.assert_not_called()
+    main_qkv.split.assert_not_called()
+    mock_fused_qkv.assert_called_once()
+    assert mock_fused_qkv.call_args.kwargs["input"] is main_qkv.contiguous.return_value
+    assert mock_fused_qkv.call_args.kwargs["positions"] is positions
+
+
+def test_sparse_prepare_uses_torch_fallback_without_fused_qkv_capability() -> None:
+    attention, main_qkv, index_q, index_k = _make_sparse_prepare_subject()
+    q = MagicMock(name="q")
+    k = MagicMock(name="k")
+    v = MagicMock(name="v")
+    normalized_q = MagicMock(name="normalized_q")
+    normalized_k = MagicMock(name="normalized_k")
+    rotated_q = MagicMock(name="rotated_q")
+    rotated_k = MagicMock(name="rotated_k")
+    rotated_index_q = MagicMock(name="rotated_index_q")
+    rotated_index_k = MagicMock(name="rotated_index_k")
+    main_qkv.split.return_value = (q, k, v)
+    attention._qk_norm.return_value = (normalized_q, normalized_k)
+    attention.rotary_emb.side_effect = [
+        (rotated_q, rotated_k),
+        (rotated_index_q, rotated_index_k),
+    ]
+    positions = torch.tensor([0, 1], dtype=torch.int64)
+
+    with (
+        patch.object(
+            minimax_m3_model_module,
+            "_HARDWARE_PROFILE",
+            _profile_supporting(),
+        ),
+        patch.object(
+            minimax_m3_model_module.torch.ops.vllm,
+            "qkv_rmsnorm_rope",
+            create=True,
+        ) as mock_fused_qkv,
+    ):
+        result = attention._sparse_prepare(positions, MagicMock())
+
+    assert result == (
+        rotated_q,
+        rotated_k,
+        v.contiguous.return_value,
+        rotated_index_q,
+        rotated_index_k,
+    )
+    main_qkv.split.assert_called_once_with([4, 2, 2], dim=-1)
+    attention._qk_norm.assert_called_once_with(q, k)
+    mock_fused_qkv.assert_not_called()
+
+
+def test_swiglu_without_mx_quant_uses_fused_op_when_supported() -> None:
+    activation = MiniMaxM3SwiGLUOAI(
+        alpha=1.5,
+        beta=0.5,
+        limit=4.0,
+        use_mx_quant=False,
+    )
+    x = torch.tensor([[1.0, -2.0, 3.0, -4.0]])
+    expected = torch.tensor([[10.0, 20.0]])
+
+    with (
+        patch.object(
+            minimax_m3_model_module,
+            "_HARDWARE_PROFILE",
+            _profile_supporting(HardwareCapability.MINIMAX_M3_FUSED_CLIPPED_SWIGLU),
+        ),
+        patch.object(
+            minimax_m3_model_module.torch.ops.npu,
+            "npu_clipped_swiglu",
+            create=True,
+            return_value=expected,
+        ) as mock_fused_swiglu,
+    ):
+        actual = activation(x)
+
+    assert actual is expected
+    mock_fused_swiglu.assert_called_once_with(
+        x,
+        dim=-1,
+        alpha=1.5,
+        limit=4.0,
+        bias=0.5,
+        interleaved=False,
+    )
+
+
+def test_swiglu_without_mx_quant_uses_torch_fallback_when_unsupported() -> None:
+    activation = MiniMaxM3SwiGLUOAI(
+        alpha=1.5,
+        beta=0.5,
+        limit=4.0,
+        use_mx_quant=False,
+    )
+    x = torch.tensor([[1.0, -2.0, 3.0, -5.0]])
+    gate = torch.clamp(x[..., :2], max=4.0)
+    up = torch.clamp(x[..., 2:], min=-4.0, max=4.0)
+    expected = gate * torch.sigmoid(1.5 * gate) * (up + 0.5)
+
+    with (
+        patch.object(
+            minimax_m3_model_module,
+            "_HARDWARE_PROFILE",
+            _profile_supporting(),
+        ),
+        patch.object(
+            minimax_m3_model_module.torch.ops.npu,
+            "npu_clipped_swiglu",
+            create=True,
+        ) as mock_fused_swiglu,
+    ):
+        actual = activation(x)
+
+    assert torch.equal(actual, expected)
+    mock_fused_swiglu.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("capability_supported", "expected_use_mx_quant"),
+    [(False, False), (True, True)],
+)
+def test_mlp_mxfp8_activation_requires_hardware_capability(
+    capability_supported: bool,
+    expected_use_mx_quant: bool,
+) -> None:
+    config = SimpleNamespace(
+        hidden_size=4,
+        hidden_act="swigluoai",
+        intermediate_size=8,
+        swiglu_alpha=1.5,
+        swiglu_beta=0.5,
+        swiglu_limit=4.0,
+    )
+    capabilities = (HardwareCapability.MINIMAX_M3_SWIGLU_OAI_MXFP8_OUTPUT_QUANTIZATION,) if capability_supported else ()
+
+    with (
+        patch.object(
+            minimax_m3_model_module,
+            "_HARDWARE_PROFILE",
+            _profile_supporting(*capabilities),
+        ),
+        patch.object(
+            minimax_m3_model_module,
+            "MergedColumnParallelLinear",
+            return_value=_FakeLinear(uses_mxfp8=True),
+        ),
+        patch.object(
+            minimax_m3_model_module,
+            "RowParallelLinear",
+            return_value=_FakeLinear(uses_mxfp8=True),
+        ),
+    ):
+        mlp = MiniMaxM3MLP(config)
+
+    assert mlp.act_fn.use_mx_quant is expected_use_mx_quant
+
+
+def test_sparse_prepare_bypasses_fused_qkv_norm_rope_without_capability() -> None:
     source = inspect.getsource(MiniMaxM3SparseAttention._sparse_prepare)
 
     assert "qkv_rmsnorm_rope" in source
-    assert "get_ascend_device_type() == AscendDeviceType.A5" in source
+    assert "MINIMAX_M3_FUSED_QKV_RMSNORM_ROPE" in source
+    assert "not _HARDWARE_PROFILE.supports" in source
     assert 'main_qkv.device.type != "npu"' in source
     assert "1.0 + self.q_norm.weight" in source
 
 
-def test_a5_index_decode_uses_a5_triton_without_tp_block_sharding() -> None:
+def test_triton_index_decode_family_does_not_use_tp_block_sharding() -> None:
     module_source = inspect.getsource(msa_m3_module)
-    a5_branch_start = module_source.index("if not _USE_ASCENDC_INDEX_SCORE:")
-    a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
-    import_branches = module_source[a5_branch_start:a5_branch_end]
+    triton_branch_start = module_source.index("if not _USE_ASCENDC_INDEX_SCORE:")
+    triton_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", triton_branch_start)
+    import_branches = module_source[triton_branch_start:triton_branch_end]
 
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
-    assert "get_ascend_device_type() != AscendDeviceType.A5" in module_source
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
-        return_value=AscendDeviceType.A5,
+    assert "MiniMaxM3IndexerFamily.ASCENDC_SCORE_AND_DECODE_WITH_TRITON_TOPK" in module_source
+    with patch.object(
+        msa_m3_module,
+        "_HARDWARE_PROFILE",
+        _profile_supporting(),
     ):
         assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
 
 
-def test_non_a5_decode_keeps_tp_block_sharding() -> None:
-    with patch(
-        "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
-        return_value=AscendDeviceType.A3,
+def test_tp_sharded_index_decode_capability_enables_block_sharding() -> None:
+    with patch.object(
+        msa_m3_module,
+        "_HARDWARE_PROFILE",
+        _profile_supporting(HardwareCapability.MINIMAX_M3_TP_SHARDED_INDEX_DECODE),
     ):
         assert _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=0)
         assert not _should_use_tp_sharded_index_decode(tp_size=1, num_prefills=0)
         assert not _should_use_tp_sharded_index_decode(tp_size=4, num_prefills=1)
 
+    builder_source = inspect.getsource(AscendMiniMaxM3IndexerMetadataBuilder.build)
+    forward_source = inspect.getsource(AscendMiniMaxM3IndexerImpl.forward)
+    assert "_should_use_tp_sharded_index_decode" in builder_source
+    assert forward_source.count("_should_use_tp_sharded_index_decode") == 2
 
-def test_a5_indexer_forward_keeps_original_decode_path() -> None:
+
+def test_sparse_attention_prefill_families_select_exact_implementations() -> None:
+    implementations = msa_m3_npu_module._MINIMAX_M3_SPARSE_ATTN_PREFILL_IMPLS
+
+    assert (
+        implementations[MiniMaxM3SparseAttentionPrefillFamily.SELECT_INDEX_AND_COUNT_SCORE]
+        is msa_m3_npu_module._minimax_m3_sparse_attn_select_count_score
+    )
+    assert (
+        implementations[MiniMaxM3SparseAttentionPrefillFamily.K2Q_CSR_SCORE]
+        is msa_m3_npu_module._minimax_m3_sparse_attn_k2q_csr_score
+    )
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        MiniMaxM3SparseAttentionPrefillFamily.SELECT_INDEX_AND_COUNT_SCORE,
+        MiniMaxM3SparseAttentionPrefillFamily.K2Q_CSR_SCORE,
+    ],
+)
+def test_sparse_attention_prefill_wrapper_dispatches_by_family(
+    family: MiniMaxM3SparseAttentionPrefillFamily,
+) -> None:
+    implementations = {
+        MiniMaxM3SparseAttentionPrefillFamily.SELECT_INDEX_AND_COUNT_SCORE: MagicMock(name="select_count_score"),
+        MiniMaxM3SparseAttentionPrefillFamily.K2Q_CSR_SCORE: MagicMock(name="k2q_csr_score"),
+    }
+    args = [
+        MagicMock(name=name)
+        for name in (
+            "q",
+            "kv_cache",
+            "topk_idx",
+            "block_table",
+            "cu_seqlens_q",
+            "seq_lens",
+            "prefix_lens",
+            "output",
+        )
+    ]
+    q, kv_cache, topk_idx, block_table, cu_seqlens_q, seq_lens, prefix_lens, output = args
+
+    with (
+        patch.object(
+            msa_m3_npu_module,
+            "_HARDWARE_PROFILE",
+            SimpleNamespace(minimax_m3_sparse_attention_prefill_family=family),
+        ),
+        patch.object(
+            msa_m3_npu_module,
+            "_MINIMAX_M3_SPARSE_ATTN_PREFILL_IMPLS",
+            implementations,
+        ),
+    ):
+        msa_m3_npu_module.minimax_m3_sparse_attn(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            prefix_lens,
+            max_query_len=32,
+            num_kv_heads=2,
+            sm_scale=0.5,
+            output=output,
+            block_size=128,
+        )
+
+    implementations[family].assert_called_once_with(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        2,
+        0.5,
+        output,
+        128,
+    )
+    other_family = (
+        MiniMaxM3SparseAttentionPrefillFamily.K2Q_CSR_SCORE
+        if family is MiniMaxM3SparseAttentionPrefillFamily.SELECT_INDEX_AND_COUNT_SCORE
+        else MiniMaxM3SparseAttentionPrefillFamily.SELECT_INDEX_AND_COUNT_SCORE
+    )
+    implementations[other_family].assert_not_called()
+
+
+def test_triton_indexer_forward_keeps_unsharded_decode_path() -> None:
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
     impl.num_index_heads = 1
@@ -646,7 +1000,7 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
     assert mock_decode.call_args.kwargs == {"sm_scale": impl.scale}
 
 
-def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
+def test_triton_indexer_forward_keeps_score_then_topk_prefill_path() -> None:
     impl = object.__new__(AscendMiniMaxM3IndexerImpl)
     torch.nn.Module.__init__(impl)
     impl.num_index_heads = 1
@@ -735,22 +1089,19 @@ def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
 
 
 @patch(
-    "vllm_ascend.models.minimax_m3.minimax_m3.get_ascend_device_type",
-    return_value=AscendDeviceType.A5,
-)
-@patch(
     "vllm_ascend.models.minimax_m3.minimax_m3.torch_npu.npu_scatter_pa_cache",
     create=True,
 )
-def test_scatter_index_cache_uses_pa_cache_on_a5(
-    mock_scatter_pa_cache: MagicMock,
-    _mock_device_type: MagicMock,
-) -> None:
+def test_scatter_index_cache_uses_paged_scatter_when_supported(mock_scatter_pa_cache: MagicMock) -> None:
     cache = torch.zeros(2, 128, 4, dtype=torch.bfloat16)
     updates = torch.randn(3, 4, dtype=torch.bfloat16)
     slots = torch.tensor([0, 129, -1], dtype=torch.int64)
 
-    _scatter_index_cache(cache, updates, slots)
+    with patch(
+        "vllm_ascend.models.minimax_m3.minimax_m3._HARDWARE_PROFILE",
+        _profile_supporting(HardwareCapability.MINIMAX_M3_PAGED_INDEX_CACHE_SCATTER),
+    ):
+        _scatter_index_cache(cache, updates, slots)
 
     mock_scatter_pa_cache.assert_called_once()
     key, actual_slots = mock_scatter_pa_cache.call_args.args
@@ -764,20 +1115,22 @@ def test_scatter_index_cache_uses_pa_cache_on_a5(
     assert key_cache.data_ptr() == cache.data_ptr()
 
 
-@patch(
-    "vllm_ascend.models.minimax_m3.minimax_m3.get_ascend_device_type",
-    return_value=AscendDeviceType.A2,
-)
-def test_scatter_index_cache_keeps_legacy_op_off_a5(_mock_device_type: MagicMock) -> None:
+def test_scatter_index_cache_uses_flat_scatter_without_paged_capability() -> None:
     cache = torch.zeros(2, 128, 4, dtype=torch.bfloat16)
     updates = torch.randn(3, 4, dtype=torch.bfloat16)
     slots = torch.tensor([0, 1, 2], dtype=torch.int64)
 
-    with patch.object(
-        torch.ops._C_ascend,
-        "npu_scatter_nd_update_v2",
-        create=True,
-    ) as mock_scatter_nd_update:
+    with (
+        patch(
+            "vllm_ascend.models.minimax_m3.minimax_m3._HARDWARE_PROFILE",
+            _profile_supporting(),
+        ),
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_scatter_nd_update_v2",
+            create=True,
+        ) as mock_scatter_nd_update,
+    ):
         _scatter_index_cache(cache, updates, slots)
 
     mock_scatter_nd_update.assert_called_once()

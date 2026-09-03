@@ -6,9 +6,9 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
+from vllm_ascend.device.device_config import is_310p as is_310p_hw
 from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
 from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.utils import is_310p as is_310p_hw
 
 enable_custom_op()
 

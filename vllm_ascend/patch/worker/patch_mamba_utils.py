@@ -32,7 +32,7 @@ mamba_utils._TEMPORAL_TILES = 1
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
-    return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
+    return get_current_hardware_profile().supports(HardwareCapability.TRITON_MAMBA_STATE_BATCH_MEMCPY)
 
 
 def _get_mamba_groups(

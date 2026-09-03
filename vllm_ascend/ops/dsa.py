@@ -223,12 +223,12 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+        if get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE):
             indexer_k_cache, indexer_scale_cache, indexer_full_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
         else:
             indexer_k_cache, indexer_scale_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
 
-    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+    if get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE):
         kv_cache = tuple(
             [
                 unfold_kvcache(cache)

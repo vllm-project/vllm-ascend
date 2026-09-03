@@ -479,11 +479,8 @@ _backend_init_path = os.path.join(_backend_pkg.__path__[0], "__init__.py")  # ty
 with open(_backend_init_path, encoding="utf-8") as _backend_init_file:
     exec(compile(_backend_init_file.read(), _backend_init_path, "exec"), vars(_backend_pkg))  # type: ignore[arg-type]
 
-if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
-    _ascend_utils = MagicMock()
-    _ascend_utils.AscendDeviceType = MagicMock()
-    _ascend_utils.get_ascend_device_type = MagicMock()
-    sys.modules["vllm_ascend.utils"] = _ascend_utils
+if "vllm_ascend.utils" not in sys.modules:
+    sys.modules["vllm_ascend.utils"] = MagicMock()
 
 # NOTE: vllm_ascend.{ascend_config, attention_fence} and their helpers
 # (get_ascend_config, AttentionComputeStartGate, ...) are intentionally NOT

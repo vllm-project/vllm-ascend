@@ -35,6 +35,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.device.hardware_profile import (
     AttentionBackendFamily,
+    CompilationCustomOpPolicy,
     HardwareCapability,
     QuantizationBackendFamily,
     get_current_hardware_profile,
@@ -74,8 +75,6 @@ logger.info_once(
 )
 
 _CUSTOM_OP_REGISTERED = False
-# Delete after the driver is released; temporarily hard-coded to 4
-MAX_REDUCED_CAPTURE_SIZES = 4
 
 
 class NPUPlatform(Platform):
@@ -256,7 +255,7 @@ class NPUPlatform(Platform):
             # (True, True):  "...AscendSFABackend310",
         }
 
-        if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
+        if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.DENSE_ONLY:
             return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
         if attn_selector_config.use_pcp:
@@ -305,7 +304,10 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
-        if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
+        if (
+            get_current_hardware_profile().quantization_backend_family
+            is QuantizationBackendFamily.COMPRESSED_TENSORS_FP8_MXFP8_AND_MODELSLIM
+        ):
             from vllm_ascend.quantization import (  # noqa: F401
                 AscendCompressedTensorsConfig,
                 AscendFp8Config,
@@ -1202,8 +1204,9 @@ def _setup_compile_backend(
             ]
         )
         # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
-        if get_current_hardware_profile().supports(HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES):
-            _prune_reduced_capture_sizes(vllm_config)
+        capture_size_limit = get_current_hardware_profile().cudagraph_capture_size_limit
+        if capture_size_limit is not None:
+            _prune_reduced_capture_sizes(vllm_config, capture_size_limit)
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
     elif compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -1245,7 +1248,7 @@ def _setup_worker_and_scheduler(
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         hardware_profile = get_current_hardware_profile()
         if ascend_config.xlite_graph_config.enabled and hardware_profile.supports(
-            HardwareCapability.STANDARD_WORKER_PATCHES
+            HardwareCapability.XLITE_GRAPH_WORKER
         ):
             logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
             parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
@@ -1254,8 +1257,9 @@ def _setup_worker_and_scheduler(
 
     refresh_block_size(vllm_config)
 
-    # Automatically activate all custom ops on profiles using the standard path.
-    if get_current_hardware_profile().supports(HardwareCapability.AUTO_ENABLE_CUSTOM_OPS):
+    # Force-enable the complete compilation custom-op set only when selected
+    # by the profile policy; otherwise preserve the user's configuration.
+    if get_current_hardware_profile().compilation_custom_op_policy is CompilationCustomOpPolicy.FORCE_ENABLE_ALL:
         vllm_config.compilation_config.custom_ops = ["all"]
 
     # Select specialized scheduler class
@@ -1453,14 +1457,14 @@ def _config_deprecated_logging():
     warnings_logger.propagate = False
 
 
-def _prune_reduced_capture_sizes(vllm_config):
+def _prune_reduced_capture_sizes(vllm_config, capture_size_limit: int):
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not original_sizes:
         return
-    if len(original_sizes) <= MAX_REDUCED_CAPTURE_SIZES:
+    if len(original_sizes) <= capture_size_limit:
         return
-    step = (len(original_sizes) - 1) / (MAX_REDUCED_CAPTURE_SIZES - 1)
-    indices = [round(i * step) for i in range(MAX_REDUCED_CAPTURE_SIZES)]
+    step = (len(original_sizes) - 1) / (capture_size_limit - 1)
+    indices = [round(i * step) for i in range(capture_size_limit)]
     indices[0], indices[-1] = 0, len(original_sizes) - 1
     sampled_sizes = [original_sizes[i] for i in indices]
     update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
@@ -1468,7 +1472,7 @@ def _prune_reduced_capture_sizes(vllm_config):
         "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
         "and this warning will be cleared soon.",
         len(original_sizes),
-        MAX_REDUCED_CAPTURE_SIZES,
+        capture_size_limit,
     )
 
 

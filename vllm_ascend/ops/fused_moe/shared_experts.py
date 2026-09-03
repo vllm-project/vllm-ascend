@@ -342,7 +342,9 @@ class AscendSharedExperts:
                         clamp_limit=self.swiglu_limit,
                         **(
                             {}
-                            if not get_current_hardware_profile().supports(HardwareCapability.FUSED_SWIGLU_TUNING_ARGS)
+                            if not get_current_hardware_profile().supports(
+                                HardwareCapability.DEQUANT_SWIGLU_GLU_ALPHA_BIAS_ARGS
+                            )
                             else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
                         ),
                     )

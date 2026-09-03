@@ -42,8 +42,9 @@ from vllm.logger import logger
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, is_950, maybe_trans_nz
+from vllm_ascend.utils import FP8_METHOD, maybe_trans_nz
 
 from ..base import AscendLinearScheme, AscendMoEScheme, QuantType
 from ..registry import register_scheme
@@ -54,6 +55,7 @@ BLOCK_FP8_WEIGHT_DTYPE = torch.float8_e4m3fn
 # Output rows resolved per step. Bounds the float32 staging buffer to
 # ``_ROWS_PER_DEQUANT_STEP * in_features * 4`` bytes regardless of layer size.
 _ROWS_PER_DEQUANT_STEP = 1024
+_HARDWARE_PROFILE = get_current_hardware_profile()
 
 
 def resolve_block_scales(
@@ -140,7 +142,11 @@ class AscendFp8BlockLinearMethod(AscendLinearScheme):
     def __init__(self, weight_block_size: tuple[int, int]):
         self.block_n, self.block_k = weight_block_size
         self.model_dtype = get_current_vllm_config().model_config.dtype
-        self.mxfp8_method = AscendW8A8MXFP8DynamicLinearMethod() if is_950() else None
+        self.mxfp8_method = (
+            AscendW8A8MXFP8DynamicLinearMethod()
+            if _HARDWARE_PROFILE.supports(HardwareCapability.BLOCK_FP8_TO_MXFP8_REQUANTIZATION)
+            else None
+        )
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
         return {"weight": torch.empty(output_size, input_size, dtype=BLOCK_FP8_WEIGHT_DTYPE)}
@@ -230,7 +236,11 @@ class AscendFp8BlockFusedMoEMethod(AscendMoEScheme):
         self.group_size = self.block_k
         self.model_dtype = get_current_vllm_config().model_config.dtype
         self.moe_config = moe_config
-        self.mxfp8_method = AscendW8A8MXFP8DynamicFusedMoEMethod() if is_950() else None
+        self.mxfp8_method = (
+            AscendW8A8MXFP8DynamicFusedMoEMethod()
+            if _HARDWARE_PROFILE.supports(HardwareCapability.BLOCK_FP8_TO_MXFP8_REQUANTIZATION)
+            else None
+        )
         # MoE MXFP8 has group_size only. Snapshot the Linear helper here so
         # requantize does not call get_current_vllm_config() at load time.
         self._mx_scale_alg = (

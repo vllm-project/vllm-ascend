@@ -88,7 +88,7 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
-        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE_FUSED_MC2)
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
@@ -332,9 +332,13 @@ def _select_capacity_and_world_size_moe_comm_method(
 
 
 _MOE_COMM_SELECTORS = {
-    MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY: _select_capacity_and_expert_density_moe_comm_method,
-    MoECommPolicy.FUSED_OR_CAPACITY: _select_fused_or_capacity_moe_comm_method,
-    MoECommPolicy.CAPACITY_AND_WORLD_SIZE: _select_capacity_and_world_size_moe_comm_method,
+    MoECommPolicy.MC2_IF_CAPACITY_AND_EXPERT_DENSITY_ELSE_ALLGATHER: (
+        _select_capacity_and_expert_density_moe_comm_method
+    ),
+    MoECommPolicy.FUSED_MC2_THEN_CAPACITY_MC2_ELSE_ALLTOALL: _select_fused_or_capacity_moe_comm_method,
+    MoECommPolicy.MC2_IF_CAPACITY_ELSE_ALLGATHER_OR_ALLTOALL_BY_WORLD_SIZE: (
+        _select_capacity_and_world_size_moe_comm_method
+    ),
 }
 
 

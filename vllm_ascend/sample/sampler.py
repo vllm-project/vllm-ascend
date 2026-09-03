@@ -270,6 +270,6 @@ def _apply_top_k_top_p_torch_npu(
 
 apply_top_k_top_p = (
     _apply_top_k_top_p_torch_npu
-    if get_current_hardware_profile().supports(HardwareCapability.NPU_TOP_K_TOP_P)
+    if get_current_hardware_profile().supports(HardwareCapability.NATIVE_TOP_K_TOP_P_SAMPLING)
     else _apply_top_k_top_p_pytorch
 )

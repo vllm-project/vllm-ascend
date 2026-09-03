@@ -121,6 +121,12 @@ repos:
     entry: python3 tools/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-hardware-identity
+    name: Forbid hardware identity use outside the HAL boundary
+    entry: python3 tools/check_hardware_identity.py
+    language: python
+    pass_filenames: false
+    always_run: true
   - id: check-long-functions
     name: Check that new functions over 100 lines have comments
     entry: python3 tools/check_long_functions.py

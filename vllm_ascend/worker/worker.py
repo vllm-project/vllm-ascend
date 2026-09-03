@@ -134,7 +134,7 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
 
         ops.register_dummy_fusion_op()
-        if get_current_hardware_profile().supports(HardwareCapability.ATB_EXTENSIONS):
+        if get_current_hardware_profile().supports(HardwareCapability.ATB_MODEL_EXECUTION_EXTENSIONS):
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
@@ -434,7 +434,7 @@ class NPUWorker(WorkerBase):
         gc.collect()
         torch.npu.empty_cache()
 
-        if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
+        if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_TRANSFER_COMM_RESOURCE):
             setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
@@ -821,7 +821,7 @@ class NPUWorker(WorkerBase):
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
+        if get_current_hardware_profile().atb_matmul_warmup_required:
             self._warm_up_atb()
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.

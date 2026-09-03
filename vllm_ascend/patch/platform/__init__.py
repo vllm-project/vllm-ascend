@@ -22,9 +22,9 @@ import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import MambaConfigPatchFamily, get_current_hardware_profile
 
-if get_current_hardware_profile().supports(HardwareCapability.STANDARD_MAMBA_PATCH):
+if get_current_hardware_profile().mamba_config_patch_family is MambaConfigPatchFamily.MLA_OR_DENSE_CACHE_LAYOUT:
     import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 else:
     import vllm_ascend.patch.platform.patch_mamba_config_310  # noqa

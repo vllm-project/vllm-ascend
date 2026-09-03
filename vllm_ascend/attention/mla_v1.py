@@ -1061,7 +1061,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
             )
             supports_native_weights = get_current_hardware_profile().supports(
-                HardwareCapability.MLAPO_NATIVE_WEIGHTS
+                HardwareCapability.MLAPO_UNQUANTIZED_PROJECTION_WEIGHTS
             ) and isinstance(layer_quant_method, UnquantizedLinearMethod)
             if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False

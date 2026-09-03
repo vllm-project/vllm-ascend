@@ -13,12 +13,12 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     DSA_COMPRESSOR_SLOT_MAPPING_FLAT,
     get_dsa_attn_kv_plan,
     get_dsv4_attn_kv_dtype,
-    is_a5_bf16_kv_enabled,
+    is_dsv4_bf16_sparse_flash_mla_enabled,
     resolve_dsv4_cache_dtype,
 )
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import AscendDeviceType
 
 _DSA_C_ASCEND_OPS = (
     "npu_sparse_attn_sharedkv",
@@ -95,23 +95,23 @@ def test_scatter_skips_none_updates():
             epilog.assert_not_called()
 
 
-def test_is_a5_bf16_kv_enabled_requires_vllm_config():
+def test_bf16_sparse_flash_mla_selection_requires_vllm_config():
     with _on(AscendDeviceType.A5), pytest.raises(TypeError):
-        is_a5_bf16_kv_enabled()
+        is_dsv4_bf16_sparse_flash_mla_enabled()
 
 
 def test_only_explicit_bfloat16_selects_bf16_kv_on_a5():
     with _on(AscendDeviceType.A5):
-        assert is_a5_bf16_kv_enabled(_cache_config("bfloat16"))
-        assert not is_a5_bf16_kv_enabled(_cache_config())
-        assert not is_a5_bf16_kv_enabled(_cache_config("fp8"))
+        assert is_dsv4_bf16_sparse_flash_mla_enabled(_cache_config("bfloat16"))
+        assert not is_dsv4_bf16_sparse_flash_mla_enabled(_cache_config())
+        assert not is_dsv4_bf16_sparse_flash_mla_enabled(_cache_config("fp8"))
         # The A5 spec path rewrites cache_dtype once FP8 KV is chosen.
-        assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
+        assert not is_dsv4_bf16_sparse_flash_mla_enabled(_cache_config("float8_e4m3fn"))
 
 
 def test_a5_bf16_kv_is_disabled_on_non_a5():
     with _on(AscendDeviceType.A3):
-        assert not is_a5_bf16_kv_enabled(_cache_config("bfloat16"))
+        assert not is_dsv4_bf16_sparse_flash_mla_enabled(_cache_config("bfloat16"))
 
 
 @pytest.mark.parametrize(
@@ -146,9 +146,9 @@ def test_a5_mode_survives_the_spec_path_rewrite():
     with _on(AscendDeviceType.A5):
         for launch in ("auto", "fp8"):
             pinned = resolve_dsv4_cache_dtype(launch, "bfloat16")
-            assert not is_a5_bf16_kv_enabled(_cache_config(pinned))
+            assert not is_dsv4_bf16_sparse_flash_mla_enabled(_cache_config(pinned))
             # layer.get_kv_cache_spec pins FP8 once it has picked the mode.
-            assert not is_a5_bf16_kv_enabled(_cache_config("float8_e4m3fn"))
+            assert not is_dsv4_bf16_sparse_flash_mla_enabled(_cache_config("float8_e4m3fn"))
 
         pinned = resolve_dsv4_cache_dtype("bfloat16", "bfloat16")
-        assert is_a5_bf16_kv_enabled(_cache_config(pinned))
+        assert is_dsv4_bf16_sparse_flash_mla_enabled(_cache_config(pinned))

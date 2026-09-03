@@ -16,25 +16,26 @@ _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
 
 
 def _supports_dsv4_compressed_cache() -> bool:
-    return get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+    return get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE)
 
 
 def resolve_dsv4_cache_dtype(cache_dtype, model_dtype: str) -> str:
     """Return the KV cache dtype the platform should pin for DeepSeek-V4.
 
-    On A5 the launch request has to stay readable afterwards, because it is the
-    only thing that separates an explicit bfloat16 KV request from ``auto``.
-    ``auto`` and the model dtype resolve identically everywhere downstream, so
-    collapsing every non-bfloat16 request to ``auto`` preserves the upstream
-    values while keeping the mode recoverable.
+    On profiles with compressed DSA KV cache, the launch request has to stay
+    readable afterwards because it is the only thing that separates an
+    explicit bfloat16 KV request from ``auto``. ``auto`` and the model dtype
+    resolve identically everywhere downstream, so collapsing every
+    non-bfloat16 request to ``auto`` preserves the upstream values while
+    keeping the mode recoverable.
     """
     if not _supports_dsv4_compressed_cache():
         return model_dtype
     return "bfloat16" if str(cache_dtype).lower() in _BF16_KV_CACHE_DTYPES else "auto"
 
 
-def is_a5_bf16_kv_enabled(vllm_config) -> bool:
-    """Return whether BF16 SparseFlashMla KV is enabled on A5.
+def is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config) -> bool:
+    """Return whether the BF16 SparseFlashMla DSA KV plan is enabled.
 
     Callers must pass the engine ``vllm_config``. Do not look it up from the
     process-global current config: that context is only set during
@@ -49,10 +50,10 @@ def is_a5_bf16_kv_enabled(vllm_config) -> bool:
 
 
 def get_dsv4_attn_kv_dtype(vllm_config) -> torch.dtype:
-    """Return the attention KV dtype while preserving non-A5 behavior."""
+    """Return the attention KV dtype for the selected DSA KV-cache plan."""
     return (
         torch.bfloat16
-        if not _supports_dsv4_compressed_cache() or is_a5_bf16_kv_enabled(vllm_config)
+        if not _supports_dsv4_compressed_cache() or is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config)
         else torch.float8_e4m3fn
     )
 
@@ -136,7 +137,7 @@ class DsaAttnKvPlan:
 
 
 def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
-    """Return the explicit A5 BF16 or upstream-compatible FP8 DSA plan."""
+    """Return the explicit BF16 SparseFlashMla or compressed-FP8 DSA plan."""
     if not _supports_dsv4_compressed_cache():
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=False,
@@ -152,7 +153,7 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
             applies_sparse_attn_runtime_kwargs=True,
         )
 
-    use_bf16 = is_a5_bf16_kv_enabled(vllm_config)
+    use_bf16 = is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config)
     if use_bf16:
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=True,

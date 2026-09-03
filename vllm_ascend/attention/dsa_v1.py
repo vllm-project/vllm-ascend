@@ -21,7 +21,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
-    is_a5_bf16_kv_enabled,
+    is_dsv4_bf16_sparse_flash_mla_enabled,
 )
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
@@ -94,7 +94,7 @@ def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
 
 def _dsa_swa_only_cmp_ratio(compress_ratio: int, vllm_config: VllmConfig) -> int:
     """BF16 SWA-only attention takes no compressed stream; otherwise keep main's value."""
-    if is_a5_bf16_kv_enabled(vllm_config) and compress_ratio <= 1:
+    if is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config) and compress_ratio <= 1:
         return 0
     return max(compress_ratio, 1)
 
@@ -212,9 +212,7 @@ class AscendDSAC128StateBackend(AscendDSABackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
-        if get_current_hardware_profile().supports(HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES):
-            return [4, 8, 16]
-        return [8, 16, 32]
+        return list(get_current_hardware_profile().dsa_c128_block_sizes)
 
 
 @dataclass
@@ -373,9 +371,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
-            vllm_config
-        ):
+        if get_current_hardware_profile().supports(
+            HardwareCapability.FP8_ATTENTION
+        ) and not is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config):
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -1066,7 +1064,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
 
         ascend_config = get_ascend_config()
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
-        if self.multistream_dsv4_dsa_overlap and is_a5_bf16_kv_enabled(self.vllm_config):
+        if self.multistream_dsv4_dsa_overlap and is_dsv4_bf16_sparse_flash_mla_enabled(self.vllm_config):
             self.multistream_dsv4_dsa_overlap = False
 
     def _get_layer_metadata(
@@ -1128,11 +1126,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         num_tokens = o_proj_input.shape[0]
         group_hidden_dim = o_proj_input.shape[1] * o_proj_input.shape[2] // self.n_local_groups
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
-        # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
-        # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP / olora_tp paths below, so it must win first.
-        use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
-        if use_a5_quant_o_proj:
+        # FP8 attention profiles use a quantized o_proj path (dynamic MX quant
+        # plus quantized batch matmul). It is orthogonal to the OTP / olora_tp
+        # paths below, so it must win first.
+        use_quantized_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
+        if use_quantized_o_proj:
             o = o_proj_input
             o, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(o, dst_type=torch.float8_e4m3fn)
             o = torch_npu.npu_transpose_quant_batchmatmul(

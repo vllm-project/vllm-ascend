@@ -26,7 +26,8 @@ import torch
 from vllm.utils.network_utils import get_open_port
 
 from tests.e2e.conftest import wait_until_npu_memory_free
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 
 MODELS = [
     # Offline data parallel mode will be not supported/useful for dense models

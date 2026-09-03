@@ -39,6 +39,11 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    MiniMaxM3IndexerFamily,
+    get_current_hardware_profile,
+)
 from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     MiniMaxM3TPDecodeScoreMetadata,
     minimax_m3_index_tp_block_parallel_decode,
@@ -53,9 +58,11 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
 )
 from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-_USE_ASCENDC_INDEX_SCORE = get_ascend_device_type() != AscendDeviceType.A5
+_HARDWARE_PROFILE = get_current_hardware_profile()
+_USE_ASCENDC_INDEX_SCORE = (
+    _HARDWARE_PROFILE.minimax_m3_indexer_family is MiniMaxM3IndexerFamily.ASCENDC_SCORE_AND_DECODE_WITH_TRITON_TOPK
+)
 
 if not _USE_ASCENDC_INDEX_SCORE:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
@@ -66,10 +73,13 @@ if not _USE_ASCENDC_INDEX_SCORE:
 
 
 def _should_use_tp_sharded_index_decode(tp_size: int, num_prefills: int) -> bool:
-    # The A5 Triton decode kernel operates on the complete, replicated index-K
-    # cache on every TP rank. Keep the mainline block-sharded optimization for
-    # the other device families only.
-    return get_ascend_device_type() != AscendDeviceType.A5 and tp_size > 1 and num_prefills == 0
+    # Only profiles that explicitly support sharded index decode may use the
+    # block-parallel optimization, regardless of the selected indexer family.
+    return (
+        _HARDWARE_PROFILE.supports(HardwareCapability.MINIMAX_M3_TP_SHARDED_INDEX_DECODE)
+        and tp_size > 1
+        and num_prefills == 0
+    )
 
 
 def _active_decode_num_reqs(
@@ -361,7 +371,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
             )
-            if _USE_ASCENDC_INDEX_SCORE and self.tp_size > 1 and active_prefills == 0:
+            if _USE_ASCENDC_INDEX_SCORE and _should_use_tp_sharded_index_decode(self.tp_size, active_prefills):
                 decode_metadata.tp_score = self._build_tp_score_metadata(
                     decode_metadata.block_table,
                     decode_cu_seqlens_q,
@@ -504,7 +514,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             tp_group = get_tp_group()
             decode_iq = iq[:num_decode_tokens]
             if _USE_ASCENDC_INDEX_SCORE:
-                if tp_group.world_size > 1 and index_md.num_prefills == 0:
+                if _should_use_tp_sharded_index_decode(tp_group.world_size, index_md.num_prefills):
                     decode_topk = minimax_m3_index_tp_block_parallel_decode(
                         decode_iq,
                         kv,

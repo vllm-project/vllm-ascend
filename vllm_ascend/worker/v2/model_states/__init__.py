@@ -22,7 +22,12 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
-from vllm_ascend.device.device_config import is_310p
+from vllm_ascend.device.hardware_profile import (
+    ModelRunnerV2ImplementationFamily,
+    get_current_hardware_profile,
+)
+
+_HARDWARE_PROFILE = get_current_hardware_profile()
 
 
 def init_asecnd_model_state(
@@ -36,9 +41,12 @@ def init_asecnd_model_state(
         cls = model.get_model_state_cls()
         return cls(vllm_config, model, encoder_cache, device)
 
-    # 310P uses Triton-free states under ``vllm_ascend._310p.worker.v2.model_state``.
+    use_triton_free_state = (
+        _HARDWARE_PROFILE.model_runner_v2_implementation_family
+        is ModelRunnerV2ImplementationFamily.TRITON_FREE_HOST_METADATA
+    )
     if vllm_config.model_config.is_hybrid:
-        if is_310p():
+        if use_triton_free_state:
             from vllm_ascend._310p.worker.v2.model_state import Ascend310PMambaHybridModelState
 
             return Ascend310PMambaHybridModelState(vllm_config, model, encoder_cache, device)
@@ -54,7 +62,7 @@ def init_asecnd_model_state(
             device,
         )
 
-    if is_310p():
+    if use_triton_free_state:
         from vllm_ascend._310p.worker.v2.model_state import (
             Ascend310PModelState,
         )

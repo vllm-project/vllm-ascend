@@ -39,7 +39,7 @@ from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
+from vllm_ascend.attention.dsa_attn_kv_plan import is_dsv4_bf16_sparse_flash_mla_enabled
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -90,9 +90,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+        if get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE):
             self.dtype = torch.float8_e4m3fn
-            if not is_a5_bf16_kv_enabled(vllm_config):
+            if not is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config):
                 vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -109,7 +109,7 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
             scale_dtype=torch.float
-            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            if get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE)
             else torch.float16,
         )
 
@@ -292,7 +292,7 @@ class DeepseekV4Indexer(nn.Module):
         )
         k_dtype = (
             torch.float8_e4m3fn
-            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            if get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE)
             else torch.int8
         )
 

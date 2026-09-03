@@ -524,7 +524,7 @@ class CpuAlloc:
 
     @staticmethod
     def _reserve_irq_cpus() -> bool:
-        return get_current_hardware_profile().supports(HardwareCapability.IRQ_CPU_RESERVATION)
+        return get_current_hardware_profile().reserve_irq_cpus
 
     @staticmethod
     def _min_cpus_per_npu() -> int:

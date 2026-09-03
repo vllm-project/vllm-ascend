@@ -21,8 +21,8 @@ from unittest.mock import MagicMock, call, mock_open, patch
 
 import vllm_ascend.cpu_binding as cpu_binding_module
 from vllm_ascend.cpu_binding import CpuAlloc, DeviceInfo, bind_cpus, is_arm_cpu
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import AscendDeviceType
 
 
 def make_cpu_alloc(rank_id=0):

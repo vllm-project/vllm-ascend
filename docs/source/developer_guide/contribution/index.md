@@ -71,6 +71,31 @@ git commit -sm "your commit info"
 
 You can refer to [Testing](./testing.md)  to set up a testing environment and running tests locally.
 
+## Hardware-specific behavior
+
+Shared runtime and model code must select hardware-specific behavior through
+`get_current_hardware_profile()`. Direct SoC checks such as `is_310p()`,
+`is_950()`, `get_ascend_device_type()`, or comparisons with
+`AscendDeviceType` belong only in the device detection and profile
+registration boundary. The pre-commit hardware-identity check enforces this
+rule for production Python code.
+
+Choose the profile abstraction by its contract:
+
+- A `HardwareCapability` is a positive, independently testable hardware or
+  runtime feature. Its name should make `profile.supports(...)` read as a
+  precise question.
+- A family selects one implementation contract from several alternatives.
+- A policy or explicit profile value selects a default behavior or a bounded
+  parameter, rather than claiming hardware support.
+
+New names must state the feature scope, action, and object. Avoid device and
+model codenames as the complete contract, and avoid unqualified terms such as
+`STANDARD`, `COMPATIBILITY`, `UNRESTRICTED`, or `EXTRA_ARGS`. If an established
+domain acronym remains necessary, document its stable runtime or operator ABI
+contract next to the profile definition. Add the exact device-profile matrix
+and a focused consumer test with every new profile dimension.
+
 ## DCO and Signed-off-by
 
 When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO (Developer Certificate of Origin).

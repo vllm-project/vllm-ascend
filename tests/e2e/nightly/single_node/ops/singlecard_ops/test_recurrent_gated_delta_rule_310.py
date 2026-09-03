@@ -2,8 +2,8 @@ import pytest
 import torch
 import torch_npu
 
+from vllm_ascend.device.device_config import is_310p as is_310p_hw
 from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.utils import is_310p as is_310p_hw
 
 torch_npu.npu.set_compile_mode(jit_compile=False)
 

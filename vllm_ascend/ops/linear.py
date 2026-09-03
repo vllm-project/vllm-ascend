@@ -40,7 +40,11 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import (
+    DSAOProjWeightLayoutPolicy,
+    WeightLayoutPolicy,
+    get_current_hardware_profile,
+)
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
 from vllm_ascend.utils import (
@@ -457,16 +461,16 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
-            HardwareCapability.DYNAMIC_MX_QUANT_FUSION
-        )
+        dsa_o_proj_weight_layout_policy = get_current_hardware_profile().dsa_o_proj_weight_layout_policy
         reshape_bf16_wo_a = (
             "wo_a" in self.prefix
-            and supports_dynamic_mx_quant_fusion
+            and dsa_o_proj_weight_layout_policy is DSAOProjWeightLayoutPolicy.TRANSPOSE_UNQUANTIZED_BF16_WO_A_ONLY
             and self.quant_config is None
             and loaded_weight.dtype == torch.bfloat16
         )
-        if "wo_a" in self.prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a):
+        if "wo_a" in self.prefix and (
+            dsa_o_proj_weight_layout_policy is DSAOProjWeightLayoutPolicy.ALWAYS_TRANSPOSE_WO_A or reshape_bf16_wo_a
+        ):
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
                 self.weight.data = (

@@ -453,7 +453,7 @@ def _view_dsv4_cache(
         )
         cache_shapes.append(scale_shape)
         cache_dtypes.append(scale_dtype)
-        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+        if get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE):
             full_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
                 kv_cache_spec.storage_block_size,
