@@ -79,9 +79,7 @@ def _apply_indexer_kv_dtype_int8_patch() -> None:
 
     _attention_mod.IndexerKVDType = _INDEXER_KV_DTYPE_WITH_INT8
     AttentionConfig.__annotations__["indexer_kv_dtype"] = _INDEXER_KV_DTYPE_WITH_INT8
-    AttentionConfig.__dataclass_fields__["indexer_kv_dtype"].type = (
-        _INDEXER_KV_DTYPE_WITH_INT8
-    )
+    AttentionConfig.__dataclass_fields__["indexer_kv_dtype"].type = _INDEXER_KV_DTYPE_WITH_INT8
 
     # Rebuild the pydantic dataclass schema so the new Literal is enforced.
     # ``_parent_namespace_depth=1`` makes pydantic resolve types against this
@@ -92,10 +90,7 @@ def _apply_indexer_kv_dtype_int8_patch() -> None:
         raise_errors=True,
         _parent_namespace_depth=1,
     )
-    logger.info(
-        "Patched AttentionConfig.indexer_kv_dtype to accept 'int8' "
-        "(DeepSeek V4 Ascend indexer K cache dtype)."
-    )
+    logger.info("Patched AttentionConfig.indexer_kv_dtype to accept 'int8' (DeepSeek V4 Ascend indexer K cache dtype).")
 
 
 _apply_indexer_kv_dtype_int8_patch()

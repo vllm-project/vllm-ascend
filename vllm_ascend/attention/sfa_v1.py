@@ -35,7 +35,6 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
 )
@@ -512,8 +511,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_sparse_sfa_c8 = self.vllm_config.cache_config.cache_dtype in ["fp8", "int8"]
         self.enable_sparse_li_c8 = self.has_indexer and ascend_config.is_sparse_li_c8_layer(self.indexer.k_cache.prefix)
         self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-            self.vllm_config.attention_config.indexer_kv_dtype, 
-            self.vllm_config.model_config
+            self.vllm_config.attention_config.indexer_kv_dtype, self.vllm_config.model_config
         )
         if c8_k_cache_dtype == torch.float8_e4m3fn:
             self.c8_k_scale_cache_dtype = torch.float32

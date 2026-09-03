@@ -276,4 +276,6 @@ def enable_fa_quant(vllm_config, layer_name=None) -> bool:
             return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
         else:
             return True
-    raise ValueError("The current MLA‑related models adopt static quantization. KV quantization is configured via `--kv‑cache‑dtype` upon service startup, and the corresponding quantized weights are required.")
+    raise ValueError(
+        "The current MLA‑related models adopt static quantization. KV quantization is configured via `--kv‑cache‑dtype` upon service startup, and the corresponding quantized weights are required."
+    )
