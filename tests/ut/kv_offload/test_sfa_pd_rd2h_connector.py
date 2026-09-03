@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,6 +13,7 @@ import pytest
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+import torch  # noqa: E402
 from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
 )
@@ -33,6 +35,9 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (  #
     SendTask,
     SfaPDProducerReqMeta,
     infer_sfa_component_group_ids,
+)
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h import (  # noqa: E402
+    read_thread as read_thread_module,
 )
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.read_thread import (  # noqa: E402
     ConsumerReadState,
@@ -712,6 +717,188 @@ def test_send_thread_slices_each_group_at_chunk_boundaries():
     assert sent_message[3] == [("req-0", [11], [20], 1, 0)]
     assert sent_message[5] == 0
     assert sent_message[6] == 1
+
+
+def _make_scatter_wait_send_thread() -> MembPullSendingThread:
+    layer_name = "model.layers.0.self_attn"
+    thread = MembPullSendingThread.__new__(MembPullSendingThread)
+    thread._state = ProducerSendState(
+        last_layer_idx=0,
+        main_group_idx=1,
+        indexer_group_idx=0,
+        block_sizes=(32, 16),
+        layer_metadata={
+            layer_name: LayerMetadata(
+                tensor_group_idx=[1, 1, 0],
+                kv_caches_base_addr=[1000, 2000, 3000],
+                block_len=[10, 20, 5],
+                block_size_scale=[1, 1, 1],
+                main_tensor_count=2,
+                has_indexer=True,
+            )
+        },
+        layer_storage_slots={0: (0, 1)},
+        p_session="p-session",
+    )
+    thread.last_layer_idx = 0
+    thread._p_save_events = {}
+    thread._pending_reads_by_layer = {}
+    thread._storage_read_errors = {}
+    thread.storage_send_done_events = [threading.Event(), threading.Event()]
+    for event in thread.storage_send_done_events:
+        event.set()
+    thread._mf_meta_sent_paths = {"tcp://127.0.0.1:1234"}
+    thread._ensure_dealer = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    return thread
+
+
+def _make_scatter_wait_req_meta() -> SfaPDProducerReqMeta:
+    return SfaPDProducerReqMeta(
+        local_block_ids=[[7], [3, 4]],
+        token_ids=[],
+        remote_block_ids=[],
+        remote_block_size=[],
+        remote_engine_id=None,
+        remote_host="127.0.0.1",
+        remote_port=1234,
+        remote_te_rpc_port=None,
+        remote_layer_metadata=None,
+        metaserver=None,
+        remote_tp_size=None,
+        remote_pcp_size=None,
+        remote_dcp_size=None,
+        chunk_finish=True,
+        local_transed_tokens=0,
+        local_computed_tokens=32,
+    )
+
+
+def test_send_thread_waits_for_scatter_through_its_own_stream():
+    # Event.synchronize() does not wait on an event recorded by the forward
+    # thread, so D would pull blocks the scatter had not filled yet.
+    thread = _make_scatter_wait_send_thread()
+    encoder = MagicMock()
+    encoder.encode.side_effect = lambda value: value
+    scatter_event = MagicMock()
+    stream = MagicMock()
+
+    with (
+        patch.object(torch.npu, "current_stream", return_value=stream),
+        patch.object(torch.npu, "synchronize") as device_sync,
+    ):
+        thread._process_send_task(
+            SendTask(
+                send_request={"req-0": _make_scatter_wait_req_meta()},
+                layer_idx=0,
+                layer_name="model.layers.0.self_attn",
+                wait_event=scatter_event,
+            ),
+            encoder,
+        )
+
+    stream.wait_event.assert_called_once_with(scatter_event)
+    stream.synchronize.assert_called_once()
+    scatter_event.synchronize.assert_not_called()
+    device_sync.assert_not_called()
+
+
+def test_send_thread_prefers_the_task_event_over_the_layer_keyed_map():
+    # Pre-attention dispatch keeps two steps in flight; the map is keyed by
+    # layer alone and so cannot tell this step's event from the other's.
+    thread = _make_scatter_wait_send_thread()
+    encoder = MagicMock()
+    encoder.encode.side_effect = lambda value: value
+    this_step, other_step = MagicMock(), MagicMock()
+    thread._p_save_events = {0: other_step}
+    stream = MagicMock()
+
+    with (
+        patch.object(torch.npu, "current_stream", return_value=stream),
+        patch.object(torch.npu, "synchronize"),
+    ):
+        thread._process_send_task(
+            SendTask(
+                send_request={"req-0": _make_scatter_wait_req_meta()},
+                layer_idx=0,
+                layer_name="model.layers.0.self_attn",
+                wait_event=this_step,
+            ),
+            encoder,
+        )
+
+    stream.wait_event.assert_called_once_with(this_step)
+    assert thread._p_save_events == {}
+
+
+def test_send_thread_falls_back_to_device_sync_when_no_event_is_available():
+    # A missing event must never be read as "nothing to wait for".
+    thread = _make_scatter_wait_send_thread()
+    encoder = MagicMock()
+    encoder.encode.side_effect = lambda value: value
+    stream = MagicMock()
+
+    with (
+        patch.object(torch.npu, "current_stream", return_value=stream),
+        patch.object(torch.npu, "synchronize") as device_sync,
+    ):
+        thread._process_send_task(
+            SendTask(
+                send_request={"req-0": _make_scatter_wait_req_meta()},
+                layer_idx=0,
+                layer_name="model.layers.0.self_attn",
+            ),
+            encoder,
+        )
+
+    device_sync.assert_called_once()
+    stream.wait_event.assert_not_called()
+
+
+def test_await_destinations_returns_once_the_worker_registers():
+    # P can prefill and notify inside the gap between D advertising a request
+    # and the next forward step recording its destination blocks.
+    thread = _make_read_thread()
+    thread._stop_event = threading.Event()
+    thread._state.dest_blocks_by_req.clear()
+
+    def register_late():
+        time.sleep(0.05)
+        thread._state.dest_blocks_by_req["req-late"] = ([1], [2])
+
+    registrar = threading.Thread(target=register_late)
+    registrar.start()
+    try:
+        thread._await_destinations(["req-late"])
+    finally:
+        registrar.join()
+
+    assert "req-late" in thread._state.dest_blocks_by_req
+
+
+def test_await_destinations_gives_up_after_the_timeout():
+    thread = _make_read_thread()
+    thread._stop_event = threading.Event()
+    thread._state.dest_blocks_by_req.clear()
+
+    with patch.object(read_thread_module, "DEST_REGISTRATION_TIMEOUT_SECONDS", 0.01):
+        thread._await_destinations(["req-never"])
+
+    # Returning lets the read itself raise the missing-destination error, so a
+    # request that truly never registers still fails rather than hanging.
+    assert "req-never" not in thread._state.dest_blocks_by_req
+
+
+def test_record_p_save_event_returns_the_event_for_the_task():
+    thread = MembPullSendingThread.__new__(MembPullSendingThread)
+    thread._p_save_events = {}
+    event = MagicMock()
+
+    with patch.object(torch.npu, "Event", return_value=event):
+        returned = thread.record_p_save_event(3)
+
+    assert returned is event
+    event.record.assert_called_once()
+    assert thread._p_save_events[3] is event
 
 
 @pytest.mark.parametrize("all_groups", [False, True])

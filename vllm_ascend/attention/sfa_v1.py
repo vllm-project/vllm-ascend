@@ -1656,6 +1656,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         # scattered, so the connector can dispatch the PD pull immediately.
         notify_kv_cache_written(self.layer_name or "")
 
+        if kv_cache is not None and self.is_kv_producer:
+            # Record once this layer's scatters are on the stream. The event was
+            # only ever constructed, so a PD connector waiting on it to learn the
+            # cache is written waited on a never-recorded event.
+            attn_metadata.reshape_cache_event.record()
+
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
         # inside indexer_select_post_process would leave their gate closed.

@@ -161,10 +161,16 @@ class MembPullSendingThread(threading.Thread):
         if self.is_alive():
             logger.warning("MembPull send thread did not stop within %.1f seconds", timeout)
 
-    def record_p_save_event(self, layer_idx: int) -> None:
+    def record_p_save_event(self, layer_idx: int) -> Any:
+        """Record KV-scatter completion for one layer of one step.
+
+        Returned so the caller can attach it to the matching ``SendTask``; the
+        layer-keyed map is kept only as a fallback for callers that do not.
+        """
         evt = torch.npu.Event()
         evt.record()
         self._p_save_events[layer_idx] = evt
+        return evt
 
     def mark_layer_pending(self, layer_idx: int) -> None:
         """Close all gates protecting storage written by ``layer_idx``."""
@@ -174,11 +180,26 @@ class MembPullSendingThread(threading.Thread):
 
     def _process_send_task(self, send_task: SendTask, encoder: msgspec.msgpack.Encoder) -> None:
         layer_idx = send_task.layer_idx
-        p_save_event = self._p_save_events.pop(layer_idx, None)
-        if p_save_event is not None:
-            p_save_event.synchronize()
-        elif send_task.wait_event is not None:
-            send_task.wait_event.synchronize()
+        # Notifying D before this layer's KV scatter lands makes it pull the
+        # block's previous contents -- the last request's KV, since blocks are
+        # reused. Prefer the task's own event; the layer-keyed map cannot tell
+        # two in-flight steps apart, and a missing event must never be read as
+        # "nothing to wait for".
+        wait_event = send_task.wait_event or self._p_save_events.pop(layer_idx, None)
+        if wait_event is not None:
+            # Event.synchronize() does not wait on an event recorded by the
+            # model-forward thread; waiting through this thread's stream does.
+            stream = torch.npu.current_stream()
+            stream.wait_event(wait_event)
+            stream.synchronize()
+        else:
+            logger.warning(
+                "MembPull P has no KV-scatter event for layer %d; falling back to a "
+                "device sync before notifying D.",
+                layer_idx,
+            )
+            torch.npu.synchronize()
+        self._p_save_events.pop(layer_idx, None)
         layer_name = send_task.layer_name
 
         # Group this layer's notifications by D-side endpoint so requests for
