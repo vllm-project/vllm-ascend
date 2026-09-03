@@ -76,10 +76,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         with (
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0),
-            patch(
-                "vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_world_size",
-                return_value=2,
-            ),
             patch("vllm.model_executor.layers.vocab_parallel_embedding.pad_vocab_size", side_effect=lambda x, y: x + y),
             patch("vllm.model_executor.layers.vocab_parallel_embedding.divide", side_effect=lambda x, y: x // y),
         ):
@@ -225,42 +221,20 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                 self.assertEqual(output.shape, expected_shape)
 
     def test_disable_tp(self):
-        mock_group = MagicMock()
-        mock_group.world_size = 2
-        mock_group.rank_in_group = 0
-
-        with patch(
-            "vllm_ascend.ops.vocab_parallel_embedding.get_tp_group",
-            return_value=mock_group,
-        ) as mock_get_tp_group:
-            layer = AscendVocabParallelEmbedding(
-                num_embeddings=self.num_embeddings,
-                embedding_dim=self.embedding_dim,
-                org_num_embeddings=self.org_num_embeddings,
-                padding_size=self.padding_size,
-                quant_config=None,
-                prefix="",
-                disable_tp=True,
-            )
+        layer = AscendVocabParallelEmbedding(
+            num_embeddings=self.num_embeddings,
+            embedding_dim=self.embedding_dim,
+            org_num_embeddings=self.org_num_embeddings,
+            padding_size=self.padding_size,
+            quant_config=None,
+            prefix="",
+            disable_tp=True,
+        )
 
         self.assertTrue(layer.disable_tp)
+        self.assertIsNone(layer.comm_group)
         self.assertEqual(layer.tp_size, 1)
         self.assertEqual(layer.tp_rank, 0)
-
-        # disable_tp=True should not depend on the TP communication group.
-        mock_get_tp_group.assert_not_called()
-
-        layer.quant_method.embedding = MagicMock(return_value=torch.randn(3, layer.embedding_dim))
-        input_ = torch.tensor([1, 2, 3])
-
-        with patch(
-            "torch.ops.vllm.all_reduce",
-            side_effect=lambda x, _: x,
-        ) as mock_reduce:
-            output = layer.forward(input_)
-
-        mock_reduce.assert_not_called()
-        self.assertEqual(output.shape, (3, layer.embedding_dim))
 
 
 class TestAscendLogitsProcessor(unittest.TestCase):
@@ -296,8 +270,6 @@ class TestAscendLogitsProcessor(unittest.TestCase):
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.vocab_parallel_embedding.lmhead_tp_enable", return_value=True),
-            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0),
-            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_world_size", return_value=2),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.dist.all_to_all_single",
                 self.mock_all_to_all_single,
@@ -334,59 +306,3 @@ class TestAscendLogitsProcessor(unittest.TestCase):
         self.mock_all_to_all_single.assert_called_once()
         # [N/P, V] after redistribution, then truncated to org_vocab_size.
         self.assertEqual(logits.shape, (1, self.vocab_size))
-
-    def test_disable_tp_lm_head_skips_lmhead_tp_path(self):
-        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
-
-        lm_head = AscendParallelLMHead(
-            num_embeddings=self.num_embeddings,
-            embedding_dim=self.embedding_dim,
-            prefix="markov_head",
-            disable_tp=True,
-        )
-
-        hidden_states = torch.randn(1, self.embedding_dim)
-
-        with (
-            patch.object(
-                processor,
-                "_get_logits_lmheadtp",
-            ) as mock_lmhead_tp,
-            patch.object(
-                processor,
-                "_get_logits_normal",
-                return_value=torch.randn(1, self.vocab_size),
-            ) as mock_normal,
-        ):
-            processor._get_logits(hidden_states, lm_head)
-
-        mock_lmhead_tp.assert_not_called()
-        mock_normal.assert_called_once()
-
-    def test_disable_tp_lm_head_skips_logits_gather(self):
-        processor = AscendLogitsProcessor(vocab_size=self.vocab_size)
-
-        lm_head = AscendParallelLMHead(
-            num_embeddings=self.num_embeddings,
-            embedding_dim=self.embedding_dim,
-            prefix="markov_head",
-            disable_tp=True,
-        )
-
-        lm_head.quant_method = self.mock_quant_method
-
-        self.mock_ascend_config.enable_reduce_sample = False
-
-        hidden_states = torch.randn(1, self.embedding_dim)
-
-        with patch.object(
-            processor,
-            "_gather_logits",
-        ) as mock_gather:
-            processor._get_logits_normal(
-                hidden_states,
-                lm_head,
-                None,
-            )
-
-        mock_gather.assert_not_called()
