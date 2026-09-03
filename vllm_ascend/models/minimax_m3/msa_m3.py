@@ -741,7 +741,6 @@ class AscendMiniMaxM3SparsePrefillMetadata:
 @dataclass
 class AscendMiniMaxM3SparseDecodeMetadata:
     seq_lens: torch.Tensor
-    query_lens: torch.Tensor
     block_table: torch.Tensor
     max_seq_len: int
     decode_query_len: int
@@ -837,12 +836,6 @@ class AscendMiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[AscendMiniMa
             active_decodes = _active_decode_num_reqs(num_decodes, num_decode_tokens, decode_query_len)
             decode_metadata = AscendMiniMaxM3SparseDecodeMetadata(
                 seq_lens=seq_lens[:active_decodes],
-                query_lens=torch.full(
-                    (active_decodes,),
-                    decode_query_len,
-                    dtype=torch.int32,
-                    device=seq_lens.device,
-                ),
                 block_table=block_table[:active_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
@@ -929,7 +922,6 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 d.decode_query_len,
                 block_size=self.block_size,
                 select_num_idx=decode_select_num_idx,
-                query_lens=d.query_lens,
                 dequant_scale=self._dequant_scale,
             )
 

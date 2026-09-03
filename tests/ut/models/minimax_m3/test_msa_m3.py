@@ -357,11 +357,6 @@ def test_sparse_metadata_builder(batch_spec: BatchSpec) -> None:
         assert metadata.prefill is None
         assert metadata.decode is not None
         assert metadata.decode.decode_query_len == 1
-        assert metadata.decode.query_lens.dtype == torch.int32
-        assert torch.equal(
-            metadata.decode.query_lens,
-            torch.ones(batch_spec.batch_size, dtype=torch.int32),
-        )
     else:
         assert metadata.num_prefills == batch_spec.batch_size
         assert metadata.decode is None
@@ -1576,7 +1571,6 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
         num_prefill_tokens=2,
         decode=AscendMiniMaxM3SparseDecodeMetadata(
             seq_lens=torch.tensor([5], dtype=torch.int32),
-            query_lens=torch.tensor([1], dtype=torch.int32),
             block_table=torch.tensor([[0, 1]], dtype=torch.int32),
             max_seq_len=5,
             decode_query_len=1,
@@ -1614,10 +1608,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
     assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
     assert mock_sparse_attn_decode.call_args.kwargs["select_num_idx"] is decode_select_num_idx
-    assert torch.equal(
-        mock_sparse_attn_decode.call_args.kwargs["query_lens"],
-        torch.tensor([1], dtype=torch.int32),
-    )
+    assert "query_lens" not in mock_sparse_attn_decode.call_args.kwargs
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
 
 
@@ -1702,7 +1693,6 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
     select_num_idx = torch.ones(1, 1, dtype=torch.int32)
     block_table = torch.zeros(1, 1, dtype=torch.int32)
     seq_lens = torch.ones(1, dtype=torch.int32)
-    query_lens = torch.ones(1, dtype=torch.int32)
     dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32)
     output = torch.empty_like(q)
     mock_sparse_attention_score.return_value = torch.ones_like(output)
@@ -1718,7 +1708,6 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
         output=output,
         decode_query_len=1,
         select_num_idx=select_num_idx,
-        query_lens=query_lens,
         dequant_scale=dequant_scale,
     )
 
@@ -1728,7 +1717,8 @@ def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
     assert args[1].dtype == torch.float8_e4m3fn
     assert args[2].dtype == torch.float8_e4m3fn
     assert kwargs["select_num_idx"] is select_num_idx
-    assert kwargs["actual_seq_lengths"] is query_lens
+    assert kwargs["actual_seq_lengths"].dtype == torch.int32
+    assert torch.equal(kwargs["actual_seq_lengths"], torch.ones_like(seq_lens))
     assert kwargs["q_dequant_scale"] is dequant_scale
     assert kwargs["k_dequant_scale"] is dequant_scale
     assert kwargs["v_dequant_scale"] is dequant_scale
