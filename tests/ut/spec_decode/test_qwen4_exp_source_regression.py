@@ -218,6 +218,14 @@ def test_qsa_triton_selector_bounds_topk_row_workspace() -> None:
     assert "range(0, rows, rows_per_chunk)" in source
 
 
+def test_qsa_triton_selector_rejects_only_true_capacity_overflow() -> None:
+    source = ast.unparse(_function(TRITON_QSA, "qsa_select_paged_tokens"))
+    assert "columns = page_table.shape[1] * k_cache.shape[1]" in source
+    assert "block_topk = token_topk // compress_ratio" in source
+    assert "block_topk > columns" in source
+    assert "QSA top-k exceeds the compressed cache capacity" in source
+
+
 def test_qsa_ascend_backend_uses_six_slab_kv_views() -> None:
     source = MODEL_RUNNER.read_text()
     assert "owner.role == QSA_MAIN" in source

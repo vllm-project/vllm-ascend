@@ -1166,5 +1166,72 @@ class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
             runner._correct_optimistic_seq_lens_cpu(1)
 
 
+class TestQSAInputBatchBlockTableSizing(unittest.TestCase):
+    """Exercise the production runner path that supplies BlockTable widths."""
+
+    @staticmethod
+    def _qsa_group():
+        compressed = AscendMLAAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            compress_ratio=4,
+        )
+        main = FullAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=256,
+            head_size_v=256,
+            dtype=torch.bfloat16,
+        )
+        return KVCacheGroupSpec(
+            layer_names=["compressed", "main"],
+            kv_cache_spec=UniformTypeKVCacheSpecs(
+                block_size=768,
+                kv_cache_specs={"compressed": compressed, "main": main},
+            ),
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.select_common_block_size", return_value=768)
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_runner_uses_composite_spec_contract_for_boundaries(self, mock_input_batch, _mock_select):
+        group = self._qsa_group()
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.max_encoder_len = 0
+        runner.cache_config = SimpleNamespace(block_size=128)
+        runner.kernel_block_sizes = []
+        runner.attn_groups = [[SimpleNamespace(backend=object())]]
+        runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
+        runner.max_num_reqs = 32
+        runner.max_num_tokens = 4096
+        runner.device = torch.device("cpu")
+        runner.pin_memory = False
+        runner.model_config = MagicMock()
+        runner.model_config.get_vocab_size.return_value = 152064
+        runner.is_pooling_model = False
+        runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+        runner.input_batch = SimpleNamespace(logitsprocs=None)
+        runner.vllm_config = SimpleNamespace(
+            speculative_config=SimpleNamespace(num_speculative_tokens=3),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=256,
+            kv_cache_tensors=[],
+            kv_cache_groups=[group],
+        )
+
+        for max_model_len in (4096, 6143, 6144, 71680, 135168):
+            with self.subTest(max_model_len=max_model_len):
+                runner.max_model_len = max_model_len
+                mock_input_batch.reset_mock()
+                runner.may_reinitialize_input_batch(kv_cache_config)
+                self.assertEqual(
+                    mock_input_batch.call_args.kwargs["max_num_blocks_per_req"],
+                    [(max_model_len + 767) // 768],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

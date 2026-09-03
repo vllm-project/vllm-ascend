@@ -716,6 +716,13 @@ def qsa_select_paged_tokens(
 
     columns = page_table.shape[1] * k_cache.shape[1]
     block_topk = token_topk // compress_ratio
+    if block_topk > columns:
+        raise ValueError(
+            "QSA top-k exceeds the compressed cache capacity: "
+            f"block_topk={block_topk}, capacity={columns}, "
+            f"page_table_width={page_table.shape[1]}, "
+            f"storage_block_size={k_cache.shape[1]}"
+        )
     # torch.topk needs substantial temporary storage in addition to logits.
     # Bound the row batch so a 4096-token eager prefill does not create a
     # multi-GiB transient while decode D4 x max_num_seqs=32 remains one chunk.
