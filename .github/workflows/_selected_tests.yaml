@@ -90,10 +90,13 @@ jobs:
         id: filter
         run: |
           set -euo pipefail
-          RAW="${{ inputs.test_groups }}"
-          FILTERED=$(echo "${RAW}" | jq -c '[ .[] | select(.npu_type != "cpu") ]')
+          # 将输入json写入临时文件，避免shell变量破坏引号
+          cat > /tmp/test_groups.json <<'EOF'
+${{ inputs.test_groups }}
+EOF
+          FILTERED=$(jq -c '[ .[] | select(.npu_type != "cpu") ]' /tmp/test_groups.json)
           echo "filtered_test_groups=${FILTERED}" >> "${GITHUB_OUTPUT}"
-          
+
   selected-tests:
     name: ${{ matrix.group.partition_name }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
