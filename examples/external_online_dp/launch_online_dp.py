@@ -14,6 +14,8 @@ def parse_args():
     parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
     parser.add_argument("--dp-rpc-port", type=str, default=12345, help="Port for data parallel master node.")
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
+    parser.add_argument("--is-pd-disaggregated", action="store_true", help="Is pd-disaggregated deployment.")
+    parser.add_argument("--is-prefill", action="store_true", help="Is prefill dp.")
     return parser.parse_args()
 
 
@@ -27,12 +29,18 @@ dp_rank_start = args.dp_rank_start
 dp_address = args.dp_address
 dp_rpc_port = args.dp_rpc_port
 vllm_start_port = args.vllm_start_port
+template_path = "./run_dp_template.sh"
+if args.is_pd_disaggregated:
+    if args.is_prefill:
+        template_path = "./run_dp_template_p.sh"
+    else:
+        template_path = "./run_dp_template_d.sh"
 
 
 def run_command(visible_devices, dp_rank, vllm_engine_port):
     command = [
         "bash",
-        "./run_dp_template.sh",
+        template_path,
         visible_devices,
         str(vllm_engine_port),
         str(dp_size),
@@ -45,7 +53,6 @@ def run_command(visible_devices, dp_rank, vllm_engine_port):
 
 
 if __name__ == "__main__":
-    template_path = "./run_dp_template.sh"
     if not os.path.exists(template_path):
         print(f"Template file {template_path} does not exist.")
         sys.exit(1)
