@@ -97,11 +97,15 @@ def test_synthetic_rejection_sample(
     """
     torch.manual_seed(42)
     device = "npu"
-    # NPU: the block-stats kernel launches one program per logit row
-    # (grid = (num_logits, ...)) and triton-ascend caps grid dims at 65536.
-    # Cap the trials so num_trials * (K + 1) stays within the limit
-    # (upstream uses 10 * VOCAB_SIZE trials, which exceeds it).
-    num_trials = 65535 // (num_speculative_steps + 1)
+    # NPU: triton-ascend caps the flattened grid at 65535. The block-stats
+    # kernel launches one program per logit row, and the resample kernel
+    # launches num_reqs * cdiv(vocab, 1024) programs, so a single call cannot
+    # hold upstream's 10 * VOCAB_SIZE trials. Split the trials into chunks
+    # below every grid bound and aggregate the acceptance statistics —
+    # rejection_sample is a pure function, so this is equivalent to one
+    # large call (upstream uses 10 * VOCAB_SIZE trials in one shot).
+    num_trials = 10 * VOCAB_SIZE
+    TRIALS_PER_CALL = 16000
     deviation_tol = 1e-2
 
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
@@ -110,25 +114,36 @@ def test_synthetic_rejection_sample(
     if temperature > 0:
         target_logits_1d /= temperature
 
-    inputs = _build_rejection_sample_inputs(
-        target_logits_1d,
-        draft_logits_1d,
-        num_speculative_steps,
-        temperature=temperature,
-        num_trials=num_trials,
-    )
-
     conditional_rates = unconditional_to_conditional_rates(unconditional_rates)
     synthetic_conditional_rates = torch.tensor(conditional_rates, dtype=torch.float32, device=device)
 
-    _, num_sampled = rejection_sample(
-        **inputs,
-        num_speculative_steps=num_speculative_steps,
-        synthetic_conditional_rates=synthetic_conditional_rates,
-    )
+    num_accepted_chunks = []
+    for start in range(0, num_trials, TRIALS_PER_CALL):
+        chunk_trials = min(TRIALS_PER_CALL, num_trials - start)
+        inputs = _build_rejection_sample_inputs(
+            target_logits_1d,
+            draft_logits_1d,
+            num_speculative_steps,
+            temperature=temperature,
+            num_trials=chunk_trials,
+        )
+        # Synthetic acceptance is driven by u = f(seed, pos) only, so chunks
+        # that restart the seed/pos sequences would replay identical draws.
+        # Offset both so every chunk consumes a fresh noise stream.
+        inputs["seed"] = inputs["seed"] + start
+        inputs["pos"] = inputs["pos"] + start * (num_speculative_steps + 1)
 
-    # num_sampled includes the resampled/bonus token.
-    num_accepted = num_sampled - 1
+        _, num_sampled = rejection_sample(
+            **inputs,
+            num_speculative_steps=num_speculative_steps,
+            synthetic_conditional_rates=synthetic_conditional_rates,
+        )
+        # num_sampled includes the resampled/bonus token.
+        num_accepted_chunks.append(num_sampled - 1)
+        gc.collect()
+        torch.npu.empty_cache()
+
+    num_accepted = torch.cat(num_accepted_chunks)
     for i, expected_rate in enumerate(unconditional_rates):
         observed_rate = (num_accepted >= i + 1).float().mean().item()
         assert abs(observed_rate - expected_rate) < deviation_tol, (
