@@ -26,6 +26,15 @@ class _PPAuxHiddenStateModel(Protocol):
     aux_hidden_state_layers: tuple[int, ...]
 
 
+class _PPTopKModel(Protocol):
+    start_layer: int
+    end_layer: int
+    topk_indices_buffer: torch.Tensor | None
+    receive_pp_topk_indices: bool
+    send_pp_topk_indices: bool
+    make_empty_intermediate_tensors: Callable[[int, torch.dtype, torch.device], IntermediateTensors]
+
+
 @dataclass(frozen=True)
 class SpecPPSupport:
     """Capabilities for one speculative decoding method under PP."""
@@ -195,3 +204,88 @@ def add_pp_transport_buffers(
     """Add empty receive buffers for one PP transport data type."""
     tensors = [torch.zeros(shape, dtype=dtype, device=device) for _ in range(count)]
     return add_pp_transport_tensors(intermediate_tensors, data_type, tensors)
+
+
+def configure_pp_topk_transport(
+    model: _PPTopKModel,
+    stage_requires_topk_indices: Callable[[int], bool],
+) -> None:
+    """Configure Top-K index transport for a model split across PP stages."""
+    model.receive_pp_topk_indices = False
+    model.send_pp_topk_indices = False
+    topk_indices_buffer = model.topk_indices_buffer
+    if topk_indices_buffer is None:
+        return
+
+    model.receive_pp_topk_indices = stage_requires_topk_indices(model.start_layer)
+    model.send_pp_topk_indices = stage_requires_topk_indices(model.end_layer)
+    if not model.receive_pp_topk_indices:
+        return
+
+    tensor_factory = model.make_empty_intermediate_tensors
+
+    def wrapped_tensor_factory(
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        intermediate_tensors = tensor_factory(batch_size, dtype, device)
+        return add_pp_transport_buffers(
+            intermediate_tensors,
+            PPTransportDataType.TOPK_INDICES,
+            count=1,
+            shape=(batch_size, *topk_indices_buffer.shape[1:]),
+            dtype=topk_indices_buffer.dtype,
+            device=device,
+        )
+
+    model.make_empty_intermediate_tensors = wrapped_tensor_factory
+
+
+def restore_pp_topk_indices(
+    intermediate_tensors: IntermediateTensors,
+    topk_indices_buffer: torch.Tensor,
+) -> torch.Tensor:
+    """Restore Top-K indices received from the preceding PP stage."""
+    received_tensors = get_pp_transport_tensors(
+        intermediate_tensors,
+        PPTransportDataType.TOPK_INDICES,
+    )
+    if len(received_tensors) != 1:
+        raise ValueError(f"Expected one PP Top-K indices tensor, got {len(received_tensors)}.")
+
+    received_topk_indices = received_tensors[0]
+    if received_topk_indices.shape[1:] != topk_indices_buffer.shape[1:]:
+        raise ValueError(
+            "Received PP Top-K indices have an unexpected shape: "
+            f"received {tuple(received_topk_indices.shape)}, "
+            f"buffer {tuple(topk_indices_buffer.shape)}."
+        )
+    num_tokens = received_topk_indices.shape[0]
+    if num_tokens > topk_indices_buffer.shape[0]:
+        raise ValueError(
+            "Received PP Top-K indices exceed the local buffer capacity: "
+            f"received {num_tokens} tokens, capacity {topk_indices_buffer.shape[0]}."
+        )
+    topk_indices_buffer[:num_tokens].copy_(received_topk_indices)
+    return received_topk_indices
+
+
+def add_pp_topk_indices(
+    intermediate_tensors: IntermediateTensors,
+    topk_indices_buffer: torch.Tensor,
+    num_tokens: int,
+) -> torch.Tensor:
+    """Append locally available Top-K indices to an outgoing PP payload."""
+    if num_tokens > topk_indices_buffer.shape[0]:
+        raise ValueError(
+            "PP Top-K indices exceed the local buffer capacity: "
+            f"requested {num_tokens} tokens, capacity {topk_indices_buffer.shape[0]}."
+        )
+    topk_indices = topk_indices_buffer[:num_tokens]
+    add_pp_transport_tensors(
+        intermediate_tensors,
+        PPTransportDataType.TOPK_INDICES,
+        [topk_indices],
+    )
+    return topk_indices

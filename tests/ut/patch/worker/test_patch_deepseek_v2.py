@@ -10,13 +10,13 @@ import vllm_ascend.patch.worker.patch_deepseek_v2 as patch_deepseek_v2
 from vllm_ascend.patch.worker.patch_deepseek_v2 import (
     _deepseek_v2_model_init_with_pp_topk_transport,
     _patched_forward,
-    _restore_pp_topk_indices,
     _should_skip_indexer_init,
 )
 from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
+    restore_pp_topk_indices,
 )
 
 
@@ -59,7 +59,7 @@ def test_restore_pp_topk_indices_rejects_incompatible_shape():
     )
 
     with pytest.raises(ValueError, match="unexpected shape"):
-        _restore_pp_topk_indices(
+        restore_pp_topk_indices(
             intermediate_tensors,
             torch.zeros((4, 2), dtype=torch.int32),
         )

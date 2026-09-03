@@ -34,10 +34,9 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.utils import pp_stage_requires_topk_indices, should_reuse_topk
 from vllm_ascend.worker.v2.pp_utils import (
-    PPTransportDataType,
-    add_pp_transport_buffers,
-    add_pp_transport_tensors,
-    get_pp_transport_tensors,
+    add_pp_topk_indices,
+    configure_pp_topk_transport,
+    restore_pp_topk_indices,
 )
 
 
@@ -305,70 +304,13 @@ def _deepseek_v2_model_init_with_pp_topk_transport(
         ),
         None,
     )
-    self.receive_pp_topk_indices = False
-    self.send_pp_topk_indices = False
-    if self.topk_indices_buffer is None:
-        return
-
-    self.receive_pp_topk_indices = pp_stage_requires_topk_indices(
-        self.config,
-        self.start_layer,
+    configure_pp_topk_transport(
+        self,
+        lambda start_layer: pp_stage_requires_topk_indices(self.config, start_layer),
     )
-    self.send_pp_topk_indices = pp_stage_requires_topk_indices(
-        self.config,
-        self.end_layer,
-    )
-    if not self.receive_pp_topk_indices:
-        return
-
-    original_tensor_factory = self.make_empty_intermediate_tensors
-
-    def make_empty_intermediate_tensors(
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> IntermediateTensors:
-        intermediate_tensors = original_tensor_factory(batch_size, dtype, device)
-        return add_pp_transport_buffers(
-            intermediate_tensors,
-            PPTransportDataType.TOPK_INDICES,
-            count=1,
-            shape=(batch_size, *self.topk_indices_buffer.shape[1:]),
-            dtype=self.topk_indices_buffer.dtype,
-            device=device,
-        )
-
-    self.make_empty_intermediate_tensors = make_empty_intermediate_tensors
 
 
 DeepseekV2Model.__init__ = _deepseek_v2_model_init_with_pp_topk_transport
-
-
-def _restore_pp_topk_indices(
-    intermediate_tensors: IntermediateTensors,
-    topk_indices_buffer: torch.Tensor,
-) -> None:
-    received_tensors = get_pp_transport_tensors(
-        intermediate_tensors,
-        PPTransportDataType.TOPK_INDICES,
-    )
-    if len(received_tensors) != 1:
-        raise ValueError(f"Expected one PP Top-K indices tensor, got {len(received_tensors)}.")
-
-    received_topk_indices = received_tensors[0]
-    if received_topk_indices.shape[1:] != topk_indices_buffer.shape[1:]:
-        raise ValueError(
-            "Received PP Top-K indices have an unexpected shape: "
-            f"received {tuple(received_topk_indices.shape)}, "
-            f"buffer {tuple(topk_indices_buffer.shape)}."
-        )
-    num_tokens = received_topk_indices.shape[0]
-    if num_tokens > topk_indices_buffer.shape[0]:
-        raise ValueError(
-            "Received PP Top-K indices exceed the local buffer capacity: "
-            f"received {num_tokens} tokens, capacity {topk_indices_buffer.shape[0]}."
-        )
-    topk_indices_buffer[:num_tokens].copy_(received_topk_indices)
 
 
 def _patched_forward(
@@ -392,7 +334,7 @@ def _patched_forward(
         residual = intermediate_tensors["residual"]
         if self.receive_pp_topk_indices:
             assert self.topk_indices_buffer is not None
-            _restore_pp_topk_indices(
+            restore_pp_topk_indices(
                 intermediate_tensors,
                 self.topk_indices_buffer,
             )
@@ -426,16 +368,10 @@ def _patched_forward(
         if self.send_pp_topk_indices:
             assert self.topk_indices_buffer is not None
             num_tokens = positions.shape[0]
-            if num_tokens > self.topk_indices_buffer.shape[0]:
-                raise ValueError(
-                    "PP Top-K indices exceed the local buffer capacity: "
-                    f"requested {num_tokens} tokens, capacity "
-                    f"{self.topk_indices_buffer.shape[0]}."
-                )
-            add_pp_transport_tensors(
+            add_pp_topk_indices(
                 intermediate_tensors,
-                PPTransportDataType.TOPK_INDICES,
-                [self.topk_indices_buffer[:num_tokens]],
+                self.topk_indices_buffer,
+                num_tokens,
             )
         return intermediate_tensors
 
