@@ -75,6 +75,7 @@ The following features are deprecated or subject to change:
 - Added deprecation warnings for W4A8 linear, W4A8 MoE per-group, and W8A8 PDMix MoE quantization. These quantization paths will be removed in a future release. [#13850](https://github.com/vllm-project/vllm-ascend/pull/13850)
 - The `mega_moe_max_tokens` and `enable_fused_mc2` configurations in `additional-config` will be moved into a new dedicated dict for centralized maintenance in the next release.
 - DeepSeek-V3, DeepSeek-V3.1, and DeepSeek-R1 model support will be removed in v0.28.0.
+- The `reduce sampling` feature is experimental and will be deprecated in future releases. We will follow the upstream vLLM community for the `batch-sharded sampling` feature.
 
 ### Documentation
 
