@@ -31,7 +31,37 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
-from vllm_ascend.worker.v2.spec_decode.physical_k import physical_k_scope
+from vllm_ascend.worker.v2.spec_decode.physical_k import (
+    initialize_physical_k_buffers,
+    physical_k_scope,
+)
+
+
+class _RowwiseConfidenceBuffer:
+    """Expose a fixed confidence buffer with safe active-width assignment."""
+
+    def __init__(self, buffer: torch.Tensor, active_k: int):
+        self._buffer = buffer
+        self._active_k = active_k
+
+    @property
+    def ndim(self) -> int:
+        return self._buffer.ndim
+
+    @property
+    def shape(self):
+        return (self._buffer.shape[0], self._active_k)
+
+    def __setitem__(self, key, value) -> None:
+        # Upstream DSpark assigns ``buffer[:num_reqs] = [B, K]``.  Assigning
+        # that 2-D slice is a strided copy when K < max_K.  Copy each request
+        # row instead; every row is contiguous and remains graph-safe.
+        if not isinstance(key, slice) or key.start not in (None, 0) or key.step not in (None, 1):
+            raise TypeError("unsupported confidence buffer index")
+        num_reqs = self._buffer.shape[0] if key.stop is None else key.stop
+        values = value.reshape(num_reqs, self._active_k)
+        for req_idx in range(num_reqs):
+            self._buffer[req_idx, : self._active_k].copy_(values[req_idx])
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
@@ -41,6 +71,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
         self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
+        # DSpark changes ``sample_from_anchor`` after DFlash initialization,
+        # so initialize the width-dependent anchor indices only now.
+        initialize_physical_k_buffers(self)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
@@ -99,11 +132,18 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             super()._sample_sequential(num_reqs, head_hidden)
             return
 
-        if confidence_probs.shape[1] <= active_k:
+        max_k = int(
+            getattr(self, "_vllm_ascend_max_speculative_steps", active_k)
+        )
+        if active_k >= max_k:
+            # Keep the fixed-K path unchanged; the row-wise adapter is only
+            # needed by a smaller physical-K graph.
             super()._sample_sequential(num_reqs, head_hidden)
             return
 
-        self.draft_token_confidence_probs = confidence_probs[:, :active_k]
+        self.draft_token_confidence_probs = _RowwiseConfidenceBuffer(
+            confidence_probs, active_k
+        )
         try:
             super()._sample_sequential(num_reqs, head_hidden)
         finally:

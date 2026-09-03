@@ -18,7 +18,10 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.spec_decode.physical_k import physical_k_scope
+from vllm_ascend.worker.v2.spec_decode.physical_k import (
+    initialize_physical_k_buffers,
+    physical_k_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
+        initialize_physical_k_buffers(self)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)

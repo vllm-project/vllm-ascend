@@ -162,6 +162,33 @@ def test_v2_physical_k_scope_keeps_mixed_batch_on_safe_width() -> None:
         assert speculator.num_query_per_req == 5
 
 
+def test_v2_physical_k_scope_reuses_preallocated_device_indices() -> None:
+    speculator = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            additional_config={
+                "dynamic_spec_config": {
+                    "method_params": {"v2_varlen_physical_k": True}
+                }
+            }
+        ),
+        num_speculative_steps=5,
+        num_query_per_req=5,
+        max_num_reqs=2,
+        sample_from_anchor=True,
+        sample_col=torch.arange(5).repeat(2),
+        _anchor_idx=torch.arange(2) * 5,
+    )
+    batch = SimpleNamespace(num_draft_tokens_per_req=torch.tensor([2, 2]))
+
+    with physical_k_scope(speculator, batch):
+        sample_col = speculator.sample_col
+        anchor_idx = speculator._anchor_idx
+
+    with physical_k_scope(speculator, batch):
+        assert speculator.sample_col.data_ptr() == sample_col.data_ptr()
+        assert speculator._anchor_idx.data_ptr() == anchor_idx.data_ptr()
+
+
 def test_v2_dflash_physical_k_writes_only_active_prefix() -> None:
     """A smaller captured K must not resize the fixed draft-token buffer."""
     speculator = SimpleNamespace(
