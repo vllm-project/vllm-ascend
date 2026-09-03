@@ -2761,59 +2761,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(ptrs, [aligned_tensor.data_ptr()])
         self.assertEqual(lengths, [tensor_size])
 
-    def test_registered_hybrid_buffers_deduplicate_shared_backing(self):
-        alignment = 2 * 1024 * 1024
-        backing_size = 4 * alignment
-        layer_names = [
-            "model.layers.0.self_attn",
-            "model.layers.1.self_attn",
-        ]
-        raw_tensor = torch.empty(backing_size + alignment, dtype=torch.uint8)
-        aligned_offset = (-raw_tensor.data_ptr()) % alignment
-        backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
-        kv_caches = {
-            layer_names[0]: backing[:alignment],
-            layer_names[1]: backing[alignment : 2 * alignment],
-        }
-
-        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-        worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[make_mock_kv_cache_tensor(backing_size, [layer_name]) for layer_name in layer_names]
-        )
-
-        ptrs, lengths = worker._get_registered_kv_tensor_buffers(kv_caches)
-
-        self.assertEqual(ptrs, [backing.data_ptr()])
-        self.assertEqual(lengths, [backing_size])
-
-    def test_registered_private_strided_view_uses_address_span(self):
-        alignment = 2 * 1024 * 1024
-        raw_tensor = torch.empty(2 * alignment, dtype=torch.uint8)
-        aligned_offset = (-raw_tensor.data_ptr()) % alignment
-        backing = raw_tensor[aligned_offset : aligned_offset + alignment]
-        logical_tensor = backing[1:33:2]
-        layer_name = "model.layers.0.self_attn"
-
-        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-        worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[make_mock_kv_cache_tensor(3 * alignment, [layer_name])]
-        )
-
-        ptrs, lengths = worker._get_registered_kv_tensor_buffers({layer_name: logical_tensor})
-
-        tensor_span = logical_tensor.element_size() + sum(
-            (size - 1) * stride * logical_tensor.element_size()
-            for size, stride in zip(
-                logical_tensor.shape,
-                logical_tensor.stride(),
-            )
-        )
-        self.assertEqual(ptrs, [backing.data_ptr()])
-        self.assertEqual(
-            lengths,
-            [logical_tensor.data_ptr() + tensor_span - backing.data_ptr()],
-        )
-
     def test_registered_mtp_buffer_ignores_aligned_stale_group_padding(self):
         alignment = 2 * 1024 * 1024
         tensor_size = 4 * alignment

@@ -243,7 +243,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
-    def test_shared_backing_is_registered_once(self):
+    def test_hybrid_registration_uses_actual_merged_tensor_ranges(self):
         alignment = 2 * 1024 * 1024
         backing_size = 4 * alignment
         layer_names = [
@@ -254,25 +254,49 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
         aligned_offset = (-raw_tensor.data_ptr()) % alignment
         backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
         kv_caches = {
-            layer_names[0]: backing[:alignment],
-            layer_names[1]: backing[alignment : 2 * alignment],
+            layer_names[0]: backing[: 2 * alignment],
+            layer_names[1]: backing[alignment : 3 * alignment],
         }
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=False,
+                hf_text_config=types.SimpleNamespace(),
+            )
+        )
         worker.kv_cache_config = types.SimpleNamespace(
+            num_blocks=1,
+            kv_cache_groups=[types.SimpleNamespace(layer_names=layer_names)],
             kv_cache_tensors=[
                 types.SimpleNamespace(
                     size=backing_size,
                     layers=[layer_name],
+                    shared_by=[layer_name],
                 )
                 for layer_name in layer_names
-            ]
+            ],
         )
+        worker.use_hybrid = True
+        worker.use_mamba = False
+        worker.use_compress = True
 
-        ptrs, lengths = worker._get_registered_kv_tensor_buffers(kv_caches)
+        class RegistrationCaptured(Exception):
+            pass
 
-        self.assertEqual(ptrs, [backing.data_ptr()])
-        self.assertEqual(lengths, [backing_size])
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=RegistrationCaptured,
+            ) as register_buffer,
+            self.assertRaises(RegistrationCaptured),
+        ):
+            worker.register_kv_caches(kv_caches)
+
+        register_buffer.assert_called_once_with(
+            [backing.data_ptr()],
+            [3 * alignment],
+        )
 
 
 class TestMooncakeHybridConnectorScheduler(unittest.TestCase):

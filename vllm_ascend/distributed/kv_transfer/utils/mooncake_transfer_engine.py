@@ -36,9 +36,7 @@ class GlobalTE:
             for ptr, size in zip(ptrs, sizes):
                 ret_value = self.transfer_engine.register_memory(ptr, size)
                 if ret_value != 0:
-                    raise RuntimeError(
-                        f"Mooncake memory registration failed: ptr={ptr:#x}, size={size}, ret_value={ret_value}."
-                    )
+                    raise RuntimeError("Mooncake memory registration failed.")
             self.is_register_buffer = True
 
 
