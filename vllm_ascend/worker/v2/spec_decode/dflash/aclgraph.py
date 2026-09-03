@@ -178,6 +178,63 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         debug_capture_sync = os.environ.get("VLLM_ASCEND_DFLASH_CAPTURE_SYNC") == "1"
         previous_desc: tuple[int, int, int] | None = None
 
+        # The upstream DFlash graph manager builds ``attn_state`` before it
+        # invokes the supplied forward function.  For a variable-width graph,
+        # that preparation must observe the same physical K as the forward
+        # itself: the Ascend metadata builder derives TND
+        # ``actual_seq_lengths_q`` and query padding from the prepared input
+        # batch.  Temporarily wrap the upstream helper so capture-time
+        # metadata and the model forward use one width.  This also avoids
+        # changing the upstream vLLM checkout or the shared attention backend.
+        dflash_cudagraph_module = None
+        original_prepare_inputs = None
+        if self._v2_varlen_physical_k:
+            import vllm.v1.worker.gpu.spec_decode.dflash.cudagraph as dflash_cudagraph_module
+
+            original_prepare_inputs = (
+                dflash_cudagraph_module._prepare_dflash_inputs_to_capture
+            )
+
+            def prepare_inputs_with_runtime_width(
+                num_reqs: int,
+                num_tokens: int,
+                input_buffers: InputBuffers,
+                block_tables: BlockTables,
+                attn_groups: list[list[AttentionGroup]],
+                kv_cache_config: KVCacheConfig,
+                max_model_len: int,
+                skip_attn: bool,
+                causal: bool | Mapping[int, bool],
+            ):
+                width = num_tokens // num_reqs
+                draft_k = width if self._sample_from_anchor() else width - 1
+                with physical_k_scope(self.speculator, draft_k=draft_k):
+                    attn_state = original_prepare_inputs(
+                        num_reqs,
+                        num_tokens,
+                        input_buffers,
+                        block_tables,
+                        attn_groups,
+                        kv_cache_config,
+                        max_model_len,
+                        skip_attn,
+                        causal,
+                    )
+
+                # ``make_dummy`` normally produces this sequence, but an
+                # Ascend graph capture may add padding requests.  Make the
+                # exact descriptor contract explicit for FIA's TND layout:
+                # the final cumulative query length must equal num_tokens.
+                if attn_state.attn_metadata is not None:
+                    query_lens = [(idx + 1) * width for idx in range(num_reqs)]
+                    for metadata in attn_state.attn_metadata.values():
+                        metadata.actual_seq_lengths_q = query_lens
+                return attn_state
+
+            dflash_cudagraph_module._prepare_dflash_inputs_to_capture = (
+                prepare_inputs_with_runtime_width
+            )
+
         def forward_with_runtime_width(
             num_reqs: int,
             num_tokens: int,
@@ -223,23 +280,29 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 previous_desc = current_desc
             return result
 
-        with communicator_switch(), model_capture_wrapper(self.speculator, False):
-            super().capture(
-                forward_with_runtime_width,
-                input_buffers,
-                block_tables,
-                attn_groups,
-                kv_cache_config,
-                max_model_len,
-                causal,
-                progress_bar_desc,
-            )
-            if debug_capture_sync:
-                logger.warning(
-                    "DFlash V2 graph-capture final sync; last_desc=%s",
-                    previous_desc,
+        try:
+            with communicator_switch(), model_capture_wrapper(self.speculator, False):
+                super().capture(
+                    forward_with_runtime_width,
+                    input_buffers,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    max_model_len,
+                    causal,
+                    progress_bar_desc,
                 )
-                torch.npu.current_stream().synchronize()
+                if debug_capture_sync:
+                    logger.warning(
+                        "DFlash V2 graph-capture final sync; last_desc=%s",
+                        previous_desc,
+                    )
+                    torch.npu.current_stream().synchronize()
+        finally:
+            if dflash_cudagraph_module is not None:
+                dflash_cudagraph_module._prepare_dflash_inputs_to_capture = (
+                    original_prepare_inputs
+                )
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
