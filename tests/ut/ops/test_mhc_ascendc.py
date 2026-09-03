@@ -20,9 +20,7 @@ import sys
 
 # Run from any checkout location; falls through to the installed package
 # when the repo layout is absent.
-_REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if os.path.isdir(os.path.join(_REPO_ROOT, "vllm_ascend")) and _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
@@ -30,7 +28,7 @@ import torch  # noqa: E402
 
 torch.manual_seed(0)
 
-import torch_npu  # noqa: E402
+import torch_npu  # noqa: E402,F401  # registers NPU kernels
 
 from vllm_ascend.utils import enable_custom_op  # noqa: E402
 
@@ -91,7 +89,7 @@ def make_inputs(t: int = T, hidden: int = HIDDEN, hc_mult: int = HC_MULT, packed
     x = torch.randn(t, hc_mult, hidden, dtype=torch.bfloat16, device=DEVICE) * 0.5
     if packed:
         x = x.reshape(t, hc_mult * hidden)
-    hc_fn = (torch.randn(mix_hc, hc_mult * hidden, dtype=torch.float32, device=DEVICE) * 0.02)
+    hc_fn = torch.randn(mix_hc, hc_mult * hidden, dtype=torch.float32, device=DEVICE) * 0.02
     hc_scale = torch.randn(3, dtype=torch.float32, device=DEVICE) * 0.05
     hc_base = torch.randn(mix_hc, dtype=torch.float32, device=DEVICE) * 0.05
     norm_weight = torch.randn(hidden, dtype=torch.bfloat16, device=DEVICE)
@@ -114,9 +112,7 @@ def pre_ref(
     hc_base: torch.Tensor,
     norm_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    post, comb, layer_input = mhc_pre_torch(
-        residual, hc_fn, hc_scale, hc_base, RMS_EPS, HC_EPS, HC_EPS, 2.0, SINKHORN
-    )
+    post, comb, layer_input = mhc_pre_torch(residual, hc_fn, hc_scale, hc_base, RMS_EPS, HC_EPS, HC_EPS, 2.0, SINKHORN)
     return post, comb, rms_norm_ref(layer_input, norm_weight, RMS_EPS)
 
 
@@ -128,8 +124,16 @@ def test_pre() -> None:
 
     print("  -- with fused input RMSNorm (production path)")
     y, post, comb = m.hc_pre_ascendc(
-        x, fn, scale, base, HC_MULT, SINKHORN, RMS_EPS, HC_EPS,
-        norm_weight=w, layer_norm_eps=RMS_EPS,
+        x,
+        fn,
+        scale,
+        base,
+        HC_MULT,
+        SINKHORN,
+        RMS_EPS,
+        HC_EPS,
+        norm_weight=w,
+        layer_norm_eps=RMS_EPS,
     )
     post_r, comb_r, y_r = pre_ref(x, fn, scale, base, w)
     _assert_close("y", y, y_r)
@@ -154,9 +158,7 @@ def test_pre() -> None:
     _assert_close("comb", comb3, comb_r)
 
     print("  -- post_keepdim=False (raw operator layout)")
-    _, post4, _ = m.hc_pre_ascendc(
-        x, fn, scale, base, HC_MULT, SINKHORN, RMS_EPS, HC_EPS, post_keepdim=False
-    )
+    _, post4, _ = m.hc_pre_ascendc(x, fn, scale, base, HC_MULT, SINKHORN, RMS_EPS, HC_EPS, post_keepdim=False)
     assert post4.shape == (T, HC_MULT), f"post4 shape {post4.shape}"
 
     print("  -- 4-D batched x [1, T, hc, d]")
@@ -216,8 +218,18 @@ def test_fused() -> None:
     post, comb, _ = pre_ref(residual, fn, scale, base)
 
     res_c, post_c, comb_c, layer_input_c = m.fused_post_pre_ascendc(
-        x_branch, residual, post, comb, fn, scale, base, SINKHORN, RMS_EPS, HC_EPS,
-        norm_weight=w, layer_norm_eps=RMS_EPS,
+        x_branch,
+        residual,
+        post,
+        comb,
+        fn,
+        scale,
+        base,
+        SINKHORN,
+        RMS_EPS,
+        HC_EPS,
+        norm_weight=w,
+        layer_norm_eps=RMS_EPS,
     )
 
     ref_res = mhc_post_torch(x_branch, residual, post, comb)
@@ -234,8 +246,16 @@ def test_fused() -> None:
     print("  -- equals separate hc_post + hc_pre calls")
     res_s = m.hc_post_ascendc(x_branch, residual, post, comb)
     y_s, post_s, comb_s = m.hc_pre_ascendc(
-        res_s, fn, scale, base, HC_MULT, SINKHORN, RMS_EPS, HC_EPS,
-        norm_weight=w, layer_norm_eps=RMS_EPS,
+        res_s,
+        fn,
+        scale,
+        base,
+        HC_MULT,
+        SINKHORN,
+        RMS_EPS,
+        HC_EPS,
+        norm_weight=w,
+        layer_norm_eps=RMS_EPS,
     )
     assert torch.equal(res_c, res_s)
     assert torch.equal(post_c, post_s)
@@ -271,18 +291,36 @@ def _layer_forward(
     x = hc_expand(x, n)
     residual = x
     _, post, comb, x = _fake_fused_pre(
-        x, params, calls,
+        x,
+        params,
+        calls,
         m.hc_pre_ascendc(
-            x, params["fn"], params["scale"], params["base"], params["n"],
-            SINKHORN, RMS_EPS, HC_EPS,
-            norm_weight=params["w"], layer_norm_eps=RMS_EPS,
+            x,
+            params["fn"],
+            params["scale"],
+            params["base"],
+            params["n"],
+            SINKHORN,
+            RMS_EPS,
+            HC_EPS,
+            norm_weight=params["w"],
+            layer_norm_eps=RMS_EPS,
         ),
     )
     x = attn_out_fn(x)
     res, post, comb, x = m.fused_post_pre_ascendc(
-        x, residual, post, comb, params["fn"], params["scale"], params["base"],
-        SINKHORN, RMS_EPS, HC_EPS,
-        norm_weight=params["w"], layer_norm_eps=RMS_EPS,
+        x,
+        residual,
+        post,
+        comb,
+        params["fn"],
+        params["scale"],
+        params["base"],
+        SINKHORN,
+        RMS_EPS,
+        HC_EPS,
+        norm_weight=params["w"],
+        layer_norm_eps=RMS_EPS,
     )
     residual = res
     x = mlp_fn(x)
@@ -330,23 +368,21 @@ def test_skip_branch() -> None:
         layer_in = torch.randn(4, HIDDEN, dtype=torch.bfloat16, device=DEVICE)
 
         # non-mHC / MTP layer: plain path, mHC ops must not be entered
-        out_plain = _layer_forward(
-            layer_in, mhc=False, attn_out_fn=attn, mlp_fn=mlp, params=params, calls=calls
-        )
+        out_plain = _layer_forward(layer_in, mhc=False, attn_out_fn=attn, mlp_fn=mlp, params=params, calls=calls)
         assert calls == {"pre": 0, "fused": 0, "post": 0}, calls
         ref_plain = mlp(attn(layer_in))
         assert torch.equal(out_plain, ref_plain), "plain (non-mHC) path must be untouched"
 
         # mHC layer: 1 pre + 1 fused + 1 post entry points; the fused entry
         # internally re-enters hc_post + hc_pre, hence pre/post count 2 each.
-        out_mhc = _layer_forward(
-            layer_in, mhc=True, attn_out_fn=attn, mlp_fn=mlp, params=params, calls=calls
-        )
+        out_mhc = _layer_forward(layer_in, mhc=True, attn_out_fn=attn, mlp_fn=mlp, params=params, calls=calls)
         assert calls == {"pre": 2, "fused": 1, "post": 2}, calls
         assert out_mhc.shape == layer_in.shape, (out_mhc.shape, layer_in.shape)
         assert m._PRE_AVAILABLE is True and m._POST_AVAILABLE is True
-        print(f"    non-mHC layer mHC calls: 0; mHC layer entry points: "
-              f"pre=1, fused=1, post=1 (calls counted incl. fused's internal post+pre: {calls})")
+        print(
+            f"    non-mHC layer mHC calls: 0; mHC layer entry points: "
+            f"pre=1, fused=1, post=1 (calls counted incl. fused's internal post+pre: {calls})"
+        )
     finally:
         m.hc_pre_ascendc, m.hc_post_ascendc, m.fused_post_pre_ascendc = orig
         m.reset_availability()
@@ -359,8 +395,16 @@ def test_fallback_unsupported_shapes() -> None:
     # hidden_size not in {4096, 7168}
     x, fn, scale, base, w = make_inputs(t=4, hidden=5120, hc_mult=HC_MULT)
     y, post, comb = m.hc_pre_ascendc(
-        x, fn, scale, base, HC_MULT, SINKHORN, RMS_EPS, HC_EPS,
-        norm_weight=w, layer_norm_eps=RMS_EPS,
+        x,
+        fn,
+        scale,
+        base,
+        HC_MULT,
+        SINKHORN,
+        RMS_EPS,
+        HC_EPS,
+        norm_weight=w,
+        layer_norm_eps=RMS_EPS,
     )
     post_r, comb_r, y_r = pre_ref(x, fn, scale, base, w)
     assert m._PRE_AVAILABLE is False, "unsupported d must flip availability to False"
@@ -373,8 +417,16 @@ def test_fallback_unsupported_shapes() -> None:
     # hc_mult != 4
     x, fn, scale, base, w = make_inputs(t=4, hidden=HIDDEN, hc_mult=2)
     y, post, comb = m.hc_pre_ascendc(
-        x, fn, scale, base, 2, SINKHORN, RMS_EPS, HC_EPS,
-        norm_weight=w, layer_norm_eps=RMS_EPS,
+        x,
+        fn,
+        scale,
+        base,
+        2,
+        SINKHORN,
+        RMS_EPS,
+        HC_EPS,
+        norm_weight=w,
+        layer_norm_eps=RMS_EPS,
     )
     post_r, comb_r, y_r = pre_ref(x, fn, scale, base, w)
     assert m._PRE_AVAILABLE is False
@@ -386,8 +438,17 @@ def test_fallback_unsupported_shapes() -> None:
     # hc_post_mult_value != 2.0 (kernel hard-codes 2.0)
     x, fn, scale, base, w = make_inputs(t=4)
     y, post, comb = m.hc_pre_ascendc(
-        x, fn, scale, base, HC_MULT, SINKHORN, RMS_EPS, HC_EPS,
-        hc_post_mult_value=1.5, norm_weight=w, layer_norm_eps=RMS_EPS,
+        x,
+        fn,
+        scale,
+        base,
+        HC_MULT,
+        SINKHORN,
+        RMS_EPS,
+        HC_EPS,
+        hc_post_mult_value=1.5,
+        norm_weight=w,
+        layer_norm_eps=RMS_EPS,
     )
     post_r, comb_r, y_r = pre_ref(x, fn, scale, base, w)
     assert m._PRE_AVAILABLE is False
@@ -403,8 +464,16 @@ def test_env_kill_switch() -> None:
     try:
         x, fn, scale, base, w = make_inputs()
         y, post, comb = m.hc_pre_ascendc(
-            x, fn, scale, base, HC_MULT, SINKHORN, RMS_EPS, HC_EPS,
-            norm_weight=w, layer_norm_eps=RMS_EPS,
+            x,
+            fn,
+            scale,
+            base,
+            HC_MULT,
+            SINKHORN,
+            RMS_EPS,
+            HC_EPS,
+            norm_weight=w,
+            layer_norm_eps=RMS_EPS,
         )
         post_r, comb_r, y_r = pre_ref(x, fn, scale, base, w)
         _assert_close("y", y, y_r)
@@ -438,8 +507,16 @@ def test_dispatch_counts() -> None:
 
     with Counter() as c_asc:
         m.hc_pre_ascendc(
-            x, fn, scale, base, HC_MULT, SINKHORN, RMS_EPS, HC_EPS,
-            norm_weight=w, layer_norm_eps=RMS_EPS,
+            x,
+            fn,
+            scale,
+            base,
+            HC_MULT,
+            SINKHORN,
+            RMS_EPS,
+            HC_EPS,
+            norm_weight=w,
+            layer_norm_eps=RMS_EPS,
         )
     m.reset_availability()
     with Counter() as c_torch:
@@ -451,8 +528,10 @@ def test_dispatch_counts() -> None:
 
 
 def main() -> int:
-    print(f"config: hidden={HIDDEN} hc_mult={HC_MULT} mix_hc={MIX_HC} "
-          f"sinkhorn={SINKHORN} rms_eps={RMS_EPS} hc_eps={HC_EPS} T={T}")
+    print(
+        f"config: hidden={HIDDEN} hc_mult={HC_MULT} mix_hc={MIX_HC} "
+        f"sinkhorn={SINKHORN} rms_eps={RMS_EPS} hc_eps={HC_EPS} T={T}"
+    )
     print(f"fused ops registered: {m.is_available()}  probe: {m.probe_available(HIDDEN, HC_MULT)}")
     m.reset_availability()
 

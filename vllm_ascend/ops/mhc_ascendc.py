@@ -60,6 +60,7 @@ import torch
 
 try:  # torch_npu is a hard requirement on Ascend, but keep the module importable off-device
     import torch_npu  # noqa: F401
+
     _TORCH_NPU_OK = True
 except Exception:  # pragma: no cover - non-NPU host (CPU import / docs build)
     _TORCH_NPU_OK = False
@@ -158,17 +159,11 @@ def probe_available(hidden_size: int = HC_PRE_D_LIMIT, hc_mult: int = HC_PRE_HC_
     device = torch.device("npu", torch.npu.current_device())
     try:
         x = torch.zeros(1, hc_mult, hidden_size, dtype=torch.bfloat16, device=device)
-        hc_fn = torch.zeros(
-            HC_PRE_MIX_HC_LIMIT, hc_mult * hidden_size, dtype=torch.float32, device=device
-        )
+        hc_fn = torch.zeros(HC_PRE_MIX_HC_LIMIT, hc_mult * hidden_size, dtype=torch.float32, device=device)
         hc_scale = torch.zeros(3, dtype=torch.float32, device=device)
         hc_base = torch.zeros(HC_PRE_MIX_HC_LIMIT, dtype=torch.float32, device=device)
-        y, post, comb = torch.ops._C_ascend.npu_hc_pre_v2(
-            x, hc_fn, hc_scale, hc_base, hc_mult, 1, 1e-6, 1e-6
-        )
-        torch.ops._C_ascend.npu_hc_post(
-            y.view(1, 1, hidden_size), x.unsqueeze(0), post.unsqueeze(0), comb.unsqueeze(0)
-        )
+        y, post, comb = torch.ops._C_ascend.npu_hc_pre_v2(x, hc_fn, hc_scale, hc_base, hc_mult, 1, 1e-6, 1e-6)
+        torch.ops._C_ascend.npu_hc_post(y.view(1, 1, hidden_size), x.unsqueeze(0), post.unsqueeze(0), comb.unsqueeze(0))
         torch.npu.synchronize()
         return True
     except Exception as op_err:
@@ -185,31 +180,24 @@ def probe_available(hidden_size: int = HC_PRE_D_LIMIT, hc_mult: int = HC_PRE_HC_
 # --------------------------------------------------------------------------
 def _check_hc_mult(hc_mult: int) -> None:
     if hc_mult != HC_PRE_HC_LIMIT:
-        raise ValueError(
-            f"{_LOG_PREFIX} operator only supports hc_mult={HC_PRE_HC_LIMIT}, got {hc_mult}"
-        )
+        raise ValueError(f"{_LOG_PREFIX} operator only supports hc_mult={HC_PRE_HC_LIMIT}, got {hc_mult}")
 
 
 def _check_param_dtypes(hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor) -> None:
     if hc_fn.dtype != torch.float32 or hc_scale.dtype != torch.float32 or hc_base.dtype != torch.float32:
         raise ValueError(
-            f"{_LOG_PREFIX} hc_fn/hc_scale/hc_base must be float32, got "
-            f"{hc_fn.dtype}/{hc_scale.dtype}/{hc_base.dtype}"
+            f"{_LOG_PREFIX} hc_fn/hc_scale/hc_base must be float32, got {hc_fn.dtype}/{hc_scale.dtype}/{hc_base.dtype}"
         )
 
 
 def _streams_d(x: torch.Tensor, hc_mult: int) -> int:
     d = x.shape[-1]
     if hc_mult * d != x.shape[-2] * x.shape[-1]:
-        raise ValueError(
-            f"{_LOG_PREFIX} x shape {tuple(x.shape)} is inconsistent with hc_mult={hc_mult}"
-        )
+        raise ValueError(f"{_LOG_PREFIX} x shape {tuple(x.shape)} is inconsistent with hc_mult={hc_mult}")
     return d
 
 
-def _stream_layout(
-    x: torch.Tensor, hc_mult: int, name: str
-) -> tuple[torch.Tensor, int, tuple[int, ...]]:
+def _stream_layout(x: torch.Tensor, hc_mult: int, name: str) -> tuple[torch.Tensor, int, tuple[int, ...]]:
     """Return (x as [..., hc_mult, d], d, outer_shape), no envelope check.
 
     Accepts both the packed residual layout ``[..., hc_mult * d]`` (what
@@ -221,23 +209,17 @@ def _stream_layout(
     if x.dim() >= 3 and x.shape[-2] == hc_mult:
         return x, _streams_d(x, hc_mult), tuple(x.shape[:-2])
     if x.shape[-1] % hc_mult:
-        raise ValueError(
-            f"{_LOG_PREFIX} {name} last dim {x.shape[-1]} is not divisible by hc_mult={hc_mult}"
-        )
+        raise ValueError(f"{_LOG_PREFIX} {name} last dim {x.shape[-1]} is not divisible by hc_mult={hc_mult}")
     d = x.shape[-1] // hc_mult
     x_stream = x.reshape(*x.shape[:-1], hc_mult, d)
     return x_stream, d, tuple(x_stream.shape[:-2])
 
 
-def _to_stream_layout(
-    x: torch.Tensor, hc_mult: int, name: str
-) -> tuple[torch.Tensor, int, tuple[int, ...]]:
+def _to_stream_layout(x: torch.Tensor, hc_mult: int, name: str) -> tuple[torch.Tensor, int, tuple[int, ...]]:
     """``_stream_layout`` + the operator's hidden_size envelope."""
     x_stream, d, outer = _stream_layout(x, hc_mult, name)
     if d not in _HC_SUPPORTED_D:
-        raise ValueError(
-            f"{_LOG_PREFIX} operator only supports hidden_size in {_HC_SUPPORTED_D}, got {d}"
-        )
+        raise ValueError(f"{_LOG_PREFIX} operator only supports hidden_size in {_HC_SUPPORTED_D}, got {d}")
     return x_stream, d, outer
 
 
@@ -247,8 +229,7 @@ def _post_to_2d(post: torch.Tensor, hc_mult: int, name: str) -> torch.Tensor:
         post = post.squeeze(-1)
     if post.dim() < 1 or post.shape[-1] != hc_mult:
         raise ValueError(
-            f"{_LOG_PREFIX} {name} must end with hc={hc_mult} (optionally with a trailing 1), "
-            f"got {tuple(post.shape)}"
+            f"{_LOG_PREFIX} {name} must end with hc={hc_mult} (optionally with a trailing 1), got {tuple(post.shape)}"
         )
     return post
 
@@ -256,9 +237,7 @@ def _post_to_2d(post: torch.Tensor, hc_mult: int, name: str) -> torch.Tensor:
 def _check_pre_params(hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor, d: int, hc_mult: int) -> None:
     mix_hc = (2 + hc_mult) * hc_mult
     if hc_fn.dim() != 2 or hc_fn.shape != (mix_hc, hc_mult * d):
-        raise ValueError(
-            f"{_LOG_PREFIX} hc_fn must be {(mix_hc, hc_mult * d)}, got {tuple(hc_fn.shape)}"
-        )
+        raise ValueError(f"{_LOG_PREFIX} hc_fn must be {(mix_hc, hc_mult * d)}, got {tuple(hc_fn.shape)}")
     if hc_scale.dim() != 1 or hc_scale.shape[0] != 3:
         raise ValueError(f"{_LOG_PREFIX} hc_scale must be (3,), got {tuple(hc_scale.shape)}")
     if hc_base.dim() != 1 or hc_base.shape[0] != mix_hc:
@@ -319,9 +298,7 @@ def _pre_torch(
         sinkhorn_iters,
     )
     post = post_mix.squeeze(-1) if not post_keepdim else post_mix
-    return HCPreOutput(
-        _rms_norm(layer_input, norm_weight, layer_norm_eps), post, comb_mix
-    )
+    return HCPreOutput(_rms_norm(layer_input, norm_weight, layer_norm_eps), post, comb_mix)
 
 
 def _post_torch(
@@ -381,15 +358,34 @@ def hc_pre_ascendc(
 
     if _PRE_AVAILABLE is False or not _ensure_ops_registered():
         return _pre_torch(
-            x, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, norm_eps, hc_eps,
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            hc_mult,
+            sinkhorn_iters,
+            norm_eps,
+            hc_eps,
             hc_post_mult_value,
-            norm_weight=norm_weight, layer_norm_eps=layer_norm_eps, post_keepdim=post_keepdim,
+            norm_weight=norm_weight,
+            layer_norm_eps=layer_norm_eps,
+            post_keepdim=post_keepdim,
         )
 
     try:
         y, post, comb = _run_hc_pre(
-            x, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, norm_eps, hc_eps,
-            hc_post_mult_value, norm_weight, layer_norm_eps, post_keepdim,
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            hc_mult,
+            sinkhorn_iters,
+            norm_eps,
+            hc_eps,
+            hc_post_mult_value,
+            norm_weight,
+            layer_norm_eps,
+            post_keepdim,
         )
     except Exception as op_err:
         if _PRE_AVAILABLE is True:
@@ -403,9 +399,18 @@ def hc_pre_ascendc(
         )
         _PRE_AVAILABLE = False
         return _pre_torch(
-            x, hc_fn, hc_scale, hc_base, hc_mult, sinkhorn_iters, norm_eps, hc_eps,
+            x,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            hc_mult,
+            sinkhorn_iters,
+            norm_eps,
+            hc_eps,
             hc_post_mult_value,
-            norm_weight=norm_weight, layer_norm_eps=layer_norm_eps, post_keepdim=post_keepdim,
+            norm_weight=norm_weight,
+            layer_norm_eps=layer_norm_eps,
+            post_keepdim=post_keepdim,
         )
 
     if _PRE_AVAILABLE is None:
@@ -517,29 +522,26 @@ def _run_hc_post(
     if residual.dim() < 2:
         raise ValueError(f"{_LOG_PREFIX} residual must be at least 2-D, got {tuple(residual.shape)}")
     out_shape = tuple(residual.shape)
-    if residual.dim() >= 2 and residual.shape[-1] % hc_mult == 0 and (
-        residual.dim() < 3 or residual.shape[-2] != hc_mult
+    if (
+        residual.dim() >= 2
+        and residual.shape[-1] % hc_mult == 0
+        and (residual.dim() < 3 or residual.shape[-2] != hc_mult)
     ):
         # packed [..., hc * d] -> [..., hc, d]
         d = residual.shape[-1] // hc_mult
         residual = residual.reshape(*residual.shape[:-1], hc_mult, d)
     if residual.shape[-2] != hc_mult:
-        raise ValueError(
-            f"{_LOG_PREFIX} residual must end with hc={hc_mult}, got {tuple(residual.shape)}"
-        )
+        raise ValueError(f"{_LOG_PREFIX} residual must end with hc={hc_mult}, got {tuple(residual.shape)}")
     d = residual.shape[-1]
 
     if x.shape != residual.shape[:-2] + (d,):
         raise ValueError(
-            f"{_LOG_PREFIX} x {tuple(x.shape)} must match residual stream dims "
-            f"{tuple(residual.shape[:-2] + (d,))}"
+            f"{_LOG_PREFIX} x {tuple(x.shape)} must match residual stream dims {tuple(residual.shape[:-2] + (d,))}"
         )
     if residual.dtype != x.dtype:
         raise ValueError(f"{_LOG_PREFIX} x.dtype {x.dtype} must match residual.dtype {residual.dtype}")
     if post_layer_mix.dtype != comb_res_mix.dtype:
-        raise ValueError(
-            f"{_LOG_PREFIX} post.dtype {post_layer_mix.dtype} must match comb.dtype {comb_res_mix.dtype}"
-        )
+        raise ValueError(f"{_LOG_PREFIX} post.dtype {post_layer_mix.dtype} must match comb.dtype {comb_res_mix.dtype}")
 
     post2d = _post_to_2d(post_layer_mix, hc_mult, "post_layer_mix")
     if post2d.shape != residual.shape[:-1]:
@@ -549,8 +551,7 @@ def _run_hc_post(
         )
     if comb_res_mix.shape != residual.shape[:-2] + (hc_mult, hc_mult):
         raise ValueError(
-            f"{_LOG_PREFIX} comb {tuple(comb_res_mix.shape)} must be "
-            f"{tuple(residual.shape[:-2] + (hc_mult, hc_mult))}"
+            f"{_LOG_PREFIX} comb {tuple(comb_res_mix.shape)} must be {tuple(residual.shape[:-2] + (hc_mult, hc_mult))}"
         )
 
     # Operator contract: [B, S, d] / [B, S, hc, d] / [B, S, hc] / [B, S, hc, hc]
