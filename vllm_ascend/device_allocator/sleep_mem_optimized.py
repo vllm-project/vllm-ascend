@@ -222,6 +222,10 @@ class HcclSleepWakeupManager:
             self._skip_hccl_cleanup_for_cycle = True
             return 0
 
+        if not self.prepare_moe_hccl_teardown():
+            self._skip_hccl_cleanup_for_cycle = True
+            return 0
+
         num_destroyed = 0
         for group in groups:
             if group is self._lifecycle_anchor_group:
@@ -253,6 +257,33 @@ class HcclSleepWakeupManager:
             if callable(refresh_fn):
                 refresh_fn()
 
+    @staticmethod
+    def prepare_moe_hccl_teardown() -> bool:
+        """Prepare MoE resources before their HCCL groups are destroyed."""
+        from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
+
+        try:
+            for comm_method in _MoECommMethods.values():
+                prepare_fn = getattr(comm_method, "prepare_hccl_teardown", None)
+                if callable(prepare_fn):
+                    prepare_fn()
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to prepare MoE state for HCCL teardown; skipping HCCL cleanup for this sleep cycle."
+            )
+            return False
+
+    @staticmethod
+    def refresh_moe_hccl_runtime_state() -> None:
+        """Refresh MoE runtime resources after HCCL groups are restored."""
+        from vllm_ascend.ops.fused_moe.moe_comm_method import _MoECommMethods
+
+        for comm_method in _MoECommMethods.values():
+            refresh_fn = getattr(comm_method, "refresh_hccl_runtime_state", None)
+            if callable(refresh_fn):
+                refresh_fn()
+
     def sleep(self) -> None:
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             for handle in getattr(self.worker, "_pp_send_work", []):
@@ -267,4 +298,5 @@ class HcclSleepWakeupManager:
         with set_current_vllm_config(self.vllm_config):
             num_restored = self.restore_hccl()
             self.refresh_moe_hccl_groups()
+            self.refresh_moe_hccl_runtime_state()
         logger.info("Restored %d HCCL process groups after sleep mode.", num_restored)
