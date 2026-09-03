@@ -18,6 +18,7 @@
 #
 
 import inspect
+import logging
 from contextlib import contextmanager
 
 import numpy as np
@@ -72,6 +73,8 @@ from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpecul
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 
+logger = logging.getLogger(__name__)
+
 
 @contextmanager
 def _use_ascend_pcp_manager_for_vllm_0271():
@@ -114,6 +117,26 @@ class NPUModelRunner(GPUModelRunner):
 
         with torch_cuda_wrapper():
             super().__init__(vllm_config, device)
+
+        # V2 now receives the Ascend hardware-aware proposal length through
+        # the scheduler side channel.  The upstream adaptive-verification
+        # manager would make a second, independent budget decision and run a
+        # duplicate compaction path, so disable only that manager for the
+        # hardware-aware DSpark path.  DSpark's own confidence head remains
+        # enabled and is consumed by Ascend's scheduler.
+        dynamic_config = getattr(self.ascend_config, "dynamic_spec_config", None)
+        if (
+            dynamic_config is not None
+            and dynamic_config.method == "dspark"
+            and dynamic_config.policy == "hardware_aware"
+            and self.adaptive_verification is not None
+        ):
+            logger.info(
+                "V2 hardware-aware DSpark is using Ascend DynamicSpecScheduler; "
+                "disable upstream adaptive-verification compaction to avoid "
+                "duplicate budget decisions."
+            )
+            self.adaptive_verification = None
         self.use_spec_pp = (
             self.use_pp and self.speculative_config is not None and self.speculative_config.method == "mtp"
         )
@@ -765,6 +788,25 @@ class NPUModelRunner(GPUModelRunner):
         (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
         """
         return self.max_num_reqs * self.decode_query_len
+
+    @torch.inference_mode()
+    def sample_tokens(self, grammar_output):
+        """Publish V2 hardware-aware K after the draft step completes."""
+
+        output = super().sample_tokens(grammar_output)
+        if self.is_last_pp_rank and self.speculator is not None and output is not None:
+            dynamic_spec = getattr(self.speculator, "dynamic_spec", None)
+            input_batch = getattr(self.speculator, "input_batch", None)
+            if dynamic_spec is not None and input_batch is not None:
+                lengths = dynamic_spec.proposal_lengths_for_v2(
+                    input_batch.req_ids[: input_batch.num_reqs],
+                    max_k=self.num_speculative_steps,
+                )
+                if lengths is not None:
+                    model_runner_output = getattr(output, "model_runner_output", output)
+                    # ``patch_pp_mtp`` adds this field on older vLLM checkouts.
+                    setattr(model_runner_output, "proposal_lengths", lengths)
+        return output
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.

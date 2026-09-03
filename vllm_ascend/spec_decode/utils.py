@@ -431,6 +431,28 @@ class DynamicSpecScheduler:
         if self.hybrid_full_width_goodput_margin < 0.0:
             raise ValueError("hybrid_full_width_goodput_margin must be >= 0")
 
+        # V2 Ascend FULL graphs have one physical query width for the whole
+        # batch.  The hardware policy still computes per-request logical
+        # prefixes, but a mixed result cannot be represented by the current
+        # FIA metadata.  Collapse the result to one batch width at the output
+        # boundary so the next scheduled batch can use a smaller captured
+        # graph instead of silently falling back to max-K.  The percentile is
+        # configurable because it trades off tail-request acceptance against
+        # draft-model work.
+        self.v2_uniform_batch_k = bool(
+            method_params.get(
+                "v2_uniform_batch_k",
+                method_params.get("v2_varlen_physical_k", False),
+            )
+        )
+        self.v2_batch_k_percentile = float(
+            method_params.get("v2_batch_k_percentile", 50.0)
+        )
+        if not 0.0 <= self.v2_batch_k_percentile <= 100.0:
+            raise ValueError("v2_batch_k_percentile must be in [0, 100]")
+        self._last_v2_batch_physical_k: int | None = None
+        self._last_v2_proposal_lengths: list[int] | None = None
+
         self._steps_since_budget_update = 0
 
         self._hybrid_last_acceptance: float | None = None
@@ -496,6 +518,60 @@ class DynamicSpecScheduler:
         self._confidence_steps = 0
         self._last_confidence_num_reqs: int | None = None
         self._last_confidence_num_draft_tokens: int | None = None
+
+    def update_from_token_probs(
+        self,
+        token_probs: torch.Tensor,
+        *,
+        request_ids: Sequence[Any] | None = None,
+    ) -> torch.Tensor:
+        """Update the policy from confidence probabilities already computed.
+
+        V2 DSpark computes the confidence head inside the upstream speculator.
+        Recomputing that head in :meth:`update` would duplicate the most
+        expensive part of the decision path, so V2 publishes the existing
+        probabilities through this small adapter.
+        """
+
+        self.reused_last_result = False
+        return self._finish_token_probs_update(token_probs, request_ids=request_ids)
+
+    def proposal_lengths_for_v2(
+        self,
+        request_ids: Sequence[Any],
+        *,
+        max_k: int,
+    ) -> list[int] | None:
+        """Return the logical K that V2 should schedule on the next step.
+
+        A V2 FULL Ascend graph currently has a single physical K.  When
+        requested, use a robust batch percentile of the hardware policy's
+        per-request result.  This preserves dynamic K while avoiding the
+        mixed-batch fallback in ``physical_k_scope``.
+        """
+
+        if self.num_verify_tokens is None:
+            return None
+        values = self.num_verify_tokens.detach().to("cpu").tolist()
+        lengths = [
+            max(0, min(int(values[idx]), max_k))
+            for idx in range(min(len(request_ids), len(values)))
+        ]
+        if len(lengths) != len(request_ids):
+            return None
+        if not lengths:
+            return []
+
+        if self.v2_uniform_batch_k:
+            ordered = sorted(lengths)
+            rank = int(round((len(ordered) - 1) * self.v2_batch_k_percentile / 100.0))
+            batch_k = max(1, min(max_k, ordered[rank]))
+            lengths = [batch_k] * len(lengths)
+            self._last_v2_batch_physical_k = batch_k
+        else:
+            self._last_v2_batch_physical_k = max(lengths, default=0)
+        self._last_v2_proposal_lengths = lengths
+        return lengths
 
     def _install_hardware_policy(self, cost_model: HardwareCostModel) -> None:
         """Install or replace the profile-backed prefix policy."""
@@ -648,6 +724,77 @@ class DynamicSpecScheduler:
             return False
         return True
 
+    def _finish_token_probs_update(
+        self,
+        token_probs: torch.Tensor,
+        *,
+        request_ids: Sequence[Any] | None = None,
+    ) -> torch.Tensor:
+        """Apply the policy to probabilities produced by any DSpark path."""
+
+        num_reqs, num_draft_tokens = token_probs.shape
+        if num_reqs == 0 or num_draft_tokens == 0:
+            self.num_verify_tokens = self._num_verify_tokens_buffer[:num_reqs]
+            self.num_verify_tokens.zero_()
+            return self.num_verify_tokens
+
+        # Keep the same low-overhead hybrid/full-width semantics as the normal
+        # update path.  V2 has already paid for the confidence head by the
+        # time this method is called, but it can still skip sorting/allocation.
+        if self.hardware_policy is not None:
+            physical_k = min(num_draft_tokens, self.num_speculative_tokens)
+            use_hybrid_fast_path = self._hybrid_should_hold_full_width(
+                num_reqs=int(num_reqs),
+                physical_k=physical_k,
+            )
+            use_legacy_saturated_fast_path = (
+                not self.hybrid_policy_enabled
+                and self.hardware_min_budget_ratio >= 1.0
+                and physical_k <= self.budget_k
+            )
+            if use_hybrid_fast_path or use_legacy_saturated_fast_path:
+                same_shape = (
+                    self._hybrid_full_width_active
+                    and self._hybrid_last_num_reqs == int(num_reqs)
+                    and self._hybrid_last_num_draft_tokens == physical_k
+                )
+                self.num_verify_tokens = self._num_verify_tokens_buffer[:num_reqs]
+                self.num_verify_tokens.fill_(physical_k)
+                self.reused_last_result = same_shape
+                self._hybrid_last_num_reqs = int(num_reqs)
+                self._hybrid_last_num_draft_tokens = physical_k
+                self._hybrid_full_width_active = True
+                if int(num_reqs) >= self.hybrid_min_batch_size:
+                    self._hybrid_steps_since_probe += 1
+                return self.num_verify_tokens
+
+        result = self._update_from_token_probs(
+            token_probs,
+            request_ids=request_ids,
+        )
+        if self.hybrid_policy_enabled and self.hardware_policy is not None:
+            # The full-prefix survival is a cheap batch-level acceptance
+            # signal used by the next cadence decision.
+            self._hybrid_last_acceptance = float(
+                self._survival_buffer[:num_reqs, num_draft_tokens - 1].mean().item()
+            )
+            self._hybrid_last_dynamic_goodput = self.hardware_policy.last_goodput
+            self._hybrid_last_full_width_goodput = self.hardware_policy.full_width_goodput(
+                self._survival_buffer[:num_reqs, :num_draft_tokens]
+            )
+            self._hybrid_last_num_reqs = int(num_reqs)
+            self._hybrid_last_num_draft_tokens = int(num_draft_tokens)
+            self._hybrid_steps_since_probe = 0
+            self._hybrid_full_width_active = False
+        if (
+            self.hardware_policy is not None
+            and self.confidence_update_interval > 1
+        ):
+            self._cached_num_verify_tokens = result
+            self._last_confidence_num_reqs = int(num_reqs)
+            self._last_confidence_num_draft_tokens = int(num_draft_tokens)
+        return result
+
     def _apply_confidence_ema(
         self,
         token_probs: torch.Tensor,
@@ -717,40 +864,26 @@ class DynamicSpecScheduler:
     ) -> torch.Tensor:
         self.reused_last_result = False
 
-        # A full hardware budget does not need confidence estimation.  This
-        # is the saturated, non-adaptive mode: the configured confidence
-        # budget already covers the current physical draft width, so running
-        # the DSpark confidence head would only add scheduler overhead before
-        # returning the same full-width decision.
+        # A full hardware budget does not need confidence estimation.  Keep
+        # this check in the regular path for V1; V2 calls the same policy
+        # through ``update_from_token_probs`` after its confidence head.
         if (
             self.hardware_policy is not None
             and num_reqs is not None
             and draft_token_ids is not None
         ):
             physical_k = max(int(draft_token_ids.shape[1]) - 1, 0)
-            use_hybrid_fast_path = self._hybrid_should_hold_full_width(
-                num_reqs=int(num_reqs),
-                physical_k=physical_k,
-            )
-            use_legacy_saturated_fast_path = (
+            if self._hybrid_should_hold_full_width(
+                num_reqs=int(num_reqs), physical_k=physical_k
+            ) or (
                 not self.hybrid_policy_enabled
                 and self.hardware_min_budget_ratio >= 1.0
                 and physical_k <= self.budget_k
-            )
-            if use_hybrid_fast_path or use_legacy_saturated_fast_path:
-                same_shape = (
-                    self._hybrid_full_width_active
-                    and self._hybrid_last_num_reqs == int(num_reqs)
-                    and self._hybrid_last_num_draft_tokens == physical_k
-                )
+            ):
                 self.num_verify_tokens = self._num_verify_tokens_buffer[:num_reqs]
                 self.num_verify_tokens.fill_(physical_k)
-                self.reused_last_result = same_shape
-                self._hybrid_last_num_reqs = int(num_reqs)
-                self._hybrid_last_num_draft_tokens = physical_k
+                self.reused_last_result = True
                 self._hybrid_full_width_active = True
-                if int(num_reqs) >= self.hybrid_min_batch_size:
-                    self._hybrid_steps_since_probe += 1
                 return self.num_verify_tokens
 
         self._hybrid_full_width_active = False
@@ -806,39 +939,7 @@ class DynamicSpecScheduler:
         else:
             raise RuntimeError(f"Unsupported dynamic speculative method: {self.method}")
 
-        result = self._update_from_token_probs(token_probs, request_ids=request_ids)
-        if self.hybrid_policy_enabled and self.hardware_policy is not None:
-            # The mean full-prefix survival is a batch-level proxy for the
-            # probability that the complete physical K is useful. It is more
-            # selective than the mean per-position confidence for low-
-            # acceptance batches. The cumulative survival buffer was already
-            # produced by _update_from_token_probs, so this adds only one
-            # scalar sync when the confidence path is actually evaluated.
-            draft_width = int(num_draft_tokens or 0)
-            if num_reqs and draft_width:
-                self._hybrid_last_acceptance = float(
-                    self._survival_buffer[:num_reqs, draft_width - 1].mean().item()
-                )
-                self._hybrid_last_dynamic_goodput = self.hardware_policy.last_goodput
-                self._hybrid_last_full_width_goodput = (
-                    self.hardware_policy.full_width_goodput(
-                        self._survival_buffer[:num_reqs, :draft_width]
-                    )
-                )
-            self._hybrid_last_num_reqs = int(num_reqs or 0)
-            self._hybrid_last_num_draft_tokens = draft_width
-            self._hybrid_steps_since_probe = 0
-            self._hybrid_full_width_active = False
-        if (
-            self.hardware_policy is not None
-            and self.confidence_update_interval > 1
-            and num_reqs is not None
-            and num_draft_tokens is not None
-        ):
-            self._cached_num_verify_tokens = result
-            self._last_confidence_num_reqs = int(num_reqs)
-            self._last_confidence_num_draft_tokens = num_draft_tokens
-        return result
+        return self._finish_token_probs_update(token_probs, request_ids=request_ids)
 
     def _compute_dflash_token_probs(
         self,

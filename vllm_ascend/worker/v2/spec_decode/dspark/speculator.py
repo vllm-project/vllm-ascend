@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import logging
 from typing import Any, cast
 
 import torch
@@ -27,6 +28,8 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
@@ -35,6 +38,8 @@ from vllm_ascend.worker.v2.spec_decode.physical_k import (
     initialize_physical_k_buffers,
     physical_k_scope,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _RowwiseConfidenceBuffer:
@@ -92,6 +97,45 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         # DSpark changes ``sample_from_anchor`` after DFlash initialization,
         # so initialize the width-dependent anchor indices only now.
         initialize_physical_k_buffers(self)
+
+        # V2 uses the upstream DSpark implementation for the draft forward,
+        # so it does not inherit the V1 Ascend proposer that creates the
+        # hardware-aware scheduler.  Reuse the confidence probabilities that
+        # DSpark already computes instead of running the confidence head twice.
+        dynamic_config = get_ascend_config().dynamic_spec_config
+        self.dynamic_spec: DynamicSpecScheduler | None = None
+        if (
+            dynamic_config.method == "dspark"
+            and dynamic_config.policy == "hardware_aware"
+        ):
+            if not self.enable_adaptive_verification:
+                logger.warning(
+                    "V2 hardware-aware DSpark scheduling requires "
+                    "enable_adaptive_verification=true; keeping fixed K."
+                )
+            else:
+                self.dynamic_spec = DynamicSpecScheduler(
+                    method="dspark",
+                    policy=dynamic_config.policy,
+                    method_params=dynamic_config.method_params,
+                    max_batch_size=self.max_num_reqs,
+                    num_speculative_tokens=self.num_speculative_steps,
+                    device=device,
+                )
+
+    def _update_dynamic_spec(self, num_reqs: int, active_k: int) -> None:
+        """Publish DSpark confidence output to the Ascend K policy."""
+
+        if self.dynamic_spec is None or active_k <= 0:
+            return
+        confidence = self.draft_token_confidence_probs[:num_reqs, :active_k]
+        request_ids = None
+        if self.input_batch is not None:
+            request_ids = self.input_batch.req_ids[:num_reqs]
+        self.dynamic_spec.update_from_token_probs(
+            confidence,
+            request_ids=request_ids,
+        )
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
@@ -152,6 +196,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             # Keep the fixed-K path unchanged; the row-wise adapter is only
             # needed by a smaller physical-K graph.
             super()._sample_sequential(num_reqs, head_hidden)
+            self._update_dynamic_spec(num_reqs, active_k)
             return
 
         confidence_probs = getattr(self, "draft_token_confidence_probs", None)
@@ -167,6 +212,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             self.draft_tokens = old_draft_tokens
             if confidence_probs is not None and confidence_probs.ndim >= 2:
                 self.draft_token_confidence_probs = confidence_probs
+        self._update_dynamic_spec(num_reqs, active_k)
 
     def build_draft_attn_metadatas(
         self,

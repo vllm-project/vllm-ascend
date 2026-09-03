@@ -659,6 +659,34 @@ def test_hardware_policy_accepts_smaller_dynamic_width() -> None:
     assert lengths.item() <= 2
 
 
+def test_v2_hardware_policy_collapses_mixed_lengths_to_batch_width() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    scheduler = DynamicSpecScheduler(
+        method="dspark",
+        policy="hardware_aware",
+        method_params={
+            "profile": {
+                "fingerprint": {"device": "Ascend"},
+                "latency_ms": {str(size): 1.0 for size in range(1, 33)},
+            },
+            "v2_varlen_physical_k": True,
+            "hardware_min_budget_ratio": 0.0,
+        },
+        max_batch_size=4,
+        num_speculative_tokens=5,
+        device=torch.device("cpu"),
+    )
+    scheduler.num_verify_tokens = torch.tensor([1, 3, 5, 2], dtype=torch.int32)
+
+    lengths = scheduler.proposal_lengths_for_v2(
+        ["a", "b", "c", "d"], max_k=5
+    )
+
+    assert lengths == [2, 2, 2, 2]
+    assert scheduler._last_v2_batch_physical_k == 2
+
+
 def test_proposal_gate_enters_latency_profile_after_low_load_streak() -> None:
     gate = ProposalGate(
         max_num_seqs=8,
