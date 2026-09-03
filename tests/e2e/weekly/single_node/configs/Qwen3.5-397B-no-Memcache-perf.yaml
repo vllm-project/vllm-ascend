@@ -1,0 +1,54 @@
+# No Memcache Pooling + Qwen3.5-397B Performance Testing
+test_cases:
+  - name: "Qwen3.5-397B-no-Memcache-perf"
+    model: "Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp"
+    envs:
+      PYTHONHASHSEED: "0"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_BUFFSIZE: "1024"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--quantization"
+      - "ascend"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "128"
+      - "--max-model-len"
+      - "133000"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.90"
+      - "--no-enable-prefix-caching"
+      - "--speculative-config"
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true, "enable_fused_mc2":1, "enable_flashcomm1":true}'
+    benchmarks:
+      perf:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 64/1
+        max_out_len: 1
+        batch_size: 16
+        request_rate: 0
+        baseline: 100
+        input_throughput_threshold: 1
+    
