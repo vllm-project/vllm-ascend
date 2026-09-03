@@ -20,6 +20,7 @@ from vllm_ascend.utils import (
 )
 
 SFA_QSFA_TILE_SIZE = 128
+MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
 def get_or_register_attention_buffer(

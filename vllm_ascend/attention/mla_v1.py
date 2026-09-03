@@ -26,6 +26,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
+    MLAPO_MAX_SUPPORTED_TOKENS,
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_dcp,
@@ -70,8 +71,6 @@ if TYPE_CHECKING:
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
-# token count limits within the mlapo operator
-MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
 def _npu_mla_prolog_v3_no_rope(**kwargs):
