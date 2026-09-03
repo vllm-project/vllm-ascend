@@ -529,6 +529,13 @@ def rope_forward_triton(
 
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
+    # Resolve rope_dim early so tile sizing uses the actual rotary dimension
+    # instead of falling back to head_dim (which may be much larger).
+    if rope_dim == -1:
+        if cos is not None:
+            rope_dim = cos.shape[-1] * 2
+        elif cos_sin_cache is not None:
+            rope_dim = cos_sin_cache.shape[-1]
     # Dynamically size the head tile to fit within NPU Unified Buffer,
     # replacing the previous hardcoded head_dim threshold approach.
     BLOCK_SIZE_HEAD = _compute_rope_block_size_head(head_dim, rope_dim, is_neox_style)
