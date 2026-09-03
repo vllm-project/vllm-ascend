@@ -1073,6 +1073,20 @@
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
 #
+# ** 28a. File: worker/patch_v2/patch_trace_replay.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens`
+#    Why:
+#       The upstream implementation is reused as-is for non-empty batches,
+#       but Ascend Triton rejects the zero-size grid used for an empty batch.
+#    How:
+#       Wrap the upstream function with an empty-batch no-op guard and forward
+#       every non-empty call unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/46701
+#    Future Plan:
+#       Remove this guard when upstream handles empty Triton grids portably.
+#
 # ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`

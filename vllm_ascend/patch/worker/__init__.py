@@ -31,6 +31,8 @@ import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
 import vllm_ascend.patch.worker.patch_step3p5  # noqa
 
 if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+    if HAS_TRITON:
+        import vllm_ascend.patch.worker.patch_v2.patch_trace_replay  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
