@@ -35,7 +35,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsEagle3
-from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
+from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead, DSparkMarkovHead
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
 
 from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask, sp_shard
@@ -45,7 +45,7 @@ from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV4MoE,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
-from vllm_ascend.utils import enable_dsa_cp, vllm_version_is
+from vllm_ascend.utils import enable_dsa_cp
 
 
 def _apply_dsv4_rope(
@@ -136,25 +136,13 @@ class DeepseekV4DSparkModel(nn.Module):
                 f"layers.{last_layer_idx}.markov_head",
             ),
         )
-        self.confidence_head: nn.Module
-        if vllm_version_is("0.27.1"):
-            from vllm_ascend.models.qwen3_dspark import DSparkConfidenceHead as CompatDSparkConfidenceHead
 
-            self.confidence_head = CompatDSparkConfidenceHead(
-                input_dim=config.hidden_size + config.dspark_markov_rank,
-                prefix=maybe_prefix(prefix, "confidence_head"),
-                bias=False,
-                with_markov=True,
-            )
-        else:
-            from vllm.model_executor.models.qwen3_dspark import DSparkConfidenceHead
-
-            self.confidence_head = DSparkConfidenceHead(
-                input_dim=config.hidden_size + config.dspark_markov_rank,
-                prefix=maybe_prefix(prefix, "confidence_head"),
-                bias=False,
-                with_markov=True,
-            )
+        self.confidence_head = DSparkConfidenceHead(
+            input_dim=config.hidden_size + config.dspark_markov_rank,
+            prefix=maybe_prefix(prefix, "confidence_head"),
+            bias=False,
+            with_markov=True,
+        )
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
