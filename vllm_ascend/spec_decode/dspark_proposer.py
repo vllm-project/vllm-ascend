@@ -142,15 +142,11 @@ class AscendDSparkProposer(AscendDflashProposer):
         }
         return (
             (
-                getattr(target_model_config.hf_config, "model_type", None)
-                == "kimi_k3"
+                getattr(target_model_config.hf_config, "model_type", None) == "kimi_k3"
                 or any("KimiK3" in architecture for architecture in target_architectures)
             )
             and getattr(draft_hf_config, "model_type", None) == "qwen3"
-            and any(
-                architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
-                for architecture in draft_architectures
-            )
+            and any(architecture in {"DSparkDraftModel", "Qwen3DSparkModel"} for architecture in draft_architectures)
         )
 
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -193,9 +189,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         replicated_cols = local_cols * replication_size
         required_shape = (dcp_block_table.shape[0], replicated_cols)
         storage = self._replicated_block_table_storage.get(gid)
-        if storage is None or any(
-            have < need for have, need in zip(storage.shape, required_shape)
-        ):
+        if storage is None or any(have < need for have, need in zip(storage.shape, required_shape)):
             storage = torch.empty(
                 required_shape,
                 dtype=torch.int32,
@@ -212,8 +206,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._replicated_block_table_arange[gid] = col_indices
         col_indices = col_indices[:replicated_cols]
         local_col_indices = (
-            col_indices // (replication_size * blocks_per_phys_block)
-            * blocks_per_phys_block
+            col_indices // (replication_size * blocks_per_phys_block) * blocks_per_phys_block
             + col_indices % blocks_per_phys_block
         )
         lanes = (col_indices // blocks_per_phys_block) % replication_size
@@ -248,10 +241,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         result.fill_(-1)
         if num_tokens == 0:
             return result
-        query_lens = (
-            query_start_loc[1 : num_reqs + 1]
-            - query_start_loc[:num_reqs]
-        )
+        query_lens = query_start_loc[1 : num_reqs + 1] - query_start_loc[:num_reqs]
         req_indices = torch.repeat_interleave(
             torch.arange(num_reqs, dtype=torch.int32, device=self.device),
             query_lens.to(device=self.device),
@@ -260,14 +250,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         kernel_block_size = self._per_group_kernel_block_sizes[gid]
         token_positions = positions[:num_tokens].to(torch.int32)
         logical_block_indices = token_positions // kernel_block_size
-        flat_indices = (
-            req_indices * block_table.shape[1] + logical_block_indices
-        ).to(torch.int64)
+        flat_indices = (req_indices * block_table.shape[1] + logical_block_indices).to(torch.int64)
         block_numbers = block_table.flatten()[flat_indices]
-        result[:num_tokens] = (
-            block_numbers * kernel_block_size
-            + token_positions % kernel_block_size
-        )
+        result[:num_tokens] = block_numbers * kernel_block_size + token_positions % kernel_block_size
         return result
 
     def _compute_confidence(
@@ -307,9 +292,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_replication_sizes = {}
         self.draft_attn_groups: list[AttentionGroup] = []
         draft_vllm_config = (
-            self._create_draft_vllm_config()
-            if getattr(self, "replicated_draft_kv", False)
-            else self.vllm_config
+            self._create_draft_vllm_config() if getattr(self, "replicated_draft_kv", False) else self.vllm_config
         )
 
         for kv_cache_gid, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
@@ -344,16 +327,12 @@ class AscendDSparkProposer(AscendDflashProposer):
                         kernel_block_size=kernel_block_size,
                     )
                     self._per_group_kernel_block_sizes[kv_cache_gid] = kernel_block_size
-                    self._per_group_manager_block_sizes[kv_cache_gid] = (
-                        layer_kv_cache_spec.block_size
-                    )
+                    self._per_group_manager_block_sizes[kv_cache_gid] = layer_kv_cache_spec.block_size
                     if isinstance(
                         layer_kv_cache_spec,
                         AscendDCPReplicatedDraftAttentionSpec,
                     ):
-                        self._per_group_replication_sizes[kv_cache_gid] = (
-                            layer_kv_cache_spec.dcp_replication_size
-                        )
+                        self._per_group_replication_sizes[kv_cache_gid] = layer_kv_cache_spec.dcp_replication_size
                     attention_groups[key] = attn_group
                 else:
                     attention_groups[key].layer_names.append(layer_name)

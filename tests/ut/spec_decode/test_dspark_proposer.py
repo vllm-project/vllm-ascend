@@ -399,17 +399,13 @@ def test_dcp_replicated_dspark_block_table_and_slot_mapping(
 ) -> None:
     proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
     proposer.device = torch.device("cpu")
-    proposer.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=16)
-    )
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=16))
     proposer._per_group_replication_sizes = {0: 2}
     proposer._per_group_manager_block_sizes = {0: manager_block_size}
     proposer._per_group_kernel_block_sizes = {0: kernel_block_size}
     proposer._replicated_block_table_storage = {}
     proposer._replicated_block_table_arange = {}
-    proposer._per_group_context_slot_mapping_buffers = {
-        0: torch.empty(16, dtype=torch.int32)
-    }
+    proposer._per_group_context_slot_mapping_buffers = {0: torch.empty(16, dtype=torch.int32)}
 
     replicated = proposer._build_replicated_block_table(
         0,

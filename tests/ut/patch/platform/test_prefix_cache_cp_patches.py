@@ -111,11 +111,9 @@ def _make_kimi_k3_dspark_kv_cache_specs(
             page_size_padded=page_size,
         )
         if draft_replication_size > 1:
-            draft_attention_spec = (
-                AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
-                    draft_attention_spec,
-                    draft_replication_size,
-                )
+            draft_attention_spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+                draft_attention_spec,
+                draft_replication_size,
             )
     mamba_spec = MambaSpec(
         block_size=block_size,
@@ -413,9 +411,7 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
         lambda _config, num_blocks: num_blocks,
     )
     config = _get_kimi_k3_replicated_dspark_kv_cache_config(
-        SimpleNamespace(
-            cache_config=SimpleNamespace(prefix_cache_retention_interval=None)
-        ),
+        SimpleNamespace(cache_config=SimpleNamespace(prefix_cache_retention_interval=None)),
         groups,
         bytes_per_block * expected_num_blocks,
     )
@@ -423,18 +419,12 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
     assert config is not None
     assert config.num_blocks == expected_num_blocks
     assert len(config.kv_cache_tensors) == 29
-    assert [len(tensor.shared_by) for tensor in config.kv_cache_tensors] == (
-        [4] * 23 + [1] * 6
-    )
-    assert [tensor.size for tensor in config.kv_cache_tensors[:24]] == [
-        page_size * expected_num_blocks
-    ] * 24
+    assert [len(tensor.shared_by) for tensor in config.kv_cache_tensors] == ([4] * 23 + [1] * 6)
+    assert [tensor.size for tensor in config.kv_cache_tensors[:24]] == [page_size * expected_num_blocks] * 24
     assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [
         page_size * replication_size * expected_num_blocks
     ] * 5
-    assert sum(tensor.size for tensor in config.kv_cache_tensors) == (
-        bytes_per_block * expected_num_blocks
-    )
+    assert sum(tensor.size for tensor in config.kv_cache_tensors) == (bytes_per_block * expected_num_blocks)
 
 
 def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
@@ -448,9 +438,7 @@ def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
     assert unified is not specs
     assert {spec.block_size for spec in unified.values()} == {384}
     assert {
-        spec.page_size_bytes
-        for spec in unified.values()
-        if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
+        spec.page_size_bytes for spec in unified.values() if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
     } == {4 * 488448}
 
 

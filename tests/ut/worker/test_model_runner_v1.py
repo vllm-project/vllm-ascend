@@ -634,9 +634,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             )
         ]
 
-        k_cache, v_cache = runner._reshape_kv_cache_tensors(config, raw)[
-            "draft_attn"
-        ]
+        k_cache, v_cache = runner._reshape_kv_cache_tensors(config, raw)["draft_attn"]
 
         expected_shape = (2 * replication_size, 16, 2, 4)
         self.assertEqual(k_cache.shape, expected_shape)

@@ -1567,34 +1567,23 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     uses_kimi_k3_gqa_dspark = (
         speculative_config.use_dspark()
         and (
-            getattr(target_model_config.hf_config, "model_type", None)
-            == "kimi_k3"
+            getattr(target_model_config.hf_config, "model_type", None) == "kimi_k3"
             or any("KimiK3" in arch for arch in target_architectures)
         )
         and getattr(draft_model_config.hf_config, "model_type", None) == "qwen3"
-        and any(
-            architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
-            for architecture in draft_architectures
-        )
+        and any(architecture in {"DSparkDraftModel", "Qwen3DSparkModel"} for architecture in draft_architectures)
     )
     if uses_kimi_k3_gqa_dspark:
         draft_parallel_config = speculative_config.draft_parallel_config
         if draft_parallel_config is not None and (
-            draft_parallel_config.tensor_parallel_size
-            != parallel_config.tensor_parallel_size
+            draft_parallel_config.tensor_parallel_size != parallel_config.tensor_parallel_size
         ):
             raise ValueError(
-                "Kimi K3 GQA DSpark requires draft tensor parallel size to "
-                "match the target tensor parallel size."
+                "Kimi K3 GQA DSpark requires draft tensor parallel size to match the target tensor parallel size."
             )
-        if (
-            parallel_config.tensor_parallel_size
-            % decode_context_parallel_size
-            != 0
-        ):
+        if parallel_config.tensor_parallel_size % decode_context_parallel_size != 0:
             raise ValueError(
-                "Target tensor parallel size must be divisible by decode "
-                "context parallel size for Kimi K3 GQA DSpark."
+                "Target tensor parallel size must be divisible by decode context parallel size for Kimi K3 GQA DSpark."
             )
         return
 
