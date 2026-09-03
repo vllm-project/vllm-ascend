@@ -240,10 +240,7 @@ class AscendDCPReplicatedDraftAttentionSpec(FullAttentionSpec):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.dcp_replication_size < 1:
-            raise ValueError(
-                "dcp_replication_size must be positive, got "
-                f"{self.dcp_replication_size}."
-            )
+            raise ValueError(f"dcp_replication_size must be positive, got {self.dcp_replication_size}.")
 
     @property
     def page_size_bytes(self) -> int:
@@ -259,10 +256,7 @@ class AscendDCPReplicatedDraftAttentionSpec(FullAttentionSpec):
         spec: FullAttentionSpec,
         dcp_replication_size: int,
     ) -> "AscendDCPReplicatedDraftAttentionSpec":
-        kwargs = {
-            field.name: getattr(spec, field.name)
-            for field in fields(FullAttentionSpec)
-        }
+        kwargs = {field.name: getattr(spec, field.name) for field in fields(FullAttentionSpec)}
         return cls(
             **kwargs,
             dcp_replication_size=dcp_replication_size,
@@ -270,14 +264,12 @@ class AscendDCPReplicatedDraftAttentionSpec(FullAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(
-            isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
-            for spec in specs
-        ), "All replicated draft layers must use the replicated draft spec."
+        assert all(isinstance(spec, AscendDCPReplicatedDraftAttentionSpec) for spec in specs), (
+            "All replicated draft layers must use the replicated draft spec."
+        )
         replication_sizes = {spec.dcp_replication_size for spec in specs}
         assert len(replication_sizes) == 1, (
-            "All replicated draft layers in one KV cache group must use the "
-            "same DCP replication size."
+            "All replicated draft layers in one KV cache group must use the same DCP replication size."
         )
         merged = super().merge(specs)
         return replace(
