@@ -1263,4 +1263,3 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc.additional_config = {"combine_quant_mode": "true"}
         with self.assertRaises(ValueError):
             init_ascend_config(vc)
-
