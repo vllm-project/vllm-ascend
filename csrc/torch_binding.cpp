@@ -57,6 +57,7 @@
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
+#include "attention/build_dspark_swa_indices/build_dspark_swa_indices_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -2365,6 +2366,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor(a!), Tensor(b!), Tensor(c!))"
         );
     ops.impl("compressor_metadata_out", torch::kPrivateUse1, &vllm_ascend::compressor_metadata_out);
+
+    ops.def(
+        "build_dspark_swa_indices("
+            "Tensor block_table, Tensor query_start_loc, Tensor seq_lens, "
+            "int num_speculative_tokens, int window_size, int block_size, "
+            "int index_width, int num_decode_tokens"
+        ") -> Tensor"
+        );
+    ops.impl("build_dspark_swa_indices", torch::kPrivateUse1, &vllm_ascend::build_dspark_swa_indices);
 
     ops.def(
         "npu_vllm_quant_lightning_indexer("
