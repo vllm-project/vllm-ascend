@@ -23,9 +23,11 @@ from vllm.logger import logger
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend._310p.model_runner_310p import NPUModelRunner310
-from vllm_ascend.utils import is_rc_device
+from vllm_ascend.utils import is_rc_device, vllm_version_is
 from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
@@ -135,6 +137,89 @@ class NPUWorker310(NPUWorker):
             scope="local",
         )
         return int(self.available_kv_cache_memory_bytes)
+
+    def _scale_kv_cache_memory_for_multi_group(self, available_memory: int) -> int:
+        """Scale the KV cache budget for vllm main's multi-group layout.
+
+        vLLM #51718 derives num_blocks from the largest KV cache group's
+        bytes-per-block, but the 310P runner keeps per-layer contiguous buffers
+        for every group. Per-layer sizing then totals num_blocks * (sum of ALL
+        groups' pages), which exceeds available memory whenever more than one
+        group is non-trivial. Scale the advertised budget by bytes_per_block /
+        sum(pages) so the engine derives a num_blocks (and block pool) small
+        enough for the per-layer buffers to fit.
+        """
+        if vllm_version_is("0.27.1"):
+            return available_memory
+        kv_cache_spec = self.get_kv_cache_spec()
+        if not isinstance(kv_cache_spec, dict):
+            return available_memory
+        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+        if not kv_cache_groups:
+            return available_memory
+        # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
+        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
+        # all groups in one physical budget and must not take the generic
+        # per-layer multi-group scale below.
+        for group in kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            specs = (
+                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
+            )
+            if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
+                return available_memory
+
+        # vLLM #51718 overlays KV cache groups in one standardized backing
+        # allocation. Do not shrink the planner budget if a future 310P runner
+        # can consume the compact Attention/Mamba shared layout directly.
+        per_layer_specs = []
+        for group in kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                per_layer_specs.extend(group_spec.kv_cache_specs.values())
+            else:
+                per_layer_specs.append(group_spec)
+        has_attention = any(isinstance(spec, AttentionSpec) for spec in per_layer_specs)
+        has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
+        model_runner = getattr(self, "model_runner", None)
+        layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        if (
+            has_attention
+            and has_mamba
+            and layout.is_layer_compact
+            and layout.is_block_compact
+            and self.vllm_config.kv_transfer_config is None
+            and getattr(model_runner, "supports_standardized_shared_kv_backing", False)
+            and not getattr(model_runner, "use_sparse", False)
+            and not getattr(model_runner, "use_compress", False)
+        ):
+            return available_memory
+
+        bytes_per_block = 0
+        sum_pages = 0
+        for group in kv_cache_groups:
+            group_pages = 0
+            for layer_name in group.layer_names:
+                group_spec = group.kv_cache_spec
+                if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                    layer_spec = group_spec.kv_cache_specs[layer_name]
+                else:
+                    layer_spec = group_spec
+                group_pages += layer_spec.page_size_bytes
+                sum_pages += layer_spec.page_size_bytes
+            bytes_per_block = max(bytes_per_block, group_pages)
+        if bytes_per_block > 0 and sum_pages > bytes_per_block:
+            scale = bytes_per_block / sum_pages
+            logger.info(
+                "310P per-layer KV layout scales the multi-group budget by %.4f "
+                "(%d bytes/block over %d total page bytes) so per-layer "
+                "buffers fit within device memory.",
+                scale,
+                bytes_per_block,
+                sum_pages,
+            )
+            return int(available_memory * scale)
+        return available_memory
 
     def _warm_up_atb(self):
         # 310p device do not support torch_npu._npu_matmul_add_fp32 atb ops

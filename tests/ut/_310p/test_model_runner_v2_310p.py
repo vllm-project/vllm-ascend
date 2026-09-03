@@ -10,6 +10,13 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.sampling_params import SamplingParams
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 import vllm_ascend._310p.worker.v2.model_runner as model_runner_module
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
@@ -54,6 +61,25 @@ def test_config_accepts_prefix_caching() -> None:
     config = _make_vllm_config()
     config.cache_config.enable_prefix_caching = True
     NPUModelRunner310V2._validate_config(config)
+
+
+def _load_worker_310p():
+    atb_ops = MagicMock()
+    atb_ops._register_atb_extensions = MagicMock()
+    profiler = MagicMock()
+    profiler.dynamic_profile = MagicMock()
+    with patch.dict(
+        sys.modules,
+        {
+            "torch_npu.op_plugin": MagicMock(),
+            "torch_npu.op_plugin.atb": MagicMock(),
+            "torch_npu.op_plugin.atb._atb_ops": atb_ops,
+            "torch_npu.profiler": profiler,
+        },
+    ):
+        from vllm_ascend._310p.worker_310p import NPUWorker310
+
+    return NPUWorker310
 
 
 def test_config_accepts_tensor_parallelism() -> None:
@@ -455,21 +481,7 @@ def test_aclgraph_query_lens_ignore_padded_request_entries() -> None:
 
 
 def test_worker_selects_v2_runner_on_310p() -> None:
-    atb_ops = MagicMock()
-    atb_ops._register_atb_extensions = MagicMock()
-    profiler = MagicMock()
-    profiler.dynamic_profile = MagicMock()
-    with patch.dict(
-        sys.modules,
-        {
-            "torch_npu.op_plugin": MagicMock(),
-            "torch_npu.op_plugin.atb": MagicMock(),
-            "torch_npu.op_plugin.atb._atb_ops": atb_ops,
-            "torch_npu.profiler": profiler,
-        },
-    ):
-        from vllm_ascend._310p.worker_310p import NPUWorker310
-
+    NPUWorker310 = _load_worker_310p()
     worker = object.__new__(NPUWorker310)
     worker.vllm_config = SimpleNamespace()
     worker.use_v2_model_runner = True
@@ -477,3 +489,69 @@ def test_worker_selects_v2_runner_on_310p() -> None:
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()
     runner_cls.assert_called_once_with(worker.vllm_config, worker.device)
+
+
+@pytest.mark.skipif(
+    model_runner_module.vllm_version_is("0.27.1"),
+    reason="vLLM #51718 only changed the main planner",
+)
+def test_worker_310p_dsv4_shared_tuple_layout_does_not_scale_budget() -> None:
+    spec = MLAAttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        tokens_per_state=4,
+        model_version="deepseek_v4",
+    )
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs({"attn": spec})
+    assert uniform_spec is not None
+    groups = [KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=uniform_spec)]
+    NPUWorker310 = _load_worker_310p()
+    worker = object.__new__(NPUWorker310)
+    worker.vllm_config = SimpleNamespace()
+    worker.get_kv_cache_spec = MagicMock(return_value={"attn": spec})
+
+    with patch("vllm_ascend._310p.worker_310p.get_kv_cache_groups", return_value=groups):
+        assert worker._scale_kv_cache_memory_for_multi_group(12345) == 12345
+
+
+@pytest.mark.skipif(
+    model_runner_module.vllm_version_is("0.27.1"),
+    reason="vLLM #51718 only changed the main planner",
+)
+def test_worker_310p_hybrid_budget_scaling_follows_runner_backing_capability() -> None:
+    attn_spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=4,
+        head_size_v=4,
+        dtype=torch.float16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=2,
+        shapes=((2, 4),),
+        dtypes=(torch.float32,),
+    )
+    groups = [
+        KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attn_spec),
+        KVCacheGroupSpec(layer_names=["linear_attn"], kv_cache_spec=mamba_spec),
+    ]
+    layout = SimpleNamespace(is_layer_compact=True, is_block_compact=True)
+    cache_config = SimpleNamespace(get_resolved_kv_cache_layout=lambda: layout)
+    NPUWorker310 = _load_worker_310p()
+    worker = object.__new__(NPUWorker310)
+    worker.vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        kv_transfer_config=None,
+    )
+    worker.get_kv_cache_spec = MagicMock(return_value={"attn": attn_spec, "linear_attn": mamba_spec})
+
+    for supports_shared_backing, expected_budget in ((True, 12345), (False, 6172)):
+        worker.model_runner = SimpleNamespace(
+            use_sparse=False,
+            use_compress=False,
+            supports_standardized_shared_kv_backing=supports_shared_backing,
+        )
+        with patch("vllm_ascend._310p.worker_310p.get_kv_cache_groups", return_value=groups):
+            assert worker._scale_kv_cache_memory_for_multi_group(12345) == expected_budget
