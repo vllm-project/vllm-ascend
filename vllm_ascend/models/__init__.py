@@ -35,6 +35,10 @@ def register_model():
             "GlmMoeDsaForCausalLM",
             "vllm_ascend.models.glm_5_2_mega:AscendGlm52MegaForCausalLM",
         )
+        ModelRegistry.register_model(
+            "DeepSeekMTPModel",
+            "vllm_ascend.models.glm_5_2_mega:AscendGlm52MegaMTP",
+        )
     else:
         ModelRegistry.register_model(
             "GlmMoeDsaForCausalLM",

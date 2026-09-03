@@ -44,6 +44,8 @@ from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 from vllm.sequence import IntermediateTensors
 
+from vllm.logger import logger
+
 _ENABLED = os.environ.get("ENABLE_MEGAKERNEL", "0") in ("1", "true", "True")
 
 # Packed-KV layout constants are resolved from vLLM config at state init
@@ -114,11 +116,6 @@ def _extract_dsa_metadata(attn_metadata: Any) -> AscendDSAMetadata:
         # v1: {layer_name: AttentionMetadata}; all layers share the batch shape
         for meta in attn_metadata.values():
             if meta is not None:
-                print(
-                    "[MegaKernel] attn metadata type: "
-                    f"{type(meta).__name__}",
-                    flush=True,
-                )
                 return meta
         raise RuntimeError("MegaKernel: no attention metadata in forward context")
     if isinstance(attn_metadata, (list, tuple)):
@@ -195,36 +192,23 @@ class _MegaKernelGLM52State:
                         self.model_args.num_hidden_layers,
                     )
                 )
-            print(
-                "[MegaKernel] reduced main layers: "
-                f"num_hidden_layers={self.model_args.num_hidden_layers}, "
-                f"mtp_start={self.model_args.mtp_start_layer_idx}",
-                flush=True,
-            )
 
         num_blocks = self._num_blocks()
         self.num_blocks = num_blocks
         self.k_cache, self.index_k_buffer, self.index_k_scale_buffer = (
             self._borrow_vllm_kv_cache(vllm_model)
         )
-        print(
-            "[MegaKernel] reusing vLLM KV cache: "
-            f"layers={len(self.k_cache)} packed_blocks={self.k_cache[0].shape[0]} "
-            f"packed_dim={self.k_cache[0].shape[-1]}",
-            flush=True,
+        # indexer_rope indexes this table with absolute token positions.  Reuse
+        # vLLM's complete RoPE table just like the SGLang handoff does; a
+        # per-step [num_tokens, 64] buffer is invalid once decode positions are
+        # non-zero.
+        self.index_cos_sin_cache = self._borrow_vllm_index_rope_cache(
+            vllm_model
         )
-        self.index_cos_sin_cache = torch.empty(
-            (self.max_tokens_default, 64),
-            dtype=torch.bfloat16,
-            device="npu",
-        )
-        # Compact 64-wide DSA indexer RoPE cache used by the MTP steps
-        # (indexer_rope requires [*, 64] = [cos(32), sin(32)]).
-        self.mtp_index_cos_sin_cache = torch.empty(
-            (self.max_tokens_default, 64),
-            dtype=torch.bfloat16,
-            device="npu",
-        )
+        # Target and MTP use the same indexer RoPE configuration.  Start with
+        # the target's complete table; fill_rope_caches may replace this with
+        # the draft module's own complete table if it exposes one.
+        self.mtp_index_cos_sin_cache = self.index_cos_sin_cache
         self.mla_cos_cache = torch.empty(
             (self.max_tokens_default, self.rope_head_dim),
             dtype=torch.bfloat16,
@@ -256,16 +240,25 @@ class _MegaKernelGLM52State:
             name: tensor.detach()
             for name, tensor in vllm_model.state_dict().items()
         }
-        print(
-            "[MegaKernel] vllm-ascend weight_dict: "
-            f"n={len(weight_dict)} keys={sorted(weight_dict.keys())}",
-            flush=True,
-        )
+
+
+        # SFA disposes kv_b_proj after deriving W_UK_T / W_UV, leaving an empty
+        # state_dict entry.  The vLLM-specific load_weights hook snapshots the
+        # original tensors before attention post-processing so MegaKernel can
+        # derive its own w_kc / w_vc without changing the generic SFA path.
+        _saved_kv_b = dict(getattr(vllm_model, "_mega_kv_b_weights", {}))
+        for _k, _v in _saved_kv_b.items():
+            _existing = weight_dict.get(_k)
+            if _existing is not None and _existing.numel() == 0:
+                weight_dict[_k] = _v
         self.mega = Glm52MegaKernel(
             self.model_args, weight_dict,
             tp_size=self.tp_size, tp_rank=self.tp_rank,
             vllm_ascend_weights=True,
         )
+        # MegaKernel now owns Parameter wrappers for the borrowed tensors; the
+        # vLLM wrapper no longer needs to keep a second set of Python refs.
+        getattr(vllm_model, "_mega_kv_b_weights", {}).clear()
 
         # Dedicated KV/index caches for the MTP layer(s).  vLLM's slot mapping
         # and block tables index the shared-pool layout; a pool with the same
@@ -295,16 +288,51 @@ class _MegaKernelGLM52State:
                 dtype=torch.float32,
                 device="npu",
             )
-        print(
-            "[MegaKernel] MTP cache pool ready: "
-            f"layers [{mtp_start}, {mtp_end}) "
-            f"blocks={num_blocks} block_size={self.block_size}",
-            flush=True,
-        )
 
         # Share this runtime with the MegaKernel MTP draft (same checkpoint),
         # so the draft does not reload weights or build a second runtime.
         _MEGA_STATE_REGISTRY[str(vllm_config.model_config.model)] = self
+
+    @staticmethod
+    def _validate_index_rope_cache(cache: torch.Tensor, owner: str) -> torch.Tensor:
+        """Validate the full absolute-position cache required by BlockRT."""
+        if (
+            cache.ndim != 2
+            or cache.shape[1] != 64
+            or cache.dtype != torch.bfloat16
+            or not cache.is_npu
+            or not cache.is_contiguous()
+        ):
+            raise RuntimeError(
+                "MegaKernel indexer RoPE cache must be contiguous NPU BF16 "
+                f"[max_positions, 64], got owner={owner}, "
+                f"shape={tuple(cache.shape)}, dtype={cache.dtype}, "
+                f"device={cache.device}, contiguous={cache.is_contiguous()}"
+            )
+        return cache
+
+    @classmethod
+    def _borrow_vllm_index_rope_cache(
+        cls, vllm_model: Any
+    ) -> torch.Tensor:
+        """Borrow vLLM's full indexer RoPE table without copying storage."""
+        layers = getattr(getattr(vllm_model, "model", None), "layers", None)
+        if layers is None:
+            raise RuntimeError(
+                "MegaKernel: cannot locate vLLM decoder layers for indexer "
+                "RoPE cache"
+            )
+        for layer_id, layer in enumerate(layers):
+            self_attn = getattr(layer, "self_attn", None)
+            rope = getattr(self_attn, "indexer_rope_emb", None)
+            cache = getattr(rope, "cos_sin_cache", None)
+            if isinstance(cache, torch.Tensor):
+                return cls._validate_index_rope_cache(
+                    cache, f"model.layers.{layer_id}.self_attn.indexer_rope_emb"
+                )
+        raise RuntimeError(
+            "MegaKernel: vLLM model exposes no indexer RoPE cos_sin_cache"
+        )
 
     def _resolve_packed_kv_dim(self, hf_config: Any) -> int:
         """Resolve the packed MLA KV head dimension from vLLM-Ascend.
@@ -326,10 +354,9 @@ class _MegaKernelGLM52State:
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            print(
+            logger.warning(
                 "[MegaKernel] falling back to model-config packed cache "
                 f"dimension: {exc}",
-                flush=True,
             )
         kv_lora_rank = int(getattr(hf_config, "kv_lora_rank", 512))
         rope_head_dim = int(getattr(hf_config, "qk_rope_head_dim", 64))
@@ -467,7 +494,12 @@ class _MegaKernelGLM52State:
                     (max_tokens,), dtype=torch.int64, device="npu"
                 ),
                 "slot_mapping": torch.empty(
-                    (max_tokens,), dtype=torch.int32, device="npu"
+                    # BlockRT scatter_update reads this input as int64_t.
+                    # Keep the persistent graph buffer on that exact ABI;
+                    # using vLLM's int32 metadata directly makes the kernel
+                    # combine two adjacent entries into one out-of-range
+                    # cache index (especially visible for batch size 1).
+                    (max_tokens,), dtype=torch.int64, device="npu"
                 ),
                 "block_tables": torch.empty(
                     (batch_size, self.num_blocks),
@@ -514,7 +546,7 @@ class _MegaKernelGLM52State:
             num_tokens=num_tokens,
             mask=meta_bufs["mask"] if "mask" in meta_bufs else None,
             mask_type=1,
-            index_cos_sin_cache=self.index_cos_sin_cache[:num_tokens],
+            index_cos_sin_cache=self.index_cos_sin_cache,
             index_rope_positions=meta_bufs["positions"][:num_tokens],
             index_k_buffer=self.index_k_buffer,
             index_k_scale_buffer=self.index_k_scale_buffer,
@@ -551,7 +583,7 @@ class _MegaKernelGLM52State:
             num_tokens=num_tokens,
             mask=meta_bufs["mask"] if "mask" in meta_bufs else None,
             mask_type=1,
-            index_cos_sin_cache=self.mtp_index_cos_sin_cache[:num_tokens],
+            index_cos_sin_cache=self.mtp_index_cos_sin_cache,
             index_rope_positions=meta_bufs["positions"][:num_tokens],
             index_k_buffer=self.mtp_index_k_buffer,
             index_k_scale_buffer=self.mtp_index_k_scale_buffer,
@@ -597,14 +629,13 @@ class _MegaKernelGLM52State:
         )
 
         irope = getattr(self_attn, "indexer_rope_emb", None)
-        if irope is not None:
-            icos32, isin32 = _cos_sin(irope, pos_cpu)
-            # indexer_rope consumes a compact [*, 64] = [cos(32), sin(32)]
-            # cache; do NOT repeat-interleave here (that is the 128-wide
-            # layout the target prefill path uses and the MTP indexer would
-            # reject).
-            self.mtp_index_cos_sin_cache[:num_tokens].copy_(
-                torch.cat((icos32, isin32), dim=-1).to(torch.bfloat16).npu()
+        index_cache = getattr(irope, "cos_sin_cache", None)
+        if isinstance(index_cache, torch.Tensor):
+            # MTP also uses absolute positions, so retain the complete table
+            # instead of filling a per-token cache that would be indexed a
+            # second time by indexer_rope.
+            self.mtp_index_cos_sin_cache = self._validate_index_rope_cache(
+                index_cache, "MTP self_attn.indexer_rope_emb"
             )
 
 
@@ -617,7 +648,7 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
         # aclshmem must be initialized exactly once per process; failure here
         # is fatal (fail fast at startup).
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        
+
         pc = vllm_config.parallel_config
         self.tp_size = int(getattr(pc, "tensor_parallel_size", 1) or 1)
         if _mega_enabled() and self.tp_size > 1:
@@ -625,45 +656,33 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
             self.tp_rank = int(get_tensor_model_parallel_rank())
             import torch_npu  # noqa: F401
 
-            import os as _os
-            _dev = torch.npu.current_device()
-            _lmaps = [
-                l.split()[-1]
-                for l in open("/proc/self/maps")
-                if "libshmem.so" in l
-            ]
-            print(
-                f"[MegaKernel] pre-shemm: current_device={_dev} "
-                f"tp_rank={self.tp_rank} libshmem_maps={_lmaps} "
-                f"SHMEM_HOME={_os.environ.get('SHMEM_HOME_PATH')}",
-                flush=True,
-            )
             if torch.npu.is_available():
                 torch.npu.set_device(torch.npu.current_device())
             from blockrt.dist.utils import init_shemm
-            _ms = int(os.environ.get("MEGA_SHMEM_SIZE", str(1 << 33)))
-            print(
+            # Match the initialization path verified by MegaKernel's TP
+            # test_forward: a 1-GiB symmetric heap and one free bootstrap port
+            # selected/broadcast through torch.distributed.  A fixed port can
+            # still be requested explicitly for deployments that need it.
+            _ms = int(os.environ.get("MEGA_SHMEM_SIZE", str(1 << 30)))
+            _shmem_ip_port = os.environ.get("MEGA_SHMEM_IP_PORT")
+            logger.debug(
                 f"[MegaKernel] init_shemm rank={self.tp_rank} "
                 f"world={self.tp_size} mem_size={_ms}",
-                flush=True,
             )
             try:
                 init_shemm(
                     rank=self.tp_rank,
                     world_size=self.tp_size,
                     mem_size=_ms,
-                    ip_port=os.environ.get(
-                        "MEGA_SHMEM_IP_PORT", "tcp://127.0.0.1:8666"
-                    ),
+                    ip_port=_shmem_ip_port,
                 )
             except Exception:
                 _lm = [
                     l for l in open("/proc/self/maps") if "libshmem.so" in l
                 ]
-                print(
+                logger.error(
                     "[MegaKernel] init_shemm FAILED; libshmem maps:\n"
                     + "\n".join(_lm),
-                    flush=True,
                 )
                 raise
         else:
@@ -672,10 +691,9 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
         self.vllm_config = vllm_config
         self._mega_state: Optional[_MegaKernelGLM52State] = None
         self._mega_raw_weights: Optional[Dict[str, torch.Tensor]] = None
-        print(
+        logger.info(
             "[MegaKernel] AscendGlm52MegaForCausalLM initialized, "
             f"ENABLE_MEGAKERNEL={_mega_enabled()}",
-            flush=True,
         )
 
     def _ensure_mega(self, vllm_config: VllmConfig) -> _MegaKernelGLM52State:
@@ -688,14 +706,20 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
             # regular tensor.
             import threading
 
-            print("[MegaKernel] initializing GLM-5.2 mega kernel", flush=True)
+            logger.info("[MegaKernel] initializing GLM-5.2 mega kernel")
             result: Dict[str, Any] = {}
             errors: list[BaseException] = []
+            # NPU device selection is thread-local.  Capture the worker's
+            # device here; a fresh thread otherwise reports device 0 on every
+            # TP rank and allocates rank-local MegaKernel weights on npu:0.
+            worker_device = (
+                torch.npu.current_device() if torch.npu.is_available() else None
+            )
 
             def _init() -> None:
                 try:
-                    if torch.npu.is_available():
-                        torch.npu.set_device(torch.npu.current_device())
+                    if worker_device is not None:
+                        torch.npu.set_device(worker_device)
                     result["state"] = _MegaKernelGLM52State(vllm_config, self)
                 except BaseException as exc:  # noqa: BLE001
                     import traceback
@@ -716,7 +740,7 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
             # sync hits the AICPU timeout.  Force completion here instead.
             if torch.npu.is_available():
                 torch.npu.synchronize()
-            print("[MegaKernel] GLM-5.2 mega kernel ready", flush=True)
+            logger.info("[MegaKernel] GLM-5.2 mega kernel ready")
         return self._mega_state
 
     def forward(
@@ -740,21 +764,7 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
                 and self._is_decode_step(attn_meta)
                 and _has_usable_metadata(attn_meta)
             )
-            print(
-                "[MegaKernel] forward: "
-                f"mega_enabled={_mega_enabled()}, "
-                f"attn_meta="
-                f"{type(attn_meta).__name__ if attn_meta is not None else 'None'}, "
-                f"decode={is_decode}",
-                flush=True,
-            )
             if is_decode:
-                print(
-                    "[MegaKernel] >>> ROUTED TO MEGA KERNEL (decode), "
-                    f"num_tokens="
-                    f"{getattr(attn_meta, 'num_actual_tokens', '?')}",
-                    flush=True,
-                )
                 try:
                     return self._forward_mega(input_ids, positions, attn_meta)
                 except Exception:
@@ -762,12 +772,6 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
 
                     traceback.print_exc()
                     raise
-        elif _mega_enabled():
-            print(
-                "[MegaKernel] >>> NATIVE vLLM-Ascend path "
-                f"(input_ids={'yes' if input_ids is not None else 'no'})",
-                flush=True,
-            )
         return super().forward(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -793,7 +797,24 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
                 if not n.startswith("rot.")
                 and not n.startswith(f"model.layers.{self.config.num_hidden_layers}.")
             )
-        return super().load_weights(weights)
+        loaded_weights = super().load_weights(weights)
+
+        # Ascend's attention post-load hook turns kv_b_proj into W_UK_T/W_UV
+        # and disposes the original Parameter. Snapshot zero-copy aliases here,
+        # after checkpoint loading but before that hook runs. Keeping this on
+        # the MegaKernel-specific wrapper leaves the generic SFA path intact.
+        if _mega_enabled():
+            self._mega_kv_b_weights = {}
+            for module_name, module in self.named_modules():
+                if not module_name.endswith(".self_attn.kv_b_proj"):
+                    continue
+                weight = getattr(module, "weight", None)
+                if weight is not None and weight.numel() > 0:
+                    self._mega_kv_b_weights[f"{module_name}.weight"] = (
+                        weight.detach()
+                    )
+
+        return loaded_weights
 
     @staticmethod
     def _is_decode_step(attn_meta: Any) -> bool:
@@ -819,10 +840,10 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
         """Populate the persistent MLA/indexer RoPE caches for this step.
 
         vLLM stores per-position cos/sin as [B, rotary_dim//2] pair
-        coefficients (interleaved rope, is_neox_style=False); the MegaKernel
-        kernels consume [B, 64] with the pair coefficients repeat-interleaved
-        (c0,c0,c1,c1,...), and the DSA indexer needs [B, 128] =
-        cat(cos64, sin64) under the same convention.
+        coefficients (interleaved rope, is_neox_style=False).  MegaKernel's
+        MLA kernels consume per-token [B, 64] cos/sin tensors with the pair
+        coefficients repeat-interleaved (c0,c0,c1,c1,...).  The DSA indexer
+        separately borrows vLLM's full [max_positions, 64] compact table.
         """
         if num_tokens <= 0:
             return
@@ -850,13 +871,10 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
             sin32.repeat_interleave(2, dim=-1).to(torch.bfloat16).npu()
         )
 
-        irope = getattr(attn0, "indexer_rope_emb", None)
-        if irope is not None:
-            icos32, isin32 = _cos_sin(irope, pos_cpu)
-            idx_cache = torch.cat((icos32, isin32), dim=-1)  # [B, 64]
-            state.index_cos_sin_cache[:num_tokens].copy_(
-                idx_cache.to(torch.bfloat16).npu()
-            )
+        # The indexer uses absolute positions to read vLLM's full
+        # ``state.index_cos_sin_cache``.  Do not build a per-token table here:
+        # passing that table together with absolute positions double-indexes
+        # it and reads out of bounds after prefill.
 
     def _forward_mega(
         self,
@@ -888,11 +906,6 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
                 f"query_start_loc={query_start_loc is not None}"
             )
         batch_size = int(seq_lens.shape[0])
-        print(
-            "[MegaKernel] _forward_mega: "
-            f"tokens={num_tokens} batch={batch_size}",
-            flush=True,
-        )
         bufs = state.get_meta_buffers(batch_size)
 
         # Fill the persistent MLA/indexer RoPE caches for this step.
@@ -904,7 +917,10 @@ class AscendGlm52MegaForCausalLM(GlmMoeDsaForCausalLM):
         bufs["input_ids"][:num_tokens].copy_(ids)
         bufs["positions"][:num_tokens].copy_(pos)
 
-        slot = slot_mapping.to(torch.int32).reshape(-1).contiguous()
+        # MegaKernel's scatter_update ABI requires int64 indices.  vLLM's
+        # attention metadata may expose int32 slot mappings, so normalize
+        # before copying into the stable graph buffer.
+        slot = slot_mapping.to(torch.int64).reshape(-1).contiguous()
         bufs["slot_mapping"][:num_tokens].copy_(slot[:num_tokens])
 
         block_table = block_table.to(torch.int32).contiguous()
@@ -1179,7 +1195,6 @@ class AscendGlm52MegaMTP(DeepSeekMTP):
                 ),
             )
             self._mtp_state = state
-            print("[MegaKernel] MTP draft ready (per-step mega graphs)", flush=True)
         return self._mtp_state
 
     def forward(
@@ -1235,7 +1250,9 @@ class AscendGlm52MegaMTP(DeepSeekMTP):
         pos = positions.to(torch.int64).contiguous()
         bufs["input_ids"][:num_tokens].copy_(ids[:num_tokens])
         bufs["positions"][:num_tokens].copy_(pos[:num_tokens])
-        slot = slot_mapping.to(torch.int32).reshape(-1).contiguous()
+        # Keep the MTP path on the same BlockRT scatter_update int64 ABI as
+        # the target decode path.
+        slot = slot_mapping.to(torch.int64).reshape(-1).contiguous()
         bufs["slot_mapping"][:num_tokens].copy_(slot[:num_tokens])
         block_table = block_table.to(torch.int32).contiguous()
         max_blocks = min(block_table.shape[1], state.num_blocks)
