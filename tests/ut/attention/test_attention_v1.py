@@ -25,9 +25,9 @@ from vllm_ascend.attention.utils import (
     using_paged_attention,
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
-from vllm_ascend.utils import AscendDeviceType
 
 LARGE_HEAD_PREFILL_PATH = "vllm_ascend.device.utils.npu_large_head_prefill_attention"
 

@@ -51,7 +51,7 @@ def get_dynamic_mx_quant_scale_alg(vllm_config=None) -> int:
     destination FP8 range, then rounds the E8M0 scale exponent up to avoid
     quantization overflow. MiniMax M3 checkpoints require the latter.
     """
-    if not get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE):
+    if not get_current_hardware_profile().supports(HardwareCapability.DYNAMIC_MX_QUANT_E8M0_OVERFLOW_SAFE_SCALING):
         return 0
 
     if vllm_config is None:

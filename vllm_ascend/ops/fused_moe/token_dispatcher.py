@@ -31,7 +31,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import MoEDistributeApiFamily, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
@@ -117,12 +117,20 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
         profile = get_current_hardware_profile()
-        self.need_extra_args = profile.supports(HardwareCapability.MOE_DISPATCH_EXTRA_ARGS)
-        self.need_shared_expert_args = profile.supports(HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS)
+        moe_distribute_api_family = profile.moe_distribute_api_family
+        self.uses_tp_metadata = moe_distribute_api_family in (
+            MoEDistributeApiFamily.EP_AND_TP_METADATA,
+            MoEDistributeApiFamily.EP_TP_WITH_EXPERT_SCALES_MXFP_MODE_AND_QUANT_OUTPUT_DTYPE,
+        )
+        self.uses_mxfp_dispatch_metadata = (
+            moe_distribute_api_family
+            is MoEDistributeApiFamily.EP_TP_WITH_EXPERT_SCALES_MXFP_MODE_AND_QUANT_OUTPUT_DTYPE
+        )
         self.mc2_comm_alg = get_ascend_config().get_mc2_comm_alg()
 
-        # When enable hierarchical communication or A5 case, param `expert_scales` need to be passed in.
-        self.need_expert_scale = self.need_shared_expert_args or self.mc2_comm_alg == "hierarchy"
+        # Hierarchical communication and API families with expert-scale
+        # metadata both require the `expert_scales` argument.
+        self.need_expert_scale = self.uses_mxfp_dispatch_metadata or self.mc2_comm_alg == "hierarchy"
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
@@ -168,7 +176,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif token_dispatch_input.quant.dispatch_with_quant:
-            quant_mode = 4 if self.need_shared_expert_args and token_dispatch_input.quant.is_mxfp else 2
+            quant_mode = 4 if self.uses_mxfp_dispatch_metadata and token_dispatch_input.quant.is_mxfp else 2
         else:
             quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
@@ -193,7 +201,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "ep_rank_id": self.ep_rank_id,
             "comm_alg": self.mc2_comm_alg,
         }
-        if self.need_extra_args:
+        if self.uses_tp_metadata:
             stage1_kwargs.update(
                 {
                     "group_tp": self.moe_all_to_all_group_name,
@@ -203,7 +211,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             )
         # Only dispatch-enabled MXFP paths pass y_dtype through MC2.
         if (
-            self.need_shared_expert_args
+            self.uses_mxfp_dispatch_metadata
             and (token_dispatch_input.quant.is_mxfp or token_dispatch_input.quant.is_fp8)
             and token_dispatch_input.quant.dispatch_with_quant
         ):
@@ -306,7 +314,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "assist_info_for_combine": assist_info_for_combine,
         }
 
-        if self.need_extra_args:
+        if self.uses_tp_metadata:
             stage3_kwargs.update(
                 {
                     "tp_send_counts": tp_recv_counts,

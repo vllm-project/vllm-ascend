@@ -75,7 +75,7 @@ class AscendCompilationConfig:
     def _apply_unsupported_hardware_downgrade_and_static_kernel_check(self):
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
-        if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX):
+        if not get_current_hardware_profile().supports(HardwareCapability.NPUGRAPH_EX_COMPILATION_BACKEND):
             if self.enable_npugraph_ex:
                 logger.warning("npugraph_ex is not supported by the current hardware profile. Disabling it.")
             if self.enable_static_kernel:
@@ -688,9 +688,7 @@ class AscendConfig:
         from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
         hardware_profile = get_current_hardware_profile()
-        if self.mc2_comm_alg == "fullmesh_v2" and not hardware_profile.supports(
-            HardwareCapability.MC2_FULLMESH_V2_COMM
-        ):
+        if self.mc2_comm_alg == "fullmesh_v2" and not hardware_profile.supports(HardwareCapability.MC2_FULLMESH_V2):
             raise NotImplementedError("mc2_comm_alg == 'fullmesh_v2' is not supported by the current hardware profile.")
 
         if self.mc2_comm_alg != "hierarchy":
@@ -882,12 +880,13 @@ class AscendConfig:
         return
 
     def get_mc2_comm_alg(self) -> str:
-        from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+        from vllm_ascend.device.hardware_profile import MC2FullmeshAliasPolicy, get_current_hardware_profile
 
-        # When A3 and comm_alg == "fullmesh", dispatch/combine op need pass in "fullmesh_v1" instead of "fullmesh"
-        # TODO(zzzzwwjj): Remove it when op's param is uniformed between A2/A3/A5.
-        if self.mc2_comm_alg == "fullmesh" and get_current_hardware_profile().supports(
-            HardwareCapability.MC2_FULLMESH_V2_COMM
+        # Some distribute-v2 ABIs spell the configured "fullmesh" alias as
+        # "fullmesh_v1". Remove this policy when the operator ABI is uniform.
+        if (
+            self.mc2_comm_alg == "fullmesh"
+            and get_current_hardware_profile().mc2_fullmesh_alias_policy is MC2FullmeshAliasPolicy.MAP_FULLMESH_TO_V1
         ):
             return "fullmesh_v1"
         return self.mc2_comm_alg

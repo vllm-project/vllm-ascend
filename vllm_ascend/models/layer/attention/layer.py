@@ -19,7 +19,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
+from vllm_ascend.attention.dsa_attn_kv_plan import is_dsv4_bf16_sparse_flash_mla_enabled
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC128Backend,
@@ -29,7 +29,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
-def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
+def get_dsv4_block_sizes(use_bf16_sparse_flash_mla: bool = False):
     # cache_config.block_size: [mla, swa, c4 state, c128 state], [page_size_padded_t1, page_size_padded_t2]
     _DSV4_BLOCK_SIZES = {
         128: [[128, 128, 8, 32], [16640, 131072]],
@@ -41,26 +41,26 @@ def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
         64: [[64, 64, 4, 8], [8448, 40960]],
         32: [[32, 32, 2, 4], [4224, 20480]],
     }
-    _DSV4_BLOCK_SIZES_A5_BF16 = {
+    _DSV4_BLOCK_SIZES_BF16_SPARSE_FLASH_MLA = {
         128: [[128, 128, 8, 16], [16896, 131072]],
         64: [[64, 64, 4, 8], [8448, 65536]],
         32: [[32, 32, 2, 4], [4224, 32768]],
     }
-    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-        if use_a5_bf16_kv:
-            return _DSV4_BLOCK_SIZES_A5_BF16
+    if get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE):
+        if use_bf16_sparse_flash_mla:
+            return _DSV4_BLOCK_SIZES_BF16_SPARSE_FLASH_MLA
         return _DSV4_COMPRESSED_BLOCK_SIZES
     return _DSV4_BLOCK_SIZES
 
 
 DSV4_BLOCK_SIZES = get_dsv4_block_sizes()
-DSV4_BLOCK_SIZES_A5_BF16 = get_dsv4_block_sizes(use_a5_bf16_kv=True)
+DSV4_BLOCK_SIZES_BF16_SPARSE_FLASH_MLA = get_dsv4_block_sizes(use_bf16_sparse_flash_mla=True)
 
 
 def dsv4_block_sizes(vllm_config: VllmConfig):
-    """Return the A5 BF16 KV table when explicitly requested, else the upstream table."""
-    if is_a5_bf16_kv_enabled(vllm_config):
-        return DSV4_BLOCK_SIZES_A5_BF16
+    """Return the BF16 SparseFlashMla table when selected, else the default."""
+    if is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config):
+        return DSV4_BLOCK_SIZES_BF16_SPARSE_FLASH_MLA
     return DSV4_BLOCK_SIZES
 
 
@@ -191,8 +191,8 @@ class DSAAttention(nn.Module, AttentionLayerBase):
         if self.compress_ratio <= 1:  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
-        use_bf16_kv = is_a5_bf16_kv_enabled(vllm_config)
-        has_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+        use_bf16_kv = is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config)
+        has_compressed_cache = get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE)
         if use_bf16_kv:
             kv_cache_dtype = torch.bfloat16
         elif has_compressed_cache:

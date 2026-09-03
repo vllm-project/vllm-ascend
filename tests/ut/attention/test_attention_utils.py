@@ -14,10 +14,12 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
-from vllm_ascend.attention.utils import filter_chunked_req_indices, get_or_register_attention_buffer
+from vllm_ascend.attention.utils import enabling_mlapo, filter_chunked_req_indices, get_or_register_attention_buffer
+from vllm_ascend.device.hardware_profile import MLAPOEnablementPolicy
 
 
 def test_get_or_register_attention_buffer() -> None:
@@ -68,3 +70,32 @@ def test_filter_chunked_req_indices_mixed_mask() -> None:
     )
 
     torch.testing.assert_close(indices, torch.tensor([0, 1, 3, 4, 5]))
+
+
+def test_enabling_mlapo_respects_producer_and_consumer_policy() -> None:
+    cases = (
+        (MLAPOEnablementPolicy.DECODE_KV_CONSUMER_ONLY, True, False, True),
+        (MLAPOEnablementPolicy.DECODE_KV_CONSUMER_ONLY, False, True, False),
+        (MLAPOEnablementPolicy.ANY_CONFIGURED_INSTANCE, True, False, True),
+        (MLAPOEnablementPolicy.ANY_CONFIGURED_INSTANCE, False, True, True),
+    )
+
+    for policy, is_consumer, is_producer, expected in cases:
+        vllm_config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(
+                is_kv_consumer=is_consumer,
+                is_kv_producer=is_producer,
+            )
+        )
+        profile = SimpleNamespace(mlapo_enablement_policy=policy)
+        with (
+            patch(
+                "vllm_ascend.attention.utils.get_ascend_config",
+                return_value=SimpleNamespace(enable_mlapo=True),
+            ),
+            patch(
+                "vllm_ascend.attention.utils.get_current_hardware_profile",
+                return_value=profile,
+            ),
+        ):
+            assert enabling_mlapo(vllm_config) is expected

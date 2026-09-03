@@ -4493,7 +4493,7 @@ class NPUModelRunner(GPUModelRunner):
                                                 current_kv_cache_spec.num_kv_heads,
                                                 current_kv_cache_spec.scale_dim
                                                 )
-                        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
+                        if get_current_hardware_profile().supports(HardwareCapability.DSA_COMPRESSED_KV_CACHE):
                             indexer_full_shape = self.attn_backend.get_kv_cache_shape(
                                 num_blocks, current_kv_cache_spec.storage_block_size,
                                 current_kv_cache_spec.num_kv_heads,

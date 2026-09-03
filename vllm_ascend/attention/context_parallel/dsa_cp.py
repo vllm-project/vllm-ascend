@@ -17,7 +17,7 @@ from vllm_ascend.attention import dsa_v1
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
-    is_a5_bf16_kv_enabled,
+    is_dsv4_bf16_sparse_flash_mla_enabled,
 )
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
@@ -246,9 +246,9 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
         self.spec_slot_mapping = None
-        if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
-            vllm_config
-        ):
+        if get_current_hardware_profile().supports(
+            HardwareCapability.FP8_ATTENTION
+        ) and not is_dsv4_bf16_sparse_flash_mla_enabled(vllm_config):
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens,)  # type: ignore
         else:
             self.slot_mapping_shape = (vllm_config.scheduler_config.max_num_batched_tokens, 2)  # type: ignore
@@ -1565,8 +1565,8 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             self._switch_o_proj_to_full_weight()
         o_proj_groups = self.n_group if full_gather_wo_a_enabled else self.n_local_groups
         try:
-            use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
-            if use_a5_quant_o_proj:
+            use_quantized_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
+            if use_quantized_o_proj:
                 o = o_proj_input.view(num_tokens, o_proj_groups, -1)
                 wo_a_method = getattr(self.wo_a.quant_method, "quant_method", self.wo_a.quant_method)
                 if isinstance(wo_a_method, AscendUnquantizedLinearMethod):

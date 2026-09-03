@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import importlib
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -19,6 +20,7 @@ from vllm_ascend._310p.worker.v2.model_state import (
     Ascend310PModelState,
 )
 from vllm_ascend._310p.worker.v2.sampler import Ascend310PSampler
+from vllm_ascend.device.hardware_profile import ModelRunnerV2ImplementationFamily
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
@@ -110,8 +112,8 @@ def test_310p_hybrid_model_state_initializes_full_upstream_contract() -> None:
     assert isinstance(state._capture_seq_lens_by_ptr, dict)
 
 
-def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
-    """Qwen3.5 is_hybrid must select Ascend310PMambaHybridModelState on 310P."""
+def test_host_staged_family_routes_qwen35_hybrid_to_triton_free_state() -> None:
+    """The host-staged family selects the Triton-free hybrid state."""
     from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 
     vllm_config = SimpleNamespace(model_config=SimpleNamespace(is_hybrid=True))
@@ -119,9 +121,15 @@ def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
     encoder_cache = object()
     device = torch.device("cpu")
     expected = object()
+    triton_free_profile = SimpleNamespace(
+        model_runner_v2_implementation_family=ModelRunnerV2ImplementationFamily.TRITON_FREE_HOST_METADATA
+    )
 
     with (
-        patch("vllm_ascend.worker.v2.model_states.is_310p", return_value=True),
+        patch(
+            "vllm_ascend.worker.v2.model_states._HARDWARE_PROFILE",
+            triton_free_profile,
+        ),
         patch(
             "vllm_ascend._310p.worker.v2.model_state.Ascend310PMambaHybridModelState",
             return_value=expected,
@@ -131,6 +139,115 @@ def test_init_model_state_routes_qwen35_hybrid_to_310p() -> None:
 
     assert state is expected
     hybrid_cls.assert_called_once_with(vllm_config, model, encoder_cache, device)
+
+
+@pytest.mark.parametrize(
+    ("family", "calls_upstream_validation"),
+    [
+        (ModelRunnerV2ImplementationFamily.DEFAULT_TRITON_BACKED, True),
+        (ModelRunnerV2ImplementationFamily.TRITON_FREE_HOST_METADATA, False),
+    ],
+)
+def test_model_runner_v2_validation_follows_implementation_family(
+    family: ModelRunnerV2ImplementationFamily,
+    calls_upstream_validation: bool,
+) -> None:
+    patch_module = importlib.import_module("vllm_ascend.patch.platform.patch_use_v2_model_runner")
+    vllm_config = object()
+    profile = SimpleNamespace(model_runner_v2_implementation_family=family)
+
+    with (
+        patch.object(patch_module, "_HARDWARE_PROFILE", profile),
+        patch.object(
+            patch_module,
+            "_original_validate_v2_model_runner",
+        ) as upstream_validation,
+    ):
+        patch_module._patched_validate_v2_model_runner(vllm_config)
+
+    if calls_upstream_validation:
+        upstream_validation.assert_called_once_with(vllm_config)
+    else:
+        upstream_validation.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("family", "expected_block_tables"),
+    [
+        (ModelRunnerV2ImplementationFamily.DEFAULT_TRITON_BACKED, "default"),
+        (ModelRunnerV2ImplementationFamily.TRITON_FREE_HOST_METADATA, "host_metadata"),
+    ],
+)
+def test_block_tables_import_time_binding_follows_implementation_family(
+    family: ModelRunnerV2ImplementationFamily,
+    expected_block_tables: str,
+) -> None:
+    from vllm.v1.worker.gpu import model_runner as upstream_model_runner
+
+    import vllm_ascend.device.hardware_profile as hardware_profile
+    from vllm_ascend.worker.v2.block_table import (
+        AscendBlockTables as DefaultAscendBlockTables,
+    )
+
+    patch_module = importlib.import_module("vllm_ascend.patch.worker.patch_v2.patch_block_table")
+    profile = SimpleNamespace(model_runner_v2_implementation_family=family)
+    expected_cls = DefaultAscendBlockTables if expected_block_tables == "default" else Ascend310PBlockTables
+    original_upstream_cls = upstream_model_runner.BlockTables
+
+    try:
+        with patch.object(
+            hardware_profile,
+            "get_current_hardware_profile",
+            return_value=profile,
+        ):
+            patch_module = importlib.reload(patch_module)
+
+        assert patch_module.AscendBlockTables is expected_cls
+        assert upstream_model_runner.BlockTables is expected_cls
+    finally:
+        importlib.reload(patch_module)
+        upstream_model_runner.BlockTables = original_upstream_cls
+
+
+@pytest.mark.parametrize(
+    ("family", "state_class_path"),
+    [
+        (
+            ModelRunnerV2ImplementationFamily.DEFAULT_TRITON_BACKED,
+            "vllm_ascend.worker.v2.model_states.default.AscendModelState",
+        ),
+        (
+            ModelRunnerV2ImplementationFamily.TRITON_FREE_HOST_METADATA,
+            "vllm_ascend._310p.worker.v2.model_state.Ascend310PModelState",
+        ),
+    ],
+)
+def test_non_hybrid_model_state_follows_implementation_family(
+    family: ModelRunnerV2ImplementationFamily,
+    state_class_path: str,
+) -> None:
+    import vllm_ascend.worker.v2.model_states as model_states
+
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(is_hybrid=False))
+    model = MagicMock(spec=["forward"])
+    encoder_cache = object()
+    device = torch.device("cpu")
+    expected = object()
+    profile = SimpleNamespace(model_runner_v2_implementation_family=family)
+
+    with (
+        patch.object(model_states, "_HARDWARE_PROFILE", profile),
+        patch(state_class_path, return_value=expected) as state_cls,
+    ):
+        state = model_states.init_asecnd_model_state(
+            vllm_config,
+            model,
+            encoder_cache,
+            device,
+        )
+
+    assert state is expected
+    state_cls.assert_called_once_with(vllm_config, model, encoder_cache, device)
 
 
 def test_get_kv_cache_spec_restores_qwen35_linear_attn() -> None:

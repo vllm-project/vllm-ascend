@@ -22,7 +22,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
-        if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
+        if not get_current_hardware_profile().supports(HardwareCapability.LORA_BGMV_SGMV_CUSTOM_OPS) or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
             from vllm.lora.ops.torch_ops import (

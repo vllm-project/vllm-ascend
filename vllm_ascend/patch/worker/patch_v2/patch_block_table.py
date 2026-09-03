@@ -18,9 +18,15 @@
 #
 from vllm.v1.worker.gpu import model_runner
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.device.hardware_profile import (
+    ModelRunnerV2ImplementationFamily,
+    get_current_hardware_profile,
+)
 
-if is_310p():
+if (
+    get_current_hardware_profile().model_runner_v2_implementation_family
+    is ModelRunnerV2ImplementationFamily.TRITON_FREE_HOST_METADATA
+):
     from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables as AscendBlockTables
 else:
     from vllm_ascend.worker.v2.block_table import AscendBlockTables

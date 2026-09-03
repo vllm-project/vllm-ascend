@@ -138,7 +138,7 @@ def _apply_clipped_swiglu(
     swiglu_alpha: float,
     swiglu_beta: float,
 ) -> torch.Tensor:
-    if get_current_hardware_profile().supports(HardwareCapability.SWIGLU_OAI_MX_QUANT):
+    if not get_current_hardware_profile().supports(HardwareCapability.MINIMAX_M3_FUSED_CLIPPED_SWIGLU):
         hidden_size = hidden_states.shape[-1] // 2
         gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
         up = hidden_states[..., hidden_size:].clamp(
@@ -164,8 +164,8 @@ def _swiglu_oai_dynamic_mx_quant(
     swiglu_alpha: float,
     swiglu_beta: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not get_current_hardware_profile().supports(HardwareCapability.SWIGLU_OAI_MX_QUANT):
-        raise RuntimeError("The MiniMax-M3 SwiGLU-OAI MX quant path is only expected on Ascend A5.")
+    if not get_current_hardware_profile().supports(HardwareCapability.MINIMAX_M3_SWIGLU_OAI_MXFP8_OUTPUT_QUANTIZATION):
+        raise RuntimeError("The active hardware profile does not support MiniMax-M3 SwiGLU-OAI MX quantization.")
 
     hidden_states = _apply_clipped_swiglu(
         hidden_states,

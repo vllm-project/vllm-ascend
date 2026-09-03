@@ -1586,9 +1586,9 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
 
 def get_device_adaptor() -> type["BaseDeviceAdaptor"]:
     adaptor_by_family = {
-        DeviceAdaptorFamily.STANDARD: BaseDeviceAdaptor,
-        DeviceAdaptorFamily.FP8_OPTIMIZED: A5DeviceAdaptor,
-        DeviceAdaptorFamily.COMPATIBILITY: Ascend310PDeviceAdaptor,
+        DeviceAdaptorFamily.BASE_DEVICE_OPERATIONS: BaseDeviceAdaptor,
+        DeviceAdaptorFamily.FP8_MXFP_DSA_AND_FUSED_MODEL_OPERATIONS: A5DeviceAdaptor,
+        DeviceAdaptorFamily.RESHAPE_CACHE_AND_INDEX_FILL_OPERATIONS: Ascend310PDeviceAdaptor,
     }
     return adaptor_by_family[get_current_hardware_profile().device_adaptor_family]
 

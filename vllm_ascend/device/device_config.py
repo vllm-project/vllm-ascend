@@ -48,8 +48,8 @@ def get_device_config() -> DeviceConfig:
     return DeviceConfig(_device_type=_device_type_from_build_info())
 
 
-# Compatibility API. New business code must consume semantic DeviceConfig
-# capabilities instead of branching on these hardware identities.
+# Compatibility API. New business code must consume HardwareProfile
+# capabilities, policies, or families instead of these hardware identities.
 def get_ascend_device_type() -> AscendDeviceType:
     return get_device_config()._device_type
 

@@ -96,6 +96,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    get_current_hardware_profile,
+)
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3Indexer,
     AscendMiniMaxM3IndexerLinear,
@@ -107,7 +111,6 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _register_m3_sparse_packed_modules,
     _use_fused_qkv_indexer,
 )
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
     add_pp_transport_tensors,
@@ -161,6 +164,9 @@ def _cast_for_cache(tensor: torch.Tensor, cache: torch.Tensor) -> torch.Tensor:
     return tensor.to(cache.dtype)
 
 
+_HARDWARE_PROFILE = get_current_hardware_profile()
+
+
 def _scatter_index_cache(
     cache: torch.Tensor,
     updates: torch.Tensor,
@@ -175,9 +181,9 @@ def _scatter_index_cache(
     if updates.dtype != cache.dtype:
         updates = updates.to(cache.dtype)
 
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if _HARDWARE_PROFILE.supports(HardwareCapability.MINIMAX_M3_PAGED_INDEX_CACHE_SCATTER):
         if cache.ndim != 3:
-            raise ValueError(f"Unexpected MiniMax-M3 index cache ndim on A5: {cache.ndim}")
+            raise ValueError(f"Unexpected paged MiniMax-M3 index cache ndim: {cache.ndim}")
         key = updates.reshape(slots.shape[0], 1, cache.shape[-1]).contiguous()
         key_cache = cache.unsqueeze(2)
         torch_npu.npu_scatter_pa_cache(
@@ -418,7 +424,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             )
 
         if (
-            get_ascend_device_type() == AscendDeviceType.A5
+            not _HARDWARE_PROFILE.supports(HardwareCapability.MINIMAX_M3_FUSED_QKV_RMSNORM_ROPE)
             or main_qkv.device.type != "npu"
             or main_qkv.dtype != torch.bfloat16
             or positions.ndim != 1
@@ -565,7 +571,7 @@ class MiniMaxM3SwiGLUOAI(nn.Module):
         self.use_mx_quant = use_mx_quant
 
     def forward(self, x: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self.use_mx_quant or get_ascend_device_type() == AscendDeviceType.A5:
+        if self.use_mx_quant or not _HARDWARE_PROFILE.supports(HardwareCapability.MINIMAX_M3_FUSED_CLIPPED_SWIGLU):
             d = x.shape[-1] // 2
             gate = torch.clamp(x[..., :d], max=self.limit)
             up = torch.clamp(x[..., d:], min=-self.limit, max=self.limit)
@@ -621,7 +627,7 @@ class MiniMaxM3MLP(nn.Module):
         )
         if hidden_act == "swigluoai":
             use_mx_quant = (
-                get_ascend_device_type() == AscendDeviceType.A5
+                _HARDWARE_PROFILE.supports(HardwareCapability.MINIMAX_M3_SWIGLU_OAI_MXFP8_OUTPUT_QUANTIZATION)
                 and _is_w8a8_mxfp8_linear(self.gate_up_proj)
                 and _is_w8a8_mxfp8_linear(self.down_proj)
             )

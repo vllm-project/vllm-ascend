@@ -61,7 +61,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_graph_params_workspaces,
 )
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
@@ -1422,7 +1422,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     (
                         envs_vllm.VLLM_BATCH_INVARIANT
                         or (
-                            get_current_hardware_profile().supports(HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT)
+                            get_current_hardware_profile().split_fia_chunked_prefill_by_default
                             and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
                         )
                     )

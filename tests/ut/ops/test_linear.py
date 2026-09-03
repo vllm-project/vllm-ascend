@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -6,8 +7,10 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
+from vllm_ascend.device.hardware_profile import DSAOProjWeightLayoutPolicy
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.linear import (
+    AscendColumnParallelLinear,
     AscendMergedColumnParallelLinear,
     AscendReplicatedLinear,
     AscendRowParallelLinear,
@@ -86,6 +89,69 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
+
+
+class TestDSAOProjWeightLayoutPolicy(unittest.TestCase):
+    @staticmethod
+    def _make_wo_a_layer(dtype, quant_config=None):
+        layer = AscendColumnParallelLinear.__new__(AscendColumnParallelLinear)
+        torch.nn.Module.__init__(layer)
+        layer.prefix = "model.layers.0.self_attn.wo_a"
+        layer.quant_config = quant_config
+        layer.n_local_groups = 2
+        layer.o_lora_rank = 3
+        layer.tp_rank = 0
+        layer.weight = torch.nn.Parameter(torch.empty((6, 4), dtype=dtype))
+        return layer
+
+    @staticmethod
+    def _base_weight_loader(_layer, param, loaded_weight):
+        param.data.copy_(loaded_weight)
+
+    def test_always_transpose_wo_a_applies_to_quantized_non_bfloat16_weight(self):
+        layer = self._make_wo_a_layer(torch.float16, quant_config=object())
+        loaded_weight = torch.arange(24, dtype=torch.float16).reshape(6, 4)
+        profile = SimpleNamespace(dsa_o_proj_weight_layout_policy=DSAOProjWeightLayoutPolicy.ALWAYS_TRANSPOSE_WO_A)
+
+        with (
+            patch("vllm_ascend.ops.linear.get_current_hardware_profile", return_value=profile),
+            patch(
+                "vllm_ascend.ops.linear.ColumnParallelLinear.weight_loader",
+                new=self._base_weight_loader,
+            ),
+        ):
+            layer.weight_loader(layer.weight, loaded_weight)
+
+        expected = loaded_weight.view(2, 3, 4).transpose(2, 1).contiguous()
+        torch.testing.assert_close(layer.weight, expected)
+
+    def test_transpose_unquantized_wo_a_only_requires_bfloat16_and_no_quantization(self):
+        cases = (
+            (torch.bfloat16, None, True),
+            (torch.float16, None, False),
+            (torch.bfloat16, object(), False),
+        )
+        profile = SimpleNamespace(
+            dsa_o_proj_weight_layout_policy=DSAOProjWeightLayoutPolicy.TRANSPOSE_UNQUANTIZED_BF16_WO_A_ONLY
+        )
+
+        for dtype, quant_config, should_transpose in cases:
+            with self.subTest(dtype=dtype, quantized=quant_config is not None):
+                layer = self._make_wo_a_layer(dtype, quant_config)
+                loaded_weight = torch.arange(24, dtype=dtype).reshape(6, 4)
+                with (
+                    patch("vllm_ascend.ops.linear.get_current_hardware_profile", return_value=profile),
+                    patch(
+                        "vllm_ascend.ops.linear.ColumnParallelLinear.weight_loader",
+                        new=self._base_weight_loader,
+                    ),
+                ):
+                    layer.weight_loader(layer.weight, loaded_weight)
+
+                expected = (
+                    loaded_weight.view(2, 3, 4).transpose(2, 1).contiguous() if should_transpose else loaded_weight
+                )
+                torch.testing.assert_close(layer.weight, expected)
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):

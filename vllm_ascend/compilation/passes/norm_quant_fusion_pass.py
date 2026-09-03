@@ -384,7 +384,7 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
 
         for eps in common_epsilons:
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            if profile.supports(HardwareCapability.DYNAMIC_MX_QUANT_FUSION):
+            if profile.supports(HardwareCapability.GRAPH_DYNAMIC_MX_QUANT_FUSION):
                 AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 RMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
             if enable_custom_op():

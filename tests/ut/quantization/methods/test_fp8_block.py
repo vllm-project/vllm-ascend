@@ -23,6 +23,7 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
+from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockFusedMoEMethod,
     AscendFp8BlockLinearMethod,
@@ -94,15 +95,18 @@ class TestResolveBlockScales(TestBase):
 
 
 class TestAscendFp8BlockLinearMethod(TestBase):
-    def build_scheme(self, is_950=False, block_size=(128, 128)):
+    def build_scheme(self, supports_mxfp8_requantization=False, block_size=(128, 128)):
+        profile = MagicMock()
+        profile.supports.return_value = supports_mxfp8_requantization
         with (
             patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()),
-            patch(f"{MODULE}.is_950", return_value=is_950),
+            patch(f"{MODULE}._HARDWARE_PROFILE", profile),
             patch(f"{MODULE}.AscendW8A8MXFP8DynamicLinearMethod") as mock_mxfp8,
         ):
             mock_mxfp8.return_value.dynamic_mx_quant_scale_alg = 0
             mock_mxfp8.return_value.group_size = MX_GROUP_SIZE
             scheme = AscendFp8BlockLinearMethod(block_size)
+        profile.supports.assert_called_once_with(HardwareCapability.BLOCK_FP8_TO_MXFP8_REQUANTIZATION)
         return scheme
 
     def test_get_weight_is_fp8(self):
@@ -136,8 +140,8 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         layer.weight_scale_inv = nn.Parameter(scale_inv, requires_grad=False)
         return layer, weight, scale_inv
 
-    def test_resolves_to_model_dtype_off_950(self):
-        scheme = self.build_scheme(is_950=False, block_size=(4, 32))
+    def test_resolves_to_model_dtype_without_mxfp8_requantization(self):
+        scheme = self.build_scheme(supports_mxfp8_requantization=False, block_size=(4, 32))
         layer, weight, scale_inv = self._make_layer()
 
         with patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor):
@@ -148,8 +152,8 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)
         self.assertTrue(torch.equal(layer.weight.data, expected))
 
-    def test_requantizes_to_mxfp8_on_950(self):
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+    def test_requantizes_to_mxfp8_when_supported(self):
+        scheme = self.build_scheme(supports_mxfp8_requantization=True, block_size=(4, 32))
         layer, _, _ = self._make_layer()
         num_groups = 64 // MX_GROUP_SIZE
         quantized = torch.zeros(8, 64).to(torch.float8_e4m3fn)
@@ -172,7 +176,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         # SFA splits kv_b_proj into W_UK/W_UV and disposes of the layer, so it
         # never runs a matmul. Requantizing it would only destroy the dense
         # matrix the attention backend has to absorb.
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        scheme = self.build_scheme(supports_mxfp8_requantization=True, block_size=(4, 32))
         layer, weight, scale_inv = self._make_layer()
         layer.prefix = "model.layers.0.self_attn.kv_b_proj"
 
@@ -188,7 +192,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertTrue(torch.equal(layer.weight.data, expected))
 
     def test_falls_back_when_reduction_dim_is_not_mx_aligned(self):
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        scheme = self.build_scheme(supports_mxfp8_requantization=True, block_size=(4, 32))
         layer, weight, scale_inv = self._make_layer(out_features=8, in_features=48, block=(4, 32))
 
         with patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor):
@@ -200,9 +204,9 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertTrue(torch.equal(layer.weight.data, expected))
 
     def test_mx_fallback_does_not_require_layer_prefix(self):
-        # The 950 MX-aligned path never logs this warning; this only covers the
-        # fallback log so a missing prefix cannot raise AttributeError.
-        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        # The MX-aligned requantization path never logs this warning; this only
+        # covers the fallback log so a missing prefix cannot raise AttributeError.
+        scheme = self.build_scheme(supports_mxfp8_requantization=True, block_size=(4, 32))
         layer, _, _ = self._make_layer(out_features=8, in_features=48, block=(4, 32))
         delattr(layer, "prefix")
 
@@ -213,7 +217,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         self.assertEqual(layer.weight.dtype, torch.bfloat16)
 
     def test_apply_uses_unquantized_gemm_when_resolved_to_bf16(self):
-        scheme = self.build_scheme(is_950=False)
+        scheme = self.build_scheme(supports_mxfp8_requantization=False)
         scheme.mxfp8_method = None
         layer = nn.Module()
         layer.weight = nn.Parameter(torch.randn(4, 8), requires_grad=False)
@@ -224,7 +228,7 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         mock_gemm.assert_called_once_with(x, layer.weight, None)
 
     def test_apply_delegates_to_mxfp8_when_requantized(self):
-        scheme = self.build_scheme(is_950=True)
+        scheme = self.build_scheme(supports_mxfp8_requantization=True)
         scheme.mxfp8_method.apply.return_value = "mxfp8"
         layer = nn.Module()
         x = torch.randn(2, 8)
@@ -234,15 +238,18 @@ class TestAscendFp8BlockLinearMethod(TestBase):
 
 
 class TestAscendFp8BlockFusedMoEMethod(TestBase):
-    def build_scheme(self, is_950=False, block_size=(4, 32)):
+    def build_scheme(self, supports_mxfp8_requantization=False, block_size=(4, 32)):
+        profile = MagicMock()
+        profile.supports.return_value = supports_mxfp8_requantization
         with (
             patch(f"{MODULE}.get_current_vllm_config", return_value=create_mock_vllm_config()),
-            patch(f"{MODULE}.is_950", return_value=is_950),
+            patch(f"{MODULE}._HARDWARE_PROFILE", profile),
             patch(f"{MODULE}.AscendW8A8MXFP8DynamicFusedMoEMethod") as mock_mxfp8,
         ):
             mock_mxfp8.return_value.dynamic_mx_quant_scale_alg = 0
             mock_mxfp8.return_value.group_size = MX_GROUP_SIZE
             scheme = AscendFp8BlockFusedMoEMethod(block_size, MagicMock())
+        profile.supports.assert_called_once_with(HardwareCapability.BLOCK_FP8_TO_MXFP8_REQUANTIZATION)
         return scheme
 
     def test_weights_are_fp8_and_scales_are_block_shaped(self):
@@ -278,8 +285,8 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         )
         return layer
 
-    def test_resolves_every_expert_off_950(self):
-        scheme = self.build_scheme(is_950=False)
+    def test_resolves_every_expert_without_mxfp8_requantization(self):
+        scheme = self.build_scheme(supports_mxfp8_requantization=False)
         layer = self._make_moe_layer(intermediate=32)
         original_w13 = layer.w13_weight.data.clone()
         original_scale = layer.w13_weight_scale_inv.data.clone()
@@ -296,8 +303,8 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         expected = reference_resolve(original_w13[0], original_scale[0], 4, 32, torch.bfloat16)
         self.assertTrue(torch.equal(layer.w13_weight.data[0], expected))
 
-    def test_requantizes_every_expert_on_950(self):
-        scheme = self.build_scheme(is_950=True)
+    def test_requantizes_every_expert_when_supported(self):
+        scheme = self.build_scheme(supports_mxfp8_requantization=True)
         # Both weights need an even group count so the operator's split layout
         # is representable for each of them.
         layer = self._make_moe_layer(intermediate=64)
@@ -323,7 +330,7 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
 
     def test_apply_delegates_to_the_active_method(self):
-        scheme = self.build_scheme(is_950=False)
+        scheme = self.build_scheme(supports_mxfp8_requantization=False)
         scheme._bf16_method = MagicMock()
         scheme._bf16_method.apply.return_value = "bf16"
         layer = nn.Module()

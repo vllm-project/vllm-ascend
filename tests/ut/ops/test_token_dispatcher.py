@@ -167,7 +167,7 @@ class TestTokenDispatcherWithMC2(TestBase):
     def test_init(self):
         self.assertEqual(self.dispatcher.ep_rank_id, 0)
         self.assertEqual(self.dispatcher.ep_world_size, 8)
-        self.assertTrue(self.dispatcher.need_extra_args)
+        self.assertTrue(self.dispatcher.uses_tp_metadata)
         self.assertEqual(self.dispatcher.global_bs, 0)
 
     def test_init_uses_mc2_capacity_for_non_uniform_global_bs(self):
@@ -333,7 +333,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             quant=token_dispatch_input.quant,
         )
 
-        self.dispatcher.need_extra_args = True
+        self.dispatcher.uses_tp_metadata = True
         self.dispatcher.enable_dispatch_v2 = True
         self.dispatcher.moe_expert_num = len(expert_map)
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
@@ -345,7 +345,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
-        self.dispatcher.need_shared_expert_args = True
+        self.dispatcher.uses_mxfp_dispatch_metadata = True
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
@@ -367,7 +367,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_ids = torch.randint(0, 8, (10, 1))
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
-        self.dispatcher.need_shared_expert_args = True
+        self.dispatcher.uses_mxfp_dispatch_metadata = True
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,

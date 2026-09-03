@@ -19,7 +19,7 @@
 
 import torch
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DistributedCollectiveFamily, get_current_hardware_profile
 
 
 class NullHandle:
@@ -85,5 +85,8 @@ def communication_adaptation_310p():
     )
 
 
-if get_current_hardware_profile().supports(HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION):
+if (
+    get_current_hardware_profile().distributed_collective_family
+    is DistributedCollectiveFamily.BROADCAST_AND_INT64_ALLREDUCE_VIA_ALLGATHER
+):
     communication_adaptation_310p()
