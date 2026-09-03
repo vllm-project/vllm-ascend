@@ -1132,6 +1132,14 @@
 #       Native FP8 serving of zai-org/GLM-5.3-Flash on Ascend 950.
 #    Future Plan:
 #       Remove this patch when vLLM Triton ops dispatch to the Ascend backend.
+#   4. `vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens`
+#    Why:
+#       Ascend Triton rejects the zero-size grid used by the upstream
+#       implementation for an empty batch.
+#    How:
+#       Return early for empty batches and forward non-empty calls unchanged.
+#    Future Plan:
+#       Remove this guard when upstream handles empty Triton grids portably.
 #
 # ** 22. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1301,6 +1309,14 @@
 #       Remove the `_load_effective_token` patch after the new Q4
 #       Triton-Ascend release is available. Remove the marker-cache kernel
 #       patch when Triton-Ascend 3.6.0 is the minimum supported version.
+#   4. `vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens`
+#    Why:
+#       Ascend Triton rejects the zero-size grid used by the upstream
+#       implementation for an empty batch.
+#    How:
+#       Return early for empty batches and forward non-empty calls unchanged.
+#    Future Plan:
+#       Remove this guard when upstream handles empty Triton grids portably.
 #
 # ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
