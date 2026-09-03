@@ -184,7 +184,7 @@ jobs:
       fail-fast: false
       matrix:
         vllm_version:
-          - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ github.event.pull_request.head.sha }}
     uses: ./.github/workflows/_selected_tests_cpu.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
