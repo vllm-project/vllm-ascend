@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import pickle
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,27 +8,57 @@ import pytest
 import torch
 from vllm.config.model import ModelConfig
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
 
 from vllm_ascend.patch.platform.patch_pp_mtp import (
-    _update_pp_mtp_spec_token_ids,
+    _update_pp_mtp_draft_token_ids,
     _use_pp_ipc_runtime_patch,
 )
+from vllm_ascend.worker.model_runner_output import AscendModelRunnerOutput
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
-def test_model_config_validates_local_mtp_drafter_as_single_pp_rank(monkeypatch):
+def test_ascend_model_runner_output_owns_pp_mtp_metadata():
+    assert "draft_token_ids" not in ModelRunnerOutput.__dataclass_fields__
+    assert not hasattr(EMPTY_MODEL_RUNNER_OUTPUT, "draft_token_ids")
+    assert "draft_token_ids" in AscendModelRunnerOutput.__dataclass_fields__
+
+    output = AscendModelRunnerOutput(
+        req_ids=["req-0"],
+        req_id_to_index={"req-0": 0},
+        sampled_token_ids=[[101]],
+        draft_token_ids=[[201, 202]],
+    )
+    restored = pickle.loads(pickle.dumps(output))
+
+    assert isinstance(restored, ModelRunnerOutput)
+    assert restored.draft_token_ids == [[201, 202]]
+
+
+@pytest.mark.parametrize(
+    ("model_type", "architectures"),
+    [
+        ("qwen3_5_mtp", ["Qwen3_5MTP"]),
+        ("eagle", ["EagleLlamaForCausalLM"]),
+    ],
+)
+def test_model_config_validates_local_drafter_as_single_pp_rank(
+    monkeypatch,
+    model_type,
+    architectures,
+):
     fake_registry = SimpleNamespace(
         is_pp_supported_model=lambda _architectures, _model_config: False,
     )
     monkeypatch.setattr(ModelConfig, "registry", property(lambda _self: fake_registry))
 
     model_config = ModelConfig.__new__(ModelConfig)
-    model_config.hf_config = SimpleNamespace(model_type="qwen3_5_mtp")
+    model_config.hf_config = SimpleNamespace(model_type=model_type)
     model_config.runner = "draft"
     model_config.model_arch_config = SimpleNamespace(
         total_num_attention_heads=1,
-        architectures=["Qwen3_5MTP"],
+        architectures=architectures,
     )
     model_config.multimodal_config = None
 
@@ -311,13 +342,100 @@ def test_pp_mtp_spec_tokens_are_written_from_model_runner_output_for_sync_and_as
     model_runner_output = SimpleNamespace(
         req_id_to_index={"req-0": 0},
         sampled_token_ids=[[200]],
-        spec_token_ids=[[301, 302]],
+        draft_token_ids=[[301, 302]],
     )
 
-    _update_pp_mtp_spec_token_ids(
+    _update_pp_mtp_draft_token_ids(
         scheduler,
         scheduler_output,
         model_runner_output,
     )
 
     assert request.spec_token_ids == [301, 302]
+
+
+def test_pp_mtp_draft_tokens_follow_output_request_mapping():
+    request = SimpleNamespace(
+        spec_token_ids=[],
+        structured_output_request=None,
+        is_finished=lambda: False,
+    )
+    scheduler = SimpleNamespace(
+        requests={"req-1": request},
+        structured_output_manager=SimpleNamespace(
+            should_advance=lambda _request: False,
+        ),
+    )
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-1": 1})
+    model_runner_output = SimpleNamespace(
+        req_id_to_index={"req-0": 0, "req-1": 1},
+        sampled_token_ids=[[100], [200]],
+        draft_token_ids=[[301], [401, 402]],
+    )
+
+    _update_pp_mtp_draft_token_ids(
+        scheduler,
+        scheduler_output,
+        model_runner_output,
+    )
+
+    assert request.spec_token_ids == [401, 402]
+
+
+def test_pp_mtp_draft_tokens_are_validated_for_structured_output():
+    grammar = SimpleNamespace(
+        validate_tokens=lambda token_ids: [token_id for token_id in token_ids if token_id != 302],
+    )
+    request = SimpleNamespace(
+        spec_token_ids=[],
+        structured_output_request=SimpleNamespace(grammar=grammar),
+        is_finished=lambda: False,
+    )
+    scheduler = SimpleNamespace(
+        requests={"req-0": request},
+        structured_output_manager=SimpleNamespace(
+            should_advance=lambda _request: True,
+        ),
+    )
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1})
+    model_runner_output = SimpleNamespace(
+        req_id_to_index={"req-0": 0},
+        sampled_token_ids=[[200]],
+        draft_token_ids=[[301, 302]],
+    )
+
+    _update_pp_mtp_draft_token_ids(
+        scheduler,
+        scheduler_output,
+        model_runner_output,
+    )
+
+    assert request.spec_token_ids == [301]
+
+
+def test_pp_mtp_draft_tokens_are_cleared_without_sampled_output():
+    request = SimpleNamespace(
+        spec_token_ids=[999],
+        structured_output_request=None,
+        is_finished=lambda: False,
+    )
+    scheduler = SimpleNamespace(
+        requests={"req-0": request},
+        structured_output_manager=SimpleNamespace(
+            should_advance=lambda _request: False,
+        ),
+    )
+    scheduler_output = SimpleNamespace(num_scheduled_tokens={"req-0": 1})
+    model_runner_output = SimpleNamespace(
+        req_id_to_index={"req-0": 0},
+        sampled_token_ids=[[]],
+        draft_token_ids=[[301, 302]],
+    )
+
+    _update_pp_mtp_draft_token_ids(
+        scheduler,
+        scheduler_output,
+        model_runner_output,
+    )
+
+    assert request.spec_token_ids == []

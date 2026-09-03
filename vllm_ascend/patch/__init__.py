@@ -394,21 +394,7 @@
 #
 # ** 16. File: platform/patch_pp_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.outputs.ModelRunnerOutput`
-#    Why:
-#       PP + MTP mixed deployment needs the model runner to return the draft
-#       tokens produced for the same scheduler output. Upstream output objects
-#       do not carry `spec_token_ids` on all supported vLLM revisions.
-#    How：
-#       Add a backward-compatible `spec_token_ids` field to `ModelRunnerOutput`
-#       and `EMPTY_MODEL_RUNNER_OUTPUT` when the field is missing.
-#    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
-#    Future Plan:
-#       Remove this patch once the supported vLLM version carries PP-safe
-#       speculative token metadata in `ModelRunnerOutput`.
-#
-#   2. `vllm.v1.engine.core.EngineCore.post_step`
+#   1. `vllm.v1.engine.core.EngineCore.post_step`
 #    Why:
 #       With PP batch queue, synchronous scheduling can schedule the next batch
 #       before the previous model output is consumed. Calling `post_step` in that
@@ -417,14 +403,14 @@
 #    How：
 #       In PP + MTP + batch queue + sync scheduling, skip `post_step` after model
 #       execution and let scheduler output processing perform the spec token
-#       writeback from the corresponding `ModelRunnerOutput`.
+#       writeback from the corresponding `AscendModelRunnerOutput`.
 #    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
+#       vLLM #44698 (V1) and #46994 (V2) are still open.
 #    Future Plan:
 #       Remove this patch when upstream makes spec token writeback output-owned
 #       for PP batch queue.
 #
-#   3. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
+#   2. `vllm.v1.core.sched.scheduler.Scheduler._update_after_schedule`
 #      `vllm.v1.core.sched.scheduler.Scheduler.update_from_output`
 #    Why:
 #       PP async scheduling must not schedule the same decode request again
@@ -438,14 +424,15 @@
 #       chunks in PP IPC mode. Release the fence in `update_from_output` after
 #       the matching output is processed. For PP + MTP, also filter zero-token
 #       placeholder requests before delegating to upstream scheduler accounting,
-#       then write `request.spec_token_ids` from `model_runner_output.spec_token_ids`.
+#       then write `request.spec_token_ids` from the matching output's
+#       `draft_token_ids`.
 #    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
+#       vLLM #44698 (V1) and #46994 (V2) are still open.
 #    Future Plan:
 #       Remove this patch once upstream supports request-level PP async fences
 #       and output-owned spec token writeback.
 #
-#   4. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
+#   3. `vllm.v1.core.sched.scheduler.Scheduler._make_cached_request_data`
 #    Why:
 #       Upstream PP async scheduling relies on direct PP-rank GPU broadcast for
 #       sampled-token handoff and omits `new_token_ids` from cached request data.
@@ -458,12 +445,12 @@
 #       mode, then fill the last confirmed output token for requests whose
 #       clamped upstream slice is empty.
 #    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
+#       vLLM #44698 (V1) and #46994 (V2) are still open.
 #    Future Plan:
 #       Remove this patch once upstream provides a scheduler-owned PP sampled
 #       token handoff path that works for both sync and async scheduling.
 #
-#   5. `vllm.config.model.ModelConfig.verify_with_parallel_config`
+#   4. `vllm.config.model.ModelConfig.verify_with_parallel_config`
 #    Why:
 #       Local Eagle/MTP drafters are loaded on the last PP stage rather than
 #       partitioned across all PP ranks. Upstream `ModelConfig.verify_with_parallel_config`
@@ -476,7 +463,7 @@
 #       with a patched `pipeline_parallel_size=1` copy, preserving normal target-model
 #       validation for non-drafter models.
 #    Related PR (if no, explain why):
-#       Backport of local vLLM PP+MTP branch changes.
+#       vLLM #52069 tracks the missing upstream draft-model validation path.
 #    Future Plan:
 #       Remove this patch once upstream vLLM's `ModelConfig.verify_with_parallel_config`
 #       supports local drafter models with PP > 1, or moves the PP validation to a

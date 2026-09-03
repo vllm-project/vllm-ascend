@@ -14,12 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Backport vLLM PP + MTP runtime support.
+"""Compatibility shims for vLLM PP + MTP runtime support.
 
 The local Eagle/MTP drafter returns the draft tokens that belong to the model
 output being processed. With PP batch_queue, EngineCore schedules a newer batch
 before consuming the older output, so updating ``request.spec_token_ids`` from
 ``post_step`` observes live Request state from the newer schedule step.
+
+Ascend-owned output metadata lives in ``AscendModelRunnerOutput``. The shims in
+this module can be removed after upstream's PP speculative-decoding protocol is
+available in the pinned vLLM revision.
 """
 
 from __future__ import annotations
@@ -59,30 +63,6 @@ def _use_pp_ipc_runtime_patch(vllm_config, use_pp: bool) -> bool:
     if not use_pp or _is_pd_prefill_node(vllm_config):
         return False
     return not getattr(vllm_config, "use_v2_model_runner", False)
-
-
-def _patch_model_runner_output() -> None:
-    from vllm.v1 import outputs as outputs_mod
-
-    model_runner_output_cls = outputs_mod.ModelRunnerOutput
-    fields = getattr(model_runner_output_cls, "__dataclass_fields__", {})
-    if "spec_token_ids" not in fields:
-        model_runner_output_cls.spec_token_ids = None
-        original_init = model_runner_output_cls.__init__
-        if getattr(original_init, "_vllm_ascend_pp_mtp_patched", False):
-            return
-
-        @wraps(original_init)
-        def _patched_init(self, *args, spec_token_ids=None, **kwargs):
-            original_init(self, *args, **kwargs)
-            self.spec_token_ids = spec_token_ids
-
-        _patched_init._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
-        model_runner_output_cls.__init__ = _patched_init
-
-    empty_output = outputs_mod.EMPTY_MODEL_RUNNER_OUTPUT
-    if not hasattr(empty_output, "spec_token_ids"):
-        empty_output.spec_token_ids = None
 
 
 def _patch_engine_core() -> None:
@@ -206,9 +186,9 @@ def _patch_scheduler_make_cached_request_data() -> None:
     Scheduler._make_cached_request_data = _patched_make_cached_request_data
 
 
-def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_output) -> None:
-    spec_token_ids = getattr(model_runner_output, "spec_token_ids", None)
-    if spec_token_ids is None:
+def _update_pp_mtp_draft_token_ids(scheduler, scheduler_output, model_runner_output) -> None:
+    draft_token_ids = getattr(model_runner_output, "draft_token_ids", None)
+    if draft_token_ids is None:
         return
 
     sampled_token_ids = getattr(model_runner_output, "sampled_token_ids", None)
@@ -222,11 +202,11 @@ def _update_pp_mtp_spec_token_ids(scheduler, scheduler_output, model_runner_outp
             continue
 
         new_token_ids = sampled_token_ids[req_index] if sampled_token_ids else []
-        if not new_token_ids or req_index >= len(spec_token_ids):
+        if not new_token_ids or req_index >= len(draft_token_ids):
             request.spec_token_ids = []
             continue
 
-        next_spec_token_ids = spec_token_ids[req_index]
+        next_spec_token_ids = draft_token_ids[req_index]
         if scheduler.structured_output_manager.should_advance(request):
             metadata = request.structured_output_request
             assert metadata is not None and metadata.grammar is not None
@@ -283,7 +263,7 @@ def _patch_scheduler_update_from_output() -> None:
         if not use_pp_mtp_runtime_patch:
             return engine_core_outputs
 
-        _update_pp_mtp_spec_token_ids(self, scheduler_output, model_runner_output)
+        _update_pp_mtp_draft_token_ids(self, scheduler_output, model_runner_output)
         return engine_core_outputs
 
     _patched_update_from_output._vllm_ascend_pp_mtp_patched = True  # type: ignore[attr-defined]
@@ -338,7 +318,6 @@ def _apply_patch() -> None:
     if _PATCHED:
         return
     _PATCHED = True
-    _patch_model_runner_output()
     _patch_engine_core()
     _patch_scheduler_update_after_schedule()
     _patch_scheduler_make_cached_request_data()

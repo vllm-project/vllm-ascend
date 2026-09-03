@@ -196,6 +196,7 @@ from vllm_ascend.utils import (
     weak_ref_tensors,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
+from vllm_ascend.worker.model_runner_output import AscendModelRunnerOutput
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
@@ -2553,7 +2554,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
-        output_spec_token_ids = None
+        output_draft_token_ids = None
         use_padded_batch = False
         early_pp_padded_drafter = False
         if self.speculative_config:
@@ -2621,16 +2622,16 @@ class NPUModelRunner(GPUModelRunner):
                     draft_req_ids = self.input_batch.req_ids
                 if draft_ids_list and draft_req_ids:
                     draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
-                    output_spec_token_ids = [
+                    output_draft_token_ids = [
                         draft_by_req_id.get(req_id, [])
                         for req_id in req_ids_output_copy
                     ]
 
-        model_runner_output = ModelRunnerOutput(
+        model_runner_output = AscendModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=output_spec_token_ids,
+            draft_token_ids=output_draft_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             kv_connector_output=kv_connector_output,
