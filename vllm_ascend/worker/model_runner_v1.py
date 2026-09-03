@@ -109,7 +109,7 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -526,7 +526,7 @@ class NPUModelRunner(GPUModelRunner):
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
-            kernel_block_sizes=[[self.cache_config.block_size]],
+            kernel_block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
@@ -3964,14 +3964,20 @@ class NPUModelRunner(GPUModelRunner):
         # old first-spec scan over attn_groups cannot recognize them.
         self.need_accepted_tokens = kv_cache_config.has_mamba_layers
 
-        self.may_reinitialize_input_batch(kv_cache_config)
+        kernel_block_sizes = prepare_kernel_block_sizes(
+            kv_cache_config, self.attn_groups
+        )
+        self.kernel_block_sizes = kernel_block_sizes
+        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         if self.sparse_kv_offload_enabled:
             self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
                 self.vllm_config,
                 kv_cache_config,
                 self.sparse_kv_offload_config,
             )
-        kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+        kv_caches = self.initialize_kv_cache_tensors(
+            kv_cache_config, kernel_block_sizes
+        )
         # TODO: refactor the logic of attention
         if (
             self.speculative_config
@@ -3992,9 +3998,7 @@ class NPUModelRunner(GPUModelRunner):
                     int(size[0] if isinstance(size, (list, tuple)) else size) for size in sizes
                 ]
             else:
-                draft_kernel_block_sizes = (
-                    kernel_block_sizes[0] if isinstance(kernel_block_sizes, list) else kernel_block_sizes
-                )
+                draft_kernel_block_sizes = kernel_block_sizes
             self.drafter.initialize_attn_backend(kv_cache_config, draft_kernel_block_sizes)
 
         if (
@@ -4019,7 +4023,11 @@ class NPUModelRunner(GPUModelRunner):
         offset = (aligned_addr - data_ptr) // tensor.element_size()
         return tensor[int(offset) :]
 
-    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def initialize_kv_cache_tensors(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int],
+    ) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
 
@@ -4032,7 +4040,9 @@ class NPUModelRunner(GPUModelRunner):
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        kv_caches = self._reshape_kv_cache_tensors(
+            kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
+        )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -4445,6 +4455,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_raw_tensors: dict[str, torch.Tensor],
+        kernel_block_sizes: list[int],
     ) -> dict[str, torch.Tensor]:
         """
         Reshape the KV cache tensors to the desired shape and dtype.
@@ -4458,6 +4469,56 @@ class NPUModelRunner(GPUModelRunner):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
+        if self.hybrid_with_attn_and_mamba:
+            for group in self._kv_cache_spec_attn_group_iterator():
+                if group.kv_cache_group_id >= len(kernel_block_sizes):
+                    # The last group may contain layers without KV cache.
+                    continue
+                attn_backend = group.backend
+                kv_cache_spec = group.kv_cache_spec
+                kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
+                for layer_name in group.layer_names:
+                    if layer_name in self.runner_only_attn_layers:
+                        continue
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    assert isinstance(raw_tensor, torch.Tensor)
+                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+
+                    if isinstance(kv_cache_spec, AttentionSpec):
+                        num_blocks_per_kv_block = (
+                            kv_cache_spec.block_size // kernel_block_size
+                        )
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            num_blocks * num_blocks_per_kv_block,
+                            kernel_block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size,
+                            cache_dtype_str=self.cache_config.cache_dtype,
+                        )
+                        kv_caches[layer_name] = raw_tensor.view(
+                            kv_cache_spec.dtype
+                        ).view(kv_cache_shape)
+                    elif isinstance(kv_cache_spec, MambaSpec):
+                        shapes_with_blocks = tuple(
+                            (num_blocks, *shape) for shape in kv_cache_spec.shapes
+                        )
+                        kv_caches[layer_name] = self._adjust_kv_layout(
+                            raw_tensor,
+                            shapes_with_blocks,
+                            kv_cache_spec.dtypes,
+                            kv_cache_spec.page_size_bytes,
+                        )
+                    else:
+                        raise NotImplementedError(
+                            "Hybrid non-contiguous KV cache does not support "
+                            f"{type(kv_cache_spec).__name__}"
+                        )
+
+            self._update_hybrid_attention_mamba_layout(
+                kv_caches, kernel_block_sizes
+            )
+            return kv_caches
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
@@ -4644,16 +4705,6 @@ class NPUModelRunner(GPUModelRunner):
                             raw_k_tensor, raw_v_tensor = raw_cache
                             sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     elif (
-                        self.use_hybrid_blocks
-                        and self.hybrid_with_attn_and_mamba
-                        and "cache_only_layers" not in layer_name
-                        and not is_hidden_state_cache_spec(current_kv_cache_spec)
-                    ):
-                        # Currently, we ensure that the same kvcache format is used even if there
-                        # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
-                        raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
-                        sum_page_size_bytes = raw_k_tensor.numel()
-                    elif (
                         "cache_only_layers" in layer_name
                         or is_hidden_state_cache_spec(current_kv_cache_spec)
                     ):
@@ -4719,27 +4770,6 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                        if self.hybrid_with_attn_and_mamba:
-                            if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
-                                attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
-                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                                raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
-                                raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
-                            else:
-                                k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                                nope_page_size = int(np.prod(kv_cache_shape[:-1])) * k_dim * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                rope_page_size = int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                conv_block_padding_size = raw_k_tensor.numel() - nope_page_size - rope_page_size
-                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                                raw_k_tensor = raw_kv_tensor[:nope_page_size]
-                                raw_v_tensor = raw_kv_tensor[nope_page_size:]
                     else:
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks,
@@ -4837,7 +4867,11 @@ class NPUModelRunner(GPUModelRunner):
 
         return kv_caches
 
-    def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
+    def may_reinitialize_input_batch(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int],
+    ) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
         `[self.cache_config.block_size]`. This usually happens when there
@@ -4853,38 +4887,6 @@ class NPUModelRunner(GPUModelRunner):
         ]
         block_sizes = [group.kv_cache_spec.block_size for group in non_encoder_groups]
 
-        # Generate kernel_block_sizes that matches each block_size
-        # For attention backends that support virtual block splitting,
-        # use the supported block sizes from the backend
-        # For other backends (like Mamba), use [0] (no splitting)
-        self.kernel_block_sizes = []
-        for kv_cache_group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                # All layers in the UniformTypeKVCacheSpecs have the same type,
-                # Pick an arbitrary one to dispatch.
-                kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
-            elif isinstance(kv_cache_spec, AttentionSpec):
-                # This is an attention backend that supports virtual
-                # block splitting. Get the supported block sizes from
-                # the backend.
-                attn_groups = self.attn_groups[kv_cache_group_id]
-                backends = [attn_group.backend for attn_group in attn_groups]
-                kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-                selected_kernel_size = select_common_block_size(
-                    kv_manager_block_size, backends
-                )
-                self.kernel_block_sizes.append([selected_kernel_size])
-            else:
-                # This is likely Mamba or other non-attention cache,
-                # no splitting.
-                # NOTE: set kernel_block_sizes to 0 to disable slotmapping computation
-                # of mamba block. In this case, BlockTable.block_size will never equal
-                # to kernel_block_sizes[0]
-                self.kernel_block_sizes.append([0])
-
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         for kv_cache_group in non_encoder_groups:
@@ -4895,7 +4897,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_blocks.append(max_num_blocks_per_req)
 
         if (block_sizes != [self.cache_config.block_size]
-                or self.kernel_block_sizes != [[self.cache_config.block_size]]
+                or kernel_block_sizes != [self.cache_config.block_size]
                 or len(kv_cache_config.kv_cache_groups) > 1):
             assert self.offload_config.uva.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
@@ -4918,7 +4920,7 @@ class NPUModelRunner(GPUModelRunner):
                     if self.vllm_config.speculative_config
                     else 0
                 ),
-                kernel_block_sizes=self.kernel_block_sizes,
+                kernel_block_sizes=kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
                 kv_cache_groups=kv_cache_config.kv_cache_groups,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
