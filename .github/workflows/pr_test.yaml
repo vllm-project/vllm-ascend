@@ -581,8 +581,6 @@ jobs:
       matrix:
         # vllm_version keeps the full hash (it becomes the checkout ref in
         # _selected_tests.yaml); only the job name shows the short form.
-        # TEMP(main2main): run only the upgraded main lane while collecting
-        # all failures. Restore the release lane before merging this PR.
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
         vllm_version_short:
