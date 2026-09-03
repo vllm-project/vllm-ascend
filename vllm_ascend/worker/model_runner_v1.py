@@ -28,7 +28,7 @@ from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -1710,7 +1710,7 @@ class NPUModelRunner(GPUModelRunner):
         sampling_metadata: SamplingMetadata,
         scheduler_output: "SchedulerOutput",
         spec_decode_metadata: SpecDecodeMetadata,
-        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata,
+        spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None,
         positions: torch.Tensor,
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
@@ -1728,6 +1728,18 @@ class NPUModelRunner(GPUModelRunner):
         if not self.drafter:
             # Speculative decoding is not enabled.
             draft_token_ids = None
+        elif self.speculative_config.method == "custom_class":
+            assert isinstance(valid_sampled_token_ids, list)
+            draft_token_ids = cast(Any, self.drafter).propose(
+                valid_sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                slot_mappings=(
+                    spec_decode_common_attn_metadata.slot_mapping
+                    if spec_decode_common_attn_metadata is not None
+                    else None
+                ),
+            )
         elif isinstance(self.drafter, AscendNgramProposer):
             draft_token_ids = self.drafter.propose(
                 scheduler_output.num_spec_tokens_to_schedule,
@@ -3705,7 +3717,11 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
 
-            if self.drafter and not profile_cpp:
+            if (
+                self.drafter
+                and self.speculative_config.method != "custom_class"
+                and not profile_cpp
+            ):
                 self.drafter.dummy_run(
                     num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
@@ -3809,8 +3825,9 @@ class NPUModelRunner(GPUModelRunner):
                     break
             if self.drafter:
                 logger.info("Loading drafter model...")
-                with get_tp_context(self.drafter):
-                    self.drafter.load_model(self.model)
+                if hasattr(self.drafter, "load_model"):
+                    with get_tp_context(self.drafter):
+                        self.drafter.load_model(self.model)
 
             pp_group = get_pp_group()
             should_configure_aux_hidden_states = (
