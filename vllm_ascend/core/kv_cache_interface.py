@@ -46,6 +46,30 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
+    # Current vLLM represents compressed-state density with
+    # ``tokens_per_state`` but the Ascend DSV4 kernels still dispatch on the
+    # integer compression ratio. Keep that backend-owned value explicit until
+    # the kernels consume the generic Fraction-based field directly.
+    compress_ratio: int = 1
+
+    def __post_init__(self):
+        if self.compress_ratio < 1:
+            raise ValueError(f"Ascend compression ratio must be positive, got {self.compress_ratio}")
+        if self.compress_ratio == 1 and self.tokens_per_state != 1:
+            if not isinstance(self.tokens_per_state, int):
+                raise ValueError(
+                    f"Ascend compressed MLA currently requires an integer tokens_per_state, got {self.tokens_per_state}"
+                )
+            object.__setattr__(self, "compress_ratio", self.tokens_per_state)
+        elif self.tokens_per_state == 1 and self.compress_ratio != 1:
+            object.__setattr__(self, "tokens_per_state", self.compress_ratio)
+        elif self.tokens_per_state != self.compress_ratio:
+            raise ValueError(
+                "Ascend compress_ratio and the standardized tokens_per_state "
+                f"must agree, got {self.compress_ratio} and "
+                f"{self.tokens_per_state}"
+            )
+        super().__post_init__()
 
     @property
     def storage_block_size(self) -> int:
@@ -83,8 +107,12 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             "All attention layers in the same KV cache group must use the same Ascend KV cache layout."
         )
         non_causal_multi_token_decode_set = set(spec.non_causal_multi_token_decode for spec in specs)
+        compress_ratio_set = {spec.compress_ratio for spec in specs}
         assert len(non_causal_multi_token_decode_set) == 1, (
             "Causal target layers and non-causal multi-token draft layers must use separate KV cache groups."
+        )
+        assert len(compress_ratio_set) == 1, (
+            "All attention layers in the same KV cache group must use the same Ascend compression ratio."
         )
         first_spec = specs[0]
         merged = super().merge(specs)
@@ -95,6 +123,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
+            compress_ratio=compress_ratio_set.pop(),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

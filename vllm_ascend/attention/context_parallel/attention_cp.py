@@ -57,11 +57,11 @@ class AscendMetadataForPrefill:
     @dataclass
     class ChunkedContextMetadata:
         actual_chunk_seq_lengths: torch.Tensor
-        actual_seq_lengths_kv: torch.Tensor
+        actual_seq_lengths_kv: list[int]
         starts: torch.Tensor
         chunk_seq_mask_filtered_indices: torch.Tensor
         chunked_req_mask: list[bool] | None = None
-        local_context_lens_allranks: list[list[int]] | None = None
+        local_context_lens_allranks: torch.Tensor | None = None
         local_total_toks: int | None = None
 
     chunked_context: ChunkedContextMetadata | None = None
@@ -73,7 +73,7 @@ class AscendMetadataForPrefill:
 class AscendMetadataForDecode:
     """GQA decode metadata used only by DCP."""
 
-    num_computed_tokens_of_dcp: list[list[int]] | None = None
+    num_computed_tokens_of_dcp: np.ndarray | None = None
     block_tables: torch.Tensor = None
     dcp_mtp_attn_mask: torch.Tensor = None
 
@@ -148,7 +148,7 @@ class AscendAttentionDCPMetadataBuilder(
                         prefill_query_lens,
                         chunked_req_mask,
                     ).to(self.device),
-                    local_total_toks=local_chunked_kv_lens.sum().item(),
+                    local_total_toks=int(local_chunked_kv_lens.sum().item()),
                 )
             prefill_metadata = AscendMetadataForPrefill(
                 chunked_context=chunked_context_metadata,
@@ -428,20 +428,21 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
     def _compute_prefill_context(
         self,
         query: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
         attn_metadata: AscendAttentionDCPMetadata,
     ):
-        assert len(kv_cache) > 1
-        assert attn_metadata is not None
-        assert attn_metadata.prefill is not None
-        assert attn_metadata.prefill.chunked_context is not None
+        cache_pair = self._unpack_kv_cache(kv_cache)
         prefill_metadata = attn_metadata.prefill
-        local_chunked_kv_lens = prefill_metadata.chunked_context.local_context_lens_allranks
+        assert prefill_metadata is not None
+        chunked_context = prefill_metadata.chunked_context
+        assert chunked_context is not None
+        local_chunked_kv_lens = chunked_context.local_context_lens_allranks
         assert local_chunked_kv_lens is not None
 
         local_chunked_kv_lens_rank = local_chunked_kv_lens[:, self.dcp_rank]
-        total_toks = prefill_metadata.chunked_context.local_total_toks
-        key, value = self._load_kv_for_chunk(attn_metadata, kv_cache, local_chunked_kv_lens_rank, query, total_toks)
+        total_toks = chunked_context.local_total_toks
+        assert total_toks is not None
+        key, value = self._load_kv_for_chunk(attn_metadata, cache_pair, local_chunked_kv_lens_rank, query, total_toks)
         if self.dcp_size > 1:
             num_heads = self.num_heads * self.dcp_size
         else:
@@ -470,8 +471,8 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
             antiquant_mode=0,
             antiquant_scale=None,
             softmax_lse_flag=True,
-            actual_seq_lengths_kv=prefill_metadata.chunked_context.actual_seq_lengths_kv,
-            actual_seq_lengths=attn_metadata.prefill.chunked_context.actual_chunk_seq_lengths,
+            actual_seq_lengths_kv=chunked_context.actual_seq_lengths_kv,
+            actual_seq_lengths=chunked_context.actual_chunk_seq_lengths,
         )
 
         return prefix_chunk_output, prefix_chunk_lse
@@ -528,7 +529,7 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
