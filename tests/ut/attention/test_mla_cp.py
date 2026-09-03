@@ -155,3 +155,62 @@ def test_mla_dcp_mixed_cache_hit_batch_uses_decode_bsnd_metadata(mock_fia) -> No
     assert call_kwargs["actual_seq_lengths"] == [4]
     assert call_kwargs["block_table"].shape[0] == 1
     assert call_kwargs["actual_seq_lengths_kv"].tolist() == [10]
+
+
+@patch(
+    "vllm_ascend.attention.context_parallel.mla_cp._EXTRA_CTX",
+    SimpleNamespace(is_draft_model=False, capturing=False),
+)
+@patch("vllm_ascend.attention.context_parallel.mla_cp.torch_npu.npu_fused_infer_attention_score")
+def test_mla_dcp_pads_global_query_heads_for_decode(mock_fia) -> None:
+    impl = AscendMlaDCPImpl.__new__(AscendMlaDCPImpl)
+    impl.dcp_size = 2
+    impl.num_heads = 48
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 3
+    impl.qk_rope_head_dim = 2
+    impl.scale = 1.0
+    impl.speculative_config = SimpleNamespace(num_speculative_tokens=3)
+    impl._merge_dcp_attention_output = lambda output, _lse, _rank: output
+    impl._v_up_proj_batch_major = lambda output: output
+
+    decode = AscendMLADCPDecodeMetadata(
+        input_positions=torch.arange(4),
+        block_table=torch.ones((1, 2), dtype=torch.int32),
+        seq_lens=torch.tensor([20]),
+        max_seq_lens=20,
+        seq_lens_list=[20],
+        cp_seq_len=torch.tensor([10], dtype=torch.int32),
+        dcp_mtp_attn_mask=torch.zeros((1, 1, 4, 4)),
+    )
+    metadata = AscendMLAMetadata(
+        num_actual_tokens=4,
+        slot_mapping=torch.arange(4),
+        query_start_loc=torch.tensor([0, 4]),
+        seq_lens=torch.tensor([20]),
+        seq_lens_cpu=torch.tensor([20]),
+        block_tables=torch.ones((1, 2), dtype=torch.int32),
+        num_decodes=1,
+        num_decode_tokens=4,
+        num_prefills=0,
+        query_lens=[4],
+        attn_state=AscendAttentionState.SpecDecoding,
+        decode=decode,
+    )
+
+    q_nope = torch.randn(4, 96, 3)
+    q_pe = torch.randn(4, 96, 2)
+    k_nope = torch.randn(2, 1, 2, 3)
+    k_pe = torch.randn(2, 1, 2, 2)
+    mock_fia.return_value = (
+        torch.randn(1, 4, 128, 3),
+        torch.randn(1, 128, 4, 1),
+    )
+
+    output = impl._forward_decode(q_nope, q_pe, k_nope, k_pe, 2, metadata)
+
+    call_args = mock_fia.call_args.args
+    call_kwargs = mock_fia.call_args.kwargs
+    assert call_args[0].shape == (1, 4, 128, 3)
+    assert call_kwargs["num_heads"] == 128
+    assert output.shape == (4, 96, 3)
