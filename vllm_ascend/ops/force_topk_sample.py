@@ -32,9 +32,7 @@ from vllm_ascend.sample.topk_map import CompactDist
 __all__ = ["build_compact_for_logprobs", "force_topk_sample"]
 
 
-def build_compact_for_logprobs(
-    logits: torch.Tensor, k: int
-) -> CompactDist:
+def build_compact_for_logprobs(logits: torch.Tensor, k: int) -> CompactDist:
     """Build a CompactDist for logprobs reporting (no sampling).
 
     Used by the greedy branch of AscendSampler.sample() when the caller
@@ -142,10 +140,9 @@ def _sample(
             q[i].exponential_(generator=generator)
 
     local = (probs_k / q).argmax(dim=-1)  # [B] local rank
-    sampled = token_index.gather(
-        1, local[:, None]
-    ).squeeze(1).to(torch.int64)  # [B]
+    sampled = token_index.gather(1, local[:, None]).squeeze(1).to(torch.int64)  # [B]
     return sampled
+
 
 @torch.compile(dynamic=True, options={"npu_backend": "ascendc"})
 def _force_topk_process_logits(
@@ -178,30 +175,30 @@ def _force_topk_process_logits(
     # Phase 2: raw logprobs + true_p
     # (only when return_raw_logprobs=True)
     if return_raw_logprobs:
-        lse_full = torch.logsumexp(
-            logits, dim=-1, keepdim=True
-        )  # [B, 1] full-vocab LSE
+        lse_full = torch.logsumexp(logits, dim=-1, keepdim=True)  # [B, 1] full-vocab LSE
         raw_logprobs = topv - lse_full  # [B, k] raw logprob
-        true_p = torch.exp(
-            topv - lse_full
-        )  # [B, k] full-vocab normalized probs
+        true_p = torch.exp(topv - lse_full)  # [B, k] full-vocab normalized probs
     else:
         raw_logprobs = None
         true_p = torch.softmax(topv, dim=-1)  # [B, k] k-dim normalized
 
     # Phase 3: apply sampling constraints
     s_masked, probs_k = _apply_sampling_constraints(
-        topv, temperature, top_p, top_k, min_p,
-        true_p, k, logits.device,
+        topv,
+        temperature,
+        top_p,
+        top_k,
+        min_p,
+        true_p,
+        k,
+        logits.device,
     )
 
     # Phase 5: select logprobs based on mode
     if return_raw_logprobs:
         logprobs = raw_logprobs  # topv - LSE(z_raw)
     else:
-        logprobs = torch.log_softmax(
-            s_masked, dim=-1
-        )  # log_softmax(s_masked): processed
+        logprobs = torch.log_softmax(s_masked, dim=-1)  # log_softmax(s_masked): processed
 
     return probs_k, token_index, logprobs
 
@@ -249,15 +246,16 @@ def force_topk_sample(
               logprobs [B, k] f32.
     """
     probs_k, token_index, logprobs = _force_topk_process_logits(
-        logits, temperature, top_p, top_k, min_p,
-        k, return_raw_logprobs,
+        logits,
+        temperature,
+        top_p,
+        top_k,
+        min_p,
+        k,
+        return_raw_logprobs,
     )
 
     # Phase 4: random sampling (uncompiled)
-    sampled = _sample(
-        probs_k, generators, logits.shape[0], token_index
-    )
+    sampled = _sample(probs_k, generators, logits.shape[0], token_index)
 
-    return sampled, CompactDist(
-        token_index.to(torch.int32), logprobs
-    )
+    return sampled, CompactDist(token_index.to(torch.int32), logprobs)

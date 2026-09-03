@@ -41,6 +41,7 @@ from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import AttentionSpec
 else:
     VllmConfig = None
 
@@ -132,6 +133,31 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     if compress_ratios is None or layer_idx >= len(compress_ratios):
         return 0
     return compress_ratios[layer_idx]
+
+
+def model_uses_sfa_sparse(model_config: Any | None) -> bool:
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    return (
+        hf_text_config is not None
+        and hasattr(hf_text_config, "index_topk")
+        and not hasattr(hf_text_config, "compress_ratios")
+        and not hasattr(hf_config, "compress_ratios")
+    )
+
+
+def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    parallel_config = vllm_config.parallel_config
+    return (
+        model_uses_sfa_sparse(vllm_config.model_config)
+        and parallel_config.decode_context_parallel_size > 1
+        and parallel_config.prefill_context_parallel_size == 1
+    )
 
 
 def clear_enable_sp():
@@ -563,6 +589,7 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401
+
         # Worker trace patches wrap NPUModelRunner, which is only fully
         # defined after vllm_ascend.worker.model_runner_v1 finishes
         # importing. That module imports from vllm_ascend.patch.worker
@@ -1234,12 +1261,13 @@ def get_potential_max_tokens() -> int:
     return _potential_max_tokens
 
 
-def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = False) -> bool:
+def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_model: bool = False) -> bool:
     """Decide whether to skip the all-reduce across the DP group.
 
     Skipping is applicable for all dense models and for moe models only on ranks
     that act as KV consumers. We skip the DP all-reduce when either:
-    - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
+    - Prefill and decode share one graph routine and both communication methods
+      are MC2 (or FUSED_MC2), or
     - Decode requires MC2 and ascend_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
@@ -1274,12 +1302,12 @@ def should_skip_allreduce_across_dp_group(vllm_config, is_draft_model: bool = Fa
 
     scheduler_config = vllm_config.scheduler_config
     # potential_max_tokens is read from the set/get global (computed once in init).
-    decode_must_use_mc2 = needs_mc2(get_potential_max_tokens())
+    decode_can_skip = needs_mc2(get_potential_max_tokens())
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.
     prefill_must_use_mc2 = needs_mc2(scheduler_config.max_num_batched_tokens)
-    # Skip all-reduce if decode requires MC2 and either prefill also
-    # requires MC2 or recompute-based scheduler is enabled.
-    return decode_must_use_mc2 and (prefill_must_use_mc2 or get_ascend_config().recompute_scheduler_enable)
+    uniform_cudagraph_mode = not vllm_config.compilation_config.cudagraph_mode.separate_routine()
+    chunked_prefill_can_skip = prefill_must_use_mc2 and uniform_cudagraph_mode
+    return decode_can_skip and (chunked_prefill_can_skip or get_ascend_config().recompute_scheduler_enable)
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
@@ -1720,10 +1748,25 @@ def get_compressed_pos_and_indices(
     return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list
 
 
-def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
+def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(getattr(kv_cache_spec, "cache_sparse_c8", False))
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(
+        getattr(kv_cache_spec, "cache_sparse_sfa_c8", False)
+    )
+
+
+def kv_cache_spec_uses_sparse_li_c8(kv_cache_spec) -> bool:
+    from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+
+    return isinstance(kv_cache_spec, AscendMLAAttentionSpec) and bool(
+        getattr(kv_cache_spec, "cache_sparse_li_c8", False)
+    )
+
+
+def sparse_kv_cache_has_indexer(kv_cache_spec: AttentionSpec) -> bool:
+    sparse_head_dim = getattr(kv_cache_spec, "sparse_head_dim", None)
+    return sparse_head_dim is not None and len(sparse_head_dim) == 3 and sparse_head_dim[2] > 0
 
 
 def is_hidden_state_cache_spec(spec) -> bool:

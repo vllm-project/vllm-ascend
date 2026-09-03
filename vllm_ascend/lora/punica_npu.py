@@ -321,6 +321,94 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
 
+    def add_lora_fused_moe(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        *,
+        topk_weights: torch.Tensor | None = None,
+        sorted_token_ids: torch.Tensor | None = None,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor | None = None,
+        max_lora_rank: int = 0,
+        top_k_num: int = 1,
+        shrink_config=None,
+        expand_config=None,
+        adapter_enabled: torch.Tensor,
+        mul_routed_weight: bool = False,
+        fully_sharded: bool = False,
+        offset: int = 0,
+        token_lora_mapping: torch.Tensor | None = None,
+    ) -> None:
+        """
+        Ascend-native fused MoE LoRA (v2): static-shape per-row gather via the
+        same bgmv_shrink/bgmv_expand AscendC kernels (csrc/kernels/bgmv_*.cpp)
+        used by the dense Linear LoRA layers, instead of grouping rows by a
+        data-dependent ``torch.unique`` over active LoRA ids. The previous
+        ``torch.unique``/``nonzero`` version produced output whose *shape*
+        depended on tensor values, which ACL Graph capture cannot record
+        (it failed with an `aclnnUnique2` error as soon as `enforce_eager`
+        was turned off) -- every tensor below has a shape that depends only
+        on input shapes, never on values, so this stays graph-capturable.
+
+        Rows are already one-token-per-row (top_k_num=1). Each row needs the
+        LoRA slot for (lora_id, expert_id), so we fold both into a single
+        gather index into a ``[max_loras * num_experts, ...]`` view of the
+        existing per-(lora, expert) weight stacks:
+            combined_idx[row] = lora_id[row] * num_experts + expert_id[row]
+        or -1 when the row has no active adapter, mirroring the -1 sentinel
+        ``PunicaWrapperBase.token_lora_indices`` already uses. bgmv_shrink/
+        bgmv_expand skip any row whose index is negative (leaving the
+        zero-initialized shrink buffer / unmodified ``y`` in place), so
+        inactive rows get a zero delta for free -- no Python-level branching
+        needed.
+        """
+        del sorted_token_ids, num_tokens_post_padded, max_lora_rank
+        del shrink_config, expand_config, fully_sharded
+        assert top_k_num == 1, "Ascend MoE LoRA v1 expects pre-expanded rows (top_k_num=1)."
+        if token_lora_mapping is None:
+            token_lora_mapping = self.token_lora_indices
+
+        x2d = x.view(-1, x.shape[-1])
+        y2d = y.view(-1, y.shape[-1])
+        expert_idx = expert_ids.view(-1).to(torch.long)
+        num_experts = lora_a_stacked[0].shape[1]
+
+        lora_idx_safe = token_lora_mapping.clamp(min=0)
+        enabled = (token_lora_mapping >= 0) & adapter_enabled[lora_idx_safe].bool()
+        combined_idx = torch.where(
+            enabled,
+            lora_idx_safe * num_experts + expert_idx,
+            torch.full_like(token_lora_mapping, -1),
+        ).contiguous()
+
+        # bgmv_shrink writes fp32 (its Y_T); bgmv_expand reads fp32 (its X_T),
+        # so the shrink buffer is fp32.
+        rank = lora_a_stacked[0].shape[-2]
+        shrink_out = torch.zeros((x2d.shape[0], rank), dtype=torch.float32, device=x2d.device)
+
+        cur_offset = offset
+        for slice_idx in range(len(lora_a_stacked)):
+            # lora_a_stacked[s]/lora_b_stacked[s]: [max_loras, num_experts, rank, *].
+            # Flattening the leading two dims turns "gather by (lora, expert)"
+            # into "the plain per-row gather" to reuse bgmv_shrink/bgmv_expand.
+            a = lora_a_stacked[slice_idx]
+            b = lora_b_stacked[slice_idx]
+            out_size = b.shape[-2]
+            a_flat = a.view(-1, rank, a.shape[-1])
+            b_flat = b.view(-1, out_size, rank)
+
+            self.bgmv_shrink(x2d, a_flat, shrink_out, combined_idx, 1.0)
+
+            delta = shrink_out
+            if mul_routed_weight and topk_weights is not None:
+                delta = shrink_out * topk_weights.view(-1, 1)
+
+            self.bgmv_expand_slice(delta, b_flat, y2d, combined_idx, cur_offset, out_size, add_inputs=True)
+            cur_offset += out_size
+
     def add_lora_logits(
         self,
         y: torch.Tensor,

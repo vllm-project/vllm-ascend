@@ -14,16 +14,9 @@
  */
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
-
 #include "error/ops_error.h"
 
-static constexpr int IDX_0 = 0;
-static constexpr int IDX_1 = 1;
-static constexpr int IDX_2 = 2;
-
 using namespace ge;
-// using namespace Ops::Base;
-
 namespace ops {
 
 static ge::graphStatus InferShape4StoreKVBlock(gert::InferShapeContext* context)

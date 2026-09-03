@@ -127,6 +127,30 @@ msgid "openEuler 24.03"
 msgstr "openEuler 24.03"
 
 #: ../../source/tutorials/hardwares/310p.md:156
+msgid "Host Page Cache Cleanup (Recommended)"
+msgstr "宿主机页缓存清理（推荐）"
+
+#: ../../source/tutorials/hardwares/310p.md:159
+msgid ""
+"On Atlas 200I Pro, if host memory is tight or you previously ran "
+"inference workloads, consider running the following commands on the "
+"**host** (requires `root`) before `vllm serve` to release reclaimable "
+"kernel page caches. This may help free host memory and reduce OOM risk "
+"during model loading. The command does not delete user files."
+msgstr ""
+"在 Atlas 200I Pro 上，如果宿主机内存紧张，或您之前运行过推理任务，可在启动 `vllm serve` "
+"之前于**宿主机**上（需要 `root` 权限）考虑执行以下命令，以释放可回收的内核页缓存。这可能有助于释放宿主机内存，并降低模型加载时的 "
+"OOM 风险。该命令不会删除用户文件。"
+
+#: ../../source/tutorials/hardwares/310p.md:165
+msgid ""
+"Whether to run this cleanup depends on your environment. Check available "
+"host memory (for example, with `free -h`) and decide based on your actual"
+" situation. Skip it if memory is already sufficient."
+msgstr ""
+"是否执行此清理取决于您的环境。请检查可用宿主机内存（例如使用 `free -h`），并根据实际情况自行判断。如果内存已充足，可跳过此步骤。"
+
+#: ../../source/tutorials/hardwares/310p.md:175
 msgid "Set up environment variables:"
 msgstr "设置环境变量："
 
