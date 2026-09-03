@@ -221,8 +221,6 @@ jobs:
             echo "============================"
           done
 
-  recommend-tests-from-coverage:
-    name: Recommend tests from coverage
   run-selected-tests-cpu:
     strategy:
       fail-fast: false
@@ -286,11 +284,16 @@ jobs:
   recommend-tests:
     name: Recommend tests
     needs: pre-commit
-    # Skip the coverage-based recommendation path when the PR opts into the
-    # full suite via the ready-all label; select-tests will produce the test
-    # groups in that case. The pre-commit check is explicit so the job can
-    # never be made to run after a failed pre-commit by adding !cancelled().
-    if: ${{ needs.pre-commit.result == 'success' && !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
+    # The recommendation only runs under the ready-precise label: that is the
+    # only mode whose result depends on it. ready-all runs --all-tests and
+    # unlabeled runs select nothing, so both skip this job. The pre-commit
+    # check is explicit so the job can never be made to run after a failed
+    # pre-commit by adding !cancelled().
+    if: >-
+      ${{
+        needs.pre-commit.result == 'success' &&
+        contains(github.event.pull_request.labels.*.name, 'ready-precise')
+      }}
     runs-on: linux-amd64-cpu-8-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
@@ -387,17 +390,28 @@ jobs:
   select-tests:
     needs:
       - pre-commit
-      - recommend-tests-from-coverage
+      - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
-    # !cancelled() is required so this job still runs when recommend-tests-from-coverage
-    # is skipped under ready-all, but not when the workflow itself is cancelled.
-    # The explicit pre-commit success check stops it from running when pre-commit
-    # failed (!cancelled() alone would override the transitive skip). Modes:
-    #   recommended - recommend job succeeded with coverage paths
-    #   all         - ready-all forced (full selected suite)
-    #   none        - recommend job succeeded but produced no paths (no tests)
-    # Recommend job failure does not fall back to all; this job fails instead.
-    if: ${{ !cancelled() && needs.pre-commit.result == 'success' }}
+    # It runs only when a ready label asks for test execution; unlabeled runs
+    # skip it and ci-gate decides whether that is allowed (no src paths) or
+    # requires a label (src or ci_pipeline paths present). !cancelled() keeps
+    # it out of the graph only when the workflow itself is cancelled; the
+    # explicit pre-commit success check stops it from running when pre-commit
+    # failed (!cancelled() alone would override the transitive skip). The
+    # src/ci_pipeline path categories are computed by the paths-filter step
+    # in pre-commit. Modes:
+    #   recommended - recommend job succeeded with coverage paths (ready-precise)
+    #   all         - ready-all forced, or the PR touches the CI pipeline itself
+    #   none        - ready-precise on a PR whose diff recommends no tests
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        )
+      }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
