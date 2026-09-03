@@ -29,6 +29,7 @@ class _PPAuxHiddenStateModel(Protocol):
 
 
 class _PPTopKModel(Protocol):
+    config: object
     start_layer: int
     end_layer: int
     topk_indices_buffer: torch.Tensor | None
@@ -208,10 +209,7 @@ def add_pp_transport_buffers(
     return add_pp_transport_tensors(intermediate_tensors, data_type, tensors)
 
 
-def configure_pp_topk_transport(
-    model: _PPTopKModel,
-    stage_requires_topk_indices: Callable[[int], bool],
-) -> None:
+def configure_pp_topk_transport(model: _PPTopKModel) -> None:
     """Configure Top-K index transport for a model split across PP stages."""
     model.receive_pp_topk_indices = False
     model.send_pp_topk_indices = False
@@ -219,8 +217,8 @@ def configure_pp_topk_transport(
     if topk_indices_buffer is None:
         return
 
-    model.receive_pp_topk_indices = stage_requires_topk_indices(model.start_layer)
-    model.send_pp_topk_indices = stage_requires_topk_indices(model.end_layer)
+    model.receive_pp_topk_indices = pp_stage_requires_topk_indices(model.config, model.start_layer)
+    model.send_pp_topk_indices = pp_stage_requires_topk_indices(model.config, model.end_layer)
     if not model.receive_pp_topk_indices:
         return
 
