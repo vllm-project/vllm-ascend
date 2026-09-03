@@ -99,17 +99,6 @@ class AscendECCPUWorker(ECCPUWorker):
             self._buf_pool.release(bufs)
             raise
 
-    def flush_saves(self) -> None:
-        try:
-            super().flush_saves()
-        except Exception:
-            self._save_bufs = None
-            self._save_stream = None
-            self._save_count = 0
-            self._save_bytes = 0
-            self._save_mm_hashes: list[str] = []
-            raise
-
     def _shutdown_transfer_backend(self) -> None:
         if not self._mmap_pinned:
             return
