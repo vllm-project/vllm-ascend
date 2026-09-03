@@ -83,6 +83,9 @@ permissions:
 jobs:
   filter-groups:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     outputs:
       filtered_test_groups: ${{ steps.filter.outputs.filtered_test_groups }}
     env:
