@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_layerwise_protocol,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
 _PREFETCH_LAYERS = "layerwise_prefetch_layers"
@@ -311,7 +312,10 @@ def apply_layerwise_kv_cache_plan(
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return
-    if any(len(tensor.shared_by) != 1 or tensor.offset != 0 or tensor.block_stride != 0 for tensor in old_tensors):
+    if any(
+        len(get_kv_cache_tensor_layers(tensor)) != 1 or tensor.offset != 0 or tensor.block_stride != 0
+        for tensor in old_tensors
+    ):
         raise NotImplementedError(
             "Layerwise KV cache reuse does not support pre-shared or packed KV cache tensor descriptors."
         )
@@ -330,7 +334,7 @@ def apply_layerwise_kv_cache_plan(
             actual_layers - base_layers,
         )
 
-    tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
+    tensors_by_name = {get_kv_cache_tensor_layers(tensor)[0]: tensor for tensor in old_tensors}
 
     def _merge_specs(named_specs: list[NamedKVCacheSpec]) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
@@ -343,12 +347,18 @@ def apply_layerwise_kv_cache_plan(
             raise ValueError(
                 "Layers sharing layerwise KV buffers must have identical cache specs for every named cache spec."
             )
-        new_tensors.append(
-            KVCacheTensor(
-                shared_by=shared_by,
-                size=cache_tensors[0].size,
+        if vllm_version_is("0.27.1"):
+            new_tensors.append(KVCacheTensor(shared_by=shared_by, size=cache_tensors[0].size))
+        else:
+            new_tensors.append(
+                KVCacheTensor(
+                    layers=shared_by,
+                    size=cache_tensors[0].size,
+                    layer_stride=cache_tensors[0].layer_stride,
+                    block_stride=cache_tensors[0].block_stride,
+                    offset=cache_tensors[0].offset,
+                )
             )
-        )
 
     new_tensors: list[KVCacheTensor] = []
     for slot in reuse_layout.buffer_slots:

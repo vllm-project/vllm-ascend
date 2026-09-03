@@ -33,6 +33,7 @@ def _scheduler(*, is_kv_consumer: bool | None):
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         hash_block_size=384,
         mamba_partial_cache_hit=False,
+        mamba_has_prefill_checkpoint_blocks=False,
     )
 
 

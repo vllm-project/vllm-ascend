@@ -88,6 +88,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is  # noqa: E402
 
 for _k, _v in _saved_modules.items():
     sys.modules[_k] = _v
@@ -99,6 +100,12 @@ DONE_RECVING_MSG = b"done_recving_msg"
 def make_mock_kv_caches() -> dict[str, Any]:
     kv_cache = MagicMock(device=torch.device("npu:0"))
     return {"layer_0": (kv_cache, kv_cache)}
+
+
+def make_mock_kv_cache_tensor(size: int, layer_names: list[str]) -> types.SimpleNamespace:
+    """Build the descriptor renamed by vLLM #51718 for the active lane."""
+    layer_field = "shared_by" if vllm_version_is("0.27.1") else "layers"
+    return types.SimpleNamespace(size=size, **{layer_field: layer_names})
 
 
 def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
@@ -395,10 +402,21 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
             available_memory=uniform_spec.page_size_bytes * num_blocks,
         )
-        allocated_sizes = {tensor.shared_by[0]: tensor.size for tensor in allocated_config.kv_cache_tensors}
+        allocated_sizes = {
+            get_kv_cache_tensor_layers(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors
+        }
         self.assertEqual(allocated_config.num_blocks, num_blocks)
-        self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
-        self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
+        if vllm_version_is("0.27.1"):
+            self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
+            self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
+        else:
+            # vLLM #51718: on main every layer tensor in a KV cache group shares
+            # one allocation sized by the group's total bytes-per-block
+            # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
+            # tensor.size is the sum of the two page sizes times num_blocks.
+            group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
+            self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
+            self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
 
         kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
@@ -2733,7 +2751,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.num_blocks = 1579
         worker._layer_specs = {layer_name: MagicMock()}
         worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[types.SimpleNamespace(size=tensor_size, shared_by=[layer_name])]
+            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name])]
         )
 
         self.assertEqual(aligned_tensor.data_ptr() % alignment, 0)
@@ -2754,12 +2772,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[
-                types.SimpleNamespace(
-                    size=tensor_size,
-                    shared_by=[layer_name],
-                )
-            ]
+            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name])]
         )
 
         # Subtracting a stale one-group padding value from this view would
@@ -2772,6 +2785,66 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         self.assertEqual(ptrs, [aligned_tensor.data_ptr()])
         self.assertEqual(lengths, [tensor_size])
+
+    def test_registered_hybrid_buffer_supports_private_layer_storages(self):
+        alignment = 2 * 1024 * 1024
+        layer_size = 2 * alignment
+        descriptor_size = 2 * layer_size
+        layer_names = ["model.layers.0.self_attn", "model.layers.1.self_attn"]
+
+        leading_padding = 0x17200
+        layer_tensors: list[torch.Tensor] = []
+        kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        for layer_name in layer_names:
+            raw_tensor = torch.empty(layer_size + alignment, dtype=torch.uint8)
+            aligned_offset = (-raw_tensor.data_ptr()) % alignment
+            layer_tensor = raw_tensor[aligned_offset : aligned_offset + layer_size]
+            layer_tensors.append(layer_tensor)
+            kv_caches[layer_name] = (
+                layer_tensor[leading_padding:alignment],
+                layer_tensor[alignment:],
+            )
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[make_mock_kv_cache_tensor(descriptor_size, layer_names)]
+        )
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers(kv_caches)
+
+        self.assertTrue(all(tensor.data_ptr() % alignment == 0 for tensor in layer_tensors))
+        self.assertTrue(all(cache[0].data_ptr() % alignment != 0 for cache in kv_caches.values()))
+        self.assertEqual(ptrs, [tensor.data_ptr() for tensor in layer_tensors])
+        self.assertEqual(lengths, [layer_size, layer_size])
+
+    def test_registered_hybrid_buffer_supports_single_private_storage(self):
+        alignment = 2 * 1024 * 1024
+        layer_size = 2 * alignment
+        descriptor_size = 2 * layer_size
+        leading_padding = 0x17200
+        layer_name = "model.layers.0.self_attn"
+
+        raw_tensor = torch.empty(layer_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        layer_tensor = raw_tensor[aligned_offset : aligned_offset + layer_size]
+        kv_caches = {
+            layer_name: (
+                layer_tensor[leading_padding:alignment],
+                layer_tensor[alignment:],
+            )
+        }
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[make_mock_kv_cache_tensor(descriptor_size, [layer_name])]
+        )
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers(kv_caches)
+
+        self.assertEqual(layer_tensor.data_ptr() % alignment, 0)
+        self.assertNotEqual(kv_caches[layer_name][0].data_ptr() % alignment, 0)
+        self.assertEqual(ptrs, [layer_tensor.data_ptr()])
+        self.assertEqual(lengths, [layer_size])
 
     def test_device_id_selection_with_physical_devices(self):
         # Test with physical devices set

@@ -220,6 +220,7 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         use_compress = getattr(attn_selector_config, "use_compress", False)
+        use_dcp = getattr(attn_selector_config, "use_dcp", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
         # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
@@ -234,7 +235,7 @@ class NPUPlatform(Platform):
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
-        if attn_selector_config.use_pcp and attn_selector_config.use_dcp:
+        if attn_selector_config.use_pcp and use_dcp:
             raise NotImplementedError("Ascend MRV2 does not support PCP and DCP simultaneously yet.")
 
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):

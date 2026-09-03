@@ -27,6 +27,7 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 
 
 def get_dsv4_block_sizes(use_a5_bf16_kv: bool = False):
@@ -201,6 +202,13 @@ class DSAAttention(nn.Module, AttentionLayerBase):
 
         cached_head_size = self.head_size + 128 if has_compressed_cache and not use_bf16_kv else self.head_size
         storage_block_size = dsv4_block_sizes(vllm_config)[vllm_config.cache_config.block_size][0][0]
+        # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
+        # AttentionSpec.tokens_per_state on main.
+        ratio_kwargs: dict[str, Any] = (
+            {"compress_ratio": self.compress_ratio}
+            if vllm_version_is("0.27.1")
+            else {"tokens_per_state": self.compress_ratio}
+        )
         return AscendMLAAttentionSpec(
             # The scheduler operates in raw-token units. Ascend kernels keep
             # using the compressed page exposed by storage_block_size.
@@ -209,6 +217,6 @@ class DSAAttention(nn.Module, AttentionLayerBase):
             head_size=cached_head_size,
             dtype=kv_cache_dtype,
             model_version="deepseek_v4",
-            compress_ratio=self.compress_ratio,
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            **ratio_kwargs,
         )

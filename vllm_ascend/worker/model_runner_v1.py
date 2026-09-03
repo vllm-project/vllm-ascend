@@ -182,6 +182,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     get_c_env,
+    get_kv_cache_tensor_layers,
     global_stream,
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
@@ -296,6 +297,11 @@ class ExecuteModelState(NamedTuple):
 
 
 class NPUModelRunner(GPUModelRunner):
+    # vLLM #51718 describes compatible KV cache groups as views over one
+    # standardized backing allocation. The default runner preserves that
+    # contract for its layer/block-compact Attention+Mamba path.
+    supports_standardized_shared_kv_backing = True
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Must be set before super().__init__() because parent init may call
         # _allocate_kv_cache_tensors which accesses self.use_compress.
@@ -4220,20 +4226,140 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
-        # If some tensors are shared by linear layers and attention layers,
-        # the same tensor format must be maintained even if some layers
-        # have only linear or attention layers, for example, the mtp layer.
-        self.hybrid_with_attn_and_mamba = False
+        # v0.27.1 keeps the legacy ``shared_by`` contract: one allocation per
+        # descriptor, shared by every listed layer. Main uses #51718's
+        # standardized descriptors, whose ``size`` is the size of one common
+        # backing allocation rather than the size of an individual layer.
+        use_legacy_shared_by_layout = vllm_version_is("0.27.1")
+        is_dsv4_main = not use_legacy_shared_by_layout and any(
+            getattr(spec, "model_version", None) == "deepseek_v4"
+            for spec in layer_kv_cache_spec.values()
+        )
+        # vLLM #51718 no longer lists layers from different cache groups in one
+        # descriptor. Detect hybrid models across all groups instead of within
+        # each descriptor so the attention view keeps the combined K/V format.
+        self.hybrid_with_attn_and_mamba = any(
+            isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
+        ) and any(isinstance(spec, AttentionSpec) for spec in layer_kv_cache_spec.values())
+
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        kv_connector = (
+            getattr(kv_transfer_config, "kv_connector", None)
+            if kv_transfer_config is not None
+            else None
+        )
+        # ExampleHiddenStatesConnector only consumes the dedicated cache-only
+        # layer and does not register or migrate the per-layer Attention/Mamba
+        # buffers. It therefore does not require the independent 2 MiB-aligned
+        # allocations needed by Mooncake/ADXL connectors.
+        supports_shared_backing_with_kv_transfer = (
+            kv_transfer_config is None
+            or kv_connector == "ExampleHiddenStatesConnector"
+        )
+
+        # The restored DSV4 planner on main emits multiple descriptors into a
+        # single shared-tuple backing. Its memory budget is computed for that
+        # one backing, so allocating ``descriptor.size`` for every descriptor
+        # over-commits the device. Validate the complete geometry first, then
+        # allocate exactly once and expose the contiguous per-layer regions
+        # consumed by the existing page-strided DSV4 reshape path.
+        if is_dsv4_main and kv_cache_config.kv_cache_tensors:
+            tensor_sizes = {
+                descriptor.size
+                for descriptor in kv_cache_config.kv_cache_tensors
+            }
+            if len(tensor_sizes) != 1:
+                raise ValueError(
+                    "DeepSeek-V4 KV cache descriptors must share one backing "
+                    "allocation."
+                )
+            backing_size = tensor_sizes.pop()
+            dsv4_regions: list[tuple[str, int, int]] = []
+            for descriptor in kv_cache_config.kv_cache_tensors:
+                for layer_idx, layer_name in enumerate(
+                    get_kv_cache_tensor_layers(descriptor)
+                ):
+                    spec = layer_kv_cache_spec[layer_name]
+                    if descriptor.block_stride != spec.page_size_bytes:
+                        raise ValueError(
+                            "DeepSeek-V4 requires contiguous per-layer pages, "
+                            f"but {layer_name} has block_stride="
+                            f"{descriptor.block_stride} and page_size="
+                            f"{spec.page_size_bytes}."
+                        )
+                    layer_size = (
+                        kv_cache_config.num_blocks * spec.page_size_bytes
+                    )
+                    start = (
+                        descriptor.offset
+                        + layer_idx * descriptor.layer_stride
+                    )
+                    if start < 0 or start + layer_size > backing_size:
+                        raise ValueError(
+                            f"DeepSeek-V4 KV cache view for {layer_name} "
+                            "exceeds the shared backing allocation."
+                        )
+                    dsv4_regions.append((layer_name, start, layer_size))
+
+            if not dsv4_regions:
+                raise ValueError(
+                    "DeepSeek-V4 KV cache config has no materializable layers."
+                )
+            backing = self._allocate_int8_cache_tensor(
+                backing_size,
+                alignment,
+            )
+            for layer_name, start, layer_size in dsv4_regions:
+                kv_cache_raw_tensors[layer_name] = backing[
+                    start : start + layer_size
+                ]
+
+        # The standardized main descriptors all refer to the same backing
+        # allocation. Ascend attention and Mamba backends still require
+        # contiguous per-layer tensors, which the default layer/block-compact
+        # layout provides. Materialize slices of one backing tensor so cache
+        # groups retain #51718's overlay semantics without reducing capacity.
+        if (
+            not use_legacy_shared_by_layout
+            and not is_dsv4_main
+            and self.hybrid_with_attn_and_mamba
+            and supports_shared_backing_with_kv_transfer
+            and not self.use_sparse
+            and not self.use_compress
+            and kv_cache_config.kv_cache_tensors
+        ):
+            layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+            tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
+            regions: list[tuple[str, int, int]] = []
+            if len(tensor_sizes) == 1 and layout.is_layer_compact and layout.is_block_compact:
+                backing_size = next(iter(tensor_sizes))
+                for descriptor in kv_cache_config.kv_cache_tensors:
+                    for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
+                        spec = layer_kv_cache_spec[layer_name]
+                        layer_size = kv_cache_config.num_blocks * spec.page_size_bytes
+                        start = descriptor.offset + layer_idx * descriptor.layer_stride
+                        if descriptor.block_stride != spec.page_size_bytes or start + layer_size > backing_size:
+                            regions = []
+                            break
+                        regions.append((layer_name, start, layer_size))
+                    if not regions:
+                        break
+                if regions:
+                    backing = self._allocate_int8_cache_tensor(
+                        backing_size,
+                        alignment,
+                    )
+                    for layer_name, start, layer_size in regions:
+                        kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
+
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            use_mamba, use_attn = False, False
-            for layer_name in kv_cache_tensor.shared_by:
+            shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
+            use_mamba = False
+            for layer_name in shared_layers:
                 if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
                     use_mamba = True
-                if isinstance(layer_kv_cache_spec[layer_name], AttentionSpec):
-                    use_attn = True
-            self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
+            for idx in range(len(shared_layers)):
+                layer_name = shared_layers[idx]
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
                 if (
                     "linear_attn" in layer_name
@@ -4248,35 +4374,61 @@ class NPUModelRunner(GPUModelRunner):
                     # bfloat16 hidden-states data (same bytes, different interpretation).
                     has_mamba = any(
                         isinstance(layer_kv_cache_spec.get(ln), MambaSpec)
-                        for ln in kv_cache_tensor.shared_by
+                        for ln in shared_layers
                     )
                     has_hidden = any(
                         is_hidden_state_cache_spec(layer_kv_cache_spec.get(ln))
-                        for ln in kv_cache_tensor.shared_by
+                        for ln in shared_layers
                     )
-                    if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-                    else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
-                        tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
-
-                    if has_mamba and has_hidden:
-                        # Allocate separate tensor for HiddenStateCacheSpec layers
-                        # so ssm_state writes don't corrupt hidden-states data
+                    # vLLM #51718 packs all group layers into one tensor on main;
+                    # each layer owns an equal share (the per-layer size v0.27.1
+                    # stored directly on the tensor).
+                    per_layer_size = (
+                        kv_cache_tensor.size
+                        if use_legacy_shared_by_layout
+                        else kv_cache_tensor.size // len(shared_layers)
+                    )
+                    if use_legacy_shared_by_layout:
                         if self.vllm_config.kv_transfer_config is None:
-                            tensor_hs = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                            tensor = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
                         else:
-                            cache_size_aligned = kv_cache_tensor.size + alignment
-                            tensor_hs = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                            tensor_hs = self._align_memory(tensor_hs, alignment)[: kv_cache_tensor.size]
-                        for layer_name_inner in kv_cache_tensor.shared_by:
-                            if is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name_inner)):
-                                kv_cache_raw_tensors[layer_name_inner] = tensor_hs
+                            cache_size_aligned = per_layer_size + alignment
+                            tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                            tensor = self._align_memory(tensor, alignment)[: per_layer_size]
+                        if has_mamba and has_hidden:
+                            # Allocate separate tensor for HiddenStateCacheSpec layers
+                            # so ssm_state writes don't corrupt hidden-states data
+                            if self.vllm_config.kv_transfer_config is None:
+                                tensor_hs = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
                             else:
+                                cache_size_aligned = per_layer_size + alignment
+                                tensor_hs = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                                tensor_hs = self._align_memory(tensor_hs, alignment)[: per_layer_size]
+                            for layer_name_inner in shared_layers:
+                                if is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name_inner)):
+                                    kv_cache_raw_tensors[layer_name_inner] = tensor_hs
+                                else:
+                                    kv_cache_raw_tensors[layer_name_inner] = tensor
+                        else:
+                            for layer_name_inner in shared_layers:
                                 kv_cache_raw_tensors[layer_name_inner] = tensor
                     else:
-                        for layer_name_inner in kv_cache_tensor.shared_by:
+                        # vLLM #51718 describes the shared allocation through
+                        # per-layer page sizes and strides. Ascend translates it
+                        # to private contiguous layer buffers, including hybrid
+                        # attention/Mamba groups; the worker's memory budget is
+                        # scaled for this representation.
+                        for layer_name_inner in shared_layers:
+                            layer_size = (
+                                kv_cache_config.num_blocks
+                                * layer_kv_cache_spec[layer_name_inner].page_size_bytes
+                            )
+                            if self.vllm_config.kv_transfer_config is None:
+                                tensor = torch.zeros(layer_size, dtype=torch.int8, device=self.device)
+                            else:
+                                cache_size_aligned = layer_size + alignment
+                                tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                                tensor = self._align_memory(tensor, alignment)[: layer_size]
                             kv_cache_raw_tensors[layer_name_inner] = tensor
 
                 elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
@@ -4288,7 +4440,7 @@ class NPUModelRunner(GPUModelRunner):
                         cache_size_aligned = kv_cache_tensor.size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
-                    for layer_name_inner in kv_cache_tensor.shared_by:
+                    for layer_name_inner in shared_layers:
                         # shared the kvcache between the self_attn specs in the same group
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif (
@@ -4296,8 +4448,11 @@ class NPUModelRunner(GPUModelRunner):
                     and layer_name not in kv_cache_raw_tensors
                 ):
                     current_kv_cache_spec = layer_kv_cache_spec[layer_name]
-                    raw_cache: tuple[torch.Tensor, ...]
                     num_blocks = kv_cache_tensor.size // current_kv_cache_spec.page_size_bytes
+                    if not use_legacy_shared_by_layout:
+                        # vLLM #51718 packs all group layers into one tensor;
+                        # kv_cache_config.num_blocks is the per-layer block count.
+                        num_blocks = kv_cache_config.num_blocks
                     k_tensor_size = (
                         num_blocks
                         * current_kv_cache_spec.sfa_dcp_replicated_indexer_size
@@ -4315,22 +4470,38 @@ class NPUModelRunner(GPUModelRunner):
                             * current_kv_cache_spec.scale_dim
                             * get_dtype_size(current_kv_cache_spec.scale_dtype)
                         )
-                        k_tensor, scale_tensor = self._allocate_sparse_c8_indexer_tensors(
-                            dsa_k_tensor_size=k_tensor_size,
-                            dsa_k_scale_tensor_size=scale_tensor_size,
-                            alignment=alignment,
-                            scale_dtype=current_kv_cache_spec.scale_dtype,
-                        )
-                        raw_cache = (k_tensor, scale_tensor)
                     else:
-                        k_tensor = self._allocate_int8_cache_tensor(
-                            k_tensor_size,
-                            alignment,
-                        )
-                        raw_cache = (k_tensor,)
+                        scale_tensor_size = None
 
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        kv_cache_raw_tensors[layer_name_inner] = raw_cache
+                    if use_legacy_shared_by_layout:
+                        # v0.27.1 and Ascend DSV4 descriptors alias physical blocks.
+                        if scale_tensor_size is not None:
+                            kv_cache_raw_tensors[shared_layers[0]] = self._allocate_sparse_c8_indexer_tensors(
+                                dsa_k_tensor_size=k_tensor_size,
+                                dsa_k_scale_tensor_size=scale_tensor_size,
+                                alignment=alignment,
+                                scale_dtype=current_kv_cache_spec.scale_dtype,
+                            )
+                        else:
+                            kv_cache_raw_tensors[shared_layers[0]] = (
+                                self._allocate_int8_cache_tensor(k_tensor_size, alignment),
+                            )
+                        for layer_name_inner in shared_layers[1:]:
+                            kv_cache_raw_tensors[layer_name_inner] = kv_cache_raw_tensors[shared_layers[0]]
+                    else:
+                        # main: every layer owns its own region.
+                        for layer_name_inner in shared_layers:
+                            if scale_tensor_size is not None:
+                                kv_cache_raw_tensors[layer_name_inner] = self._allocate_sparse_c8_indexer_tensors(
+                                    dsa_k_tensor_size=k_tensor_size,
+                                    dsa_k_scale_tensor_size=scale_tensor_size,
+                                    alignment=alignment,
+                                    scale_dtype=current_kv_cache_spec.scale_dtype,
+                                )
+                            else:
+                                kv_cache_raw_tensors[layer_name_inner] = (
+                                    self._allocate_int8_cache_tensor(k_tensor_size, alignment),
+                                )
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
@@ -4343,8 +4514,18 @@ class NPUModelRunner(GPUModelRunner):
                         current_kv_cache_spec
                     )
 
+                    # vLLM #51718 packs every layer of a group into a single
+                    # KVCacheTensor on main; the per-layer size is the block
+                    # count times this layer's own page size. Using the layer's
+                    # spec page (rather than dividing the tensor) stays correct
+                    # when the tensor's group is not the largest group.
+                    kv_cache_tensor_size = (
+                        kv_cache_tensor.size
+                        if use_legacy_shared_by_layout
+                        else kv_cache_config.num_blocks * current_kv_cache_spec.page_size_bytes
+                    )
                     if current_sparse_sfa_c8:
-                        k_tensor_size = kv_cache_tensor.size
+                        k_tensor_size = kv_cache_tensor_size
                         v_tensor_size = None
                     else:
                         k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
@@ -4359,45 +4540,79 @@ class NPUModelRunner(GPUModelRunner):
                             )
                         else:
                             k_tensor_split_factor, v_tensor_split_factor = calc_split_factor(kv_head_dim_list)
-                        k_tensor_size = int(kv_cache_tensor.size // k_tensor_split_factor)
-                        v_tensor_size = int(kv_cache_tensor.size // v_tensor_split_factor)
+                        k_tensor_size = int(kv_cache_tensor_size // k_tensor_split_factor)
+                        v_tensor_size = int(kv_cache_tensor_size // v_tensor_split_factor)
                     if self.sparse_kv_offload_enabled:
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
                         assert v_tensor_size is not None
-                        raw_tensors = allocate_kv_cache_tensors_for_sparse_kv_offload(
-                            k_tensor_size,
-                            v_tensor_size,
-                            alignment,
-                            self.tp_rank,
-                            self.sparse_kv_offload_config.keep_device_kv_cache,
-                            self._allocate_int8_cache_tensor,
-                        )
-                        assert len(kv_cache_tensor.shared_by) == 1, "Sparse KV offload do not support HMA."
-                        kv_cache_raw_tensors[layer_name] = raw_tensors
+                        if use_legacy_shared_by_layout:
+                            assert len(shared_layers) == 1, "Sparse KV offload do not support HMA."
+                            kv_cache_raw_tensors[layer_name] = (
+                                allocate_kv_cache_tensors_for_sparse_kv_offload(
+                                    k_tensor_size,
+                                    v_tensor_size,
+                                    alignment,
+                                    self.tp_rank,
+                                    self.sparse_kv_offload_config.keep_device_kv_cache,
+                                    self._allocate_int8_cache_tensor,
+                                )
+                            )
+                        else:
+                            for layer_name_inner in shared_layers:
+                                if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                    kv_cache_raw_tensors[layer_name_inner] = (
+                                        allocate_kv_cache_tensors_for_sparse_kv_offload(
+                                            k_tensor_size,
+                                            v_tensor_size,
+                                            alignment,
+                                            self.tp_rank,
+                                            self.sparse_kv_offload_config.keep_device_kv_cache,
+                                            self._allocate_int8_cache_tensor,
+                                        )
+                                    )
                         continue
-                    # Allocate raw int8 tensors. Even bf16/fp16 KV cache entries
-                    # are allocated as int8 raw bytes first and then viewed as
-                    # the target dtype in _reshape_kv_cache_tensors.
-                    v_tensor = None
-                    k_tensor = self._allocate_int8_cache_tensor(
-                        k_tensor_size,
-                        alignment,
-                    )
-                    if v_tensor_size is not None:
-                        v_tensor = self._allocate_int8_cache_tensor(
-                            v_tensor_size,
+                    if use_legacy_shared_by_layout:
+                        # v0.27.1 and Ascend DSV4 descriptors alias physical
+                        # blocks; allocate once and reuse for every shared layer.
+                        v_tensor = None
+                        k_tensor = self._allocate_int8_cache_tensor(
+                            k_tensor_size,
                             alignment,
                         )
-
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the attn kvcache for all shared layers
-                        if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            if current_sparse_sfa_c8:
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
-                            else:
-                                assert v_tensor is not None
-                                kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
+                        if v_tensor_size is not None:
+                            v_tensor = self._allocate_int8_cache_tensor(
+                                v_tensor_size,
+                                alignment,
+                            )
+                        for layer_name_inner in shared_layers:
+                            # shared the attn kvcache for all shared layers
+                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                if current_sparse_sfa_c8:
+                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
+                                else:
+                                    assert v_tensor is not None
+                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
+                    else:
+                        # main: every layer owns its own region; give each layer a
+                        # private (k, v) so block indices don't collide across layers.
+                        for layer_name_inner in shared_layers:
+                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                k_tensor = self._allocate_int8_cache_tensor(
+                                    k_tensor_size,
+                                    alignment,
+                                )
+                                v_tensor = None
+                                if v_tensor_size is not None:
+                                    v_tensor = self._allocate_int8_cache_tensor(
+                                        v_tensor_size,
+                                        alignment,
+                                    )
+                                if current_sparse_sfa_c8:
+                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor,)
+                                else:
+                                    assert v_tensor is not None
+                                    kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
@@ -4631,6 +4846,7 @@ class NPUModelRunner(GPUModelRunner):
                         )
                         kv_caches[layer_name] = reshaped_tensors
                         continue
+                    raw_kv_is_combined = False
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
                         if not isinstance(raw_cache, tuple):
@@ -4644,31 +4860,45 @@ class NPUModelRunner(GPUModelRunner):
                             raw_k_tensor, raw_v_tensor = raw_cache
                             sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     elif (
-                        self.use_hybrid_blocks
-                        and self.hybrid_with_attn_and_mamba
+                        self.hybrid_with_attn_and_mamba
                         and "cache_only_layers" not in layer_name
                         and not is_hidden_state_cache_spec(current_kv_cache_spec)
+                        and isinstance(kv_cache_raw_tensors[layer_name], torch.Tensor)
+                        and (self.use_hybrid_blocks or not vllm_version_is("0.27.1"))
                     ):
                         # Currently, we ensure that the same kvcache format is used even if there
                         # is no shared layer, such as the full attention mtp layer of qwen3.5, etc.
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name], kv_cache_raw_tensors[layer_name]
                         sum_page_size_bytes = raw_k_tensor.numel()
+                        raw_kv_is_combined = True
                     elif (
                         "cache_only_layers" in layer_name
                         or is_hidden_state_cache_spec(current_kv_cache_spec)
                     ):
-                        # Single tensor for extract_hidden_states (no K/V split)
+                        # Single tensor for extract_hidden_states (no K/V split).
+                        # The anchor's upstream CacheOnlyAttentionBackend lacks
+                        # get_kv_cache_shape (added upstream later); the cache-only
+                        # vLLM #51718 standardized cache views as
+                        # (blocks, kv_heads, block_size, head).
                         raw_tensor = kv_cache_raw_tensors[layer_name]
                         assert raw_tensor is not None
                         assert raw_tensor.numel() % current_kv_cache_spec.page_size_bytes == 0
                         num_blocks = raw_tensor.numel() // current_kv_cache_spec.page_size_bytes
                         assert num_blocks >= kv_cache_config.num_blocks
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
-                            num_blocks,
-                            current_kv_cache_spec.block_size,
-                            current_kv_cache_spec.num_kv_heads,
-                            current_kv_cache_spec.head_size,
-                        )
+                        if vllm_version_is("0.27.1"):
+                            kv_cache_shape = (
+                                num_blocks,
+                                current_kv_cache_spec.block_size,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.head_size,
+                            )
+                        else:
+                            kv_cache_shape = (
+                                num_blocks,
+                                current_kv_cache_spec.num_kv_heads,
+                                current_kv_cache_spec.block_size,
+                                current_kv_cache_spec.head_size,
+                            )
                         raw_tensor = raw_tensor.view(current_kv_cache_spec.dtype)
                         page_size_padded = getattr(
                             current_kv_cache_spec, "page_size_padded", None
@@ -4719,27 +4949,6 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
-                        if self.hybrid_with_attn_and_mamba:
-                            if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
-                                attn_tensor_page_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                conv_block_padding_size = raw_k_tensor.numel() - attn_tensor_page_size * 2
-                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                                raw_k_tensor = raw_kv_tensor[:attn_tensor_page_size]
-                                raw_v_tensor = raw_kv_tensor[attn_tensor_page_size:]
-                            else:
-                                k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
-                                nope_page_size = int(np.prod(kv_cache_shape[:-1])) * k_dim * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                rope_page_size = int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(
-                                    current_kv_cache_spec.dtype
-                                )
-                                conv_block_padding_size = raw_k_tensor.numel() - nope_page_size - rope_page_size
-                                raw_kv_tensor = raw_k_tensor[conv_block_padding_size:]
-                                raw_k_tensor = raw_kv_tensor[:nope_page_size]
-                                raw_v_tensor = raw_kv_tensor[nope_page_size:]
                     else:
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks,
@@ -4747,6 +4956,62 @@ class NPUModelRunner(GPUModelRunner):
                             current_kv_cache_spec.num_kv_heads,
                             current_kv_cache_spec.head_size,
                         )
+                    should_trim_page_padding = (
+                        self.hybrid_with_attn_and_mamba and self.use_hybrid_blocks
+                    ) or (
+                        not vllm_version_is("0.27.1")
+                        and (
+                            raw_kv_is_combined
+                            or getattr(current_kv_cache_spec, "page_size_padded", None) is not None
+                        )
+                    )
+                    if should_trim_page_padding:
+                        # vLLM #51718 groups KVCacheTensor.layers by spec, so an
+                        # attention tensor no longer has to list a Mamba layer
+                        # even though its page is padded to the hybrid common
+                        # size. Use the main-lane page contract, rather than the
+                        # legacy shared-layer heuristic, to strip that padding.
+                        if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
+                            attn_tensor_size = int(np.prod(kv_cache_shape[1:])) * get_dtype_size(
+                                current_kv_cache_spec.dtype
+                            )
+                            v_tensor_size = (
+                                int(np.prod(kv_cache_shape[1:-1]))
+                                * current_kv_cache_spec.head_size_v
+                                * get_dtype_size(current_kv_cache_spec.dtype)
+                            )
+                            if raw_kv_is_combined:
+                                padding_size = raw_k_tensor.numel() - attn_tensor_size - v_tensor_size
+                                assert padding_size >= 0
+                                raw_kv_tensor = raw_k_tensor[padding_size:]
+                                raw_k_tensor = raw_kv_tensor[:attn_tensor_size]
+                                raw_v_tensor = raw_kv_tensor[attn_tensor_size:]
+                            else:
+                                assert raw_v_tensor is not None
+                                assert raw_k_tensor.numel() >= attn_tensor_size
+                                assert raw_v_tensor.numel() >= v_tensor_size
+                                raw_k_tensor = raw_k_tensor[:attn_tensor_size]
+                                raw_v_tensor = raw_v_tensor[:v_tensor_size]
+                        else:
+                            k_dim, v_dim = self._get_attention_kv_cache_dims(layer_name, current_kv_cache_spec)
+                            nope_size = int(np.prod(kv_cache_shape[:-1])) * k_dim * get_dtype_size(
+                                current_kv_cache_spec.dtype
+                            )
+                            rope_size = int(np.prod(kv_cache_shape[:-1])) * v_dim * get_dtype_size(
+                                current_kv_cache_spec.dtype
+                            )
+                            if raw_kv_is_combined:
+                                padding_size = raw_k_tensor.numel() - nope_size - rope_size
+                                assert padding_size >= 0
+                                raw_kv_tensor = raw_k_tensor[padding_size:]
+                                raw_k_tensor = raw_kv_tensor[:nope_size]
+                                raw_v_tensor = raw_kv_tensor[nope_size:]
+                            else:
+                                assert raw_v_tensor is not None
+                                assert raw_k_tensor.numel() >= nope_size
+                                assert raw_v_tensor.numel() >= rope_size
+                                raw_k_tensor = raw_k_tensor[:nope_size]
+                                raw_v_tensor = raw_v_tensor[:rope_size]
                     if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                         k_shape = kv_cache_shape[1:]
                         if hasattr(current_kv_cache_spec, "head_size_v"):
