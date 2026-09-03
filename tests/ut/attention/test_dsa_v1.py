@@ -1108,6 +1108,7 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int):
     impl.compressor_ape = torch.empty(0)
     impl.compressor_norm = SimpleNamespace(weight=torch.empty(0))
     impl.compressor_norm_eps = 1e-6
+    impl.indexer = SimpleNamespace(skip_topk=False, use_index_cache=False)
     impl.vllm_config = MagicMock()
 
     swa_sas = torch.zeros(1024, dtype=torch.int32)
