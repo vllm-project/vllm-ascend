@@ -1252,6 +1252,7 @@ def test_rejection_sample_constraint_and_helper_paths():
                     max_spec_len=3,
                     cu_num_draft_tokens=torch.tensor([3]),
                     sampling_metadata=random_meta,
+                    target_logits_or_tuple=block_logits.clone(),
                     synthetic_mode=True,
                     synthetic_conditional_rates=torch.tensor([0.5, 0.5, 0.5]),
                 )
