@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -46,8 +47,10 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
-        self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
-        self.target_model_path = Path(vllm_config.model_config.model)
+        target_model_config = vllm_config.speculative_config.target_model_config or vllm_config.model_config
+        target_vllm_config = replace(vllm_config, model_config=target_model_config)
+        self.rotation_path = get_rotation_path(target_vllm_config) if vllm_config.quant_config is not None else None
+        self.target_model_path = Path(target_model_config.model)
 
     def compute_confidence(self, head_hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
         """Per-position acceptance probability for each drafted token."""

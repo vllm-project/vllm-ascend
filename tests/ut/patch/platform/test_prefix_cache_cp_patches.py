@@ -97,6 +97,7 @@ def _make_hybrid_kv_cache_config(
 def _make_kimi_k3_dspark_kv_cache_specs(
     *,
     block_size: int = 384,
+    mamba_block_size: int | None = None,
     page_size: int = 488448,
     target_layer_count: int = 24,
     draft_layer_count: int = 5,
@@ -136,7 +137,7 @@ def _make_kimi_k3_dspark_kv_cache_specs(
                 draft_replication_size,
             )
     mamba_spec = MambaSpec(
-        block_size=block_size,
+        block_size=mamba_block_size or block_size,
         shapes=((10, 2304), (6, 128, 128)),
         dtypes=(torch.bfloat16, torch.float32),
         page_size_padded=page_size,
@@ -612,6 +613,26 @@ def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
     specs["unrecognized.layer"] = next(iter(specs.values()))
 
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
+
+
+def test_kimi_k3_dcp_replicated_pages_allow_independent_mamba_block_size() -> None:
+    specs = _make_kimi_k3_dspark_kv_cache_specs(
+        block_size=128,
+        mamba_block_size=3072,
+        page_size=3907584,
+        target_layer_count=3,
+        draft_layer_count=5,
+        mamba_layer_count=2,
+        draft_replication_size=2,
+    )
+
+    unified = _unify_kv_cache_spec_page_size(specs)
+
+    attention_block_sizes = {spec.block_size for spec in unified.values() if isinstance(spec, FullAttentionSpec)}
+    mamba_block_sizes = {spec.block_size for spec in unified.values() if isinstance(spec, MambaSpec)}
+    assert attention_block_sizes == {128}
+    assert mamba_block_sizes == {3072}
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(unified) is not None
 
 
 def test_kimi_k3_dspark_group_count_is_derived_from_layer_ratio() -> None:
